@@ -30,7 +30,10 @@ use trace_commons_contributor::config::{
 use trace_commons_contributor::daemon::ipc::{self, DaemonShared};
 use trace_commons_contributor::daemon::policy::{ProjectMode, ProjectPolicy};
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
+use trace_commons_contributor::daemon::settings::SourceDeclaration;
 use trace_commons_contributor::identity::DeviceIdentity;
+use trace_commons_contributor::source::TraceSource;
+use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -85,15 +88,43 @@ impl Harness {
             .to_string()
     }
 
+    /// A pending entry over a session that really exists, with the source
+    /// declared so the daemon can find it. `approve` builds and pins the
+    /// envelope for anything unpreviewed, and an entry whose session file
+    /// is not there is skipped rather than approved -- so a fixture with a
+    /// made-up path would answer a question about missing files instead of
+    /// the one these tests ask about the audit log.
     fn queue_one_pending(&self) -> QueueEntry {
+        let sessions_root = self.shared.store.dir().join("sessions/projects");
+        let project = sessions_root.join("-Users-testuser-code-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("44444444-4444-4444-4444-444444444444.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+             \"content\":\"list the files\"},\
+             \"cwd\":\"/Users/testuser/code/proj\",\
+             \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"44444444-4444-4444-4444-444444444444\",\
+             \"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(sessions_root.clone());
+        let session_ref = TraceSource::discover(&src).unwrap().remove(0);
+        {
+            let mut settings = self.shared.settings.lock().unwrap();
+            settings.claude_source = Some(SourceDeclaration::Watch {
+                path: sessions_root.clone(),
+            });
+            settings.save(&self.shared.store).unwrap();
+        }
         let entry = QueueEntry {
             entry_id: entry_id_for("sha256:aa"),
             session_hash: "sha256:aa".into(),
             source: "claude-code".into(),
             project_key: "/Users/testuser/code/proj".into(),
             project_label: "proj".into(),
-            path: std::path::PathBuf::from("/Users/testuser/.claude/x.jsonl"),
-            size_bytes: 100,
+            path: session_ref.path.clone(),
+            size_bytes: session_ref.size_bytes,
             discovered_at: chrono::Utc::now(),
             state: QueueState::Pending,
             reason_label: None,

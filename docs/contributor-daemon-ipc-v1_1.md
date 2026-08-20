@@ -173,8 +173,10 @@ already grants.
 What replaces the restriction is **visibility, not gatekeeping**:
 
 - Every autonomy change (`set_project_mode: "auto_upload"`) and every bulk
-  approval (`approve: {"all": true}`) appends a local, hash-only audit entry,
-  readable via `list_audit`. So do `set_consent_scopes` and
+  approval -- `approve: {"all": true}` and `approve: {"project_id": ...}`
+  alike -- appends a local, hash-only audit entry, readable via
+  `list_audit`. A project-wide approval that matched nothing appends no
+  entry, because nothing was approved. So do `set_consent_scopes` and
   `acknowledge_near_ai_notice`.
 - The action and its audit entry are **one fail-closed unit**. If the entry
   cannot be persisted -- disk full, permissions, a corrupt log -- the action
@@ -360,9 +362,9 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
-| `approve` | `entry_id` or `all: true` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; see "The approval hold" below |
+| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
-| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
+| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending` and clears its pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
@@ -745,13 +747,93 @@ for that project already carries.
 `unknown-project` bucket reports `notify_only` even if a hand-edited policy
 file says `auto_upload`, because the daemon refuses to act on that.
 
-### The approval hold (the undo window)
+### What `approve` reports
 
 `approve` returns:
 
 ```json
-{ "approved": 1, "hold_secs": 10, "hold_until": "2026-08-08T12:00:10Z" }
+{
+  "approved": 1,
+  "hold_secs": 10,
+  "hold_until": "2026-08-08T12:00:10Z",
+  "flagged": 1,
+  "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
+  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
+}
 ```
+
+This is the whole signal a one-click submit needs: a client that never calls
+`preview` can still show "Sent -- scrubbing removed 3 things, 1 flagged.
+[Undo]" off this response alone, with `hold_until` driving the undo window
+(see below).
+
+- **`redactions`** sums the redaction category counts from
+  `preview`'s `redactions` (same shape: category name to count) across every
+  entry this call built a preview for. An entry that was already previewed
+  before this call -- and so was already pinned -- contributes nothing here;
+  its own `preview` response already reported those counts once, and this
+  call does not rebuild it. **This means an already-previewed entry and a
+  freshly-built one with nothing to redact look identical in this
+  response**: both report `redactions: {}`, `flagged: 0`. A client that
+  calls `preview` before `approve` should render its toast from the
+  `preview` response's own counts, not assume `approve`'s zero means
+  nothing was found. Counts and category names only, exactly as in
+  `preview`: never the redacted text itself. Keys are real category names
+  the deterministic redactor and the (optional) remote privacy filter emit
+  -- e.g. `private_email`, `local_path`, `secret:openai_api_key`,
+  `secret:github_token`, or a `privacy_filter:<label>` from the remote pass
+  -- not the two placeholder names shown above; see
+  `PreviewSummary::redactions` for the full set.
+- **`flagged`** counts how many of the entries this call built a preview for
+  came back with a non-empty `pii_labels_present` (the same field `preview`
+  reports). It is a count of entries, not a count of labels. Same
+  already-previewed caveat as `redactions` above.
+- **`skipped`** lists, for every id `approve` was asked to act on that it
+  did not approve, an `entry_id` plus a fixed `reason_label`:
+
+  | `reason_label` | Meaning | Retry |
+  |---|---|---|
+  | `not-enrolled` | No config was readable when the build ran | Retry after enrolling |
+  | `session-file-vanished` | The session file behind the entry is gone | Will not succeed for this entry |
+  | `preview-failed` | The redaction pipeline itself failed | May be transient |
+  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded | **Never** succeeds for this entry -- do not offer retry |
+  | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
+  | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+
+  Nothing here is free text, a path, or trace content. **`approved` plus
+  the length of `skipped` always equals the number of entries `approve` was
+  asked to act on** -- for `entry_id` that is 1, for `all`/`project_id` it
+  is however many matched at selection time. An id absent from both would
+  be a silent loss of an approval decision; the response is built so that
+  cannot happen. An `entry_id` naming no entry at all is refused before any
+  of this runs -- see below.
+- **An unrecognized `entry_id`** is refused the same way `preview` refuses
+  the same input: `bad_params` / `unknown-entry-id`, not a `skipped` entry.
+  This applies only to the single-`entry_id` form. `all` and `project_id`
+  cannot produce this case: their ids are read from the queue itself at
+  selection time, so every id they act on already names a real entry.
+- **An unrecognized `project_id`** is refused the same way
+  `set_project_mode` refuses it: `bad_params` / `project-id-unrecognized`.
+  A handle the daemon cannot resolve is a client bug, and answering it
+  `approved: 0` would be indistinguishable from "that project had nothing
+  pending" -- a client holding a typo'd or stale id would render "Sent 0
+  sessions" and never learn otherwise. A project the daemon **does** know
+  with nothing pending -- everything already approved, dismissed or swept
+  -- is not an error: it succeeds with `approved: 0` and an empty
+  `skipped`. Recognition is by the project appearing in the daemon's policy
+  or on any queue entry in any state, so a project whose entries were all
+  just approved stays recognized.
+- `approve` builds and pins an envelope for any entry that was not already
+  previewed -- the same build `preview` runs, just triggered by `approve`
+  instead. This is what makes `redactions` and `flagged` available even when
+  a client skips `preview` entirely: a client that never calls `preview`
+  still produces a pinned envelope the uploader accepts, and still gets the
+  counts to render its toast from. An entry that was already pinned by an
+  earlier `preview` is approved without rebuilding, so it is counted in
+  `approved` but does not contribute to `redactions` or `flagged` (see the
+  caveat above).
+
+### The approval hold (the undo window)
 
 `hold_until` is the instant the daemon will first consider the entry for
 upload. Until then the uploader skips it, so an "Undo" offered during that
@@ -777,8 +859,13 @@ Rules an application can rely on:
   `approval_hold_secs` is `0`. A client must then offer no undo rather than
   invent one.
 - **`cancel` during the hold returns the entry to `pending`** and clears the
-  approval outright: the scopes, the envelope-determining fingerprint, and
-  the hold itself. A subsequent `approve` starts a fresh window.
+  approval outright: the scopes, the envelope-determining fingerprint, the
+  hold itself, and the pin binding the approval to the exact bytes it
+  covered. A subsequent `approve` therefore rebuilds the envelope from the
+  session as it then stands -- reporting its own `redactions` and `flagged`
+  counts, like any other approval of an entry with no preview behind it --
+  and starts a fresh window. An undone approval leaves nothing on disk: the
+  stored envelope is swept once the pin naming it is gone.
 - **A standing `auto_upload` opt-in is not held.** Those entries are
   approved in advance, are separately audited, and no client is counting
   down for them; they upload on the next pass exactly as before. Only an
@@ -822,6 +909,12 @@ the configured window), not of the daemon's poll timing. Tuning
   ]
 }
 ```
+
+A `bulk-approved` entry carries the number of entries selected in `detail`,
+and, for the `project_id` form, that project's derived label in
+`project_label` -- `null` for `approve: {"all": true}`, which names no one
+project. The label is derived from the key the daemon holds, never from the
+caller's string.
 
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
@@ -1269,10 +1362,12 @@ race `list_pending` against the stream at startup. On `resync_required`, call
   `approval-inputs-changed`, or `envelope-changed-after-approval`. Nothing
   is sent. An app should treat these the same as a superseded entry: offer
   it again, previewing afresh.
-- `approved` entries can be returned to `pending` with `cancel`. An entry
-  approved through `approve` stays untouched for its hold window first (see
-  "The approval hold" above), so `cancel` is guaranteed to succeed for that
-  whole window. After it, `cancel` still works right up until the upload
+- `approved` entries can be returned to `pending` with `cancel`, which
+  clears the pin along with the rest of the approval, so a re-offered entry
+  is previewed or rebuilt afresh rather than carrying the withdrawn
+  approval's artifact. An entry approved through `approve` stays untouched
+  for its hold window first (see "The approval hold" above), so `cancel` is
+  guaranteed to succeed for that whole window. After it, `cancel` still works right up until the upload
   pass claims the entry (`uploading`), at which point it is refused.
 
 ## `reason_label` and health taxonomy

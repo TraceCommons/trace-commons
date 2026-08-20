@@ -22,6 +22,7 @@ use trace_commons_contributor::daemon::ipc::{
     DaemonShared, ERR_BAD_PARAMS, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT, IPC_SCHEMA, METHODS, bind,
     serve,
 };
+use trace_commons_contributor::daemon::policy::project_id_for;
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
@@ -820,6 +821,104 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
     (dir, store_dir, entry_id)
 }
 
+/// Single-entry daemon like `daemon_with_a_multi_event_entry`, except the
+/// session content carries a private email address the deterministic
+/// redactor's `private_email` regex catches unconditionally (no network, no
+/// enrolled `near_ai` needed). This is the fixture for tests that need
+/// `approve`'s `redactions` / `flagged` counts to be real, checkable values
+/// rather than merely present -- an all-benign session (like the
+/// multi-event fixture) always reports `redactions: {}`, `flagged: 0`,
+/// which cannot tell an inert fold from a correct empty one.
+async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::PathBuf, uuid::Uuid) {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let project = sessions_root.join("-Users-testuser-code-myproj");
+    std::fs::create_dir_all(&project).unwrap();
+    let user = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "please email fixture-user@example.com about the deploy"},
+        "cwd": "/Users/testuser/code/myproj",
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": "66666666-6666-6666-6666-666666666666",
+        "uuid": "a1",
+    });
+    std::fs::write(
+        project.join("66666666-6666-6666-6666-666666666666.jsonl"),
+        format!("{user}\n"),
+    )
+    .unwrap();
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let session_ref = TraceSource::discover(&src).unwrap().remove(0);
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
+    settings.save(&store).unwrap();
+
+    let entry_id = entry_id_for("redactable-fixture-hash");
+    let mut queue = Queue::new();
+    queue
+        .upsert(
+            QueueEntry {
+                entry_id,
+                session_hash: "redactable-fixture-hash".into(),
+                source: "claude-code".into(),
+                project_key: "/Users/testuser/code/myproj".into(),
+                project_label: "myproj".into(),
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                discovered_at: chrono::Utc::now(),
+                state: QueueState::Pending,
+                reason_label: None,
+                attempts: 0,
+                retry_after: None,
+                submission_id: None,
+                approved_scopes: None,
+                approved_inputs: None,
+                previewed_envelope_digest: None,
+                approved_at: None,
+                subagent_count: 0,
+                subagents_dropped: 0,
+            },
+            100,
+        )
+        .unwrap();
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    (dir, store_dir, entry_id)
+}
+
 async fn connect_to(store_dir: &std::path::Path) -> Client {
     let stream = UnixStream::connect(store_dir.join("daemon.sock"))
         .await
@@ -961,5 +1060,894 @@ async fn preview_turns_refuses_an_unanchored_or_mis_anchored_request() {
         r["error"]["message"],
         trace_commons_contributor::daemon::ipc::ERR_UNKNOWN_ENTRY_ID,
         "{r}"
+    );
+}
+
+/// Approve one entry over the socket and return the daemon's result value.
+async fn approve_one(c: &mut Client, entry_id: uuid::Uuid) -> serde_json::Value {
+    c.send(&format!(
+        r#"{{"id":1,"method":"approve","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    resp["result"].clone()
+}
+
+#[tokio::test]
+async fn approving_without_a_preview_still_pins_an_envelope() {
+    // The uploader rebuilds and compares against the pin; an approval with
+    // no pin fail-closes into a re-offer, so an unpinned approval is not a
+    // submission at all. One-click submit approves things nobody opened, so
+    // approve has to build the artifact preview used to.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    assert!(
+        Queue::load(&store)
+            .unwrap()
+            .get(entry_id)
+            .expect("entry")
+            .previewed_envelope_digest
+            .is_none(),
+        "fixture must start unpinned or this test proves nothing"
+    );
+
+    let mut c = connect_to(&store_dir).await;
+    let result = approve_one(&mut c, entry_id).await;
+    assert_eq!(result["approved"], 1, "{result}");
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    assert_eq!(entry.state, QueueState::Approved, "{:?}", entry.state);
+    assert!(
+        entry.previewed_envelope_digest.is_some(),
+        "approve must build and pin an envelope when no preview ran"
+    );
+}
+
+#[tokio::test]
+async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
+    // A digest with no envelope behind it is the same fail-closed re-offer
+    // as no digest at all: the uploader loads the stored artifact and
+    // checks it against the pin.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+    approve_one(&mut c, entry_id).await;
+
+    let queue = Queue::load(&store).unwrap();
+    let pinned = queue
+        .get(entry_id)
+        .expect("entry")
+        .previewed_envelope_digest
+        .clone()
+        .expect("pinned");
+    let saved = trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id)
+        .expect("load")
+        .expect("an envelope must be on disk, not only a digest");
+    assert_eq!(
+        trace_commons_contributor::daemon::preview::envelope_digest(&saved).expect("digest"),
+        pinned,
+        "the pinned digest must name the bytes actually persisted"
+    );
+}
+
+#[tokio::test]
+async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved() {
+    // The hole a build returning `Ok` hides. `pin_previewed_envelope`
+    // declines silently when the envelope cannot be written, so the build
+    // succeeds and the entry stays unpinned -- and an unpinned entry is not
+    // refused at upload: `approved_envelope_for` returns `Ok(None)` and
+    // `submit` builds a fresh envelope from that `None` and sends it. An
+    // approval reported as successful here would mean bytes nobody was
+    // shown going out. So the pin is re-checked before the entry is
+    // approved, and an entry that could not be pinned stays `Pending`.
+    //
+    // The write is made to fail by planting a directory where the stored
+    // envelope's file has to go: the atomic rename onto it cannot succeed,
+    // and nothing else on the store is disturbed.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    std::fs::create_dir_all(
+        store.daemon_path(
+            &trace_commons_contributor::daemon::approved_envelope::file_name(entry_id),
+        ),
+    )
+    .unwrap();
+
+    let mut c = connect_to(&store_dir).await;
+    c.send(&format!(
+        r#"{{"id":1,"method":"approve","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    assert_eq!(
+        resp["result"]["approved"], 0,
+        "an entry with no artifact behind it must not be counted as approved: {resp}"
+    );
+    // Not approved is only half of it. The response promises that
+    // `approved` plus `skipped` accounts for every id the call was asked to
+    // act on, and this is the only path that reaches the pin re-check's own
+    // skip. Without this assertion, deleting that `skipped.push` leaves the
+    // entry counted nowhere and the whole contract test file still green.
+    let skipped = resp["result"]["skipped"]
+        .as_array()
+        .expect("skipped must be an array");
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the entry this call was asked to act on must show up somewhere in \
+         the response, not vanish from both counts: {resp}"
+    );
+    assert_eq!(
+        skipped[0]["entry_id"].as_str(),
+        Some(entry_id.to_string()).as_deref(),
+        "{resp}"
+    );
+    assert_eq!(
+        skipped[0]["reason_label"].as_str(),
+        Some("not-pinned"),
+        "an entry still pending whose pin did not stick is the transient, \
+         retryable case: {resp}"
+    );
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    assert!(
+        entry.previewed_envelope_digest.is_none(),
+        "the fixture must actually have prevented the pin, or this test \
+         proves nothing"
+    );
+    assert_eq!(
+        entry.state,
+        QueueState::Pending,
+        "an entry that could not be pinned stays pending rather than \
+         becoming an approval the uploader would satisfy by building and \
+         sending something nobody saw"
+    );
+}
+
+/// An enrolled daemon with real session files in two projects: two pending
+/// entries in `proj-a`, one in `proj-b`. Built for tests that approve a
+/// whole project and must be able to tell "everything in that project" from
+/// "everything else".
+struct EnrolledDaemon {
+    _dir: tempfile::TempDir,
+    store_dir: std::path::PathBuf,
+    client: tokio::sync::Mutex<Client>,
+}
+
+impl EnrolledDaemon {
+    fn store(&self) -> ConfigStore {
+        ConfigStore::open(self.store_dir.clone()).unwrap()
+    }
+}
+
+/// Send one request over the daemon's socket and return the WHOLE response
+/// frame, error and all, for a test that is asserting on a refusal.
+async fn call_raw(
+    daemon: &EnrolledDaemon,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let mut c = daemon.client.lock().await;
+    c.send(&serde_json::json!({"id": 1, "method": method, "params": params}).to_string())
+        .await;
+    c.recv_json().await
+}
+
+/// Send one request over the daemon's socket and return its `result`.
+/// Panics with the response on an error, so a test that only wants a happy
+/// path does not have to check for one itself.
+async fn call(
+    daemon: &EnrolledDaemon,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let mut c = daemon.client.lock().await;
+    c.send(&serde_json::json!({"id": 1, "method": method, "params": params}).to_string())
+        .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{method} failed: {resp}");
+    resp["result"].clone()
+}
+
+/// The queue as currently persisted to disk -- not a socket snapshot, so a
+/// caller can assert on `QueueEntry` fields the wire format does not carry
+/// (like `state` as an enum rather than a string).
+async fn queue_entries(daemon: &EnrolledDaemon) -> Vec<QueueEntry> {
+    Queue::load(&daemon.store()).unwrap().all().to_vec()
+}
+
+/// The project id of a pending entry in `proj-a`, the project this fixture
+/// puts two entries in.
+async fn first_pending_project_id(daemon: &EnrolledDaemon) -> String {
+    let entries = queue_entries(daemon).await;
+    let e = entries
+        .iter()
+        .find(|e| e.state == QueueState::Pending && e.project_label == "proj-a")
+        .expect("fixture must seed a pending entry in proj-a");
+    project_id_for(&e.project_key)
+}
+
+fn write_fixture_session(project_dir: &std::path::Path, session_id: &str, cwd: &str) {
+    std::fs::create_dir_all(project_dir).unwrap();
+    let user = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "please list the files"},
+        "cwd": cwd,
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": session_id,
+        "uuid": "a1",
+    });
+    std::fs::write(
+        project_dir.join(format!("{session_id}.jsonl")),
+        format!("{user}\n"),
+    )
+    .unwrap();
+}
+
+async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, ConfigStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let proj_a_dir = sessions_root.join("-Users-testuser-code-proj-a");
+    let proj_b_dir = sessions_root.join("-Users-testuser-code-proj-b");
+    write_fixture_session(
+        &proj_a_dir,
+        "11111111-1111-1111-1111-111111111111",
+        "/Users/testuser/code/proj-a",
+    );
+    write_fixture_session(
+        &proj_a_dir,
+        "22222222-2222-2222-2222-222222222222",
+        "/Users/testuser/code/proj-a",
+    );
+    write_fixture_session(
+        &proj_b_dir,
+        "33333333-3333-3333-3333-333333333333",
+        "/Users/testuser/code/proj-b",
+    );
+
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let refs = TraceSource::discover(&src).unwrap();
+    let ref_for = |needle: &str| {
+        refs.iter()
+            .find(|r| r.path.to_string_lossy().contains(needle))
+            .unwrap_or_else(|| panic!("no discovered session for {needle}"))
+            .clone()
+    };
+    let a1 = ref_for("11111111-1111-1111-1111-111111111111");
+    let a2 = ref_for("22222222-2222-2222-2222-222222222222");
+    let b1 = ref_for("33333333-3333-3333-3333-333333333333");
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
+    settings.save(&store).unwrap();
+
+    let mut queue = Queue::new();
+    let mut seed =
+        |session_hash: &str,
+         project_key: &str,
+         project_label: &str,
+         session_ref: &trace_commons_contributor::source::SessionRef| {
+            queue
+                .upsert(
+                    QueueEntry {
+                        entry_id: entry_id_for(session_hash),
+                        session_hash: session_hash.into(),
+                        source: "claude-code".into(),
+                        project_key: project_key.into(),
+                        project_label: project_label.into(),
+                        path: session_ref.path.clone(),
+                        size_bytes: session_ref.size_bytes,
+                        discovered_at: chrono::Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    100,
+                )
+                .unwrap();
+        };
+    seed(
+        "two-project-fixture-a1",
+        "/Users/testuser/code/proj-a",
+        "proj-a",
+        &a1,
+    );
+    seed(
+        "two-project-fixture-a2",
+        "/Users/testuser/code/proj-a",
+        "proj-a",
+        &a2,
+    );
+    seed(
+        "two-project-fixture-b1",
+        "/Users/testuser/code/proj-b",
+        "proj-b",
+        &b1,
+    );
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    let client = connect_to(&store_dir).await;
+
+    let daemon = EnrolledDaemon {
+        _dir: dir,
+        store_dir: store_dir.clone(),
+        client: tokio::sync::Mutex::new(client),
+    };
+    let store = ConfigStore::open(store_dir).unwrap();
+    (daemon, store)
+}
+
+#[tokio::test]
+async fn approving_a_project_takes_that_project_and_no_other() {
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let v = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert!(
+        v["approved"].as_u64().unwrap_or(0) > 0,
+        "nothing approved: {v}"
+    );
+
+    for e in queue_entries(&daemon).await {
+        let want = project_id_for(&e.project_key) == target;
+        assert_eq!(
+            e.state == QueueState::Approved,
+            want,
+            "entry in {} should{} be approved",
+            e.project_label,
+            if want { "" } else { " not" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn approving_a_known_project_with_nothing_pending_is_not_an_error() {
+    // A client can race a sweep, or click twice. Zero approved is an
+    // outcome, not a fault -- and it must stay distinguishable from the
+    // refusal an id naming no project at all now gets (below).
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+    let first = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert!(
+        first["approved"].as_u64().unwrap_or(0) > 0,
+        "the fixture must leave this project with nothing pending, or the \
+         second call below proves nothing: {first}"
+    );
+
+    let again = call_raw(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert!(
+        again["error"].is_null(),
+        "a project the daemon knows, with nothing left pending, is a \
+         success reporting zero -- not a refusal: {again}"
+    );
+    assert_eq!(again["result"]["approved"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        again["result"]["skipped"].as_array().map(Vec::len),
+        Some(0),
+        "{again}"
+    );
+}
+
+#[tokio::test]
+async fn approving_a_project_id_the_daemon_does_not_know_is_refused() {
+    // Consistency with `set_project_mode`, which refuses the same input on
+    // the same socket with the same fixed label. A handle the caller never
+    // received is a client bug, and answering it `approved: 0` is
+    // indistinguishable from "that project had nothing to send" -- a shell
+    // holding a typo'd or stale id would render a success toast forever.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let v = call_raw(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": "proj_0000000000000000" }),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], ERR_BAD_PARAMS, "{v}");
+    assert_eq!(v["error"]["message"], "project-id-unrecognized", "{v}");
+
+    for e in queue_entries(&daemon).await {
+        assert_eq!(
+            e.state,
+            QueueState::Pending,
+            "a refused call must approve nothing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn approve_reports_counts_a_client_can_show_without_asking_again() {
+    // The one-click flow never calls `preview`: the toast it renders --
+    // "Sent -- scrubbing removed N things, M flagged. [Undo]" -- has to come
+    // entirely off this response. Asserts actual values, not just shape: a
+    // fold that never runs and an empty-but-present `redactions: {}` are
+    // indistinguishable to `.is_object()` / `.is_u64()` checks alone, and a
+    // fixture with nothing to redact (like the plain multi-event one) makes
+    // that gap invisible. This fixture plants a private email the
+    // deterministic redactor always catches, so the counts below are the
+    // one real thing that fixture would produce.
+    let (_dir, store_dir, entry_id) = daemon_with_a_redactable_entry().await;
+    let mut c = connect_to(&store_dir).await;
+    let v = approve_one(&mut c, entry_id).await;
+    assert_eq!(v["approved"].as_u64(), Some(1), "{v}");
+    assert_eq!(
+        v["redactions"]["private_email"].as_u64(),
+        Some(1),
+        "the planted email must show up in the redaction counts: {v}"
+    );
+    assert_eq!(
+        v["flagged"].as_u64(),
+        Some(1),
+        "a session with a PII label present must count as flagged: {v}"
+    );
+    assert!(v["skipped"].is_array(), "{v}");
+    assert_eq!(v["skipped"].as_array().unwrap().len(), 0, "{v}");
+}
+
+/// An enrolled daemon with two pending entries in one project: one ordinary
+/// session, and one whose sole event carries content past
+/// `MAX_ENVELOPE_BYTES`. `build_preview` does not size-check the raw
+/// contribution -- only the stored artifact does -- so the build itself
+/// succeeds; `approve` catches the oversize before attempting to pin it and
+/// reports the entry `skipped` (`envelope-too-large`) rather than letting it
+/// vanish from both `approved` and `skipped`. Built for the "every entry
+/// attempted is accounted for" guarantee.
+async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledDaemon, ConfigStore)
+{
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let project_dir = sessions_root.join("-Users-testuser-code-proj-a");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    write_fixture_session(
+        &project_dir,
+        "44444444-4444-4444-4444-444444444444",
+        "/Users/testuser/code/proj-a",
+    );
+
+    // Past `MAX_ENVELOPE_BYTES` (16_000_000). Preview builds this fine --
+    // the size guard `approve` checks (`summary.would_send_bytes`) mirrors
+    // the one `approved_envelope::save` would otherwise apply, not
+    // `build_preview` itself -- so this is what drives the entry into the
+    // `envelope-too-large` skip rather than a build-time (`preview-failed`)
+    // one.
+    let oversized_content = "x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 1);
+    let oversized = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": oversized_content},
+        "cwd": "/Users/testuser/code/proj-a",
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": "55555555-5555-5555-5555-555555555555",
+        "uuid": "a1",
+    });
+    std::fs::write(
+        project_dir.join("55555555-5555-5555-5555-555555555555.jsonl"),
+        format!("{oversized}\n"),
+    )
+    .unwrap();
+
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let refs = TraceSource::discover(&src).unwrap();
+    let ref_for = |needle: &str| {
+        refs.iter()
+            .find(|r| r.path.to_string_lossy().contains(needle))
+            .unwrap_or_else(|| panic!("no discovered session for {needle}"))
+            .clone()
+    };
+    let good = ref_for("44444444-4444-4444-4444-444444444444");
+    let oversized_ref = ref_for("55555555-5555-5555-5555-555555555555");
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
+    settings.save(&store).unwrap();
+
+    let mut queue = Queue::new();
+    let mut seed =
+        |session_hash: &str, session_ref: &trace_commons_contributor::source::SessionRef| {
+            queue
+                .upsert(
+                    QueueEntry {
+                        entry_id: entry_id_for(session_hash),
+                        session_hash: session_hash.into(),
+                        source: "claude-code".into(),
+                        project_key: "/Users/testuser/code/proj-a".into(),
+                        project_label: "proj-a".into(),
+                        path: session_ref.path.clone(),
+                        size_bytes: session_ref.size_bytes,
+                        discovered_at: chrono::Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    100,
+                )
+                .unwrap();
+        };
+    seed("oversized-fixture-good", &good);
+    seed("oversized-fixture-oversized", &oversized_ref);
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    let client = connect_to(&store_dir).await;
+
+    let daemon = EnrolledDaemon {
+        _dir: dir,
+        store_dir: store_dir.clone(),
+        client: tokio::sync::Mutex::new(client),
+    };
+    let store = ConfigStore::open(store_dir).unwrap();
+    (daemon, store)
+}
+
+#[tokio::test]
+async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
+    let (daemon, _store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
+    let approved = v["approved"].as_u64().expect("approved");
+    let skipped = v["skipped"].as_array().expect("skipped");
+    assert_eq!(
+        approved + skipped.len() as u64,
+        2,
+        "every entry attempted must be accounted for: {v}"
+    );
+    assert_eq!(approved, 1, "{v}");
+    assert_eq!(skipped.len(), 1, "{v}");
+    for s in skipped {
+        let label = s["reason_label"].as_str().expect("label");
+        // The build itself succeeds -- preview does not size-check the raw
+        // contribution, only the stored artifact does -- so the pin was
+        // refused for size and `approve` repeats that same measurement to
+        // recognise why, and gives it the permanent
+        // `envelope-too-large` label rather than the generic, transient
+        // `not-pinned` the pin re-check would otherwise apply. Either way
+        // this is exactly the hole the pin re-check exists to close: an
+        // entry that built but never got pinned must not vanish from the
+        // response.
+        assert_eq!(
+            label, "envelope-too-large",
+            "the oversized session's fixed label: {v}"
+        );
+        assert!(
+            !label.contains('/'),
+            "a reason label must not carry a path: {label}"
+        );
+        assert!(s["entry_id"].is_string(), "{v}");
+    }
+}
+
+#[tokio::test]
+async fn approving_an_already_approved_entry_is_reported_not_dropped() {
+    // The deterministic repro for the hole `Queue::approve` returning
+    // `false` opened one branch past the pin re-check: no timing games
+    // needed, just approve the same entry twice. The pin survives the
+    // first approval (`approve` never clears it), so the second call
+    // passes the pin re-check and only then finds the entry is not
+    // `Pending` any more.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let mut c = connect_to(&store_dir).await;
+
+    let first = approve_one(&mut c, entry_id).await;
+    assert_eq!(first["approved"].as_u64(), Some(1), "{first}");
+    assert_eq!(first["skipped"].as_array().unwrap().len(), 0, "{first}");
+
+    let second = approve_one(&mut c, entry_id).await;
+    assert_eq!(
+        second["approved"].as_u64(),
+        Some(0),
+        "an already-approved entry cannot be approved again: {second}"
+    );
+    let skipped = second["skipped"].as_array().expect("skipped");
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the entry this call was asked to act on must show up somewhere \
+         in the response: {second}"
+    );
+    assert_eq!(
+        skipped[0]["entry_id"].as_str(),
+        Some(entry_id.to_string()).as_deref(),
+        "{second}"
+    );
+    assert_eq!(
+        skipped[0]["reason_label"].as_str(),
+        Some("not-pending"),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn approve_with_an_id_the_caller_never_held_is_refused_like_preview() {
+    // Consistency with `handle_preview`, which answers the same fixed
+    // label for the same input: an id the caller never held is a client
+    // bug, not something for `approve` to fold into a labelled skip of a
+    // call that otherwise ran.
+    let h = TestDaemon::start().await;
+    let mut c = h.connect().await;
+    let unknown = uuid::Uuid::new_v4();
+    c.send(&format!(
+        r#"{{"id":1,"method":"approve","params":{{"entry_id":"{unknown}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert_eq!(resp["error"]["code"], ERR_BAD_PARAMS, "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        trace_commons_contributor::daemon::ipc::ERR_UNKNOWN_ENTRY_ID,
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn an_unpinned_entry_that_is_no_longer_pending_is_labelled_not_pending() {
+    // The two labels a client codes different retry logic against.
+    // `not-pinned` is documented transient -- "retry is expected to work" --
+    // and that is only true while the entry is still `pending`. An entry
+    // that was never previewed and has since left `pending` (dismissed
+    // here) can never be pinned by a retry: every pin path refuses a
+    // non-`pending` entry, so a shell that trusts the table loops forever.
+    // It gets `not-pending`, whose documented advice is to refresh queue
+    // state instead.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+
+    c.send(&format!(
+        r#"{{"id":1,"method":"dismiss","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    let entry = Queue::load(&store).unwrap().get(entry_id).cloned();
+    let entry = entry.expect("entry");
+    assert_eq!(
+        entry.state,
+        QueueState::Refused,
+        "the fixture must have moved the entry off pending"
+    );
+    assert!(
+        entry.previewed_envelope_digest.is_none(),
+        "the fixture must leave the entry unpinned, or this test exercises \
+         the other branch"
+    );
+
+    let result = approve_one(&mut c, entry_id).await;
+    assert_eq!(result["approved"].as_u64(), Some(0), "{result}");
+    let skipped = result["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped.len(), 1, "{result}");
+    assert_eq!(
+        skipped[0]["reason_label"].as_str(),
+        Some("not-pending"),
+        "an unpinned entry that is no longer pending cannot be fixed by a \
+         retry and must not be labelled transient: {result}"
+    );
+}
+
+#[tokio::test]
+async fn approving_a_whole_project_is_recorded_in_the_local_audit_log() {
+    // The terminal-only restriction on bulk approval was removed and this
+    // log is what replaced it (see `daemon::audit`). A tray click that
+    // approves a whole project unattended is the same class of act as
+    // approving the whole queue, so it leaves the same record. An empty
+    // match writes nothing: nothing was approved, and a shell polling a
+    // drained project would otherwise rotate real records out of a capped
+    // log.
+    use trace_commons_contributor::daemon::audit;
+
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+    assert!(
+        audit::load(&daemon.store()).unwrap().is_empty(),
+        "the fixture must start with an empty log"
+    );
+
+    let v = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(
+        v["approved"].as_u64(),
+        Some(2),
+        "the fixture puts two pending entries in this project: {v}"
+    );
+
+    let entries = audit::load(&daemon.store()).unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "a project-wide approval must leave exactly one record"
+    );
+    assert_eq!(entries[0].action, "bulk-approved");
+    assert_eq!(entries[0].detail.as_deref(), Some("2"));
+    assert_eq!(
+        entries[0].project_label.as_deref(),
+        Some("proj-a"),
+        "the label is derived from the key the daemon holds, never from \
+         the caller's string"
+    );
+
+    // Nothing left pending in that project: a second call approves nothing
+    // and records nothing.
+    let again = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert_eq!(again["approved"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        audit::load(&daemon.store()).unwrap().len(),
+        1,
+        "an approval that matched nothing must not append a record"
+    );
+}
+
+#[tokio::test]
+async fn undo_leaves_no_pin_behind_and_the_next_submit_rebuilds() {
+    // The spec's Undo property, end to end over the socket: one-click
+    // Submit pins an artifact nobody previewed, Undo withdraws it, and
+    // nothing of that approval survives -- no state, and no pin.
+    //
+    // The pin is the half that matters here. Left behind, a second Submit
+    // finds the entry already pinned, skips the rebuild, and approves the
+    // artifact built at the FIRST click: stale bytes if the session grew
+    // meanwhile, and `redactions: {}` / `flagged: 0` both times, so the
+    // contributor is shown nothing either way. Cleared, the second Submit
+    // rebuilds from the session as it now stands -- which is why this test
+    // asserts the second approval's counts are real.
+    let (_dir, store_dir, entry_id) = daemon_with_a_redactable_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+
+    let first = approve_one(&mut c, entry_id).await;
+    assert_eq!(first["approved"].as_u64(), Some(1), "{first}");
+    assert_eq!(
+        first["redactions"]["private_email"].as_u64(),
+        Some(1),
+        "{first}"
+    );
+    let pinned = Queue::load(&store)
+        .unwrap()
+        .get(entry_id)
+        .expect("entry")
+        .previewed_envelope_digest
+        .clone();
+    assert!(
+        pinned.is_some(),
+        "the first Submit must pin, or the undo below proves nothing"
+    );
+
+    c.send(&format!(
+        r#"{{"id":2,"method":"cancel","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let undo = c.recv_json().await;
+    assert!(undo["error"].is_null(), "{undo}");
+
+    let entry = Queue::load(&store).unwrap().get(entry_id).cloned();
+    let entry = entry.expect("entry");
+    assert_eq!(entry.state, QueueState::Pending, "{:?}", entry.state);
+    assert_eq!(
+        entry.previewed_envelope_digest, None,
+        "undo withdraws the approval, so the binding to the bytes it \
+         covered cannot survive it"
+    );
+
+    // A second Submit is a fresh approval of a freshly built artifact, and
+    // reports its counts like any other unpreviewed approval.
+    let second = approve_one(&mut c, entry_id).await;
+    assert_eq!(second["approved"].as_u64(), Some(1), "{second}");
+    assert_eq!(
+        second["redactions"]["private_email"].as_u64(),
+        Some(1),
+        "the second Submit must rebuild, not silently re-approve the first \
+         click's artifact with nothing to report: {second}"
+    );
+    assert!(
+        Queue::load(&store)
+            .unwrap()
+            .get(entry_id)
+            .expect("entry")
+            .previewed_envelope_digest
+            .is_some(),
+        "{second}"
     );
 }

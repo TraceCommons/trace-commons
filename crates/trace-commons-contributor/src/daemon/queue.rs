@@ -403,8 +403,9 @@ impl Queue {
     /// disk: live (not yet resolved) and still pinned to a preview.
     ///
     /// `daemon::approved_envelope::sweep` deletes everything else. An entry
-    /// that reached a terminal state, or whose approval was revoked (which
-    /// clears the pin), leaves no redacted trace content behind.
+    /// that reached a terminal state, or whose approval was revoked or
+    /// undone (both of which clear the pin), leaves no redacted trace
+    /// content behind.
     pub fn pinned_entry_ids(&self) -> std::collections::HashSet<Uuid> {
         self.entries
             .iter()
@@ -638,7 +639,9 @@ impl Queue {
     }
 
     /// Return an approved entry to pending, backing the "undo" window on an
-    /// approval. Refuses once the entry has moved past `Approved` --
+    /// approval. Clears everything the approval established, the pin
+    /// included, so the next approval is a fresh decision about freshly
+    /// built bytes. Refuses once the entry has moved past `Approved` --
     /// notably `Uploading`, where an upload may already be in flight and an
     /// undo racing it would be indistinguishable from data loss.
     ///
@@ -660,6 +663,30 @@ impl Queue {
         e.approved_scopes = None;
         e.approved_inputs = None;
         e.approved_at = None;
+        // The pin goes with the approval, exactly as in `revoke_approval`.
+        // A pin is a binding between an approval and the precise bytes it
+        // covered; an undo withdraws the approval, so the binding cannot
+        // survive it.
+        //
+        // Keeping it was load-bearing in the wrong direction once `approve`
+        // started building envelopes for entries nobody previewed. The
+        // sequence is: one-click Submit builds and pins an artifact the
+        // contributor never saw, the toast offers Undo, Undo returns the
+        // entry to `Pending` -- and a second Submit would then find it
+        // already pinned, skip the rebuild, and approve the artifact built
+        // at the FIRST click. If the session grew in between, that sends
+        // stale bytes; and because a pre-pinned entry contributes no counts,
+        // the second click reports `redactions: {}` / `flagged: 0`, so the
+        // contributor is shown nothing either time.
+        //
+        // Clearing it makes the next approval rebuild from the session as
+        // it now stands. The stored envelope is dropped from
+        // `pinned_entry_ids` by the same rule that drops a revoked one, so
+        // the next sweep deletes redacted trace content nothing refers to
+        // any more -- which is the right outcome for withdrawn consent, and
+        // is not premature: no path reads a `Pending` entry's stored
+        // envelope.
+        e.previewed_envelope_digest = None;
         Ok(())
     }
 
@@ -1214,6 +1241,37 @@ mod tests {
         q.set_state(id, QueueState::Approved, None);
         q.cancel(id).unwrap();
         assert_eq!(q.get(id).unwrap().state, QueueState::Pending);
+    }
+
+    #[test]
+    fn cancel_clears_the_pin_so_the_next_approval_rebuilds() {
+        // Undo withdraws the approval, and the pin is the approval's
+        // binding to the exact bytes it covered. Left behind, it makes a
+        // second Submit approve the artifact built at the first click --
+        // stale bytes if the session grew, and no counts to show either
+        // time, because `approve` does not rebuild an entry that is
+        // already pinned.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.approve(id, &[], None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(
+            q.get(id).unwrap().previewed_envelope_digest.is_some(),
+            "the fixture must actually pin something, or this proves nothing"
+        );
+
+        q.cancel(id).unwrap();
+        assert_eq!(
+            q.get(id).unwrap().previewed_envelope_digest,
+            None,
+            "an undone approval must leave no pin behind"
+        );
+        assert!(
+            !q.pinned_entry_ids().contains(&id),
+            "and the bytes it named must stop being kept on disk"
+        );
     }
 
     #[test]

@@ -36,8 +36,9 @@
 //!   `max_queue_entries`. An approved-but-unsent backlog is the only thing
 //!   that can accumulate.
 //! * **Deleted as soon as it is not needed.** `sweep` removes every stored
-//!   envelope whose entry has reached a terminal state or has lost its pin,
-//!   and runs after every upload pass and every watcher tick.
+//!   envelope whose entry has reached a terminal state or has lost its pin
+//!   -- to a revoked approval or an undone one -- and runs after every
+//!   upload pass and every watcher tick.
 
 use std::collections::HashSet;
 
@@ -111,8 +112,8 @@ pub fn remove(store: &ConfigStore, entry_id: Uuid) -> Result<()> {
 ///
 /// `keep` is the set of entries that are still live *and* still pinned to a
 /// preview (`Queue::pinned_entry_ids`). An entry that reached a terminal
-/// state, or whose approval was revoked -- which clears the pin -- keeps no
-/// trace content on disk. Best-effort per file: one undeletable file does
+/// state, or whose approval was revoked or undone -- both of which clear
+/// the pin -- keeps no trace content on disk. Best-effort per file: one undeletable file does
 /// not stop the rest.
 pub fn sweep(store: &ConfigStore, keep: &HashSet<Uuid>) -> Result<()> {
     let entries = match std::fs::read_dir(store.dir()) {

@@ -805,124 +805,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
             Response::ok(req.id, serde_json::json!({ "ok": true }))
         }
-        "approve" => {
-            let all = req
-                .params
-                .get("all")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            // Read before the queue lock is taken, so the settings lock is
-            // never held under it.
-            //
-            // What is being approved is not just a session: it is that
-            // session under the consent scopes and the
-            // envelope-determining configuration in force right now. Both
-            // are recorded on the entry so the uploader can refuse if
-            // either moves before it sends. An approval with no readable
-            // config records neither, which the uploader treats as
-            // "unknown, re-ask" -- fail-closed.
-            let cfg = shared.store.load_config().ok().flatten();
-            let scopes = cfg
-                .as_ref()
-                .map(|c| c.consent_scopes.clone())
-                .unwrap_or_default();
-            // One instant for the whole call, so `approve: {"all": true}`
-            // holds every entry it approved for the same window and reports
-            // one deadline that is true of all of them -- rather than a
-            // deadline that happens to describe the first entry and expires
-            // early for the rest.
-            let approved_at = Utc::now();
-            let approval_hold_secs = shared
-                .settings
-                .lock()
-                .expect("settings lock")
-                .approval_hold_secs;
-            // `None`, not `Some("")`, when there is no readable config:
-            // every call site expresses "unknown" the same way, and the
-            // uploader treats it as "re-ask" -- fail-closed.
-            let inputs = cfg.as_ref().map(|c| {
-                let near_ai = shared
-                    .settings
-                    .lock()
-                    .expect("settings lock")
-                    .near_ai
-                    .clone();
-                super::preview::input_fingerprint(c, near_ai.as_ref())
-            });
-            let mut queue = shared.queue.lock().expect("queue lock");
-            let ids: Vec<Uuid> = if all {
-                queue.pending().iter().map(|e| e.entry_id).collect()
-            } else {
-                match parse_entry_id(&req.params) {
-                    Ok(id) => vec![id],
-                    Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
-                }
-            };
-            if all {
-                // A local, label-only record that the whole queue was
-                // bulk-approved, written BEFORE anything is approved --
-                // same ordering, and the same reason, as
-                // `set_project_mode`: a rollback that has to write to the
-                // disk that just refused a write is not a rollback. This is
-                // visibility, not a security control (see `daemon::audit`),
-                // but it is the only visibility there is for a call that
-                // used to require a terminal.
-                //
-                // The count is of entries eligible to be approved, taken
-                // under the same lock that then approves them, so it cannot
-                // drift from what happens next.
-                if let Err(_e) = audit::append(
-                    &shared.store,
-                    &AuditEntry {
-                        at: Utc::now(),
-                        action: "bulk-approved".to_string(),
-                        project_label: None,
-                        detail: Some(ids.len().to_string()),
-                    },
-                ) {
-                    return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
-                }
-            }
-            let mut approved_ids = Vec::new();
-            for id in ids {
-                if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
-                    approved_ids.push(id);
-                }
-            }
-            let approved = approved_ids.len();
-            // The deadline the daemon will actually honour, taken from an
-            // entry it just wrote rather than recomputed here, so a client
-            // counting down against it is counting down against the same
-            // value `drain_approved` compares. `null` when nothing was
-            // approved or the hold is configured off -- a client must then
-            // offer no undo, rather than invent one.
-            let hold_until = approved_ids
-                .first()
-                .and_then(|id| queue.get(*id))
-                .and_then(|e| e.hold_until(approval_hold_secs));
-            if let Err(_e) = queue.save(&shared.store) {
-                // The approvals exist only in memory and would not survive a
-                // restart; a queue that disagrees with its own file is worse
-                // than no approval. `cancel` refuses anything past
-                // `Approved`, and these were set `Approved` a few lines ago
-                // under this same lock, so no upload pass can have claimed
-                // one.
-                for id in approved_ids {
-                    let _ = queue.cancel(id);
-                }
-                return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
-            }
-            drop(queue);
-            shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
-            Response::ok(
-                req.id,
-                serde_json::json!({
-                    "approved": approved,
-                    "hold_secs": approval_hold_secs,
-                    "hold_until": hold_until,
-                }),
-            )
-        }
         "dismiss" => {
             let id = match parse_entry_id(&req.params) {
                 Ok(id) => id,
@@ -1195,8 +1077,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
-/// The complete dispatcher: answers the async methods (`"preview"`,
-/// `"preview_body"`, `"preview_turns"`, `"quiesce"`, `"enroll"`,
+/// The complete dispatcher: answers the async methods (`"approve"`,
+/// `"preview"`, `"preview_body"`, `"preview_turns"`, `"quiesce"`, `"enroll"`,
 /// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
 /// `"clear_public_profile"`) for real and delegates every other method,
 /// unchanged, to the synchronous `handle_request`. See the module doc's
@@ -1206,6 +1088,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 /// `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
     match req.method.as_str() {
+        "approve" => handle_approve(shared, req).await,
         "preview" => handle_preview(shared, req).await,
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
@@ -1278,6 +1161,362 @@ async fn handle_quiesce(shared: &DaemonShared, req: &Request) -> Response {
 /// `"preview"` on its own with an honest `preview_requires_async: true`
 /// marker rather than a wrong byte count; only `handle_request_async`
 /// resolves it completely.
+async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
+    let all = req
+        .params
+        .get("all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // Read before the queue lock is taken, so the settings lock is
+    // never held under it.
+    //
+    // What is being approved is not just a session: it is that
+    // session under the consent scopes and the
+    // envelope-determining configuration in force right now. Both
+    // are recorded on the entry so the uploader can refuse if
+    // either moves before it sends. An approval with no readable
+    // config records neither, which the uploader treats as
+    // "unknown, re-ask" -- fail-closed.
+    let cfg = shared.store.load_config().ok().flatten();
+    let scopes = cfg
+        .as_ref()
+        .map(|c| c.consent_scopes.clone())
+        .unwrap_or_default();
+    // One instant for the whole call, so `approve: {"all": true}`
+    // holds every entry it approved for the same window and reports
+    // one deadline that is true of all of them -- rather than a
+    // deadline that happens to describe the first entry and expires
+    // early for the rest.
+    let approved_at = Utc::now();
+    let approval_hold_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .approval_hold_secs;
+    // `None`, not `Some("")`, when there is no readable config:
+    // every call site expresses "unknown" the same way, and the
+    // uploader treats it as "re-ask" -- fail-closed.
+    let inputs = cfg.as_ref().map(|c| {
+        let near_ai = shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .near_ai
+            .clone();
+        super::preview::input_fingerprint(c, near_ai.as_ref())
+    });
+    let project_id = req.params.get("project_id").and_then(|v| v.as_str());
+    // Three mutually exclusive selectors; `all` wins over `project_id` wins
+    // over `entry_id` when more than one is sent -- same precedence rule as
+    // `set_project_mode` above.
+    //
+    // `project_audit_label` is the display label of the project a
+    // `project_id` call resolved to, for the audit row below. It is derived
+    // from the key the daemon itself holds, never from the caller's string
+    // -- the same rule `set_project_mode` follows, and the reason
+    // `daemon-audit.jsonl` cannot be injected into.
+    let (ids, project_audit_label): (Vec<Uuid>, Option<String>) = if all {
+        let queue = shared.queue.lock().expect("queue lock");
+        (queue.pending().iter().map(|e| e.entry_id).collect(), None)
+    } else if let Some(pid) = project_id {
+        // An id naming no project the daemon knows is refused, exactly as
+        // `set_project_mode` refuses it on this same socket with this same
+        // handle, and for the same reason an unknown `entry_id` is refused
+        // below: a handle the caller never received is a client bug, and
+        // answering it `approved: 0` is indistinguishable from "that
+        // project had nothing pending" -- a shell holding a typo'd or stale
+        // id would render "Sent 0 sessions" and never learn otherwise.
+        //
+        // "Known" is policy plus every project in the queue in ANY state,
+        // so a project whose entries were all just approved or swept is
+        // still recognised and still answers `approved: 0`. The genuinely
+        // empty case therefore stays a success, distinguishable from an id
+        // that names no project at all.
+        //
+        // Lock order is policy before queue, as everywhere else.
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let Some(key) = project_key_for_id(pid, &known) else {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+        };
+        // Only `Pending`: an entry already approved has had its terms
+        // fixed, and a project-wide call must not silently re-pin them.
+        let ids = queue
+            .pending()
+            .iter()
+            .filter(|e| e.project_key == key)
+            .map(|e| e.entry_id)
+            .collect();
+        // The unknown-cwd sentinel resolves here like any other project.
+        // Approving what is already in that bucket is an ordinary consent
+        // decision about entries the contributor can see; it is *arming*
+        // the bucket that `set_mode` refuses, which is a standing grant.
+        (ids, Some(disambiguated_label(&key, &known)))
+    } else {
+        let queue = shared.queue.lock().expect("queue lock");
+        (
+            match parse_entry_id(&req.params) {
+                Ok(id) => {
+                    // An id the caller never held is a client bug, not
+                    // something to fold into the skip accounting below --
+                    // refused up front, the same way `preview` refuses the
+                    // same input, rather than reported as a labelled skip
+                    // of a call that otherwise ran. `all` and `project_id`
+                    // cannot reach this branch: their ids are read from
+                    // the queue itself a few lines above, so every id they
+                    // produce already names a real entry at the moment of
+                    // selection.
+                    if queue.get(id).is_none() {
+                        return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID);
+                    }
+                    vec![id]
+                }
+                Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+            },
+            None,
+        )
+    };
+    // A local, label-only record that a batch was bulk-approved, written
+    // BEFORE anything is approved -- same ordering, and the same reason, as
+    // `set_project_mode`: a rollback that has to write to the disk that just
+    // refused a write is not a rollback. This is visibility, not a security
+    // control (see `daemon::audit`), but it is the only visibility there is
+    // for a call that used to require a terminal.
+    //
+    // Both bulk selectors are recorded, not only `all`. A tray click that
+    // approves a whole project unattended is the same class of act as
+    // approving the whole queue -- bulk, unattended, previously
+    // terminal-only -- and leaving it unrecorded would drain the queue with
+    // nothing in `daemon-audit.jsonl` to show for it. A single `entry_id`
+    // approval is the always-was, one-click-at-a-time path and stays
+    // unaudited.
+    //
+    // Written before the envelope builds below, not merely before the
+    // approve loop: those builds persist artifacts of their own, and "the
+    // record could not be written, so nothing happened" has to stay true of
+    // everything this call does.
+    //
+    // The count is of entries eligible to be approved when the queue was
+    // read. It is an upper bound: an entry no artifact can be built for is
+    // skipped below, and `approve` can refuse one that moved. The record
+    // says the batch was bulk-approved at all, which is what it exists for.
+    //
+    // A project selector that matched nothing writes no row: nothing was
+    // approved and, the selection having been taken under the queue lock,
+    // nothing could have been -- a row would record an act that did not
+    // happen, and a shell polling a project with an empty queue would
+    // rotate real records out of a capped log. `all` keeps writing
+    // unconditionally: it names the queue rather than a subset of it, and
+    // "the whole queue was bulk-approved" is a statement about the request,
+    // which `bulk_approval_over_the_socket_is_now_allowed_and_appends_an_audit_entry`
+    // fixes in place.
+    if all || (project_audit_label.is_some() && !ids.is_empty()) {
+        if let Err(_e) = audit::append(
+            &shared.store,
+            &AuditEntry {
+                at: Utc::now(),
+                action: "bulk-approved".to_string(),
+                project_label: project_audit_label,
+                detail: Some(ids.len().to_string()),
+            },
+        ) {
+            return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+        }
+    }
+    // Entries nobody previewed have no artifact behind them. Build one now.
+    //
+    // What is at stake if this is not done, or is done and does not stick:
+    // an entry with no pin is not refused at upload. `approved_envelope_for`
+    // returns `Ok(None)` for a missing pin, and `submit` treats `None` as
+    // "build one" -- so the uploader silently constructs a fresh envelope
+    // and sends it. Approving from the tray without this would mean sending
+    // bytes no contributor was ever shown, reported back as a success.
+    //
+    // The build is async and must not run under the queue lock, so the
+    // entries are cloned out under a short lock of their own and the lock
+    // is retaken for the approve loop below.
+    let unpinned: Vec<(Uuid, super::queue::QueueEntry)> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        ids.iter()
+            .filter_map(|id| queue.all().iter().find(|e| e.entry_id == *id))
+            .filter(|e| e.previewed_envelope_digest.is_none())
+            .map(|e| (e.entry_id, e.clone()))
+            .collect()
+    };
+    // Fixed labels, one per entry that could not be given an artifact.
+    // Nothing here is approved: sending something the contributor was never
+    // shown is worse than a refusal they can see.
+    let mut skipped: Vec<(Uuid, &'static str)> = Vec::new();
+    // What the response's toast is built from: redaction counts summed by
+    // category across every entry approve itself built a preview for (an
+    // entry that was already previewed before this call contributes
+    // nothing here -- its preview response already told the caller this),
+    // and how many of those builds carried a PII label. Counts and labels
+    // only, per the hash-only rule -- never the text a redaction removed.
+    let mut redactions: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut flagged: u64 = 0;
+    for (id, entry) in unpinned {
+        // An unenrolled build is never pinned -- it is a placeholder
+        // -identity artifact, not the one an upload would send -- so there
+        // is nothing for approve to do with it. This is an optimisation of
+        // the pin re-check below, which would skip such an entry anyway,
+        // and it exists only so the caller gets the specific label rather
+        // than a generic one.
+        if cfg.is_none() {
+            skipped.push((id, "not-enrolled"));
+            continue;
+        }
+        match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
+            Ok((summary, _body, _envelope)) => {
+                // `build_preview` does not size-check the raw contribution
+                // (only `submit`'s path does); `approved_envelope::save`
+                // does, on exactly this measurement -- so the pin
+                // `build_and_pin_preview` just attempted has already been
+                // refused for size, and this entry is unpinned. Repeating
+                // the measurement here is what gives an oversized session
+                // its own label instead of the generic `not-pinned` the pin
+                // re-check below would otherwise give it -- this one is
+                // permanent, and retrying the same session can never
+                // succeed, which `not-pinned`'s other causes do not imply.
+                if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
+                    skipped.push((id, "envelope-too-large"));
+                    continue;
+                }
+                for (category, count) in &summary.redactions {
+                    *redactions.entry(category.clone()).or_insert(0) += count;
+                }
+                if !summary.pii_labels_present.is_empty() {
+                    flagged += 1;
+                }
+            }
+            Err((_code, label)) => skipped.push((id, label)),
+        }
+    }
+    let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
+    let mut queue = shared.queue.lock().expect("queue lock");
+    let mut approved_ids = Vec::new();
+    for id in &ids {
+        let id = *id;
+        if skipped_ids.contains(&id) {
+            continue;
+        }
+        // The pin is re-checked here, under the lock that approves, rather
+        // than inferred from the build returning `Ok`. `build_and_pin_preview`
+        // is `Ok` whenever the *build* succeeded, and `pin_previewed_envelope`
+        // declines silently when the envelope could not be written, and when
+        // the entry was not `Pending` by the time the pin was attempted.
+        // Trusting `Ok` would approve an entry with no
+        // artifact behind it, which is the one thing the uploader does not
+        // catch. An entry that is still unpinned here is left `Pending` for
+        // the contributor to approve again.
+        if queue
+            .get(id)
+            .is_none_or(|e| e.previewed_envelope_digest.is_none())
+        {
+            // The build reported `Ok` (or this entry had a stale pin to
+            // begin with) but nothing is pinned now: `pin_previewed_envelope`
+            // declined to write because `approved_envelope::save` failed, or
+            // because the entry was no longer `Pending` when the pin was
+            // attempted; or (for `all`/`project_id`) the entry was removed
+            // from the queue entirely in that same window. (A failed queue
+            // *save* inside `pin_previewed_envelope` does not land here: it
+            // leaves the pin in memory, which is what this check reads.)
+            //
+            // Which label that deserves depends on where the entry stands
+            // now, and the two documented labels promise different things
+            // to a client. `not-pinned` is documented transient -- retry is
+            // expected to work once the race passed -- and that is only
+            // true while the entry is still `Pending`. An entry that is
+            // both unpinned and no longer `Pending` (dismissed, expired,
+            // superseded, or approved through some other path without ever
+            // being previewed) can never be approved by a retry: every pin
+            // path refuses a non-`Pending` entry, so retrying loops
+            // forever. That case gets `not-pending`, whose documented
+            // advice -- refresh queue state rather than retry blindly -- is
+            // the correct one for it. An entry gone from the queue entirely
+            // is reported `not-pinned`: it was `Pending` when it was
+            // selected, and its disappearance is the transient race.
+            //
+            // Either way the entry is left as it stands -- but it must not
+            // vanish from the response. An entry counted in neither
+            // `approved` nor `skipped` is exactly the silent hole the pin
+            // re-check above this loop exists to close for the uploader;
+            // the caller deserves the same guarantee.
+            let label = match queue.get(id).map(|e| e.state) {
+                Some(QueueState::Pending) | None => "not-pinned",
+                Some(_) => "not-pending",
+            };
+            skipped.push((id, label));
+            continue;
+        }
+        if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
+            approved_ids.push(id);
+        } else {
+            // `Queue::approve` refuses anything not `Pending`, and this
+            // entry just passed the pin check above under the same held
+            // lock -- so it exists and nothing else can have touched it
+            // since. The only way it still lands here is that its state
+            // was already something other than `Pending` when this call
+            // started: `previewed_envelope_digest` is never cleared by
+            // `approve` or by the terminal states `cancel` moves an entry
+            // through, so an entry that was approved (or otherwise moved
+            // off `Pending`) earlier keeps looking pinned forever. The
+            // deterministic repro is approving the same `entry_id` twice
+            // in a row. Reported, not dropped, for the same reason as
+            // `not-pinned`: an id this call was asked to act on must show
+            // up somewhere in the response.
+            skipped.push((id, "not-pending"));
+        }
+    }
+    let approved = approved_ids.len();
+    // The deadline the daemon will actually honour, taken from an
+    // entry it just wrote rather than recomputed here, so a client
+    // counting down against it is counting down against the same
+    // value `drain_approved` compares. `null` when nothing was
+    // approved or the hold is configured off -- a client must then
+    // offer no undo, rather than invent one.
+    let hold_until = approved_ids
+        .first()
+        .and_then(|id| queue.get(*id))
+        .and_then(|e| e.hold_until(approval_hold_secs));
+    if let Err(_e) = queue.save(&shared.store) {
+        // The approvals exist only in memory and would not survive a
+        // restart; a queue that disagrees with its own file is worse
+        // than no approval. `cancel` refuses anything past
+        // `Approved`, and these were set `Approved` a few lines ago
+        // under this same lock, so no upload pass can have claimed
+        // one.
+        for id in approved_ids {
+            let _ = queue.cancel(id);
+        }
+        return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+    }
+    drop(queue);
+    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    // The signal the contributor sees instead of a preview: "Sent --
+    // scrubbing removed N things, M flagged." Counts and labels only -- a
+    // redaction count names a category, never the text it removed, and a
+    // skip reason is a fixed label, never a path or trace content.
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "approved": approved,
+            "hold_secs": approval_hold_secs,
+            "hold_until": hold_until,
+            "flagged": flagged,
+            "redactions": redactions,
+            "skipped": skipped
+                .iter()
+                .map(|(id, label)| serde_json::json!({
+                    "entry_id": id,
+                    "reason_label": label,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
 async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
@@ -2254,14 +2493,14 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
     }
 
-    #[test]
-    fn bulk_approval_over_the_socket_is_now_allowed_and_appends_an_audit_entry() {
+    #[tokio::test]
+    async fn bulk_approval_over_the_socket_is_now_allowed_and_appends_an_audit_entry() {
         // As with arming autonomy, the terminal-only gate on bulk approval
         // is removed for the same reason: it restricted nothing an attacker
         // with same-user code execution did not already have. The audit
         // entry is the replacement -- visibility, not a control.
         let s = shared();
-        let r = handle_request(&s, &req("approve", serde_json::json!({"all": true})));
+        let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
         assert!(r.error.is_none(), "{:?}", r.error);
         let entries = audit::load(&s.store).unwrap();
         assert_eq!(entries.len(), 1);
@@ -2269,8 +2508,8 @@ mod tests {
         assert_eq!(entries[0].project_label, None);
     }
 
-    #[test]
-    fn a_single_entry_approval_leaves_the_audit_log_empty() {
+    #[tokio::test]
+    async fn a_single_entry_approval_leaves_the_audit_log_empty() {
         // Only the "approve all" bulk action is consequential enough to
         // audit; approving one entry at a time is the default, always-was
         // path and does not need a new log entry per click.
@@ -2305,13 +2544,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let r = handle_request(
+        let r = handle_request_async(
             &s,
             &req(
                 "approve",
                 serde_json::json!({"entry_id": entry_id.to_string()}),
             ),
-        );
+        )
+        .await;
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(audit::load(&s.store).unwrap().is_empty());
     }
@@ -2825,8 +3065,8 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
     }
 
-    #[test]
-    fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
+    #[tokio::test]
+    async fn bulk_approval_is_rolled_back_when_its_audit_entry_cannot_be_written() {
         let s = shared();
         let entry_id = uuid::Uuid::new_v4();
         {
@@ -2860,7 +3100,7 @@ mod tests {
         }
         break_the_audit_log(&s.store);
 
-        let r = handle_request(&s, &req("approve", serde_json::json!({"all": true})));
+        let r = handle_request_async(&s, &req("approve", serde_json::json!({"all": true}))).await;
         let err = r.error.expect("an unwritable audit log must fail the call");
         assert_eq!(err.message, "audit-write-failed");
         let state = s.queue.lock().unwrap().get(entry_id).unwrap().state;
