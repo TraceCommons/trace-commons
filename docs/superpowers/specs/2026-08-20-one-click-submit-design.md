@@ -77,6 +77,72 @@ server-side, the quarantine queue has never been worked, and a one-click bulk
 submit is the most efficient way yet built to add to it. Whoever picks up that
 backlog should know the volume has a new source.
 
+## The toast: normative copy
+
+Every shell renders the same sentence from `approve`'s response. These strings
+are the contract, not an illustration -- transcribe them, do not reword them in
+one client. The vocabulary deliberately matches the count-dependent scrubbing
+line the queue row already uses (`gtk/src/copy.rs`), because it is the same fact
+said in fewer words.
+
+Built in four clauses, in order. Clauses 3 and 4 appear only when non-zero.
+
+**1. What was sent.**
+
+> `approved == 1`  ->  **Sent.**
+> `approved > 1`   ->  **Sent {n} sessions.**
+> `approved == 0`  ->  **Nothing sent.**
+
+**2. What scrubbing did.** Always present, including when it did nothing: a
+count of zero is a fact the contributor is owed, not an absence to omit.
+
+> `0`  ->  **Scrubbing matched nothing.**
+> `1`  ->  **Scrubbing removed 1 thing.**
+> `n`  ->  **Scrubbing removed {n} things.**
+
+Sum the values of the `redactions` map. Do not name categories in the toast --
+the preview sheet is where a contributor sees which detector fired.
+
+**3. What was flagged**, only when `flagged > 0`:
+
+> `1`  ->  **1 flagged.**
+> `n`  ->  **{n} flagged.**
+
+**4. What was not sent**, only when `skipped` is non-empty:
+
+> `1`  ->  **1 not sent: {reason}.**
+> `n`  ->  **{n} not sent: {reasons}.**
+
+`{reasons}` is the distinct human labels below, comma-separated, in the order
+listed here. Never the raw wire label, never an entry id -- an id in a toast is
+noise a contributor cannot act on.
+
+| wire label | human label | retry? |
+|---|---|---|
+| `not-enrolled` | not connected to a commons | after connecting |
+| `not-pending` | already decided | no |
+| `not-pinned` | could not be prepared | yes |
+| `envelope-too-large` | too large to send | never |
+| `session-file-vanished` | the session file is gone | no |
+| `preview-failed` | could not be read | yes |
+
+**Undo** is offered when `approved > 0`, and only then. It is present for
+`hold_secs` and maps to the existing `cancel` method, which now clears the pin
+so the next submit rebuilds.
+
+Worked examples:
+
+> Sent. Scrubbing removed 4 things. 1 flagged.
+> Sent 47 sessions. Scrubbing removed 213 things. 3 flagged.
+> Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send.
+> Nothing sent. Scrubbing matched nothing. 2 not sent: already decided.
+
+**A defect this fixes, not only a feature.** `gtk/src/ui/preview.rs` currently
+calls `offer_undo` on any `Ok` response, ignoring `approved`. That was correct
+when every approval succeeded; it is wrong now that skips exist, because a
+skipped entry reads to the contributor as sent, with an undo timer behind it.
+The rule above -- Undo only when `approved > 0` -- is what corrects it.
+
 ## Errors
 
 A build can fail: an unreadable session, or one over the 64 MB
