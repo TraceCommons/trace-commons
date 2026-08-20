@@ -1879,3 +1879,75 @@ async fn approving_a_whole_project_is_recorded_in_the_local_audit_log() {
         "an approval that matched nothing must not append a record"
     );
 }
+
+#[tokio::test]
+async fn undo_leaves_no_pin_behind_and_the_next_submit_rebuilds() {
+    // The spec's Undo property, end to end over the socket: one-click
+    // Submit pins an artifact nobody previewed, Undo withdraws it, and
+    // nothing of that approval survives -- no state, and no pin.
+    //
+    // The pin is the half that matters here. Left behind, a second Submit
+    // finds the entry already pinned, skips the rebuild, and approves the
+    // artifact built at the FIRST click: stale bytes if the session grew
+    // meanwhile, and `redactions: {}` / `flagged: 0` both times, so the
+    // contributor is shown nothing either way. Cleared, the second Submit
+    // rebuilds from the session as it now stands -- which is why this test
+    // asserts the second approval's counts are real.
+    let (_dir, store_dir, entry_id) = daemon_with_a_redactable_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+
+    let first = approve_one(&mut c, entry_id).await;
+    assert_eq!(first["approved"].as_u64(), Some(1), "{first}");
+    assert_eq!(
+        first["redactions"]["private_email"].as_u64(),
+        Some(1),
+        "{first}"
+    );
+    let pinned = Queue::load(&store)
+        .unwrap()
+        .get(entry_id)
+        .expect("entry")
+        .previewed_envelope_digest
+        .clone();
+    assert!(
+        pinned.is_some(),
+        "the first Submit must pin, or the undo below proves nothing"
+    );
+
+    c.send(&format!(
+        r#"{{"id":2,"method":"cancel","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let undo = c.recv_json().await;
+    assert!(undo["error"].is_null(), "{undo}");
+
+    let entry = Queue::load(&store).unwrap().get(entry_id).cloned();
+    let entry = entry.expect("entry");
+    assert_eq!(entry.state, QueueState::Pending, "{:?}", entry.state);
+    assert_eq!(
+        entry.previewed_envelope_digest, None,
+        "undo withdraws the approval, so the binding to the bytes it \
+         covered cannot survive it"
+    );
+
+    // A second Submit is a fresh approval of a freshly built artifact, and
+    // reports its counts like any other unpreviewed approval.
+    let second = approve_one(&mut c, entry_id).await;
+    assert_eq!(second["approved"].as_u64(), Some(1), "{second}");
+    assert_eq!(
+        second["redactions"]["private_email"].as_u64(),
+        Some(1),
+        "the second Submit must rebuild, not silently re-approve the first \
+         click's artifact with nothing to report: {second}"
+    );
+    assert!(
+        Queue::load(&store)
+            .unwrap()
+            .get(entry_id)
+            .expect("entry")
+            .previewed_envelope_digest
+            .is_some(),
+        "{second}"
+    );
+}

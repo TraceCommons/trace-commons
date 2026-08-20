@@ -364,7 +364,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
 | `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
-| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
+| `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending` and clears its pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
@@ -859,8 +859,13 @@ Rules an application can rely on:
   `approval_hold_secs` is `0`. A client must then offer no undo rather than
   invent one.
 - **`cancel` during the hold returns the entry to `pending`** and clears the
-  approval outright: the scopes, the envelope-determining fingerprint, and
-  the hold itself. A subsequent `approve` starts a fresh window.
+  approval outright: the scopes, the envelope-determining fingerprint, the
+  hold itself, and the pin binding the approval to the exact bytes it
+  covered. A subsequent `approve` therefore rebuilds the envelope from the
+  session as it then stands -- reporting its own `redactions` and `flagged`
+  counts, like any other approval of an entry with no preview behind it --
+  and starts a fresh window. An undone approval leaves nothing on disk: the
+  stored envelope is swept once the pin naming it is gone.
 - **A standing `auto_upload` opt-in is not held.** Those entries are
   approved in advance, are separately audited, and no client is counting
   down for them; they upload on the next pass exactly as before. Only an
@@ -1357,10 +1362,12 @@ race `list_pending` against the stream at startup. On `resync_required`, call
   `approval-inputs-changed`, or `envelope-changed-after-approval`. Nothing
   is sent. An app should treat these the same as a superseded entry: offer
   it again, previewing afresh.
-- `approved` entries can be returned to `pending` with `cancel`. An entry
-  approved through `approve` stays untouched for its hold window first (see
-  "The approval hold" above), so `cancel` is guaranteed to succeed for that
-  whole window. After it, `cancel` still works right up until the upload
+- `approved` entries can be returned to `pending` with `cancel`, which
+  clears the pin along with the rest of the approval, so a re-offered entry
+  is previewed or rebuilt afresh rather than carrying the withdrawn
+  approval's artifact. An entry approved through `approve` stays untouched
+  for its hold window first (see "The approval hold" above), so `cancel` is
+  guaranteed to succeed for that whole window. After it, `cancel` still works right up until the upload
   pass claims the entry (`uploading`), at which point it is refused.
 
 ## `reason_label` and health taxonomy
