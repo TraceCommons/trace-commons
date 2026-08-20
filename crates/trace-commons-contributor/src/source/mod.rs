@@ -111,6 +111,34 @@ pub fn session_hash(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// The same hash, accumulated a chunk at a time.
+///
+/// `session_hash` needs the whole file in memory, which is exactly what the
+/// adapters stopped doing: a rollout can be hundreds of megabytes, and
+/// holding one whole to hash it -- then again as a lossy `String` -- is what
+/// made a first scan cost gigabytes of resident memory. Feeding the same
+/// bytes in file order produces the identical digest, so a streaming loader
+/// and a whole-file one agree on the session id.
+#[derive(Default)]
+pub struct SessionHasher(Sha256);
+
+impl SessionHasher {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Feed the next chunk. Callers must pass the file's bytes in order and
+    /// unmodified, terminators included, or the digest will not match what
+    /// `session_hash` would have produced for the same file.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.0.update(chunk);
+    }
+
+    pub fn finish(self) -> String {
+        format!("sha256:{}", hex::encode(self.0.finalize()))
+    }
+}
+
 /// Deterministic submission id derived from the session hash string.
 pub fn submission_id_for(session_hash: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, session_hash.as_bytes())
@@ -191,6 +219,31 @@ pub fn all_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streaming hash and the whole-file hash must agree.
+    ///
+    /// They name the same thing -- the session id every receipt, dedup check
+    /// and prior-upload record is keyed on. If chunking changed the digest,
+    /// every already-uploaded session would look new the day a loader
+    /// started streaming, and the queue would re-offer the entire corpus.
+    #[test]
+    fn the_streaming_hash_matches_the_whole_file_hash() {
+        let body: Vec<u8> = (0..40_000u32)
+            .flat_map(|i| format!("line {i}\n").into_bytes())
+            .collect();
+
+        for chunk in [1usize, 7, 512, 8192] {
+            let mut hasher = SessionHasher::new();
+            for part in body.chunks(chunk) {
+                hasher.update(part);
+            }
+            assert_eq!(
+                hasher.finish(),
+                session_hash(&body),
+                "chunking at {chunk} bytes changed the digest"
+            );
+        }
+    }
 
     /// The fail-open this slice closes, stated as a test.
     ///
