@@ -410,6 +410,32 @@ public sealed class ApprovalHoldTests
     }
 
     /// <summary>
+    /// Two shapes that must never be confused: a project_id naming no
+    /// project the daemon knows at all (bad_params / project_id_unrecognized,
+    /// an error frame -- ipc.rs:1241) versus one naming a real project that
+    /// simply has nothing pending right now (an ordinary success,
+    /// approved: 0). The first is a client bug -- a typo'd or stale id --
+    /// and must read as a refusal. The second is a race a client can win
+    /// completely honestly (a sweep or another device cleared the project
+    /// first) and must read as the ordinary "nothing sent" toast, not as an
+    /// error.
+    /// </summary>
+    [Fact]
+    public void AnUnrecognisedProjectIsDistinctFromAKnownEmptyOne()
+    {
+        DaemonResponse refused = DaemonResponse.Parse(
+            """{"id":1,"error":{"code":"bad_params","message":"project_id_unrecognized"}}""");
+        DaemonResponse knownButEmpty = Response(
+            """{"approved":0,"flagged":0,"redactions":{},"skipped":[],"hold_secs":0,"hold_until":null}""");
+
+        Assert.Null(ApprovalHold.Parse(refused));
+
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(knownButEmpty));
+        Assert.Equal(0UL, hold.Approved);
+        Assert.Equal(SubmitToast.Render(0, 0, 0, new List<string>()).Line, hold.Toast.Line);
+    }
+
+    /// <summary>
     /// The full shape a one-click submit reports, decoded whole: counts,
     /// redaction categories, and the skipped list -- everything
     /// <see cref="ApprovalHold.Toast"/> and <see cref="ApprovalHold.ApprovedEntryIds"/>
@@ -440,8 +466,12 @@ public sealed class ApprovalHoldTests
         Assert.Equal(3, hold.Skipped.Count);
         Assert.Equal("e1", hold.Skipped[0].EntryId);
         Assert.Equal("envelope-too-large", hold.Skipped[0].ReasonLabel);
+        // Asserted against the renderer's own output, not a literal English
+        // sentence: SubmitToast.cs is the shared normative-copy contract and
+        // is not this file's to pin a snapshot of -- only that ApprovalHold
+        // feeds it the right numbers and labels.
         Assert.Equal(
-            "Sent 44 sessions. Scrubbing removed 213 things. 3 flagged. 3 not sent: too large to send.",
+            SubmitToast.Render(44, 213, 3, new[] { "envelope-too-large", "envelope-too-large", "envelope-too-large" }).Line,
             hold.Toast.Line);
         Assert.True(hold.Toast.OfferUndo);
     }
@@ -497,7 +527,7 @@ public sealed class ApprovalHoldTests
 
         Assert.False(hold.Toast.OfferUndo);
         Assert.Equal(
-            "Nothing sent. Scrubbing matched nothing. 2 not sent: already decided.",
+            SubmitToast.Render(0, 0, 0, new[] { "not-pending", "not-pending" }).Line,
             hold.Toast.Line);
     }
 }
