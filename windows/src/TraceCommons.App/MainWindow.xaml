@@ -37,9 +37,10 @@
                 padding and selection chrome and contributes only the 24px
                 gap between one project's block and the next; the 14px gap
                 between cards inside a project is on each row's own Border
-                margin, in the inner ItemsControl's DataTemplate, because
-                that container is a plain ContentPresenter with no style of
-                its own to carry it.
+                margin, in the inner ItemsRepeater's DataTemplate, because
+                ItemsRepeater supplies no ItemContainerStyle (it has no
+                container at all, only whatever the DataTemplate's own root
+                element is) to carry it.
             -->
             <Style x:Key="TcQueueGroupContainerStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
                 <Setter Property="Padding" Value="0" />
@@ -502,8 +503,14 @@
                     "Submit all" appears, is QueueGrouping.ByProject's, in
                     TraceCommons.Interop, and is covered by
                     QueueGroupingTests there; this outer ListView (one item
-                    per project) and the inner ItemsControl (one item per
-                    session within it) only render what that already decided.
+                    per project) and the inner ItemsRepeater (one item per
+                    session within it) only render what that already
+                    decided. Both levels virtualize now: the outer ListView
+                    always did, and the inner level was an ItemsControl
+                    until this fix, which realizes every child regardless of
+                    visibility. A contributor with a large project (one real
+                    user reached 500 queued sessions) would otherwise pay
+                    for every card in it up front.
                 -->
                 <ListView Grid.Row="2"
                           ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
@@ -546,16 +553,41 @@
                                 </Grid>
 
                                 <!--
-                                    The rows, unchanged from a plain queue:
-                                    this ItemsControl carries no selection and
-                                    no virtualization concerns beyond what a
-                                    small per-project list already has, and
-                                    every decision each row's own buttons make
-                                    is exactly as it was when the outer list
-                                    was flat.
+                                    The rows. ItemsRepeater, not ItemsControl:
+                                    a project can hold hundreds of sessions,
+                                    and ItemsControl realizes every child the
+                                    moment its project scrolls into view, so
+                                    a large project paid for cards nobody was
+                                    looking at yet. ItemsRepeater virtualizes
+                                    instead, recycling containers as rows
+                                    scroll past. It carries no selection, no
+                                    ItemContainerStyle, and no built-in item
+                                    chrome of its own, only whatever the
+                                    DataTemplate below draws; the StackLayout
+                                    spacing is left at 0 because the 14px gap
+                                    between cards is still the Border's own
+                                    bottom margin below, unchanged from the
+                                    flat-queue layout this replaced.
+
+                                    Every decision each row's own buttons
+                                    make is exactly as it was when the outer
+                                    list was flat: each button's Tag carries
+                                    the row's own view model rather than
+                                    relying on the inherited DataContext, see
+                                    the comment on that StackPanel below.
+                                    Recycled containers make that more
+                                    important, not less, because a container
+                                    that used to belong to one row can be
+                                    handed a different row's data on reuse,
+                                    and the DataContext of a container in
+                                    flight during that swap is not something
+                                    a click handler should ever trust.
                                 -->
-                                <ItemsControl ItemsSource="{x:Bind Entries}">
-                                    <ItemsControl.ItemTemplate>
+                                <ItemsRepeater ItemsSource="{x:Bind Entries}">
+                                    <ItemsRepeater.Layout>
+                                        <StackLayout Orientation="Vertical" Spacing="0" />
+                                    </ItemsRepeater.Layout>
+                                    <ItemsRepeater.ItemTemplate>
                         <DataTemplate x:DataType="vm:QueueEntryViewModel">
                             <!--
                                 The manifest strip bleeds to the card's inside
@@ -758,8 +790,8 @@
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
                             </StackPanel>
                         </DataTemplate>
                     </ListView.ItemTemplate>
