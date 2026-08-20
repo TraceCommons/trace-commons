@@ -121,6 +121,7 @@ use super::policy::{
     UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
     project_key_is_admissible,
 };
+use super::preview_scheduler::{PreviewKey, PreviewScheduler, RequestState};
 use super::queue::{Queue, QueueState};
 use super::settings::DaemonSettings;
 use super::state::DaemonState;
@@ -191,7 +192,11 @@ const QUIESCE_POLL_MS: u64 = 200;
 
 /// Every method this version answers. `hello` reports this list, and the
 /// contract document is checked against it by test.
-pub const METHODS: [&str; 32] = [
+/// A slice rather than a fixed-size array: `serde` implements `Serialize`
+/// for arrays only up to 32 elements, and `hello` serializes this list
+/// directly. The length is still checked against the contract document by
+/// test.
+pub const METHODS: &[&str] = &[
     "acknowledge_near_ai_notice",
     "approve",
     "cancel",
@@ -210,7 +215,10 @@ pub const METHODS: [&str; 32] = [
     "pause",
     "preview",
     "preview_body",
+    "preview_cancel",
+    "preview_request",
     "preview_turns",
+    "preview_visible",
     "queue_outcome_counts",
     "quiesce",
     "refresh_history",
@@ -231,6 +239,16 @@ pub const EVENT_QUEUE_CHANGED: &str = "queue_changed";
 pub const EVENT_STATUS_CHANGED: &str = "status_changed";
 pub const EVENT_DIGEST_DUE: &str = "digest_due";
 pub const EVENT_RESYNC_REQUIRED: &str = "resync_required";
+/// One entry's scheduled preview finished. Carries the same object
+/// `preview_request` returns for a cache hit: `entry_id`, `state`, and
+/// whichever of `summary` / `raw_session_bytes` / `code` that state has.
+///
+/// Published for every job the scheduler completes and delivers, including
+/// refusals -- a shell that showed a spinner needs to be told the answer is
+/// "too large" just as much as it needs to be told the summary. It is *not*
+/// published for a job that was cancelled while it ran; see
+/// `preview_scheduler::PreviewScheduler::cancel`.
+pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -325,6 +343,13 @@ pub struct DaemonShared {
     /// long poll makes it most likely to arrive.
     pub shutdown_signal: Arc<Notify>,
     pub events: broadcast::Sender<Event>,
+    /// The daemon-wide bound on concurrent preview work.
+    ///
+    /// `Arc` rather than a plain field because the worker pool outlives any
+    /// one request and is spawned from `daemon::start_embedded` with only
+    /// this handle -- the pool must not hold an `Arc<DaemonShared>` through
+    /// the scheduler, or the two would keep each other alive forever.
+    pub previews: Arc<PreviewScheduler>,
 }
 
 impl DaemonShared {
@@ -377,6 +402,7 @@ impl DaemonShared {
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
+            previews: Arc::new(PreviewScheduler::default()),
         })
     }
 
@@ -810,6 +836,12 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Ok(id) => id,
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
             };
+            // A dismissed entry is never previewed again, so drop any
+            // scheduled preview for it. If one is already building this
+            // cannot stop it mid-parse -- see `PreviewScheduler::cancel` --
+            // but the result is discarded rather than delivered or cached,
+            // which is the part that matters for a trace just declined.
+            shared.previews.cancel(id);
             let mut queue = shared.queue.lock().expect("queue lock");
             queue.set_state(
                 id,
@@ -1131,6 +1163,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             shared.shutdown_signal.notify_one();
             Response::ok(req.id, serde_json::json!({ "stopping": true }))
         }
+        "preview_request" => handle_preview_request(shared, req),
+        "preview_visible" => handle_preview_visible(shared, req),
+        "preview_cancel" => handle_preview_cancel(shared, req),
         // subscribe is handled by the connection loop, which owns the stream.
         "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
         // Real network I/O when an account session exists to make the call
@@ -1614,34 +1649,153 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 
     match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
         Ok((summary, _body, _envelope)) => {
-            Response::ok(
-                req.id,
-                serde_json::json!({
-                    "entry": entry_value(&entry),
-                    "would_send_bytes": summary.would_send_bytes,
-                    "raw_session_bytes": summary.raw_session_bytes,
-                    "event_count": summary.event_count,
-                    "opening_prompt": summary.opening_prompt,
-                    "redactions": summary.redactions,
-                    "pii_labels_present": summary.pii_labels_present,
-                    "consent_scopes": summary.consent_scopes,
-                    "residual_risk": summary.residual_risk,
-                    // Hashes, not content: what the contributor is being shown,
-                    // and the configuration that produced it. An app can hold
-                    // these to confirm the entry it later approves is the one
-                    // it displayed.
-                    "envelope_digest": summary.envelope_digest,
-                    "input_fingerprint": summary.input_fingerprint,
-                    // False when this device is not enrolled: the summary
-                    // describes a placeholder-identity, deterministic-only
-                    // build, and neither hash above is bindable to a later
-                    // approval.
-                    "enrolled": summary.enrolled,
-                }),
-            )
+            let mut value = preview_summary_value(&summary);
+            value["entry"] = entry_value(&entry);
+            Response::ok(req.id, value)
         }
         Err((code, label)) => Response::err(req.id, code, label),
     }
+}
+
+/// The summary object both `preview` and the scheduler report.
+///
+/// One definition, so the blocking method and the scheduled one cannot
+/// describe the same build differently. It deliberately does **not** carry
+/// `entry`: the scheduler caches this object and a queue entry's state
+/// changes underneath it, so embedding one would let a cached preview
+/// assert a stale state. `preview` adds a freshly read `entry` on top; the
+/// scheduler's callers already hold entries from `list_pending` and the
+/// `snapshot` event.
+pub(crate) fn preview_summary_value(summary: &super::preview::PreviewSummary) -> serde_json::Value {
+    serde_json::json!({
+        "would_send_bytes": summary.would_send_bytes,
+        "raw_session_bytes": summary.raw_session_bytes,
+        "event_count": summary.event_count,
+        "opening_prompt": summary.opening_prompt,
+        "redactions": summary.redactions,
+        "pii_labels_present": summary.pii_labels_present,
+        "consent_scopes": summary.consent_scopes,
+        "residual_risk": summary.residual_risk,
+        // Hashes, not content: what the contributor is being shown,
+        // and the configuration that produced it. An app can hold
+        // these to confirm the entry it later approves is the one
+        // it displayed.
+        "envelope_digest": summary.envelope_digest,
+        "input_fingerprint": summary.input_fingerprint,
+        // False when this device is not enrolled: the summary
+        // describes a placeholder-identity, deterministic-only
+        // build, and neither hash above is bindable to a later
+        // approval.
+        "enrolled": summary.enrolled,
+    })
+}
+
+/// The fingerprint of every input other than the session bytes that decides
+/// what a preview says.
+///
+/// Part of the scheduler's cache key, so a device that changes its consent
+/// scopes, its identity, or its privacy-filter settings does not keep being
+/// shown cards built under the old configuration.
+///
+/// An unenrolled device gets a fixed label rather than the placeholder
+/// config's fingerprint. Hashing the placeholder would be hashing a
+/// constant, and the value that matters -- that enrolling invalidates every
+/// unenrolled preview -- holds either way.
+pub(crate) fn preview_config_fingerprint(shared: &DaemonShared) -> String {
+    let cfg = shared.store.load_config().ok().flatten();
+    let near_ai = {
+        let s = shared.settings.lock().expect("settings lock");
+        s.near_ai.clone()
+    };
+    match cfg {
+        Some(c) => super::preview::input_fingerprint(&c, near_ai.as_ref()),
+        None => "unenrolled".to_string(),
+    }
+}
+
+/// Ask the scheduler for a preview and return promptly.
+///
+/// The difference from `preview` is the whole point: this never runs the
+/// redaction pipeline on the connection's time. It answers from cache, or
+/// says the work is queued and lets the `preview_ready` event carry the
+/// result. A shell drawing a list calls this once per card and blocks on
+/// nothing.
+fn handle_preview_request(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let entry = {
+        let queue = shared.queue.lock().expect("queue lock");
+        match queue.get(id) {
+            Some(e) => e.clone(),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
+        }
+    };
+    let key = PreviewKey::for_entry(
+        &entry.path,
+        entry.size_bytes,
+        preview_config_fingerprint(shared),
+    );
+    match shared.previews.request(id, key, entry.size_bytes) {
+        RequestState::Cached(outcome) => Response::ok(req.id, outcome.to_value(id)),
+        RequestState::Queued => Response::ok(
+            req.id,
+            serde_json::json!({
+                "entry_id": id.to_string(),
+                "state": super::preview_scheduler::STATE_QUEUED,
+            }),
+        ),
+        RequestState::Running => Response::ok(
+            req.id,
+            serde_json::json!({
+                "entry_id": id.to_string(),
+                "state": super::preview_scheduler::STATE_RUNNING,
+            }),
+        ),
+    }
+}
+
+/// Declare which entries are on screen, so their previews are built first.
+///
+/// Wholesale replacement of the visible set, and cheap enough to call on
+/// every scroll: it takes one lock and moves no work. Visibility decides
+/// order, never membership -- an entry that scrolls away keeps its place in
+/// the queue until someone calls `preview_cancel`.
+fn handle_preview_visible(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(raw) = req.params.get("entry_ids") else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "entry-ids-required");
+    };
+    let Some(list) = raw.as_array() else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "entry-ids-invalid");
+    };
+    let mut ids = Vec::with_capacity(list.len());
+    for item in list {
+        match item.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(id) => ids.push(id),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "entry-ids-invalid"),
+        }
+    }
+    let visible = shared.previews.set_visible(ids);
+    Response::ok(req.id, serde_json::json!({ "visible": visible }))
+}
+
+/// Drop a scheduled preview.
+///
+/// `dropped: false` means there was nothing to drop -- already finished,
+/// already cancelled, or never requested. It is not an error: a shell that
+/// cancels on every card leaving the viewport will hit that case constantly
+/// and has nothing to do about it.
+fn handle_preview_cancel(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let dropped = shared.previews.cancel(id);
+    Response::ok(
+        req.id,
+        serde_json::json!({ "entry_id": id.to_string(), "dropped": dropped }),
+    )
 }
 
 /// Build the redacted envelope for one queue entry, pin the entry to it, and
@@ -1654,7 +1808,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 /// reports and the body another returns always describe the same build.
 /// Errors are `(code, fixed label)` -- no path, no entry content -- and the
 /// callers that need a bare label discard the code.
-async fn build_and_pin_preview(
+pub(crate) async fn build_and_pin_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
     entry: &super::queue::QueueEntry,
