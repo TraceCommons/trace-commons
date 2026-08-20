@@ -1,7 +1,7 @@
 # Chunked transcript — reading a 17.5 MB trace without freezing or filling memory
 
 Date: 2026-08-20
-Status: implemented on macOS (the reference shell). GTK and Windows unported.
+Status: implemented on macOS (the reference shell) and on Windows. GTK unported.
 Scope: issue #349. The preview sheet's "Exactly what would be sent" tab, its
 redaction-marker chipping, and the search tab's context snippets.
 Reads with: `2026-08-08-contributor-shell-macos-design.md` for the sheet, and
@@ -277,6 +277,62 @@ trade for turning a per-keystroke copy into a per-sheet one.
 - `macos/Tests/TCShellCoreTests/TranscriptPagingTests.swift` — new, 27 tests.
 
 The read gate, its copy, and `onFirstScreenShown` are untouched.
+
+## What changed on Windows
+
+Same design, same cut rules, same assertions; two differences forced by the
+toolkit, and one honest gap.
+
+- `windows/src/TraceCommons.Interop/TranscriptPaging.cs` — new.
+  `TranscriptPaging` constants, `TranscriptDocument`, `TranscriptChunk`,
+  `ChunkRange`, `TranscriptRowIndex`, `TranscriptResidency`,
+  `TranscriptResidentChunks<T>`, and `TranscriptViewport`.
+- `windows/src/TraceCommons.Interop/TranscriptBudget.cs` — deleted, with
+  `windows/tests/TraceCommons.Interop.Tests/TranscriptBudgetTests.cs`.
+- `windows/src/TraceCommons.Interop/TranscriptMarkers.cs` — the
+  `[REDACTED…]` arm now excludes newlines, matching the other shells, and a
+  `ByteSpans` entry point converts marker spans to UTF-8 offsets for the
+  chunker. One pattern, two callers.
+- `windows/src/TraceCommons.App/Controls/PreviewSheet.xaml` and its
+  code-behind — the single `RichTextBlock` and the clamp notice are gone,
+  replaced by a spacer/chunks/spacer panel and a **Copy everything** button.
+- `windows/tests/TraceCommons.Interop.Tests/TranscriptPagingTests.cs` — new,
+  32 tests.
+
+**The chunk and retention numbers are inherited from macOS, not measured on
+Windows.** The WinUI App project does not build on a Mac and no Windows box
+was available, so `RichTextBlock`'s layout curve is unknown: it may be
+linear in the length of a run, in which case 4 KB chunks are needlessly
+small, or worse than CoreText, in which case they are too large. The four
+constants and the two font-metric estimates are named `const`s in one class
+with that caveat written on each of them. Someone with a Windows machine
+should run the same size sweep and either confirm them or move them; nothing
+else has to change when they do.
+
+**Two structural differences from the macOS view:**
+
+1. **Placeholders are two spacers, not one view per chunk.** macOS relies on
+   `LazyVStack` to build only the rows near the viewport, so it can afford a
+   view per chunk. WinUI's `StackPanel` does not virtualise, and 4,480
+   elements for a 17.5 MB body is its own problem. The Windows panel holds a
+   top spacer, the resident chunks, and a bottom spacer, so its element count
+   is bounded by the retention ceiling regardless of trace size. The spacer
+   heights come from the same `TranscriptRowIndex` estimate, and
+   `TranscriptViewport.Spacers` is asserted to reproduce the whole body's
+   scroll extent.
+2. **The anchor is the scroll offset, not the last row to appear.** WinUI has
+   no `onAppear`; the residency window is driven from
+   `ScrollViewer.VerticalOffset` through the row index. That is arguably more
+   robust than the macOS anchor, and it is also the piece most exposed to the
+   row estimate being wrong, since a bad estimate moves the window rather
+   than just the scrollbar.
+
+**Unverified on Windows:** everything above the model layer. The interop
+tests run and pass on a Mac; the assembled sheet has never been built or
+scrolled. In particular, whether placeholder-to-text height changes cause
+visible scroll jump on a fast flick, whether the re-entrancy guard around
+child and spacer updates is sufficient, and whether `RichTextBlock`
+per-chunk layout really costs a frame, are all open until someone runs it.
 
 ## What the other two shells must mirror
 
