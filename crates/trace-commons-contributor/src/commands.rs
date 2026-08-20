@@ -2111,11 +2111,18 @@ fn approve_selector_error(
     }
 }
 
-/// Manual arg-slice parser used only to unit-test [`approve_selector_error`]
+/// Manual arg-slice parser used only to unit-test the approve selector rule
 /// against CLI-shaped input without depending on the `clap::Parser` type
 /// defined in the `trace-commons-contributor` binary (which this lib crate
 /// does not, and should not, depend on). Recognizes `--all` and `--project
 /// <id>`; anything else is treated as the positional entry id.
+///
+/// The parsed selectors are handed to [`daemon_approve`] itself, not to
+/// [`approve_selector_error`] directly: what has to hold is that the command
+/// an operator actually runs refuses to act, and a test that only exercises
+/// the predicate would still pass if `daemon_approve` stopped consulting it.
+/// An ambiguous selector bails before any socket is touched, so the store
+/// here is never connected to anything.
 #[cfg(test)]
 fn approve_args_error(args: &[&str]) -> String {
     let mut entry_id = None;
@@ -2133,7 +2140,11 @@ fn approve_args_error(args: &[&str]) -> String {
         }
         i += 1;
     }
-    approve_selector_error(entry_id, all, project).unwrap_or_default()
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    match daemon_approve(&store, entry_id, all, project, false) {
+        Ok(()) => String::new(),
+        Err(e) => e.to_string(),
+    }
 }
 
 pub fn daemon_approve(

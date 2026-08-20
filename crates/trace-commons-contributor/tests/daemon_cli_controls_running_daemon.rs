@@ -321,3 +321,41 @@ async fn with_no_daemon_running_commands_still_work_against_the_files() {
     let policy = trace_commons_contributor::daemon::policy::ProjectPolicy::load(&store).unwrap();
     assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
 }
+
+/// `approve --project <id>` must reach the running daemon *and* stop at the
+/// project boundary. The second entry is the whole point: a selector that
+/// approves everything passes any assertion that only checks the intended
+/// entry became `Approved`, and approving a queue when one project was meant
+/// is the exact failure the CLI's refusal of ambiguous selectors exists to
+/// prevent. Both halves are asserted here.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_approve_by_project_approves_only_that_project() {
+    let h = Running::new().await;
+    let mine = h.seed_pending("/tmp/mine", "sha256:c1");
+    let other = h.seed_pending("/tmp/other", "sha256:c2");
+    assert_eq!(h.state_of(mine), QueueState::Pending);
+    assert_eq!(h.state_of(other), QueueState::Pending);
+
+    // The opaque handle the CLI is given, derived the same way the daemon
+    // derives it for `list_pending` -- never the raw project key.
+    let project_id = trace_commons_contributor::daemon::policy::project_id_for("/tmp/mine");
+    let store = h.cli_store();
+    tokio::task::spawn_blocking(move || {
+        commands::daemon_approve(&store, None, false, Some(&project_id), true).unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        h.state_of(mine),
+        QueueState::Approved,
+        "the selected project's pending entry must be approved in the \
+         running daemon's own queue"
+    );
+    assert_eq!(
+        h.state_of(other),
+        QueueState::Pending,
+        "an entry in a different project must be untouched; a project \
+         selector that approves the whole queue is the failure mode"
+    );
+}
