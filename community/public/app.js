@@ -652,7 +652,7 @@ sh install.sh</code></pre>
         <p class="install-note">That also ends the .appinstaller update subscription and the startup task. The portable build is just the unzipped folder: delete it, and if you turned on run-at-login, remove the <code>Trace Commons</code> value under <code>HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run</code>.</p>
         <p class="install-label">Command-line contributor</p>
         <pre class="install-code"><code>Remove-Item -Recurse "$env:LOCALAPPDATA\\Programs\\TraceCommons"</code></pre>
-        <p class="install-note">install.ps1 appended that folder to your user PATH, so take it back out of Path under User environment variables. State lives in <code>%APPDATA%\\trace-commons</code> for the CLI and <code>%LOCALAPPDATA%\\trace-commons</code> for the app.</p>
+        <p class="install-note">install.ps1 appended that folder to your user PATH, so take it back out of Path under User environment variables. State lives in <code>%LOCALAPPDATA%\\trace-commons</code>, shared by the CLI and the app.</p>
       </div>
 
       <div class="panel">
