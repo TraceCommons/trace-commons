@@ -46,9 +46,21 @@ final class AppModel: ObservableObject {
     /// affordance stays until the contributor puts it away or until the
     /// daemon refuses the cancel (`undoApproval` says so plainly when it
     /// does).
+    ///
+    /// One-click submit widened this from a single entry to a set: the row
+    /// action approves one id, the project action can approve many, and
+    /// `cancel` has no bulk form -- `undoApproval` below drives it once per
+    /// id in `entryIDs`. `toastLine` and `offerUndo` are `SubmitToast`'s,
+    /// carried here rather than re-derived: this is the one sentence the
+    /// contributor sees for what just happened, whether or not Undo is
+    /// offered alongside it (see `ApproveResponse.toast`).
     struct Undo: Equatable {
-        let entryID: String
-        let projectLabel: String
+        let entryIDs: [String]
+        let toastLine: String
+        /// Whether the Undo control itself is shown. False for "Nothing
+        /// approved" and fully-skipped responses -- the toast still needs to
+        /// be seen, but there is nothing to undo. See `SubmitToast.offerUndo`.
+        let offerUndo: Bool
         /// When the approval was made, on this machine's clock.
         let approvedAt: Date
         /// Seconds since `approvedAt`, ticked for display. Stops advancing
@@ -102,19 +114,27 @@ final class AppModel: ObservableObject {
         return HealthCopy.forLabel(label)
     }
 
-    /// What is waiting, per project, with sizes. These are not buttons.
-    var waitingByProject: [(label: String, count: Int, bytes: Int)] {
+    /// What is waiting, per project, with sizes and the id `submitProject`
+    /// takes.
+    ///
+    /// Grouped by `projectID`, not `projectLabel`: a label is a display name
+    /// only, not guaranteed unique across two different projects, and
+    /// grouping by it here would silently merge them into one bucket with
+    /// one Submit button that could approve the wrong project's entries.
+    var waitingByProject: [(id: String, label: String, count: Int, bytes: Int)] {
         var order: [String] = []
+        var labels: [String: String] = [:]
         var counts: [String: (Int, Int)] = [:]
         for entry in awaitingDecision {
-            if counts[entry.projectLabel] == nil {
-                order.append(entry.projectLabel)
-                counts[entry.projectLabel] = (0, 0)
+            if counts[entry.projectID] == nil {
+                order.append(entry.projectID)
+                counts[entry.projectID] = (0, 0)
+                labels[entry.projectID] = entry.projectLabel
             }
-            let current = counts[entry.projectLabel]!
-            counts[entry.projectLabel] = (current.0 + 1, current.1 + entry.sizeBytes)
+            let current = counts[entry.projectID]!
+            counts[entry.projectID] = (current.0 + 1, current.1 + entry.sizeBytes)
         }
-        return order.map { ($0, counts[$0]!.0, counts[$0]!.1) }
+        return order.map { (id: $0, label: labels[$0]!, count: counts[$0]!.0, bytes: counts[$0]!.1) }
     }
 
     // MARK: - Lifecycle
@@ -461,28 +481,62 @@ final class AppModel: ObservableObject {
 
     // MARK: - Decisions
 
-    /// Approve, then raise the recovery affordance. `cancel` returns the
-    /// entry to `pending`, so the undo is real rather than cosmetic.
+    /// One click, one session. Builds and pins the envelope if it was never
+    /// previewed, approves, then raises the toast -- see
+    /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`. This
+    /// is also what the preview sheet's `Contribute` button calls: a preview
+    /// only means the pin already exists, not a different daemon call.
     func approve(_ entry: QueueEntry) {
-        perform("approve", work: { try $0.approve(entryID: entry.entryID) }) { _ in
+        perform("approve", work: { try $0.approve(entryID: entry.entryID) }) { response in
             self.refreshQueue()
-            self.startUndo(for: entry)
+            self.showToast(for: response, attempted: [entry.entryID])
         }
     }
 
-    private func startUndo(for entry: QueueEntry) {
+    /// One click, one project: approves every entry `waitingByProject` is
+    /// currently showing for `projectID`, which must be the id `entry_value`
+    /// publishes (`QueueEntry.projectID`) -- the daemon refuses a label
+    /// here. An id naming no project the daemon knows throws a `Failure`
+    /// (`bad_params` / `project-id-unrecognized`) that `perform` reports as
+    /// `lastActionError`, never as a skip.
+    func submitProject(id projectID: String) {
+        let attempted = awaitingDecision.filter { $0.projectID == projectID }.map(\.entryID)
+        perform("approve", work: { try $0.approve(projectID: projectID) }) { response in
+            self.refreshQueue()
+            self.showToast(for: response, attempted: attempted)
+        }
+    }
+
+    /// Renders `response` as the toast and, when it offers one, starts the
+    /// recovery affordance behind it.
+    ///
+    /// `attempted` is the set of ids the caller asked the daemon to approve
+    /// -- `response.approved` is only a count, so `ApproveResponse
+    /// .approvedEntryIDs` is what recovers which of `attempted` actually
+    /// went through, and that recovered set is what Undo drives `cancel`
+    /// with.
+    private func showToast(for response: ApproveResponse, attempted: [String]) {
         undoTask?.cancel()
+        let toast = response.toast
+        let approvedIDs = response.approvedEntryIDs(attempted: attempted)
+        let startedAt = Date()
         undo = Undo(
-            entryID: entry.entryID,
-            projectLabel: entry.projectLabel,
-            approvedAt: Date(),
+            entryIDs: approvedIDs,
+            toastLine: toast.line,
+            offerUndo: toast.offerUndo,
+            approvedAt: startedAt,
             heldSeconds: 0
         )
+        guard toast.offerUndo else {
+            // Nothing to count up toward -- the toast still needs to be
+            // seen, but there is no recovery window behind it.
+            return
+        }
         undoTask = Task { @MainActor in
             for second in 1...Undo.tickCeiling {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if Task.isCancelled { return }
-                guard var current = undo, current.entryID == entry.entryID else { return }
+                guard var current = undo, current.approvedAt == startedAt else { return }
                 current.heldSeconds = second
                 undo = current
             }
@@ -501,23 +555,33 @@ final class AppModel: ObservableObject {
 
     /// Undo, and be honest when it is too late.
     ///
-    /// `cancel` only works while the entry is still `approved`. The daemon's
-    /// uploader can pick an approved entry up immediately -- observed in the
-    /// self-test, where the entry had already moved to `failed` before the
-    /// five seconds elapsed -- so the undo can lose the race. When it does,
-    /// this says so plainly instead of showing a raw label.
+    /// `cancel` takes one entry at a time and only works while that entry is
+    /// still `approved` -- the daemon's uploader can pick an approved entry
+    /// up immediately, observed in the self-test, where the entry had
+    /// already moved to `failed` before the five seconds elapsed -- so any
+    /// one of `undo.entryIDs` can lose the race independently of the rest.
+    /// This drives `cancel` once per id and reports honestly if any of them
+    /// were too late, rather than claiming a clean undo that some entries
+    /// did not get.
     func undoApproval() {
-        guard let undo else { return }
+        guard let undo, undo.offerUndo else { return }
         undoTask?.cancel()
-        let id = undo.entryID
+        let ids = undo.entryIDs
         self.undo = nil
         guard let client else { return }
         Task.detached(priority: .userInitiated) {
-            let outcome = Result { try client.cancel(entryID: id) }
+            let tooLate = ids.reduce(into: 0) { count, id in
+                let outcome = Result { try client.cancel(entryID: id) }
+                if case .failure = outcome { count += 1 }
+            }
             await MainActor.run {
-                if case .failure = outcome {
+                if tooLate == ids.count, ids.count == 1 {
                     self.lastActionError = "Too late to undo -- this one had already left "
                         + "the waiting list. History shows what happened to it."
+                } else if tooLate > 0 {
+                    self.lastActionError = "Too late to undo \(tooLate) of \(ids.count) -- "
+                        + "they had already left the waiting list. History shows what "
+                        + "happened to them."
                 }
                 self.refreshQueue()
                 self.refreshHistory()
@@ -764,6 +828,7 @@ final class AppModel: ObservableObject {
             entryID: "entry_screenshot_fixture",
             sessionHash: "sha256:0000000000000000",
             source: "claude-code",
+            projectID: "project_screenshot_fixture",
             projectLabel: "northwind-billing",
             sizeBytes: 1615,
             discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),

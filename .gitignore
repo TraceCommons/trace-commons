@@ -46,3 +46,5 @@ __pycache__/
 .linux-roots-answered.png
 .linux-removed-dialog.png
 .linux-settings-*.png
+.linux-queue-screenshot.png
+.linux-queue-screenshot-toast.png

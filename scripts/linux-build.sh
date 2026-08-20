@@ -13,6 +13,7 @@
 #   scripts/linux-build.sh --shell            # interactive shell
 #   scripts/linux-build.sh --run-headless     # start the app under Xvfb
 #   scripts/linux-build.sh --roots-shot       # photograph the roots window
+#   scripts/linux-build.sh --queue-shot       # photograph the queue and its submit toast
 #   scripts/linux-build.sh --roots-answer     # click through it, check output
 #   scripts/linux-build.sh --probe            # talk to a throwaway daemon
 #
@@ -66,6 +67,16 @@ case "${1:---build}" in
     # discovery pointed at fixture stores. The one check that answers "what
     # does this window look like", which no unit test can.
     run "bash /work/$CRATE_DIR/scripts/roots-shot.sh"
+    ;;
+  --queue-shot)
+    # Photographs the queue with one-click submit: a project header's
+    # `Submit all` beside three of its own rows, a fourth row from a second
+    # project with no header above it, and the submit toast at its longest
+    # form. The row's own class of check -- what does `Submit`, `Look
+    # inside` and `Not this one` look like together on one card, and does
+    # the toast's longest sentence still fit -- which no unit test can
+    # answer.
+    run "bash /work/$CRATE_DIR/scripts/queue-shot.sh"
     ;;
   --onboarding-shots)
     # Photographs every onboarding page that styles itself. Onboarding was

@@ -26,24 +26,24 @@ public sealed class SubmitToastTests
     public void TheSpecWorkedExamplesRenderExactly()
     {
         Assert.Equal(
-            "Sent. Scrubbing removed 4 things. 1 flagged.",
+            "Approved. Scrubbing removed 4. 1 flagged.",
             SubmitToast.Render(1, 4, 1, new List<string>()).Line);
         Assert.Equal(
-            "Sent 47 sessions. Scrubbing removed 213 things. 3 flagged.",
+            "Approved 47. Scrubbing removed 213. 3 flagged.",
             SubmitToast.Render(47, 213, 3, new List<string>()).Line);
         Assert.Equal(
-            "Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send.",
+            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send.",
             SubmitToast.Render(
-                44, 213, 0,
+                44, 213, 3,
                 new List<string> { "envelope-too-large", "envelope-too-large", "envelope-too-large" })
                 .Line);
         Assert.Equal(
-            "Nothing sent. Scrubbing matched nothing. 2 not sent: already decided.",
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: already decided.",
             SubmitToast.Render(0, 0, 0, new List<string> { "not-pending", "not-pending" }).Line);
     }
 
     [Fact]
-    public void UndoIsOfferedOnlyWhenSomethingWasSent()
+    public void UndoIsOfferedOnlyWhenSomethingWasApproved()
     {
         Assert.True(SubmitToast.Render(1, 0, 0, new List<string>()).OfferUndo);
         Assert.False(SubmitToast.Render(0, 0, 0, new List<string> { "not-pending" }).OfferUndo);
@@ -94,11 +94,28 @@ public sealed class SubmitToastTests
     public void DistinctReasonsAreListedOnceInTheSpecsOrder()
     {
         Assert.Equal(
-            "Nothing sent. Scrubbing matched nothing. 4 not sent: not connected to a commons, "
+            "Nothing approved. Scrubbing matched nothing. 4 not approved: not connected to a commons, "
                 + "already decided, could not be read.",
             SubmitToast.Render(
                 0, 0, 0,
                 new List<string> { "preview-failed", "not-pending", "not-enrolled", "not-pending" })
+                .Line);
+    }
+
+    /// <summary>
+    /// The unrecognised-label fallback happens to share its rendered text
+    /// with <c>not-pinned</c>'s own label ("could not be prepared"). A batch
+    /// that skips entries for both reasons must still print that text only
+    /// once, and must still count every skipped entry.
+    /// </summary>
+    [Fact]
+    public void TheUnknownFallbackDoesNotDuplicateAcollidingLabel()
+    {
+        Assert.Equal(
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: could not be prepared.",
+            SubmitToast.Render(
+                0, 0, 0,
+                new List<string> { "not-pinned", "some-label-this-shell-has-never-seen" })
                 .Line);
     }
 
@@ -109,10 +126,10 @@ public sealed class SubmitToastTests
     public void TheOptionalClausesAreAbsentWhenEmpty()
     {
         Assert.Equal(
-            "Sent. Scrubbing matched nothing.",
+            "Approved. Scrubbing matched nothing.",
             SubmitToast.Render(1, 0, 0, new List<string>()).Line);
         Assert.Equal(
-            "Sent 2 sessions. Scrubbing removed 1 thing.",
+            "Approved 2. Scrubbing removed 1.",
             SubmitToast.Render(2, 1, 0, new List<string>()).Line);
     }
 
@@ -127,5 +144,18 @@ public sealed class SubmitToastTests
         Assert.Contains(
             "Scrubbing matched nothing",
             SubmitToast.Render(1, 0, 0, new List<string>()).Line);
+    }
+
+    /// <summary>
+    /// Mutation guard: dropping the flagged half of the joined clause leaves
+    /// compiling, wrong code. See the follow-up report for the mutation
+    /// applied and reverted while verifying this test.
+    /// </summary>
+    [Fact]
+    public void TheJoinedClauseCarriesBothHalvesWhenBothApply()
+    {
+        Assert.Equal(
+            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send.",
+            SubmitToast.Render(44, 213, 3, new List<string> { "envelope-too-large" }).Line);
     }
 }

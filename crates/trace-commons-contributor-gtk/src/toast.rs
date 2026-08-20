@@ -1,10 +1,10 @@
 //! The submit toast: the daemon's counts, said in one sentence.
 //!
 //! One-click submit sends a session nobody previewed, so the toast is the
-//! only place a contributor learns what happened -- what went, what
-//! scrubbing did to it, what was held, and what never left. That makes the
-//! wording a contract rather than a presentation detail, and it is fixed in
-//! `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under
+//! only place a contributor learns what happened -- what was approved, what
+//! scrubbing did to it, what was held, and what was not approved. That makes
+//! the wording a contract rather than a presentation detail, and it is fixed
+//! in `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under
 //! "The toast: normative copy". The clause strings themselves live in
 //! [`crate::copy`] with the rest of this shell's words; this module is only
 //! the assembly.
@@ -13,8 +13,8 @@
 //! The Swift copy is `macos/Sources/TCShellCore/SubmitToast.swift`, the C#
 //! copy is `windows/src/TraceCommons.Interop/SubmitToast.cs`, and each
 //! carries the spec's four worked examples as a test for exactly one
-//! reason: a sentence reworded in one client is the drift this section of
-//! the spec exists to prevent.
+//! reason: a sentence reworded in one client is precisely the drift this
+//! section of the spec exists to prevent.
 //!
 //! Deliberately pure -- counts in, a string and a bool out. No GTK types,
 //! no I/O, so the assertion that the three shells agree runs on a machine
@@ -30,10 +30,10 @@ pub struct SubmitToast {
     pub line: String,
     /// Whether to offer Undo alongside it.
     ///
-    /// True only when something was actually sent. `ui::preview` used to
+    /// True only when something was actually approved. `ui::preview` used to
     /// offer Undo on any `Ok` response, which was correct while every
     /// approval succeeded and is wrong now that entries can be skipped: a
-    /// skipped entry with an undo timer behind it reads as sent.
+    /// skipped entry with an undo timer behind it reads as approved.
     pub offer_undo: bool,
 }
 
@@ -47,16 +47,12 @@ pub struct SubmitToast {
 /// an entry id ever reaches a contributor.
 pub fn toast(approved: u64, redactions: u64, flagged: u64, skipped: &[&str]) -> SubmitToast {
     let mut clauses = vec![
-        copy::submit_sent_clause(approved),
+        copy::submit_approved_clause(approved),
         copy::submit_scrub_clause(redactions),
     ];
 
-    if flagged > 0 {
-        clauses.push(copy::submit_flagged_clause(flagged));
-    }
-
-    if !skipped.is_empty() {
-        clauses.push(copy::submit_skipped_clause(skipped));
+    if let Some(clause) = copy::submit_flagged_and_skipped_clause(flagged, skipped) {
+        clauses.push(clause);
     }
 
     SubmitToast {
@@ -73,17 +69,17 @@ mod tests {
     fn the_spec_worked_examples_render_exactly() {
         assert_eq!(
             toast(1, 4, 1, &[]).line,
-            "Sent. Scrubbing removed 4 things. 1 flagged."
+            "Approved. Scrubbing removed 4. 1 flagged."
         );
         assert_eq!(
             toast(47, 213, 3, &[]).line,
-            "Sent 47 sessions. Scrubbing removed 213 things. 3 flagged."
+            "Approved 47. Scrubbing removed 213. 3 flagged."
         );
         assert_eq!(
             toast(
                 44,
                 213,
-                0,
+                3,
                 &[
                     "envelope-too-large",
                     "envelope-too-large",
@@ -91,16 +87,16 @@ mod tests {
                 ]
             )
             .line,
-            "Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send."
+            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send."
         );
         assert_eq!(
             toast(0, 0, 0, &["not-pending", "not-pending"]).line,
-            "Nothing sent. Scrubbing matched nothing. 2 not sent: already decided."
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: already decided."
         );
     }
 
     #[test]
-    fn undo_is_offered_only_when_something_was_sent() {
+    fn undo_is_offered_only_when_something_was_approved() {
         assert!(toast(1, 0, 0, &[]).offer_undo);
         assert!(!toast(0, 0, 0, &["not-pending"]).offer_undo);
     }
@@ -154,19 +150,38 @@ mod tests {
                 ]
             )
             .line,
-            "Nothing sent. Scrubbing matched nothing. 4 not sent: not connected to a commons, \
-             already decided, could not be read."
+            "Nothing approved. Scrubbing matched nothing. 4 not approved: \
+             not connected to a commons, already decided, could not be read."
         );
     }
 
-    /// Clauses 3 and 4 appear only when non-zero; clauses 1 and 2 always do.
+    /// The unrecognised-label fallback happens to share its rendered text
+    /// with `not-pinned`'s own label ("could not be prepared"). A batch
+    /// that skips entries for both reasons must still print that text only
+    /// once, and must still count every skipped entry.
+    #[test]
+    fn the_unknown_fallback_does_not_duplicate_a_colliding_label() {
+        assert_eq!(
+            toast(
+                0,
+                0,
+                0,
+                &["not-pinned", "some-label-this-shell-has-never-seen"]
+            )
+            .line,
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: could not be prepared."
+        );
+    }
+
+    /// The whole clause is absent when nothing was flagged and nothing was
+    /// skipped -- not an empty trailing sentence.
     #[test]
     fn the_optional_clauses_are_absent_when_empty() {
-        assert_eq!(toast(1, 0, 0, &[]).line, "Sent. Scrubbing matched nothing.");
         assert_eq!(
-            toast(2, 1, 0, &[]).line,
-            "Sent 2 sessions. Scrubbing removed 1 thing."
+            toast(1, 0, 0, &[]).line,
+            "Approved. Scrubbing matched nothing."
         );
+        assert_eq!(toast(2, 1, 0, &[]).line, "Approved 2. Scrubbing removed 1.");
     }
 
     /// A zero redaction count is a fact the contributor is owed, not an
@@ -178,6 +193,23 @@ mod tests {
             toast(1, 0, 0, &[])
                 .line
                 .contains("Scrubbing matched nothing")
+        );
+    }
+
+    /// Mutation guard: dropping the flagged half of the joined clause
+    /// leaves compiling, wrong code -- confirmed to fail before restoring.
+    /// See the follow-up report for the exact mutation applied and reverted.
+    #[test]
+    fn the_joined_clause_carries_both_halves_when_both_apply() {
+        let line = toast(44, 213, 3, &["envelope-too-large"]).line;
+        assert!(line.contains("3 flagged"), "flagged half missing: {line}");
+        assert!(
+            line.contains("1 not approved: too large to send"),
+            "skipped half missing: {line}"
+        );
+        assert_eq!(
+            line,
+            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send."
         );
     }
 }

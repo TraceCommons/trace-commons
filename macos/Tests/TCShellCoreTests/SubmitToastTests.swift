@@ -17,30 +17,30 @@ final class SubmitToastTests: XCTestCase {
     func testTheSpecWorkedExamplesRenderExactly() {
         XCTAssertEqual(
             SubmitToast.render(approved: 1, redactions: 4, flagged: 1, skipped: []).line,
-            "Sent. Scrubbing removed 4 things. 1 flagged."
+            "Approved. Scrubbing removed 4. 1 flagged."
         )
         XCTAssertEqual(
             SubmitToast.render(approved: 47, redactions: 213, flagged: 3, skipped: []).line,
-            "Sent 47 sessions. Scrubbing removed 213 things. 3 flagged."
+            "Approved 47. Scrubbing removed 213. 3 flagged."
         )
         XCTAssertEqual(
             SubmitToast.render(
                 approved: 44,
                 redactions: 213,
-                flagged: 0,
+                flagged: 3,
                 skipped: ["envelope-too-large", "envelope-too-large", "envelope-too-large"]
             ).line,
-            "Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send."
+            "Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send."
         )
         XCTAssertEqual(
             SubmitToast.render(
                 approved: 0, redactions: 0, flagged: 0, skipped: ["not-pending", "not-pending"]
             ).line,
-            "Nothing sent. Scrubbing matched nothing. 2 not sent: already decided."
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: already decided."
         )
     }
 
-    func testUndoIsOfferedOnlyWhenSomethingWasSent() {
+    func testUndoIsOfferedOnlyWhenSomethingWasApproved() {
         XCTAssertTrue(SubmitToast.render(approved: 1, redactions: 0, flagged: 0, skipped: []).offerUndo)
         XCTAssertFalse(
             SubmitToast.render(approved: 0, redactions: 0, flagged: 0, skipped: ["not-pending"])
@@ -88,8 +88,24 @@ final class SubmitToastTests: XCTestCase {
                 flagged: 0,
                 skipped: ["preview-failed", "not-pending", "not-enrolled", "not-pending"]
             ).line,
-            "Nothing sent. Scrubbing matched nothing. 4 not sent: not connected to a commons, "
+            "Nothing approved. Scrubbing matched nothing. 4 not approved: not connected to a commons, "
                 + "already decided, could not be read."
+        )
+    }
+
+    /// The unrecognised-label fallback happens to share its rendered text
+    /// with `not-pinned`'s own label ("could not be prepared"). A batch
+    /// that skips entries for both reasons must still print that text only
+    /// once, and must still count every skipped entry.
+    func testTheUnknownFallbackDoesNotDuplicateAcollidingLabel() {
+        XCTAssertEqual(
+            SubmitToast.render(
+                approved: 0,
+                redactions: 0,
+                flagged: 0,
+                skipped: ["not-pinned", "some-label-this-shell-has-never-seen"]
+            ).line,
+            "Nothing approved. Scrubbing matched nothing. 2 not approved: could not be prepared."
         )
     }
 
@@ -97,11 +113,11 @@ final class SubmitToastTests: XCTestCase {
     func testTheOptionalClausesAreAbsentWhenEmpty() {
         XCTAssertEqual(
             SubmitToast.render(approved: 1, redactions: 0, flagged: 0, skipped: []).line,
-            "Sent. Scrubbing matched nothing."
+            "Approved. Scrubbing matched nothing."
         )
         XCTAssertEqual(
             SubmitToast.render(approved: 2, redactions: 1, flagged: 0, skipped: []).line,
-            "Sent 2 sessions. Scrubbing removed 1 thing."
+            "Approved 2. Scrubbing removed 1."
         )
     }
 
@@ -112,6 +128,19 @@ final class SubmitToastTests: XCTestCase {
         XCTAssertTrue(
             SubmitToast.render(approved: 1, redactions: 0, flagged: 0, skipped: []).line
                 .contains("Scrubbing matched nothing")
+        )
+    }
+
+    /// Mutation guard: dropping the flagged half of the joined clause
+    /// leaves compiling, wrong code. See the follow-up report for the
+    /// mutation applied and reverted while verifying this test.
+    func testTheJoinedClauseCarriesBothHalvesWhenBothApply() {
+        let line = SubmitToast.render(
+            approved: 44, redactions: 213, flagged: 3, skipped: ["envelope-too-large"]
+        ).line
+        XCTAssertEqual(
+            line,
+            "Approved 44. Scrubbing removed 213. 3 flagged, 1 not approved: too large to send."
         )
     }
 }

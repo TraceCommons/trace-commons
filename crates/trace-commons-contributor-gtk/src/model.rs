@@ -190,7 +190,7 @@ fn humanize_redaction_kind(kind: &str) -> String {
 }
 
 /// `approve`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApproveResult {
     #[serde(default)]
     pub approved: u64,
@@ -202,6 +202,73 @@ pub struct ApproveResult {
     /// shell picked. `None` means no undo may be offered at all.
     #[serde(default)]
     pub hold_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// How many entries carried a PII label. Feeds the toast's clause 3,
+    /// which appears only when this is non-zero. See
+    /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under
+    /// "The toast: normative copy".
+    #[serde(default)]
+    pub flagged: u64,
+    /// Redaction counts, by category. The toast sums these -- it names a
+    /// count, never a category; the preview sheet is where a contributor
+    /// sees which detector fired.
+    #[serde(default)]
+    pub redactions: std::collections::BTreeMap<String, u32>,
+    /// Entries this call could not send, and why. Never rendered as the
+    /// wire label or the entry id -- `crate::toast::toast` maps each label
+    /// through `copy::submit_skip_reason_label` before it reaches a
+    /// contributor.
+    #[serde(default)]
+    pub skipped: Vec<SkippedEntry>,
+}
+
+/// One entry `approve` could not send, from the `skipped` list in its
+/// response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkippedEntry {
+    #[serde(default)]
+    pub entry_id: String,
+    #[serde(default)]
+    pub reason_label: String,
+}
+
+impl ApproveResult {
+    /// The sum of `redactions`, which is what the toast actually renders --
+    /// see [`crate::toast::toast`].
+    pub fn total_redactions(&self) -> u64 {
+        self.redactions.values().map(|&n| u64::from(n)).sum()
+    }
+
+    /// Whether the toast this response earns should come with Undo.
+    ///
+    /// This is the fix for the defect
+    /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`
+    /// names: `ui::preview` used to call `App::offer_undo` on any `Ok`
+    /// response, which was correct while every approval succeeded and is
+    /// wrong now that entries can be skipped -- a skipped entry read to the
+    /// contributor as sent, with an undo timer behind it.
+    ///
+    /// Two conditions, both required. [`crate::toast::SubmitToast::offer_undo`]
+    /// carries the spec's rule -- Undo only when `approved > 0` -- and this
+    /// adds the one the spec's Undo mechanics require: there must be a
+    /// `hold_until` to hold it against. `approved > 0` with no `hold_until`
+    /// means the hold is configured off, which the toast's own sentence
+    /// already reports as sent; there is nothing left to offer a countdown
+    /// on.
+    pub fn offers_undo(&self) -> bool {
+        let skipped: Vec<&str> = self
+            .skipped
+            .iter()
+            .map(|s| s.reason_label.as_str())
+            .collect();
+        crate::toast::toast(
+            self.approved,
+            self.total_redactions(),
+            self.flagged,
+            &skipped,
+        )
+        .offer_undo
+            && self.hold_until.is_some()
+    }
 }
 
 /// `list_projects`.
@@ -356,6 +423,69 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defect this fixes: `ui::preview` used to call `App::offer_undo`
+    /// on any `Ok` response from `approve`, ignoring `approved`. Correct
+    /// while every approval succeeded; wrong once entries can be skipped,
+    /// because a skipped entry read to the contributor as sent, with an
+    /// undo timer behind it.
+    ///
+    /// This decodes a literal `approve` response in the daemon's real wire
+    /// shape (`docs/superpowers/plans/2026-08-20-one-click-submit-shells.md`,
+    /// "Existing interfaces") with `approved: 0`, and asserts through
+    /// `ApproveResult::offers_undo` -- the same method `App::render_submit_response`
+    /// calls in production -- that no undo is offered.
+    #[test]
+    fn a_response_with_zero_approved_offers_no_undo() {
+        let value = serde_json::json!({
+            "approved": 0,
+            "flagged": 0,
+            "redactions": {},
+            "skipped": [{"entry_id": "e1", "reason_label": "not-pending"}],
+            "hold_secs": 120,
+            "hold_until": null,
+        });
+        let approve: ApproveResult = serde_json::from_value(value).expect("decodes");
+        assert_eq!(approve.approved, 0);
+        assert!(
+            !approve.offers_undo(),
+            "an approve response with approved: 0 must not offer undo"
+        );
+    }
+
+    /// The ordinary case, for contrast: something was approved and the
+    /// daemon returned a hold to undo it against.
+    #[test]
+    fn a_response_with_a_hold_and_something_approved_offers_undo() {
+        let value = serde_json::json!({
+            "approved": 1,
+            "flagged": 0,
+            "redactions": {"secrets": 2},
+            "skipped": [],
+            "hold_secs": 120,
+            "hold_until": "2026-08-20T00:02:00Z",
+        });
+        let approve: ApproveResult = serde_json::from_value(value).expect("decodes");
+        assert!(approve.offers_undo());
+        assert_eq!(approve.total_redactions(), 2);
+    }
+
+    /// `approved > 0` alone is not enough: the spec's Undo mechanics need a
+    /// `hold_until` to hold against, and a daemon with the hold configured
+    /// off returns `approved > 0` with `hold_until: null`.
+    #[test]
+    fn something_approved_with_no_hold_still_offers_no_undo() {
+        let value = serde_json::json!({
+            "approved": 1,
+            "flagged": 0,
+            "redactions": {},
+            "skipped": [],
+            "hold_secs": 0,
+            "hold_until": null,
+        });
+        let approve: ApproveResult = serde_json::from_value(value).expect("decodes");
+        assert!(!approve.offers_undo());
+    }
 
     #[test]
     fn a_receipt_with_no_redactions_says_so_rather_than_going_quiet() {
