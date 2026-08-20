@@ -1322,11 +1322,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             Ok((summary, _body, _envelope)) => {
                 // `build_preview` does not size-check the raw contribution
                 // (only `submit`'s path does); `approved_envelope::save`
-                // does, on exactly this measurement. Checked here, before
-                // the pin is even attempted, so an oversized session gets
-                // its own label instead of the generic `not-pinned` the
-                // pin re-check below would otherwise give it -- this one
-                // is permanent, and retrying the same session can never
+                // does, on exactly this measurement -- so the pin
+                // `build_and_pin_preview` just attempted has already been
+                // refused for size, and this entry is unpinned. Repeating
+                // the measurement here is what gives an oversized session
+                // its own label instead of the generic `not-pinned` the pin
+                // re-check below would otherwise give it -- this one is
+                // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
                 if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
                     skipped.push((id, "envelope-too-large"));
@@ -1353,9 +1355,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // The pin is re-checked here, under the lock that approves, rather
         // than inferred from the build returning `Ok`. `build_and_pin_preview`
         // is `Ok` whenever the *build* succeeded, and `pin_previewed_envelope`
-        // declines silently when the envelope could not be written, when the
-        // queue write failed, or when the entry left `Pending` while the
-        // build was running. Trusting `Ok` would approve an entry with no
+        // declines silently when the envelope could not be written, and when
+        // the entry was not `Pending` by the time the pin was attempted.
+        // Trusting `Ok` would approve an entry with no
         // artifact behind it, which is the one thing the uploader does not
         // catch. An entry that is still unpinned here is left `Pending` for
         // the contributor to approve again.
@@ -1365,19 +1367,38 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         {
             // The build reported `Ok` (or this entry had a stale pin to
             // begin with) but nothing is pinned now: `pin_previewed_envelope`
-            // declined to write because the queue write failed or the
-            // entry left `Pending` while the build was running, or (for
-            // `all`/`project_id`) the entry was removed from the queue
-            // entirely in that same window. All three are transient --
-            // unlike `envelope-too-large` above, retrying is expected to
-            // work once the race that caused this has passed. Either way
-            // the entry is left `Pending`, same as any other unpinned
-            // entry -- but it must not vanish from the response. An entry
-            // counted in neither `approved` nor `skipped` is exactly the
-            // silent hole the pin re-check above this loop exists to
-            // close for the uploader; the caller deserves the same
-            // guarantee.
-            skipped.push((id, "not-pinned"));
+            // declined to write because `approved_envelope::save` failed, or
+            // because the entry was no longer `Pending` when the pin was
+            // attempted; or (for `all`/`project_id`) the entry was removed
+            // from the queue entirely in that same window. (A failed queue
+            // *save* inside `pin_previewed_envelope` does not land here: it
+            // leaves the pin in memory, which is what this check reads.)
+            //
+            // Which label that deserves depends on where the entry stands
+            // now, and the two documented labels promise different things
+            // to a client. `not-pinned` is documented transient -- retry is
+            // expected to work once the race passed -- and that is only
+            // true while the entry is still `Pending`. An entry that is
+            // both unpinned and no longer `Pending` (dismissed, expired,
+            // superseded, or approved through some other path without ever
+            // being previewed) can never be approved by a retry: every pin
+            // path refuses a non-`Pending` entry, so retrying loops
+            // forever. That case gets `not-pending`, whose documented
+            // advice -- refresh queue state rather than retry blindly -- is
+            // the correct one for it. An entry gone from the queue entirely
+            // is reported `not-pinned`: it was `Pending` when it was
+            // selected, and its disappearance is the transient race.
+            //
+            // Either way the entry is left as it stands -- but it must not
+            // vanish from the response. An entry counted in neither
+            // `approved` nor `skipped` is exactly the silent hole the pin
+            // re-check above this loop exists to close for the uploader;
+            // the caller deserves the same guarantee.
+            let label = match queue.get(id).map(|e| e.state) {
+                Some(QueueState::Pending) | None => "not-pinned",
+                Some(_) => "not-pending",
+            };
+            skipped.push((id, label));
             continue;
         }
         if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {

@@ -1166,6 +1166,31 @@ async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved
         resp["result"]["approved"], 0,
         "an entry with no artifact behind it must not be counted as approved: {resp}"
     );
+    // Not approved is only half of it. The response promises that
+    // `approved` plus `skipped` accounts for every id the call was asked to
+    // act on, and this is the only path that reaches the pin re-check's own
+    // skip. Without this assertion, deleting that `skipped.push` leaves the
+    // entry counted nowhere and the whole contract test file still green.
+    let skipped = resp["result"]["skipped"]
+        .as_array()
+        .expect("skipped must be an array");
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the entry this call was asked to act on must show up somewhere in \
+         the response, not vanish from both counts: {resp}"
+    );
+    assert_eq!(
+        skipped[0]["entry_id"].as_str(),
+        Some(entry_id.to_string()).as_deref(),
+        "{resp}"
+    );
+    assert_eq!(
+        skipped[0]["reason_label"].as_str(),
+        Some("not-pinned"),
+        "an entry still pending whose pin did not stick is the transient, \
+         retryable case: {resp}"
+    );
 
     let queue = Queue::load(&store).unwrap();
     let entry = queue.get(entry_id).expect("entry");
@@ -1603,9 +1628,9 @@ async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
     for s in skipped {
         let label = s["reason_label"].as_str().expect("label");
         // The build itself succeeds -- preview does not size-check the raw
-        // contribution, only the stored artifact would have -- so `approve`
-        // catches the oversize itself (mirroring that same size guard)
-        // before attempting to pin it, and gives it the permanent
+        // contribution, only the stored artifact does -- so the pin was
+        // refused for size and `approve` repeats that same measurement to
+        // recognise why, and gives it the permanent
         // `envelope-too-large` label rather than the generic, transient
         // `not-pinned` the pin re-check would otherwise apply. Either way
         // this is exactly the hole the pin re-check exists to close: an
@@ -1682,5 +1707,50 @@ async fn approve_with_an_id_the_caller_never_held_is_refused_like_preview() {
         resp["error"]["message"],
         trace_commons_contributor::daemon::ipc::ERR_UNKNOWN_ENTRY_ID,
         "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn an_unpinned_entry_that_is_no_longer_pending_is_labelled_not_pending() {
+    // The two labels a client codes different retry logic against.
+    // `not-pinned` is documented transient -- "retry is expected to work" --
+    // and that is only true while the entry is still `pending`. An entry
+    // that was never previewed and has since left `pending` (dismissed
+    // here) can never be pinned by a retry: every pin path refuses a
+    // non-`pending` entry, so a shell that trusts the table loops forever.
+    // It gets `not-pending`, whose documented advice is to refresh queue
+    // state instead.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+
+    c.send(&format!(
+        r#"{{"id":1,"method":"dismiss","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    let entry = Queue::load(&store).unwrap().get(entry_id).cloned();
+    let entry = entry.expect("entry");
+    assert_eq!(
+        entry.state,
+        QueueState::Refused,
+        "the fixture must have moved the entry off pending"
+    );
+    assert!(
+        entry.previewed_envelope_digest.is_none(),
+        "the fixture must leave the entry unpinned, or this test exercises \
+         the other branch"
+    );
+
+    let result = approve_one(&mut c, entry_id).await;
+    assert_eq!(result["approved"].as_u64(), Some(0), "{result}");
+    let skipped = result["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped.len(), 1, "{result}");
+    assert_eq!(
+        skipped[0]["reason_label"].as_str(),
+        Some("not-pending"),
+        "an unpinned entry that is no longer pending cannot be fixed by a \
+         retry and must not be labelled transient: {result}"
     );
 }
