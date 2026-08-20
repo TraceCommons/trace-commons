@@ -22,6 +22,7 @@ use trace_commons_contributor::daemon::ipc::{
     DaemonShared, ERR_BAD_PARAMS, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT, IPC_SCHEMA, METHODS, bind,
     serve,
 };
+use trace_commons_contributor::daemon::policy::project_id_for;
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
@@ -1082,4 +1083,245 @@ async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved
          becoming an approval the uploader would satisfy by building and \
          sending something nobody saw"
     );
+}
+
+/// An enrolled daemon with real session files in two projects: two pending
+/// entries in `proj-a`, one in `proj-b`. Built for tests that approve a
+/// whole project and must be able to tell "everything in that project" from
+/// "everything else".
+struct EnrolledDaemon {
+    _dir: tempfile::TempDir,
+    store_dir: std::path::PathBuf,
+    client: tokio::sync::Mutex<Client>,
+}
+
+impl EnrolledDaemon {
+    fn store(&self) -> ConfigStore {
+        ConfigStore::open(self.store_dir.clone()).unwrap()
+    }
+}
+
+/// Send one request over the daemon's socket and return its `result`.
+/// Panics with the response on an error, so a test that only wants a happy
+/// path does not have to check for one itself.
+async fn call(
+    daemon: &EnrolledDaemon,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let mut c = daemon.client.lock().await;
+    c.send(&serde_json::json!({"id": 1, "method": method, "params": params}).to_string())
+        .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{method} failed: {resp}");
+    resp["result"].clone()
+}
+
+/// The queue as currently persisted to disk -- not a socket snapshot, so a
+/// caller can assert on `QueueEntry` fields the wire format does not carry
+/// (like `state` as an enum rather than a string).
+async fn queue_entries(daemon: &EnrolledDaemon) -> Vec<QueueEntry> {
+    Queue::load(&daemon.store()).unwrap().all().to_vec()
+}
+
+/// The project id of a pending entry in `proj-a`, the project this fixture
+/// puts two entries in.
+async fn first_pending_project_id(daemon: &EnrolledDaemon) -> String {
+    let entries = queue_entries(daemon).await;
+    let e = entries
+        .iter()
+        .find(|e| e.state == QueueState::Pending && e.project_label == "proj-a")
+        .expect("fixture must seed a pending entry in proj-a");
+    project_id_for(&e.project_key)
+}
+
+fn write_fixture_session(project_dir: &std::path::Path, session_id: &str, cwd: &str) {
+    std::fs::create_dir_all(project_dir).unwrap();
+    let user = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "please list the files"},
+        "cwd": cwd,
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": session_id,
+        "uuid": "a1",
+    });
+    std::fs::write(
+        project_dir.join(format!("{session_id}.jsonl")),
+        format!("{user}\n"),
+    )
+    .unwrap();
+}
+
+async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, ConfigStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let proj_a_dir = sessions_root.join("-Users-testuser-code-proj-a");
+    let proj_b_dir = sessions_root.join("-Users-testuser-code-proj-b");
+    write_fixture_session(
+        &proj_a_dir,
+        "11111111-1111-1111-1111-111111111111",
+        "/Users/testuser/code/proj-a",
+    );
+    write_fixture_session(
+        &proj_a_dir,
+        "22222222-2222-2222-2222-222222222222",
+        "/Users/testuser/code/proj-a",
+    );
+    write_fixture_session(
+        &proj_b_dir,
+        "33333333-3333-3333-3333-333333333333",
+        "/Users/testuser/code/proj-b",
+    );
+
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let refs = TraceSource::discover(&src).unwrap();
+    let ref_for = |needle: &str| {
+        refs.iter()
+            .find(|r| r.path.to_string_lossy().contains(needle))
+            .unwrap_or_else(|| panic!("no discovered session for {needle}"))
+            .clone()
+    };
+    let a1 = ref_for("11111111-1111-1111-1111-111111111111");
+    let a2 = ref_for("22222222-2222-2222-2222-222222222222");
+    let b1 = ref_for("33333333-3333-3333-3333-333333333333");
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
+    settings.save(&store).unwrap();
+
+    let mut queue = Queue::new();
+    let mut seed =
+        |session_hash: &str,
+         project_key: &str,
+         project_label: &str,
+         session_ref: &trace_commons_contributor::source::SessionRef| {
+            queue
+                .upsert(
+                    QueueEntry {
+                        entry_id: entry_id_for(session_hash),
+                        session_hash: session_hash.into(),
+                        source: "claude-code".into(),
+                        project_key: project_key.into(),
+                        project_label: project_label.into(),
+                        path: session_ref.path.clone(),
+                        size_bytes: session_ref.size_bytes,
+                        discovered_at: chrono::Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    100,
+                )
+                .unwrap();
+        };
+    seed(
+        "two-project-fixture-a1",
+        "/Users/testuser/code/proj-a",
+        "proj-a",
+        &a1,
+    );
+    seed(
+        "two-project-fixture-a2",
+        "/Users/testuser/code/proj-a",
+        "proj-a",
+        &a2,
+    );
+    seed(
+        "two-project-fixture-b1",
+        "/Users/testuser/code/proj-b",
+        "proj-b",
+        &b1,
+    );
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    let client = connect_to(&store_dir).await;
+
+    let daemon = EnrolledDaemon {
+        _dir: dir,
+        store_dir: store_dir.clone(),
+        client: tokio::sync::Mutex::new(client),
+    };
+    let store = ConfigStore::open(store_dir).unwrap();
+    (daemon, store)
+}
+
+#[tokio::test]
+async fn approving_a_project_takes_that_project_and_no_other() {
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+
+    let v = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert!(
+        v["approved"].as_u64().unwrap_or(0) > 0,
+        "nothing approved: {v}"
+    );
+
+    for e in queue_entries(&daemon).await {
+        let want = project_id_for(&e.project_key) == target;
+        assert_eq!(
+            e.state == QueueState::Approved,
+            want,
+            "entry in {} should{} be approved",
+            e.project_label,
+            if want { "" } else { " not" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn approving_a_project_with_nothing_pending_is_not_an_error() {
+    // A client can race a sweep. Zero approved is an outcome, not a fault.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let v = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": "proj_0000000000000000" }),
+    )
+    .await;
+    assert_eq!(v["approved"].as_u64(), Some(0));
 }

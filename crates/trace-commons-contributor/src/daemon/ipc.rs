@@ -1205,10 +1205,20 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             .clone();
         super::preview::input_fingerprint(c, near_ai.as_ref())
     });
+    let project_id = req.params.get("project_id").and_then(|v| v.as_str());
     let ids: Vec<Uuid> = {
         let queue = shared.queue.lock().expect("queue lock");
         if all {
             queue.pending().iter().map(|e| e.entry_id).collect()
+        } else if let Some(pid) = project_id {
+            // Only `Pending`: an entry already approved has had its terms
+            // fixed, and a project-wide call must not silently re-pin them.
+            queue
+                .pending()
+                .iter()
+                .filter(|e| project_id_for(&e.project_key) == pid)
+                .map(|e| e.entry_id)
+                .collect()
         } else {
             match parse_entry_id(&req.params) {
                 Ok(id) => vec![id],
