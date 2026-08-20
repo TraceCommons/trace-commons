@@ -26,6 +26,16 @@ public sealed class QueueEntryViewModel
     public string EntryId => _entry.EntryId;
 
     /// <summary>
+    /// The daemon's identifier for this session's project, as
+    /// <c>entry_value</c> publishes it -- the one a project-group submit must
+    /// send as <c>approve</c>'s <c>project_id</c>. Never the display string
+    /// <see cref="ProjectLabel"/>, which the daemon does not treat as an
+    /// identifier. May be empty for an entry the daemon did not associate
+    /// with a project.
+    /// </summary>
+    public string ProjectId => _entry.ProjectId ?? string.Empty;
+
+    /// <summary>
     /// The project this session belongs to. Falls back to the id, then to a
     /// fixed label -- never to a path, which the daemon does not send and this
     /// row must not invent.

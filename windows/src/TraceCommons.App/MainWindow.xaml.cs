@@ -620,10 +620,11 @@ public sealed partial class MainWindow : Window
     /// Opens the preview sheet for a row.
     /// </summary>
     /// <remarks>
-    /// This is the only route to approving anything. The row itself carries no
-    /// Contribute button and never will: approving from the row is approving
-    /// without looking, and an approval has to cover exactly the bytes the
-    /// contributor was shown.
+    /// This is the route to approving something after reading it. Submit
+    /// (<see cref="OnSubmitEntry"/>) is the other one now: the daemon builds
+    /// and pins an envelope inside <c>approve</c> itself for anything
+    /// unpreviewed, so a row submit no longer sends bytes nobody was shown.
+    /// See docs/superpowers/specs/2026-08-20-one-click-submit-design.md.
     /// </remarks>
     private void OnLookInside(object sender, RoutedEventArgs e)
     {
@@ -656,6 +657,45 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// "Submit" from the row: one click, no preview.
+    /// </summary>
+    /// <remarks>
+    /// Every decision about what the daemon's response means -- the toast
+    /// wording, whether Undo is offered -- is made in
+    /// <see cref="MainViewModel.SubmitEntryAsync"/> and the interop assembly
+    /// it calls into; this handler only routes the click to the entry it
+    /// came from, the same pattern <see cref="OnNotThisOne"/> follows.
+    /// </remarks>
+    private async void OnSubmitEntry(object sender, RoutedEventArgs e)
+    {
+        if (EntryOf(sender) is QueueEntryViewModel entry)
+        {
+            await ViewModel.SubmitEntryAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// "Submit all" from a project's group header: one <c>approve</c> call
+    /// for every pending entry in that project, not a loop over its rows.
+    /// </summary>
+    /// <remarks>
+    /// Sends <see cref="QueueGroupViewModel.ProjectId"/>, the id
+    /// <c>entry_value</c> publishes, never <see cref="QueueGroupViewModel.ProjectLabel"/>,
+    /// which is display text only. Shown only on a multi-entry group (see
+    /// <see cref="QueueGroupViewModel.ShowSubmitAll"/>), so this handler does
+    /// not need to guard against being reachable from a single-entry one.
+    /// <see cref="MainViewModel.SubmitProjectAsync"/> does everything else:
+    /// building the request, decoding the response, arming Undo.
+    /// </remarks>
+    private async void OnSubmitAll(object sender, RoutedEventArgs e)
+    {
+        if (GroupOf(sender) is QueueGroupViewModel group)
+        {
+            await ViewModel.SubmitProjectAsync(group.ProjectId);
+        }
+    }
+
+    /// <summary>
     /// Which queue row a click came from.
     /// </summary>
     /// <remarks>
@@ -668,6 +708,16 @@ public sealed partial class MainWindow : Window
     private static QueueEntryViewModel? EntryOf(object sender) =>
         sender is FrameworkElement element
             ? element.Tag as QueueEntryViewModel ?? element.DataContext as QueueEntryViewModel
+            : null;
+
+    /// <summary>
+    /// Which project's group header a "Submit all" click came from. Same
+    /// Tag-first, DataContext-second pattern as <see cref="EntryOf"/>, for
+    /// the same reason: which project a click means must never be ambiguous.
+    /// </summary>
+    private static QueueGroupViewModel? GroupOf(object sender) =>
+        sender is FrameworkElement element
+            ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
             : null;
 
     private async void OnSheetDecided(QueueEntryViewModel entry, PreviewDecision decision)

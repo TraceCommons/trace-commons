@@ -392,4 +392,142 @@ public sealed class ApprovalHoldTests
 
         Assert.Null(ApprovalHold.Parse(response));
     }
+
+    /// <summary>
+    /// An unrecognised <c>project_id</c> is refused the same way as an
+    /// unrecognised <c>entry_id</c>: a <c>bad_params</c> error frame, with no
+    /// result to build a toast from. A caller must show that as a refusal,
+    /// not as a toast claiming zero sessions were sent.
+    /// </summary>
+    [Fact]
+    public void AnUnrecognisedProjectIsRefusedNotSkipped()
+    {
+        DaemonResponse response = DaemonResponse.Parse(
+            """{"id":1,"error":{"code":"bad_params","message":"unknown-project"}}""");
+
+        Assert.True(response.IsError);
+        Assert.Null(ApprovalHold.Parse(response));
+    }
+
+    /// <summary>
+    /// Two shapes that must never be confused: a project_id naming no
+    /// project the daemon knows at all (bad_params / project_id_unrecognized,
+    /// an error frame -- ipc.rs:1241) versus one naming a real project that
+    /// simply has nothing pending right now (an ordinary success,
+    /// approved: 0). The first is a client bug -- a typo'd or stale id --
+    /// and must read as a refusal. The second is a race a client can win
+    /// completely honestly (a sweep or another device cleared the project
+    /// first) and must read as the ordinary "nothing sent" toast, not as an
+    /// error.
+    /// </summary>
+    [Fact]
+    public void AnUnrecognisedProjectIsDistinctFromAKnownEmptyOne()
+    {
+        DaemonResponse refused = DaemonResponse.Parse(
+            """{"id":1,"error":{"code":"bad_params","message":"project_id_unrecognized"}}""");
+        DaemonResponse knownButEmpty = Response(
+            """{"approved":0,"flagged":0,"redactions":{},"skipped":[],"hold_secs":0,"hold_until":null}""");
+
+        Assert.Null(ApprovalHold.Parse(refused));
+
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(knownButEmpty));
+        Assert.Equal(0UL, hold.Approved);
+        Assert.Equal(SubmitToast.Render(0, 0, 0, new List<string>()).Line, hold.Toast.Line);
+    }
+
+    /// <summary>
+    /// The full shape a one-click submit reports, decoded whole: counts,
+    /// redaction categories, and the skipped list -- everything
+    /// <see cref="ApprovalHold.Toast"/> and <see cref="ApprovalHold.ApprovedEntryIds"/>
+    /// are built from.
+    /// </summary>
+    [Fact]
+    public void TheFullSubmitResponseDecodes()
+    {
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(Response(
+            """
+            {
+                "approved": 44,
+                "flagged": 3,
+                "redactions": {"aws_key": 200, "email": 13},
+                "skipped": [
+                    {"entry_id": "e1", "reason_label": "envelope-too-large"},
+                    {"entry_id": "e2", "reason_label": "envelope-too-large"},
+                    {"entry_id": "e3", "reason_label": "envelope-too-large"}
+                ],
+                "hold_secs": 5,
+                "hold_until": "2026-08-20T12:00:05Z"
+            }
+            """)));
+
+        Assert.Equal(44UL, hold.Approved);
+        Assert.Equal(3UL, hold.Flagged);
+        Assert.Equal(213UL, hold.RedactionsTotal);
+        Assert.Equal(3, hold.Skipped.Count);
+        Assert.Equal("e1", hold.Skipped[0].EntryId);
+        Assert.Equal("envelope-too-large", hold.Skipped[0].ReasonLabel);
+        // Asserted against the renderer's own output, not a literal English
+        // sentence: SubmitToast.cs is the shared normative-copy contract and
+        // is not this file's to pin a snapshot of -- only that ApprovalHold
+        // feeds it the right numbers and labels.
+        Assert.Equal(
+            SubmitToast.Render(44, 213, 3, new[] { "envelope-too-large", "envelope-too-large", "envelope-too-large" }).Line,
+            hold.Toast.Line);
+        Assert.True(hold.Toast.OfferUndo);
+    }
+
+    /// <summary>
+    /// The response never lists which entries it approved, only which it
+    /// skipped -- so a project-group submit's Undo has to recover that set by
+    /// subtracting the skipped ids from the ones it offered.
+    /// </summary>
+    [Fact]
+    public void ApprovedEntryIdsIsTheCandidatesMinusTheSkipped()
+    {
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(Response(
+            """
+            {
+                "approved": 2,
+                "flagged": 0,
+                "redactions": {},
+                "skipped": [{"entry_id": "b", "reason_label": "not-pending"}],
+                "hold_secs": 5,
+                "hold_until": "2026-08-20T12:00:05Z"
+            }
+            """)));
+
+        IReadOnlyList<string> approvedIds =
+            hold.ApprovedEntryIds(new[] { "a", "b", "c" });
+
+        Assert.Equal(new[] { "a", "c" }, approvedIds);
+    }
+
+    /// <summary>
+    /// A zero-approval response offers no undo, whatever the hold fields say --
+    /// the defect Task 1's renderer exists to fix, exercised here on the real
+    /// decoded type rather than on bare counts.
+    /// </summary>
+    [Fact]
+    public void ZeroApprovedOffersNoUndoEvenWithSkips()
+    {
+        ApprovalHold hold = Assert.IsType<ApprovalHold>(ApprovalHold.Parse(Response(
+            """
+            {
+                "approved": 0,
+                "flagged": 0,
+                "redactions": {},
+                "skipped": [
+                    {"entry_id": "a", "reason_label": "not-pending"},
+                    {"entry_id": "b", "reason_label": "not-pending"}
+                ],
+                "hold_secs": 0,
+                "hold_until": null
+            }
+            """)));
+
+        Assert.False(hold.Toast.OfferUndo);
+        Assert.Equal(
+            SubmitToast.Render(0, 0, 0, new[] { "not-pending", "not-pending" }).Line,
+            hold.Toast.Line);
+    }
 }
