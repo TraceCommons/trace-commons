@@ -73,6 +73,44 @@ More usefully: **the SVG emitter already exists.**
 their bodies. They emit precisely the geometry this design needs. The problem
 is only where they live — see "Where the code goes".
 
+### Update, 2026-08-20: the palette converged on the site
+
+The geometry below is unchanged and remains canonical. The colours are not.
+
+The mark was green `#178F70` and blue `#315FBA` on a `#D9DFDC` frame -- values
+taken from the app's semantic palette, where green means "good standing" and
+blue means "held or ranked". The public site runs a different system entirely:
+black on white, one teal accent `#00d4aa`, hairline rules in ink. Shipping a
+green-and-blue logo above a teal-and-black page meant the product and its own
+website did not look like the same project.
+
+The mark now draws the opening bracket in the site accent and everything else
+in ink:
+
+| Element | Light | Dark |
+| --- | --- | --- |
+| Frame stroke | `#000000` | `#FFFFFF` |
+| Frame fill | `#FFFFFF` | `#000000` |
+| Opening bracket | `#00D4AA` | `#00D4AA` |
+| Closing bracket | `#000000` | `#FFFFFF` |
+| Template ink | `#000000` | `#FFFFFF` |
+
+Two consequences worth stating rather than discovering later.
+
+The brackets no longer encode "the user" and "the agent" as two hues of equal
+weight; they are one accent against one ink, and the distinction is carried by
+position. The semantic green and blue did **not** move -- they still mean what
+they meant on every chip, row and badge, which is why the mark now has its own
+tokens (`TC.markAccent`/`markInk`/`markField` on macOS, `TcMarkAccentBrush` and
+friends on Windows) instead of borrowing the accent palette.
+
+The accent clears no contrast ratio worth quoting on white -- roughly 1.8:1 --
+so it is never the only thing describing a shape. The ink frame and the closing
+bracket carry the form, which is the same move the site makes when it puts a
+hairline around a teal button rather than letting the fill define the edge. This
+is also why the frame stroke went from a near-invisible grey to ink: at tray
+sizes it is what survives.
+
 ### The geometry
 
 Transcribed identically in all three clients, on a 64-unit coordinate space:

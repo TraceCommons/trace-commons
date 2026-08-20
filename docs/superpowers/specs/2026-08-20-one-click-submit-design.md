@@ -54,7 +54,7 @@ client renders that without a second call.
 One click. The row's `Submit` builds, pins, approves, and raises a toast for
 the length of `approval_hold_secs`:
 
-> Sent -- scrubbing removed 4 things, 1 flagged.  [Undo]
+> Approved -- scrubbing removed 4 things, 1 flagged.  [Undo]
 
 The signal follows the click and precedes the send. Nothing has left the
 machine while the toast is up; `Undo` is the existing revoke path, which
@@ -64,7 +64,7 @@ anyway, and the hold is already implemented and already undoable.
 
 Bulk is the same gesture at the project level:
 
-> Sent 47 sessions from frobnicator -- scrubbing removed 213 things, 3
+> Approved 47 sessions from frobnicator -- scrubbing removed 213 things, 3
 > flagged.  [Undo]
 
 **Flagged entries are included, not held back.** This was decided
@@ -87,51 +87,45 @@ said in fewer words.
 
 Built in four clauses, in order. Clauses 3 and 4 appear only when non-zero.
 
-**1. What was sent.**
+**1. What happened.** Corrected 2026-08-20: this clause said "Sent", and that
+was false. `copy.rs:192` states the contract -- "The watcher sends approved
+sessions on its next sweep. Undo works until the sweep starts." At toast time
+nothing has left the machine; the approval is recorded and the send happens
+later. A toast reading "Sent." while offering Undo contradicts itself, and this
+product does not get to be careless about that sentence in particular.
 
-> `approved == 1`  ->  **Sent.**
-> `approved > 1`   ->  **Sent {n} sessions.**
-> `approved == 0`  ->  **Nothing sent.**
+> `approved == 1`  ->  **Approved.**
+> `approved > 1`   ->  **Approved {n}.**
+> `approved == 0`  ->  **Nothing approved.**
 
 **2. What scrubbing did.** Always present, including when it did nothing: a
 count of zero is a fact the contributor is owed, not an absence to omit.
 
 > `0`  ->  **Scrubbing matched nothing.**
-> `1`  ->  **Scrubbing removed 1 thing.**
-> `n`  ->  **Scrubbing removed {n} things.**
+> `n`  ->  **Scrubbing removed {n}.**
 
 Sum the values of the `redactions` map. Do not name categories in the toast --
 the preview sheet is where a contributor sees which detector fired.
 
-**3. What was flagged**, only when `flagged > 0`:
+**3 and 4. What was flagged, and what was not.** One clause, comma-joined, each
+half present only when non-zero:
 
-> `1`  ->  **1 flagged.**
-> `n`  ->  **{n} flagged.**
-
-**4. What was not sent**, only when `skipped` is non-empty:
-
-> `1`  ->  **1 not sent: {reason}.**
-> `n`  ->  **{n} not sent: {reasons}.**
+> flagged only        ->  **{n} flagged.**
+> skipped only        ->  **{n} not approved: {reasons}.**
+> both                ->  **{n} flagged, {m} not approved: {reasons}.**
 
 `{reasons}` is the distinct human labels below, comma-separated, in the order
 listed here. Never the raw wire label, never an entry id -- an id in a toast is
 noise a contributor cannot act on.
 
-| wire label | human label | retry? |
-|---|---|---|
-| `not-enrolled` | not connected to a commons | after connecting |
-| `not-pending` | already decided | no |
-| `not-pinned` | could not be prepared | yes |
-| `envelope-too-large` | too large to send | never |
-| `session-file-vanished` | the session file is gone | no |
-| `preview-failed` | could not be read | yes |
-| *anything else* | could not be sent | unknown |
-
-The last row is forward compatibility, not a wire label. A daemon newer than a
-shell can send a reason the shell has never heard of; echoing it would put
-protocol vocabulary in front of a contributor, and dropping it silently yields
-`1 not sent: .` when it is the only skip. Degrade to **could not be sent** and
-list it last. Define it once per shell so the wording stays one edit.
+**Length is a constraint, not a preference.** The GTK shell targets libadwaita
+1.2.2 deliberately (see `scripts/linux-build.Dockerfile`: an old, widely
+deployed pair). Its `adw::Toast` is single-line, does not wrap, and has no
+`custom-title` before 1.4. An earlier, wordier version of this copy was
+camera-verified to TRUNCATE at its longest realistic form, which loses the
+skip clause -- the half a contributor most needs. Every clause above is
+therefore as short as it can be while staying a sentence. Do not re-expand it
+for one shell's roomier surface: the shortest shell sets the budget.
 
 **Undo** is offered when `approved > 0`, and only then. It is present for
 `hold_secs` and maps to the existing `cancel` method, which now clears the pin
@@ -139,10 +133,17 @@ so the next submit rebuilds.
 
 Worked examples:
 
-> Sent. Scrubbing removed 4 things. 1 flagged.
-> Sent 47 sessions. Scrubbing removed 213 things. 3 flagged.
-> Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send.
-> Nothing sent. Scrubbing matched nothing. 2 not sent: already decided.
+> Approved. Scrubbing removed 4. 1 flagged.
+> Approved 47. Scrubbing removed 213. 3 flagged.
+> Approved 44. Scrubbing removed 213. 3 flagged, 3 not approved: too large to send.
+> Nothing approved. Scrubbing matched nothing. 2 not approved: already decided.
+
+**Submit is not the primary action.** `Look inside` stays the row's default and
+keeps its emphasis; `Submit` sits beside it as a peer. This product's argument
+is "that scrubbing is good and it is not perfect -- which is why you get to look
+first", and making the shortcut the recommendation contradicts it. One click is
+availability; primary styling is a recommendation, and only the first was asked
+for.
 
 **A defect this fixes, not only a feature.** `gtk/src/ui/preview.rs` currently
 calls `offer_undo` on any `Ok` response, ignoring `approved`. That was correct

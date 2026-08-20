@@ -176,11 +176,11 @@ fn draw_framed(cr: &cairo::Context, scheme: Scheme, width: f64, height: f64) {
     let _ = cr.stroke();
 
     cr.set_line_width(STROKE_FRAMED);
-    set_source(cr, scheme.green());
+    set_source(cr, scheme.bracket_open());
     bracket_top_left(cr);
     let _ = cr.stroke();
 
-    set_source(cr, scheme.blue());
+    set_source(cr, scheme.bracket_close());
     bracket_bottom_right(cr);
     let _ = cr.stroke();
 
@@ -208,12 +208,12 @@ fn draw_template(cr: &cairo::Context, ink: &str, width: f64, height: f64) {
 
 /// `M11 28V11h17` -- up the left edge, then right along the top.
 fn bracket_top_left(cr: &cairo::Context) {
-    polyline(cr, &trace_commons_mark::VERTICES_GREEN);
+    polyline(cr, &trace_commons_mark::VERTICES_BRACKET_OPEN);
 }
 
 /// `M53 36v17H36` -- down the right edge, then left along the bottom.
 fn bracket_bottom_right(cr: &cairo::Context) {
-    polyline(cr, &trace_commons_mark::VERTICES_BLUE);
+    polyline(cr, &trace_commons_mark::VERTICES_BRACKET_CLOSE);
 }
 
 /// Trace a bracket from the canonical vertices.
@@ -268,19 +268,19 @@ mod tests {
         let light = svg(Scheme::Light, 64);
         assert!(light.contains(r##"viewBox="0 0 64 64""##));
         assert!(light.contains(
-            r##"<rect x="1" y="1" width="62" height="62" fill="#FFFFFF" stroke="#D9DFDC" stroke-width="2"/>"##
+            r##"<rect x="1" y="1" width="62" height="62" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>"##
         ));
         assert!(light.contains(
-            r##"<path d="M11 28V11h17" fill="none" stroke="#178F70" stroke-width="7"/>"##
+            r##"<path d="M11 28V11h17" fill="none" stroke="#00D4AA" stroke-width="7"/>"##
         ));
         assert!(light.contains(
-            r##"<path d="M53 36v17H36" fill="none" stroke="#315FBA" stroke-width="7"/>"##
+            r##"<path d="M53 36v17H36" fill="none" stroke="#000000" stroke-width="7"/>"##
         ));
 
         let dark = svg(Scheme::Dark, 64);
-        assert!(dark.contains(r##"fill="#21241E" stroke="#3B4038""##));
-        assert!(dark.contains(r##"stroke="#3FBE9A""##));
-        assert!(dark.contains(r##"stroke="#7FA0EC""##));
+        assert!(dark.contains(r##"fill="#000000" stroke="#FFFFFF""##));
+        assert!(dark.contains(r##"stroke="#00D4AA""##));
+        assert!(dark.contains(r##"stroke="#FFFFFF""##));
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         let ink = template_svg(Scheme::Light.ink(), 20);
         assert!(!ink.contains("<rect"));
         assert_eq!(ink.matches(r##"stroke-width="8""##).count(), 2);
-        assert!(ink.contains(r##"stroke="#20241F""##));
+        assert!(ink.contains(r##"stroke="#000000""##));
     }
 
     #[test]
