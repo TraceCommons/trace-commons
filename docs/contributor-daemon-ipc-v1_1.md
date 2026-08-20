@@ -360,7 +360,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
-| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable); the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" below |
+| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable); the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
@@ -745,13 +745,54 @@ for that project already carries.
 `unknown-project` bucket reports `notify_only` even if a hand-edited policy
 file says `auto_upload`, because the daemon refuses to act on that.
 
-### The approval hold (the undo window)
+### What `approve` reports
 
 `approve` returns:
 
 ```json
-{ "approved": 1, "hold_secs": 10, "hold_until": "2026-08-08T12:00:10Z" }
+{
+  "approved": 1,
+  "hold_secs": 10,
+  "hold_until": "2026-08-08T12:00:10Z",
+  "flagged": 1,
+  "redactions": { "api_key": 2, "email": 1 },
+  "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
+}
 ```
+
+This is the whole signal a one-click submit needs: a client that never calls
+`preview` can still show "Sent -- scrubbing removed 3 things, 1 flagged.
+[Undo]" off this response alone, with `hold_until` driving the undo window
+(see below).
+
+- **`redactions`** sums the redaction category counts from
+  `preview`'s `redactions` (same shape: category name to count) across every
+  entry this call built a preview for. An entry that was already previewed
+  before this call -- and so was already pinned -- contributes nothing here;
+  its own `preview` response already reported those counts once, and this
+  call does not rebuild it. Counts and category names only, exactly as in
+  `preview`: never the redacted text itself.
+- **`flagged`** counts how many of the entries this call built a preview for
+  came back with a non-empty `pii_labels_present` (the same field `preview`
+  reports). It is a count of entries, not a count of labels.
+- **`skipped`** lists, for every id `approve` was asked to act on, the ones
+  it did not approve: `entry_id` plus a fixed `reason_label` (`not-enrolled`,
+  `session-file-vanished`, `preview-failed`, `not-pinned`). Nothing here is
+  free text, a path, or trace content. **`approved` plus the length of
+  `skipped` always equals the number of entries `approve` was asked to act
+  on** -- for `entry_id` that is 1, for `all`/`project_id` it is however many
+  matched. An id absent from both would be a silent loss of an approval
+  decision; the response is built so that cannot happen.
+- `approve` builds and pins an envelope for any entry that was not already
+  previewed -- the same build `preview` runs, just triggered by `approve`
+  instead. This is what makes `redactions` and `flagged` available even when
+  a client skips `preview` entirely: a client that never calls `preview`
+  still produces a pinned envelope the uploader accepts, and still gets the
+  counts to render its toast from. An entry that was already pinned by an
+  earlier `preview` is approved without rebuilding, so it is counted in
+  `approved` but does not contribute to `redactions` or `flagged`.
+
+### The approval hold (the undo window)
 
 `hold_until` is the instant the daemon will first consider the entry for
 upload. Until then the uploader skips it, so an "Undo" offered during that

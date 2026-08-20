@@ -1325,3 +1325,184 @@ async fn approving_a_project_with_nothing_pending_is_not_an_error() {
     .await;
     assert_eq!(v["approved"].as_u64(), Some(0));
 }
+
+#[tokio::test]
+async fn approve_reports_counts_a_client_can_show_without_asking_again() {
+    // The one-click flow never calls `preview`: the toast it renders --
+    // "Sent -- scrubbing removed N things, M flagged. [Undo]" -- has to come
+    // entirely off this response.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let mut c = connect_to(&store_dir).await;
+    let v = approve_one(&mut c, entry_id).await;
+    assert_eq!(v["approved"].as_u64(), Some(1), "{v}");
+    assert!(v["redactions"].is_object(), "counts drive the toast: {v}");
+    assert!(v["flagged"].is_u64(), "{v}");
+    assert!(v["skipped"].is_array(), "{v}");
+}
+
+/// An enrolled daemon with two pending entries in one project: one ordinary
+/// session, and one whose sole event carries content past
+/// `MAX_ENVELOPE_BYTES`. `build_preview` does not size-check the raw
+/// contribution -- only the stored artifact does -- so the build itself
+/// succeeds; `approved_envelope::save` then refuses to persist it, the pin
+/// re-check catches the decline, and `approve` reports the entry as
+/// `skipped` (`not-pinned`) rather than letting it vanish from both
+/// `approved` and `skipped`. Built for the "every entry attempted is
+/// accounted for" guarantee.
+async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledDaemon, ConfigStore)
+{
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("state");
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+
+    let sessions_root = dir.path().join("sessions/projects");
+    let project_dir = sessions_root.join("-Users-testuser-code-proj-a");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    write_fixture_session(
+        &project_dir,
+        "44444444-4444-4444-4444-444444444444",
+        "/Users/testuser/code/proj-a",
+    );
+
+    // Past `MAX_ENVELOPE_BYTES` (16_000_000). Preview builds this fine --
+    // the size guard lives in `approved_envelope::save`, not in
+    // `build_preview` -- so this is what drives the entry into the pin
+    // re-check's `not-pinned` path rather than a build-time skip.
+    let oversized_content = "x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 1);
+    let oversized = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": oversized_content},
+        "cwd": "/Users/testuser/code/proj-a",
+        "timestamp": "2026-08-08T10:00:00Z",
+        "version": "2.0.1",
+        "sessionId": "55555555-5555-5555-5555-555555555555",
+        "uuid": "a1",
+    });
+    std::fs::write(
+        project_dir.join("55555555-5555-5555-5555-555555555555.jsonl"),
+        format!("{oversized}\n"),
+    )
+    .unwrap();
+
+    let src = ClaudeCodeSource::new(sessions_root.clone());
+    let refs = TraceSource::discover(&src).unwrap();
+    let ref_for = |needle: &str| {
+        refs.iter()
+            .find(|r| r.path.to_string_lossy().contains(needle))
+            .unwrap_or_else(|| panic!("no discovered session for {needle}"))
+            .clone()
+    };
+    let good = ref_for("44444444-4444-4444-4444-444444444444");
+    let oversized_ref = ref_for("55555555-5555-5555-5555-555555555555");
+
+    let device = DeviceIdentity::load_or_generate(&store).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id: device.device_key_id.clone(),
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+    };
+    store.save_config(&cfg).unwrap();
+
+    let mut settings = DaemonSettings::load(&store).unwrap();
+    settings.claude_source = Some(
+        trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        },
+    );
+    settings.save(&store).unwrap();
+
+    let mut queue = Queue::new();
+    let mut seed =
+        |session_hash: &str, session_ref: &trace_commons_contributor::source::SessionRef| {
+            queue
+                .upsert(
+                    QueueEntry {
+                        entry_id: entry_id_for(session_hash),
+                        session_hash: session_hash.into(),
+                        source: "claude-code".into(),
+                        project_key: "/Users/testuser/code/proj-a".into(),
+                        project_label: "proj-a".into(),
+                        path: session_ref.path.clone(),
+                        size_bytes: session_ref.size_bytes,
+                        discovered_at: chrono::Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                    },
+                    100,
+                )
+                .unwrap();
+        };
+    seed("oversized-fixture-good", &good);
+    seed("oversized-fixture-oversized", &oversized_ref);
+    queue.save(&store).unwrap();
+
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let listener = bind_store(&store_dir).await;
+    tokio::spawn(async move {
+        let _ = serve(listener, shared).await;
+    });
+    let client = connect_to(&store_dir).await;
+
+    let daemon = EnrolledDaemon {
+        _dir: dir,
+        store_dir: store_dir.clone(),
+        client: tokio::sync::Mutex::new(client),
+    };
+    let store = ConfigStore::open(store_dir).unwrap();
+    (daemon, store)
+}
+
+#[tokio::test]
+async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
+    let (daemon, _store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
+    let approved = v["approved"].as_u64().expect("approved");
+    let skipped = v["skipped"].as_array().expect("skipped");
+    assert_eq!(
+        approved + skipped.len() as u64,
+        2,
+        "every entry attempted must be accounted for: {v}"
+    );
+    assert_eq!(approved, 1, "{v}");
+    assert_eq!(skipped.len(), 1, "{v}");
+    for s in skipped {
+        let label = s["reason_label"].as_str().expect("label");
+        // The build itself succeeds -- preview does not size-check the raw
+        // contribution, only the stored artifact does -- so the oversized
+        // session is skipped a step later, when `approved_envelope::save`
+        // refuses to persist an envelope past `MAX_ENVELOPE_BYTES` and the
+        // pin re-check catches the decline. This is exactly the hole the
+        // pin re-check exists to close: an entry that built but never got
+        // pinned must not vanish from the response.
+        assert_eq!(
+            label, "not-pinned",
+            "the oversized session's fixed label: {v}"
+        );
+        assert!(
+            !label.contains('/'),
+            "a reason label must not carry a path: {label}"
+        );
+        assert!(s["entry_id"].is_string(), "{v}");
+    }
+}

@@ -1285,6 +1285,14 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // Nothing here is approved: sending something the contributor was never
     // shown is worse than a refusal they can see.
     let mut skipped: Vec<(Uuid, &'static str)> = Vec::new();
+    // What the response's toast is built from: redaction counts summed by
+    // category across every entry approve itself built a preview for (an
+    // entry that was already previewed before this call contributes
+    // nothing here -- its preview response already told the caller this),
+    // and how many of those builds carried a PII label. Counts and labels
+    // only, per the hash-only rule -- never the text a redaction removed.
+    let mut redactions: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut flagged: u64 = 0;
     for (id, entry) in unpinned {
         // An unenrolled build is never pinned -- it is a placeholder
         // -identity artifact, not the one an upload would send -- so there
@@ -1297,7 +1305,14 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             continue;
         }
         match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
-            Ok(_) => {}
+            Ok((summary, _body, _envelope)) => {
+                for (category, count) in &summary.redactions {
+                    *redactions.entry(category.clone()).or_insert(0) += count;
+                }
+                if !summary.pii_labels_present.is_empty() {
+                    flagged += 1;
+                }
+            }
             Err((_code, label)) => skipped.push((id, label)),
         }
     }
@@ -1322,6 +1337,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             .get(id)
             .is_none_or(|e| e.previewed_envelope_digest.is_none())
         {
+            // The build reported `Ok` (or this entry had a stale pin to
+            // begin with) but nothing is pinned now: `pin_previewed_envelope`
+            // declined to write, or the entry left `Pending` while the
+            // build was running. Either way it is left `Pending`, same as
+            // any other unpinned entry -- but it must not vanish from the
+            // response. An entry counted in neither `approved` nor
+            // `skipped` is exactly the silent hole the pin re-check above
+            // this loop exists to close for the uploader; the caller
+            // deserves the same guarantee.
+            skipped.push((id, "not-pinned"));
             continue;
         }
         if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
@@ -1353,12 +1378,25 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     }
     drop(queue);
     shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    // The signal the contributor sees instead of a preview: "Sent --
+    // scrubbing removed N things, M flagged." Counts and labels only -- a
+    // redaction count names a category, never the text it removed, and a
+    // skip reason is a fixed label, never a path or trace content.
     Response::ok(
         req.id,
         serde_json::json!({
             "approved": approved,
             "hold_secs": approval_hold_secs,
             "hold_until": hold_until,
+            "flagged": flagged,
+            "redactions": redactions,
+            "skipped": skipped
+                .iter()
+                .map(|(id, label)| serde_json::json!({
+                    "entry_id": id,
+                    "reason_label": label,
+                }))
+                .collect::<Vec<_>>(),
         }),
     )
 }
