@@ -907,6 +907,80 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             Response::ok(req.id, serde_json::json!({ "paused": false }))
         }
         "cancel" => {
+            // `project_id` is the batch form of `cancel`, mirroring
+            // `approve`'s selector shape so an Undo of a project-wide
+            // approval is one call with the same argument -- the daemon
+            // decides which entries it covers, rather than the shell
+            // deriving "what I saw pending minus what was reported
+            // skipped" and racing the queue to cancel them one at a time.
+            // `project_id` and `entry_id` are mutually exclusive;
+            // `project_id` wins when both are sent, the same precedence
+            // `approve` uses between its own selectors.
+            let project_id = req.params.get("project_id").and_then(|v| v.as_str());
+            if let Some(pid) = project_id {
+                // Unrecognized is refused exactly as `approve` refuses it
+                // for the same selector: a handle the caller never
+                // received is a client bug, and answering `canceled: 0`
+                // would be indistinguishable from "that project had
+                // nothing to cancel". Lock order is policy before queue,
+                // as everywhere else.
+                let policy = shared.policy.lock().expect("policy lock");
+                let mut queue = shared.queue.lock().expect("queue lock");
+                let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+                let Some(key) = project_key_for_id(pid, &known) else {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+                };
+                // Only `Approved`: those are the entries an Undo would be
+                // undoing. A `Pending` entry has nothing to cancel, and a
+                // project-wide call must not touch it. Matched by the id
+                // `entry_value` publishes, never `project_label`, same as
+                // `approve`.
+                let ids: Vec<Uuid> = queue
+                    .all()
+                    .iter()
+                    .filter(|e| e.project_key == key && e.state == QueueState::Approved)
+                    .map(|e| e.entry_id)
+                    .collect();
+                let project_audit_label = disambiguated_label(&key, &known);
+                // Same ordering as `approve`'s `bulk-approved` row: written
+                // before anything is canceled, so a rollback never has to
+                // write to the disk that just refused a write. Undoing a
+                // batch is the same class of act as approving one -- bulk,
+                // unattended, previously terminal-only -- so it gets the
+                // same visibility. A selector that matched nothing writes
+                // no row, for the same reason `approve` writes none: no
+                // entries were canceled, and a shell polling an empty
+                // project would rotate real records out of a capped log.
+                if !ids.is_empty() {
+                    if let Err(_e) = audit::append(
+                        &shared.store,
+                        &AuditEntry {
+                            at: Utc::now(),
+                            action: "bulk-canceled".to_string(),
+                            project_label: Some(project_audit_label),
+                            detail: Some(ids.len().to_string()),
+                        },
+                    ) {
+                        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+                    }
+                }
+                let mut canceled = 0usize;
+                for id in &ids {
+                    // Selection and cancellation happen under one
+                    // continuous hold of the queue lock, so every id
+                    // selected above is still `Approved` when `cancel`
+                    // runs on it; nothing else can have moved it.
+                    if queue.cancel(*id).is_ok() {
+                        canceled += 1;
+                    }
+                }
+                if let Err(_e) = queue.save(&shared.store) {
+                    return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
+                }
+                drop(queue);
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                return Response::ok(req.id, serde_json::json!({ "canceled": canceled }));
+            }
             let id = match parse_entry_id(&req.params) {
                 Ok(id) => id,
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
