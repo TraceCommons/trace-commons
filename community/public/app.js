@@ -639,6 +639,46 @@ sh install.sh</code></pre>
     </section>
 
     <section class="section-band">
+      <p class="eyebrow">Uninstall</p>
+      <h1>Leaving takes two steps, and neither is hidden.</h1>
+      <p class="lede">Local state comes off first, then the program. Start everywhere with <code>trace-commons-contributor logout</code>: it stops a running daemon, then deletes the device key, config, receipts, queue, and history. Uninstalling is not withdrawal — traces you already submitted stay on the server until you withdraw them, and withdrawal needs your account session, so do it before you log out.</p>
+    </section>
+
+    <section class="install-grid">
+      <div class="panel">
+        <h2>Windows</h2>
+        <p class="install-label">Desktop app</p>
+        <pre class="install-code"><code>Get-AppxPackage Iqlusion.TraceCommons | Remove-AppxPackage</code></pre>
+        <p class="install-note">That also ends the .appinstaller update subscription and the startup task. The portable build is just the unzipped folder: delete it, and if you turned on run-at-login, remove the <code>Trace Commons</code> value under <code>HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run</code>.</p>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>Remove-Item -Recurse "$env:LOCALAPPDATA\\Programs\\TraceCommons"</code></pre>
+        <p class="install-note">install.ps1 appended that folder to your user PATH, so take it back out of Path under User environment variables. State lives in <code>%APPDATA%\\trace-commons</code> for the CLI and <code>%LOCALAPPDATA%\\trace-commons</code> for the app.</p>
+      </div>
+
+      <div class="panel">
+        <h2>macOS</h2>
+        <p class="install-label">Desktop app</p>
+        <pre class="install-code"><code>brew uninstall --cask trace-commons</code></pre>
+        <p class="install-note">Installed from the DMG instead, quit it and move <code>TraceCommons.app</code> to the Trash. Turn off run-at-login first, or clear the leftover row in System Settings, General, Login Items.</p>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>brew uninstall trace-commons-contributor</code></pre>
+        <p class="install-note">From the shell installer instead, delete <code>~/.local/bin/trace-commons-contributor</code>. State lives in <code>~/Library/Application Support/trace-commons</code>.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Linux</h2>
+        <p class="install-label">Desktop app</p>
+        <pre class="install-code"><code>flatpak uninstall --delete-data ai.tracecommons.Contributor</code></pre>
+        <p class="install-note">Without --delete-data the app's state stays under ~/.var/app.</p>
+        <p class="install-label">Command-line contributor</p>
+        <pre class="install-code"><code>systemctl --user disable --now trace-commons-contributor.service
+trace-commons-contributor daemon uninstall
+rm ~/.local/bin/trace-commons-contributor</code></pre>
+        <p class="install-note">The first two lines matter only if you installed the background daemon. State lives in <code>~/.config/trace-commons</code>.</p>
+      </div>
+    </section>
+
+    <section class="section-band">
       <p class="eyebrow">Verification</p>
       <h1>The installers refuse what they cannot verify.</h1>
       <p class="lede">Both installers check the published SHA-256, and check a signature against the platform's own roots: Authenticode naming Iqlusion Inc on Windows, a Developer ID naming our team on macOS. Neither has a force or skip-verify flag. This tool reads your coding transcripts, so an installer that can be talked out of its checks is worse than no installer. On failure you get the reason, a non-zero exit, and nothing on your PATH.</p>

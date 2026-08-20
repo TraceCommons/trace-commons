@@ -9,14 +9,27 @@ explicitly runs `submit`.
 
 ## Install
 
-For now, build from source:
+Signed binaries are published per release, and Homebrew, winget, and the
+shell/PowerShell installers all work; https://tracecommons.ai/install/ and the
+[root README](../../README.md#contributor-cli) carry the per-platform
+commands. To build from source instead:
 
 ```bash
 cargo build --release -p trace-commons-contributor
 ./target/release/trace-commons-contributor --help
 ```
 
-Prebuilt GitHub Releases binaries are a follow-up; not available yet.
+## Uninstall
+
+`logout` first — it stops a running daemon before wiping the credentials that
+daemon uploads with — then remove the binary the way you installed it, and the
+now-empty state directory. Withdraw anything you want withdrawn *before*
+logging out: uninstalling removes local state, not submitted traces, and
+`daemon withdraw` needs the account session that `logout` deletes. The
+[root README](../../README.md#uninstalling) has the per-platform commands,
+including the autostart registrations (systemd user unit, macOS login item,
+Windows startup task or Run key) that removing the program does not take with
+it.
 
 ## Quickstart
 
@@ -177,8 +190,12 @@ created mode `0700` on unix; every file in it is `0600`:
 - `receipts.jsonl` — one hash-only line per submission: submission id,
   session hash, source, timestamp, status. Never a path or trace content.
 
-`logout` deletes all three files and sweeps any orphaned atomic-write temp
-files left behind by a crash mid-write.
+The daemon keeps its settings, queue, projects, history, audit log, and the
+account session beside those, in the same directory.
+
+`logout` deletes all of the above and sweeps any orphaned atomic-write temp
+files left behind by a crash mid-write. It leaves the directory itself, so
+remove that too if you are uninstalling.
 
 ## Sources
 
@@ -216,7 +233,7 @@ the redactor and mapper produce from message content.
 | `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |
-| `logout` | Deletes local config, device key, and receipts, plus orphaned temp files. |
+| `logout` | Stops a running daemon, then deletes local config, device key, receipts, daemon state (settings, queue, projects, history, audit), the account session, and orphaned temp files. Leaves the state directory itself. |
 | `mint-grant --instance-key-pem <path> --instance-id <id> --user-subject <subject> --audience <aud> --issuer-url <url> [--device-key-id <id>] [--ttl-seconds <secs>]` | Operator/dogfood tool: signs an enrollment grant with an instance private key (PEM) and prints it base64 to stdout for a contributor to redeem with `login --grant`. |
 
 ## Operator flow: `mint-grant`
