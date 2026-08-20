@@ -168,7 +168,7 @@ async fn daemon_approve_reaches_the_running_daemon_not_just_the_file() {
     let store = h.cli_store();
     let entry_id_str = entry_id.to_string();
     tokio::task::spawn_blocking(move || {
-        commands::daemon_approve(&store, Some(&entry_id_str), false, true).unwrap()
+        commands::daemon_approve(&store, Some(&entry_id_str), false, None, true).unwrap()
     })
     .await
     .unwrap();

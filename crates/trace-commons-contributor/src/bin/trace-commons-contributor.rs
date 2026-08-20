@@ -212,11 +212,15 @@ enum DaemonAction {
     Pending,
     /// Show what would be sent for one queued session
     Preview { entry_id: String },
-    /// Approve one queued session, or all of them
+    /// Approve one queued session, all of them, or a whole project's
     Approve {
         entry_id: Option<String>,
         #[arg(long)]
         all: bool,
+        /// Approve every pending session in this project (project_id, not
+        /// project_label)
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Decline one queued session
     Dismiss { entry_id: String },
@@ -388,9 +392,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             DaemonAction::Preview { entry_id } => {
                 commands::daemon_preview(&store, &entry_id, cli.json)
             }
-            DaemonAction::Approve { entry_id, all } => {
-                commands::daemon_approve(&store, entry_id.as_deref(), all, cli.json)
-            }
+            DaemonAction::Approve {
+                entry_id,
+                all,
+                project,
+            } => commands::daemon_approve(
+                &store,
+                entry_id.as_deref(),
+                all,
+                project.as_deref(),
+                cli.json,
+            ),
             DaemonAction::Dismiss { entry_id } => {
                 commands::daemon_dismiss(&store, &entry_id, cli.json)
             }
