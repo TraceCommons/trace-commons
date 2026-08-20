@@ -1224,6 +1224,19 @@ impl EnrolledDaemon {
     }
 }
 
+/// Send one request over the daemon's socket and return the WHOLE response
+/// frame, error and all, for a test that is asserting on a refusal.
+async fn call_raw(
+    daemon: &EnrolledDaemon,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let mut c = daemon.client.lock().await;
+    c.send(&serde_json::json!({"id": 1, "method": method, "params": params}).to_string())
+        .await;
+    c.recv_json().await
+}
+
 /// Send one request over the daemon's socket and return its `result`.
 /// Panics with the response on an error, so a test that only wants a happy
 /// path does not have to check for one itself.
@@ -1437,16 +1450,67 @@ async fn approving_a_project_takes_that_project_and_no_other() {
 }
 
 #[tokio::test]
-async fn approving_a_project_with_nothing_pending_is_not_an_error() {
-    // A client can race a sweep. Zero approved is an outcome, not a fault.
+async fn approving_a_known_project_with_nothing_pending_is_not_an_error() {
+    // A client can race a sweep, or click twice. Zero approved is an
+    // outcome, not a fault -- and it must stay distinguishable from the
+    // refusal an id naming no project at all now gets (below).
     let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
-    let v = call(
+    let target = first_pending_project_id(&daemon).await;
+    let first = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert!(
+        first["approved"].as_u64().unwrap_or(0) > 0,
+        "the fixture must leave this project with nothing pending, or the \
+         second call below proves nothing: {first}"
+    );
+
+    let again = call_raw(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert!(
+        again["error"].is_null(),
+        "a project the daemon knows, with nothing left pending, is a \
+         success reporting zero -- not a refusal: {again}"
+    );
+    assert_eq!(again["result"]["approved"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        again["result"]["skipped"].as_array().map(Vec::len),
+        Some(0),
+        "{again}"
+    );
+}
+
+#[tokio::test]
+async fn approving_a_project_id_the_daemon_does_not_know_is_refused() {
+    // Consistency with `set_project_mode`, which refuses the same input on
+    // the same socket with the same fixed label. A handle the caller never
+    // received is a client bug, and answering it `approved: 0` is
+    // indistinguishable from "that project had nothing to send" -- a shell
+    // holding a typo'd or stale id would render a success toast forever.
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let v = call_raw(
         &daemon,
         "approve",
         serde_json::json!({ "project_id": "proj_0000000000000000" }),
     )
     .await;
-    assert_eq!(v["approved"].as_u64(), Some(0));
+    assert_eq!(v["error"]["code"], ERR_BAD_PARAMS, "{v}");
+    assert_eq!(v["error"]["message"], "project-id-unrecognized", "{v}");
+
+    for e in queue_entries(&daemon).await {
+        assert_eq!(
+            e.state,
+            QueueState::Pending,
+            "a refused call must approve nothing"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1752,5 +1816,66 @@ async fn an_unpinned_entry_that_is_no_longer_pending_is_labelled_not_pending() {
         Some("not-pending"),
         "an unpinned entry that is no longer pending cannot be fixed by a \
          retry and must not be labelled transient: {result}"
+    );
+}
+
+#[tokio::test]
+async fn approving_a_whole_project_is_recorded_in_the_local_audit_log() {
+    // The terminal-only restriction on bulk approval was removed and this
+    // log is what replaced it (see `daemon::audit`). A tray click that
+    // approves a whole project unattended is the same class of act as
+    // approving the whole queue, so it leaves the same record. An empty
+    // match writes nothing: nothing was approved, and a shell polling a
+    // drained project would otherwise rotate real records out of a capped
+    // log.
+    use trace_commons_contributor::daemon::audit;
+
+    let (daemon, _store) = enrolled_daemon_with_sessions_in_two_projects().await;
+    let target = first_pending_project_id(&daemon).await;
+    assert!(
+        audit::load(&daemon.store()).unwrap().is_empty(),
+        "the fixture must start with an empty log"
+    );
+
+    let v = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target.clone() }),
+    )
+    .await;
+    assert_eq!(
+        v["approved"].as_u64(),
+        Some(2),
+        "the fixture puts two pending entries in this project: {v}"
+    );
+
+    let entries = audit::load(&daemon.store()).unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "a project-wide approval must leave exactly one record"
+    );
+    assert_eq!(entries[0].action, "bulk-approved");
+    assert_eq!(entries[0].detail.as_deref(), Some("2"));
+    assert_eq!(
+        entries[0].project_label.as_deref(),
+        Some("proj-a"),
+        "the label is derived from the key the daemon holds, never from \
+         the caller's string"
+    );
+
+    // Nothing left pending in that project: a second call approves nothing
+    // and records nothing.
+    let again = call(
+        &daemon,
+        "approve",
+        serde_json::json!({ "project_id": target }),
+    )
+    .await;
+    assert_eq!(again["approved"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        audit::load(&daemon.store()).unwrap().len(),
+        1,
+        "an approval that matched nothing must not append a record"
     );
 }

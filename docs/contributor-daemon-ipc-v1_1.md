@@ -173,8 +173,10 @@ already grants.
 What replaces the restriction is **visibility, not gatekeeping**:
 
 - Every autonomy change (`set_project_mode: "auto_upload"`) and every bulk
-  approval (`approve: {"all": true}`) appends a local, hash-only audit entry,
-  readable via `list_audit`. So do `set_consent_scopes` and
+  approval -- `approve: {"all": true}` and `approve: {"project_id": ...}`
+  alike -- appends a local, hash-only audit entry, readable via
+  `list_audit`. A project-wide approval that matched nothing appends no
+  entry, because nothing was approved. So do `set_consent_scopes` and
   `acknowledge_near_ai_notice`.
 - The action and its audit entry are **one fail-closed unit**. If the entry
   cannot be persisted -- disk full, permissions, a corrupt log -- the action
@@ -360,7 +362,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
-| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable); the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
+| `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` | `ok: true` | returns an `approved` entry to `pending`; guaranteed to succeed for the whole hold; error if not currently `approved` |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
@@ -810,6 +812,17 @@ This is the whole signal a one-click submit needs: a client that never calls
   This applies only to the single-`entry_id` form. `all` and `project_id`
   cannot produce this case: their ids are read from the queue itself at
   selection time, so every id they act on already names a real entry.
+- **An unrecognized `project_id`** is refused the same way
+  `set_project_mode` refuses it: `bad_params` / `project-id-unrecognized`.
+  A handle the daemon cannot resolve is a client bug, and answering it
+  `approved: 0` would be indistinguishable from "that project had nothing
+  pending" -- a client holding a typo'd or stale id would render "Sent 0
+  sessions" and never learn otherwise. A project the daemon **does** know
+  with nothing pending -- everything already approved, dismissed or swept
+  -- is not an error: it succeeds with `approved: 0` and an empty
+  `skipped`. Recognition is by the project appearing in the daemon's policy
+  or on any queue entry in any state, so a project whose entries were all
+  just approved stays recognized.
 - `approve` builds and pins an envelope for any entry that was not already
   previewed -- the same build `preview` runs, just triggered by `approve`
   instead. This is what makes `redactions` and `flagged` available even when
@@ -891,6 +904,12 @@ the configured window), not of the daemon's poll timing. Tuning
   ]
 }
 ```
+
+A `bulk-approved` entry carries the number of entries selected in `detail`,
+and, for the `project_id` form, that project's derived label in
+`project_label` -- `null` for `approve: {"all": true}`, which names no one
+project. The label is derived from the key the daemon holds, never from the
+caller's string.
 
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching

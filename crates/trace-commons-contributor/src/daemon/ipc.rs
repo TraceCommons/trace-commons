@@ -1209,20 +1209,53 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // Three mutually exclusive selectors; `all` wins over `project_id` wins
     // over `entry_id` when more than one is sent -- same precedence rule as
     // `set_project_mode` above.
-    let ids: Vec<Uuid> = {
+    //
+    // `project_audit_label` is the display label of the project a
+    // `project_id` call resolved to, for the audit row below. It is derived
+    // from the key the daemon itself holds, never from the caller's string
+    // -- the same rule `set_project_mode` follows, and the reason
+    // `daemon-audit.jsonl` cannot be injected into.
+    let (ids, project_audit_label): (Vec<Uuid>, Option<String>) = if all {
         let queue = shared.queue.lock().expect("queue lock");
-        if all {
-            queue.pending().iter().map(|e| e.entry_id).collect()
-        } else if let Some(pid) = project_id {
-            // Only `Pending`: an entry already approved has had its terms
-            // fixed, and a project-wide call must not silently re-pin them.
-            queue
-                .pending()
-                .iter()
-                .filter(|e| project_id_for(&e.project_key) == pid)
-                .map(|e| e.entry_id)
-                .collect()
-        } else {
+        (queue.pending().iter().map(|e| e.entry_id).collect(), None)
+    } else if let Some(pid) = project_id {
+        // An id naming no project the daemon knows is refused, exactly as
+        // `set_project_mode` refuses it on this same socket with this same
+        // handle, and for the same reason an unknown `entry_id` is refused
+        // below: a handle the caller never received is a client bug, and
+        // answering it `approved: 0` is indistinguishable from "that
+        // project had nothing pending" -- a shell holding a typo'd or stale
+        // id would render "Sent 0 sessions" and never learn otherwise.
+        //
+        // "Known" is policy plus every project in the queue in ANY state,
+        // so a project whose entries were all just approved or swept is
+        // still recognised and still answers `approved: 0`. The genuinely
+        // empty case therefore stays a success, distinguishable from an id
+        // that names no project at all.
+        //
+        // Lock order is policy before queue, as everywhere else.
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let Some(key) = project_key_for_id(pid, &known) else {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+        };
+        // Only `Pending`: an entry already approved has had its terms
+        // fixed, and a project-wide call must not silently re-pin them.
+        let ids = queue
+            .pending()
+            .iter()
+            .filter(|e| e.project_key == key)
+            .map(|e| e.entry_id)
+            .collect();
+        // The unknown-cwd sentinel resolves here like any other project.
+        // Approving what is already in that bucket is an ordinary consent
+        // decision about entries the contributor can see; it is *arming*
+        // the bucket that `set_mode` refuses, which is a standing grant.
+        (ids, Some(disambiguated_label(&key, &known)))
+    } else {
+        let queue = shared.queue.lock().expect("queue lock");
+        (
             match parse_entry_id(&req.params) {
                 Ok(id) => {
                     // An id the caller never held is a client bug, not
@@ -1240,35 +1273,51 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                     vec![id]
                 }
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
-            }
-        }
+            },
+            None,
+        )
     };
-    if all {
-        // A local, label-only record that the whole queue was
-        // bulk-approved, written BEFORE anything is approved --
-        // same ordering, and the same reason, as
-        // `set_project_mode`: a rollback that has to write to the
-        // disk that just refused a write is not a rollback. This is
-        // visibility, not a security control (see `daemon::audit`),
-        // but it is the only visibility there is for a call that
-        // used to require a terminal.
-        //
-        // Written before the envelope builds below, not merely before
-        // the approve loop: those builds persist artifacts of their
-        // own, and "the record could not be written, so nothing
-        // happened" has to stay true of everything this call does.
-        //
-        // The count is of entries eligible to be approved when the
-        // queue was read. It is an upper bound: an entry no artifact
-        // can be built for is skipped below, and `approve` can refuse
-        // one that moved. The record says the whole queue was
-        // bulk-approved at all, which is what it exists for.
+    // A local, label-only record that a batch was bulk-approved, written
+    // BEFORE anything is approved -- same ordering, and the same reason, as
+    // `set_project_mode`: a rollback that has to write to the disk that just
+    // refused a write is not a rollback. This is visibility, not a security
+    // control (see `daemon::audit`), but it is the only visibility there is
+    // for a call that used to require a terminal.
+    //
+    // Both bulk selectors are recorded, not only `all`. A tray click that
+    // approves a whole project unattended is the same class of act as
+    // approving the whole queue -- bulk, unattended, previously
+    // terminal-only -- and leaving it unrecorded would drain the queue with
+    // nothing in `daemon-audit.jsonl` to show for it. A single `entry_id`
+    // approval is the always-was, one-click-at-a-time path and stays
+    // unaudited.
+    //
+    // Written before the envelope builds below, not merely before the
+    // approve loop: those builds persist artifacts of their own, and "the
+    // record could not be written, so nothing happened" has to stay true of
+    // everything this call does.
+    //
+    // The count is of entries eligible to be approved when the queue was
+    // read. It is an upper bound: an entry no artifact can be built for is
+    // skipped below, and `approve` can refuse one that moved. The record
+    // says the batch was bulk-approved at all, which is what it exists for.
+    //
+    // A project selector that matched nothing writes no row: nothing was
+    // approved and, the selection having been taken under the queue lock,
+    // nothing could have been -- a row would record an act that did not
+    // happen, and a shell polling a project with an empty queue would
+    // rotate real records out of a capped log. `all` keeps writing
+    // unconditionally: it names the queue rather than a subset of it, and
+    // "the whole queue was bulk-approved" is a statement about the request,
+    // which `bulk_approval_over_the_socket_is_now_allowed_and_appends_an_audit_entry`
+    // fixes in place.
+    if all || (project_audit_label.is_some() && !ids.is_empty()) {
         if let Err(_e) = audit::append(
             &shared.store,
             &AuditEntry {
                 at: Utc::now(),
                 action: "bulk-approved".to_string(),
-                project_label: None,
+                project_label: project_audit_label,
                 detail: Some(ids.len().to_string()),
             },
         ) {
