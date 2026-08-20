@@ -116,9 +116,36 @@ pub fn envelope_digest(envelope: &TraceContributionEnvelope) -> Result<String> {
     strip_volatile(&mut value);
     // `serde_json::Value`'s map is a `BTreeMap` under this crate's feature
     // set, so serialization is key-ordered and the digest is stable.
-    let canonical = serde_json::to_vec(&value)
+    //
+    // The canonical bytes are hashed as the serializer produces them rather
+    // than collected into a `Vec<u8>` first: `HashingWriter` feeds each
+    // chunk straight into the running SHA-256 state, so this never holds a
+    // second full copy of the envelope just to hash it. The digest is
+    // byte-for-byte the same either way -- `serde_json::to_writer` and
+    // `serde_json::to_vec` run the identical serializer, just over a
+    // different `Write` sink -- and `two_builds_of_the_same_envelope_digest_identically`
+    // plus `a_known_envelope_pins_a_known_digest` in this module's tests
+    // guard that.
+    let mut hasher = HashingWriter(Sha256::new());
+    serde_json::to_writer(&mut hasher, &value)
         .map_err(|_| anyhow::anyhow!("envelope-digest-serialize-failed"))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(&canonical)))
+    Ok(format!("sha256:{:x}", hasher.0.finalize()))
+}
+
+/// A `std::io::Write` sink that feeds every byte written into a running
+/// SHA-256 state, so a canonical serialization can be hashed as it is
+/// produced instead of collected into a buffer first.
+struct HashingWriter(Sha256);
+
+impl std::io::Write for HashingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn strip_volatile(value: &mut serde_json::Value) {
@@ -341,6 +368,53 @@ pub struct PreviewSummary {
     pub subagents_dropped: u32,
 }
 
+/// Every field a queue card needs, built without computing the envelope
+/// digest. See [`build_preview_card`] for why that split exists and why it
+/// is safe: nothing here is bindable to an approval, because nothing here
+/// pins one.
+///
+/// Field-for-field identical to [`PreviewSummary`] except for
+/// [`PreviewSummary::envelope_digest`], which this type has no equivalent
+/// of by design.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PreviewCardSummary {
+    pub would_send_bytes: usize,
+    pub raw_session_bytes: u64,
+    pub event_count: usize,
+    pub opening_prompt: String,
+    pub redactions: std::collections::BTreeMap<String, u32>,
+    pub pii_labels_present: Vec<String>,
+    pub consent_scopes: Vec<String>,
+    pub residual_risk: String,
+    pub input_fingerprint: String,
+    pub enrolled: bool,
+    pub subagent_count: u32,
+    pub subagents_dropped: u32,
+}
+
+impl PreviewCardSummary {
+    /// Complete this into a full [`PreviewSummary`] with a caller-supplied
+    /// digest. The only field this adds; every other field carries over
+    /// unchanged.
+    fn into_summary(self, envelope_digest: String) -> PreviewSummary {
+        PreviewSummary {
+            would_send_bytes: self.would_send_bytes,
+            raw_session_bytes: self.raw_session_bytes,
+            event_count: self.event_count,
+            opening_prompt: self.opening_prompt,
+            redactions: self.redactions,
+            pii_labels_present: self.pii_labels_present,
+            consent_scopes: self.consent_scopes,
+            residual_risk: self.residual_risk,
+            envelope_digest,
+            input_fingerprint: self.input_fingerprint,
+            enrolled: self.enrolled,
+            subagent_count: self.subagent_count,
+            subagents_dropped: self.subagents_dropped,
+        }
+    }
+}
+
 /// Redact one session without uploading and describe exactly what would be
 /// sent. Same redaction path the uploader uses.
 ///
@@ -374,6 +448,73 @@ pub async fn build_preview(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    let (core, envelope) = build_preview_core(cfg, near_ai, source, session_ref).await?;
+    // Digested here, at exactly the point `submit_loaded` takes over the
+    // envelope it is about to send: after redaction, before the granted
+    // scopes the issuer echoes back are stamped on. This identifies the
+    // stored artifact; it is not re-derived from a second build anywhere.
+    //
+    // This is the expensive half of a preview -- a full `serde_json::Value`
+    // tree of the envelope, then a canonical re-serialization of it -- and
+    // it exists only for a caller that is actually going to pin or submit
+    // this build. A caller that only renders a queue card wants
+    // [`build_preview_card`] instead, which shares every field below but
+    // skips this call entirely.
+    let digest = envelope_digest(&envelope)?;
+    let body = body_of(&envelope)?;
+    Ok((core.into_summary(digest), body, envelope))
+}
+
+/// Redact one session and describe exactly what would be sent, **without**
+/// computing the envelope digest or the pretty-printed body.
+///
+/// This is the summary a queue card needs: would-send size, the opening
+/// prompt, redaction counts, PII labels, consent scopes, residual risk, and
+/// the enrollment/subagent bookkeeping -- every field [`PreviewSummary`]
+/// carries except [`PreviewSummary::envelope_digest`] and
+/// [`PreviewSummary::input_fingerprint`]'s sibling cost, the digest.
+/// (`input_fingerprint` is cheap -- a hash of the config, not of the
+/// envelope -- so it is still included.)
+///
+/// The digest is deliberately not computed here, and the envelope built for
+/// this call is deliberately not returned: a caller that only wants to
+/// *render* a card has no use for either, and a card is rendered for every
+/// queued entry at once (this crate's daemon can be asked to summarize
+/// several hundred of them in one pass). Computing the digest means
+/// building a full `serde_json::Value` tree of the envelope and then
+/// re-serializing that tree to canonical bytes -- two more full copies of a
+/// structure that can already run to hundreds of megabytes for one session
+/// -- purely to produce a hash nothing in the card path reads.
+///
+/// **This path must never pin an entry.** The digest is the value an
+/// approval is checked against (`QueueEntry::previewed_envelope_digest`),
+/// and a caller that skips computing it has nothing to pin an entry to.
+/// Pinning stays exclusive to [`build_preview`], driven by the preview sheet
+/// (`daemon::ipc::open_preview`) and by an on-demand rebuild inside
+/// `handle_approve` for any entry a card never pinned -- so an entry a
+/// contributor approves is always either the artifact the sheet showed them
+/// or a fresh build made at the moment of approval, never a stale card
+/// summary silently standing in for either.
+pub async fn build_preview_card(
+    cfg: Option<&ContributorConfig>,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+) -> Result<PreviewCardSummary> {
+    let (core, _envelope) = build_preview_core(cfg, near_ai, source, session_ref).await?;
+    Ok(core)
+}
+
+/// Shared build behind [`build_preview`] and [`build_preview_card`]: load the
+/// session, redact it, and assemble every summary field that does not
+/// require a second full serialization pass. Neither the digest nor the
+/// pretty-printed body is computed here; each caller adds the one it needs.
+async fn build_preview_core(
+    cfg: Option<&ContributorConfig>,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
     let transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
 
@@ -403,11 +544,6 @@ pub async fn build_preview(
         )
     };
     let envelope = redact_to_envelope(&redactor, raw).await?;
-    // Digested here, at exactly the point `submit_loaded` takes over the
-    // envelope it is about to send: after redaction, before the granted
-    // scopes the issuer echoes back are stamped on. This identifies the
-    // stored artifact; it is not re-derived from a second build anywhere.
-    let digest = envelope_digest(&envelope)?;
     let would_send_bytes = envelope_size(&envelope)?;
 
     let event_count = envelope.events.len();
@@ -427,10 +563,8 @@ pub async fn build_preview(
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "pattern-based".to_string());
 
-    let body = body_of(&envelope)?;
-
     Ok((
-        PreviewSummary {
+        PreviewCardSummary {
             would_send_bytes,
             raw_session_bytes,
             event_count,
@@ -439,13 +573,11 @@ pub async fn build_preview(
             pii_labels_present,
             consent_scopes,
             residual_risk,
-            envelope_digest: digest,
             input_fingerprint: fingerprint,
             enrolled,
             subagent_count: transcript.subagent_count,
             subagents_dropped: transcript.subagents_dropped,
         },
-        body,
         envelope,
     ))
 }
@@ -949,6 +1081,31 @@ mod tests {
             .unwrap();
         assert_eq!(a.envelope_digest, b.envelope_digest);
         assert!(a.envelope_digest.starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn a_known_envelope_pins_a_known_digest() {
+        // `envelope_digest` now hashes the canonical bytes as
+        // `serde_json::to_writer` produces them, rather than collecting
+        // them into a `Vec<u8>` first and hashing that. This pins the
+        // output against a value computed before that change, so a
+        // refactor that silently changed what gets hashed (a different
+        // writer, a different key order, a dropped byte) fails here rather
+        // than only showing up as entries mysteriously re-offered in the
+        // field.
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.envelope_digest,
+            "sha256:54b0ddf7fd6d16af22ec3ac1621ec587561d29d63a5e30371bb619a4729f0aa2",
+            "the digest for this fixture moved -- if that is an intentional \
+             change to the redaction or envelope pipeline, recompute and \
+             update this pin; if not, something changed what gets hashed"
+        );
     }
 
     #[tokio::test]
