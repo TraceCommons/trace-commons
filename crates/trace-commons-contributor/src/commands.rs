@@ -18,7 +18,9 @@ use trace_commons_protocol::onboarding::{
 use crate::config::{
     CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ConfigStore, ContributorConfig, allowlist_for,
 };
-use crate::consent::{prompt_consent_answers, scopes_from_answers, validate_scopes};
+use crate::consent::{
+    ConsentAnswers, prompt_consent_answers, scopes_from_answers, validate_scopes,
+};
 use crate::identity::{
     DeviceIdentity, EnrollmentGrant, build_enroll_request, mint_grant, pem_to_pkcs8_der,
 };
@@ -174,16 +176,17 @@ pub(crate) async fn enroll_core(
 ///
 /// `scopes` (a CSV of wire-name consent scopes) is validated before any
 /// network call. When absent, an interactive terminal prompts for consent
-/// choices; a non-interactive session falls back to the
-/// `debugging_evaluation` floor only.
+/// choices; a non-interactive session, or one passing `default_consent`,
+/// falls back to the `debugging_evaluation` floor only.
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
     invite: Option<&str>,
     allowed_hosts: Option<&str>,
     scopes: Option<&str>,
+    default_consent: bool,
 ) -> Result<()> {
-    let consent_scopes = resolve_consent_scopes(scopes)?;
+    let consent_scopes = resolve_consent_scopes(scopes, default_consent)?;
     let used_invite = invite.is_some();
     match enroll_core(store, grant_b64, invite, allowed_hosts, consent_scopes).await? {
         EnrollOutcome::AwaitingGrant { device_key_id } => {
@@ -215,24 +218,60 @@ pub async fn login(
     Ok(())
 }
 
-/// Resolve the consent scopes to request for this login: an explicit
-/// `--scopes` CSV wins (validated immediately, before any network call); a
-/// TTY prompts interactively; a non-interactive session with no `--scopes`
-/// falls back to the `debugging_evaluation` floor only.
-fn resolve_consent_scopes(scopes: Option<&str>) -> Result<Vec<String>> {
-    if let Some(csv) = scopes {
-        let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
-        return validate_scopes(&names).context("invalid --scopes value");
+/// Where this login's consent answers come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentSource<'a> {
+    /// An explicit `--scopes` CSV, still to be validated.
+    Explicit(&'a str),
+    /// The default answer (no) to every optional scope.
+    DefaultAnswers,
+    /// The interactive consent menu.
+    Prompt,
+}
+
+/// Decide where consent answers come from, given the flags and whether
+/// stdin is a terminal. Split out from [`resolve_consent_scopes`] so the
+/// precedence is testable without a real terminal.
+///
+/// `--scopes` wins over everything; `--default` then suppresses the prompt
+/// even on a terminal, which is the case TTY detection alone cannot cover:
+/// an agent driving this CLI through a pty looks interactive.
+fn consent_source(
+    scopes: Option<&str>,
+    default_consent: bool,
+    is_terminal: bool,
+) -> ConsentSource<'_> {
+    match (scopes, default_consent, is_terminal) {
+        (Some(csv), _, _) => ConsentSource::Explicit(csv),
+        (None, true, _) => ConsentSource::DefaultAnswers,
+        (None, false, true) => ConsentSource::Prompt,
+        (None, false, false) => ConsentSource::DefaultAnswers,
     }
+}
+
+/// Resolve the consent scopes to request for this login: an explicit
+/// `--scopes` CSV wins (validated immediately, before any network call);
+/// `--default` takes the default (no) answer for every optional scope; a
+/// TTY prompts interactively; a non-interactive session with neither flag
+/// falls back to the `debugging_evaluation` floor only.
+///
+/// The default answers are deliberately the most restrictive ones: nothing
+/// beyond the always-on floor is granted unless someone said so.
+fn resolve_consent_scopes(scopes: Option<&str>, default_consent: bool) -> Result<Vec<String>> {
     use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
-        let mut stdin = std::io::stdin().lock();
-        let mut stdout = std::io::stdout();
-        let answers = prompt_consent_answers(&mut stdin, &mut stdout)
-            .context("reading interactive consent answers")?;
-        Ok(scopes_from_answers(answers))
-    } else {
-        Ok(vec!["debugging_evaluation".to_string()])
+    match consent_source(scopes, default_consent, std::io::stdin().is_terminal()) {
+        ConsentSource::Explicit(csv) => {
+            let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
+            validate_scopes(&names).context("invalid --scopes value")
+        }
+        ConsentSource::DefaultAnswers => Ok(scopes_from_answers(ConsentAnswers::default())),
+        ConsentSource::Prompt => {
+            let mut stdin = std::io::stdin().lock();
+            let mut stdout = std::io::stdout();
+            let answers = prompt_consent_answers(&mut stdin, &mut stdout)
+                .context("reading interactive consent answers")?;
+            Ok(scopes_from_answers(answers))
+        }
     }
 }
 
@@ -1157,7 +1196,7 @@ mod tests {
 
     #[test]
     fn scopes_flag_error_is_flag_scoped_not_stored_config() {
-        let err = resolve_consent_scopes(Some("bogus")).unwrap_err();
+        let err = resolve_consent_scopes(Some("bogus"), false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("--scopes"), "{msg}");
         assert!(
@@ -1168,11 +1207,45 @@ mod tests {
     }
 
     #[test]
+    fn default_flag_skips_the_prompt_even_on_a_terminal() {
+        // The whole point of `--default`: an agent driving the CLI through a
+        // pty still has a terminal on stdin, so TTY detection alone cannot
+        // save it from the interactive consent menu.
+        assert_eq!(
+            consent_source(None, true, true),
+            ConsentSource::DefaultAnswers
+        );
+        assert_eq!(
+            consent_source(None, true, false),
+            ConsentSource::DefaultAnswers
+        );
+        // Without the flag, a terminal still prompts.
+        assert_eq!(consent_source(None, false, true), ConsentSource::Prompt);
+        assert_eq!(
+            consent_source(None, false, false),
+            ConsentSource::DefaultAnswers
+        );
+        // An explicit --scopes wins over both.
+        assert_eq!(
+            consent_source(Some("model_training"), true, true),
+            ConsentSource::Explicit("model_training")
+        );
+    }
+
+    #[test]
+    fn default_consent_grants_only_the_floor_scope() {
+        assert_eq!(
+            resolve_consent_scopes(None, true).unwrap(),
+            vec!["debugging_evaluation".to_string()]
+        );
+    }
+
+    #[test]
     fn non_tty_default_falls_back_to_debugging_evaluation_only() {
         // `cargo test` runs with stdin that is not a terminal, so this
         // exercises the non-interactive silent-default branch rather than
         // the interactive prompt path.
-        let scopes = resolve_consent_scopes(None).unwrap();
+        let scopes = resolve_consent_scopes(None, false).unwrap();
         assert_eq!(scopes, vec!["debugging_evaluation".to_string()]);
     }
 
@@ -1202,6 +1275,7 @@ mod tests {
             None,
             Some("api.example"),
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -1252,7 +1326,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None)
+        let err = login(&store, Some(&grant.encode()), None, None, None, false)
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -1418,7 +1492,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None)
+        let err = login(&store, Some(&grant.encode()), None, None, None, false)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("already enrolled"));
