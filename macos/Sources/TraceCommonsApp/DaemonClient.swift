@@ -150,13 +150,28 @@ final class DaemonClient {
 
     // MARK: - Decide
 
-    /// Approves exactly one entry. There is no bulk path in this shell: the
-    /// contract allows `all: true`, and the product deliberately does not
-    /// offer it -- approval follows a preview, one session at a time.
+    /// Approves exactly one entry, by the id `list_pending` gave the caller.
+    ///
+    /// One-click submit means this no longer requires a preview: where none
+    /// was pinned, the daemon builds and pins the envelope itself before
+    /// approving (see `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`,
+    /// "What this changes"). The full response is returned rather than just
+    /// `approved` -- `ApproveResponse.toast` is how a caller renders it.
     @discardableResult
-    func approve(entryID: String) throws -> Int {
-        struct Wrapper: Decodable { let approved: Int }
-        return try call("approve", params: ["entry_id": entryID], as: Wrapper.self).approved
+    func approve(entryID: String) throws -> ApproveResponse {
+        try call("approve", params: ["entry_id": entryID], as: ApproveResponse.self)
+    }
+
+    /// Approves every pending entry in one project, by the id `entry_value`
+    /// publishes on each queue row (`project_id`) -- never `project_label`,
+    /// which the daemon does not accept for this call and which is not
+    /// guaranteed unique across projects in the first place. An id naming no
+    /// project the daemon knows comes back as `bad_params` /
+    /// `project-id-unrecognized`, thrown as a `Failure` like any other
+    /// refusal -- a caller must not fold that into a skip.
+    @discardableResult
+    func approve(projectID: String) throws -> ApproveResponse {
+        try call("approve", params: ["project_id": projectID], as: ApproveResponse.self)
     }
 
     /// Returns an approved entry to `pending`. This is what the five-second

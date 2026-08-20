@@ -124,7 +124,7 @@ struct MenuBarContent: View {
                 Text("\(model.decisionsOwed) waiting for your decision")
                 // Not approve buttons. Deliberately inert lines: the only
                 // forward action in this menu is Review.
-                ForEach(model.waitingByProject, id: \.label) { row in
+                ForEach(model.waitingByProject, id: \.id) { row in
                     Text("   \(row.label) — \(row.count) · \(Format.bytes(row.bytes))")
                 }
             }
