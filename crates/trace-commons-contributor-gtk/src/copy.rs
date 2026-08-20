@@ -63,6 +63,47 @@ pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
 pub const NOT_THIS_ONE_TOOLTIP: &str =
     "Skips this session only. This project will keep being offered.";
+
+/// The one-click send on a queue row. See
+/// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click
+/// builds, pins, and approves, then raises the toast that says what
+/// happened -- see [`crate::toast`].
+///
+/// The tooltip says "approves", never "sends": nothing leaves the machine
+/// at click time, only at the watcher's next sweep -- [`UNDO_BODY`] states
+/// that for the undo bar, and a toast that once said "Sent." while still
+/// offering Undo was the same contradiction this tooltip must not repeat.
+pub const SUBMIT: &str = "Submit";
+pub const SUBMIT_TOOLTIP: &str = "Approves this session now. Scrubbing runs first; the watcher \
+     sends it on its next sweep, and you can undo before then.";
+
+/// The same gesture at the project level, on the group's header rather than
+/// on a row. Calls `approve` with a `project_id` rather than an `entry_id`
+/// -- the daemon selects that project's pending entries, this shell never
+/// enumerates them itself.
+pub const SUBMIT_ALL: &str = "Submit all";
+pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this project now. \
+     Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
+     then.";
+
+/// A project group's header line: the label and how many are waiting under
+/// it. Deliberately plain -- the manifest strip already carries the figures
+/// a contributor weighs; this is only what tells the sessions below apart
+/// from the ones above.
+pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
+    match waiting {
+        1 => format!("{project_label} -- 1 waiting"),
+        n => format!("{project_label} -- {n} waiting"),
+    }
+}
+
+/// Shown instead of the toast's own sentence when `approve` itself refused
+/// the call -- an unrecognised `entry_id` or `project_id`, or any other
+/// transport failure. This is not a skip: nothing about the request was
+/// honoured, so none of the four toast clauses apply, and presenting it as
+/// one would claim the daemon looked at entries it never touched.
+pub const SUBMIT_FAILED: &str = "That couldn't be approved just now. Nothing has been approved.";
+
 pub const QUEUE_EMPTY_TITLE: &str = "Nothing waiting";
 pub const QUEUE_EMPTY_BODY: &str = "When a session finishes and goes quiet, it shows up here. \
      Nothing is sent unless you say so.";
@@ -178,8 +219,6 @@ pub const CLOSE: &str = "Close";
 
 pub const SENDING: &str = "Sending…";
 pub const UNDO: &str = "Undo";
-/// Used when the daemon reports no hold, so no undo may be offered.
-pub const APPROVED_NO_UNDO: &str = "Approved. It goes out on the next pass.";
 
 pub fn undo_headline(project_label: &str) -> String {
     format!("Approved {project_label}. Still on this machine.")
