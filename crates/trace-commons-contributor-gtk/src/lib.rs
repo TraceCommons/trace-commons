@@ -24,7 +24,7 @@ pub mod model;
 pub mod notify;
 pub mod portal;
 pub mod toast;
-pub mod transcript_budget;
+pub mod transcript_paging;
 pub mod tray;
 pub mod ui;
 pub mod update;
