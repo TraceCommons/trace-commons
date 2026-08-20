@@ -328,7 +328,7 @@
                         limit, so this stays collapsed for every session the
                         pilot has seen so far. Filled and shown from
                         DrawTranscript when and only when the body was
-                        clamped -- see TranscriptBudget.Clamp. Styled as a
+                        clamped; see TranscriptBudget.Clamp. Styled as a
                         caption like the caveat below, because it is the
                         same kind of sentence: true, load-bearing, and not
                         the point of the screen.
