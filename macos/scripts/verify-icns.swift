@@ -40,8 +40,13 @@ guard count == expected else {
 
 // The two bracket inks, light scheme. If neither appears the icon is a blank
 // card, which is the failure mode that matters.
-let green: (UInt8, UInt8, UInt8) = (0x17, 0x8F, 0x70)
-let blue: (UInt8, UInt8, UInt8) = (0x31, 0x5F, 0xBA)
+//
+// The names are historical: since the mark converged on the site palette the
+// opening bracket is the accent teal and the closing one is plain ink. Ink is
+// still worth probing for -- a blank card is white, so black pixels in the
+// bottom-right are exactly what distinguishes a drawn mark from nothing.
+let green: (UInt8, UInt8, UInt8) = (0x00, 0xD4, 0xAA)
+let blue: (UInt8, UInt8, UInt8) = (0x00, 0x00, 0x00)
 
 for index in 0..<count {
     guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else {

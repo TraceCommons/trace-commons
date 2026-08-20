@@ -64,8 +64,8 @@ struct BrandMark: View {
     var body: some View {
         ZStack {
             if variant != .template {
-                Rectangle().fill(TC.surface)
-                Rectangle().strokeBorder(TC.line, lineWidth: unit(Geometry.frameStroke))
+                Rectangle().fill(TC.markField)
+                Rectangle().strokeBorder(TC.markInk, lineWidth: unit(Geometry.frameStroke))
             }
             bracket(Geometry.greenBracket, ink: greenInk)
             bracket(Geometry.blueBracket, ink: blueInk)
@@ -98,11 +98,11 @@ struct BrandMark: View {
     }
 
     private var greenInk: Color {
-        variant == .template ? .primary : TC.green
+        variant == .template ? .primary : TC.markAccent
     }
 
     private var blueInk: Color {
-        variant == .template ? .primary : TC.blue
+        variant == .template ? .primary : TC.markInk
     }
 
     private var pinnedScheme: ColorScheme? {
