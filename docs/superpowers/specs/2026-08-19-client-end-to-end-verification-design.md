@@ -272,8 +272,14 @@ under Homebrew.
 That is correct design, and the reasoning above it is right: two managers must
 never both believe they own the same file, and the mode carries the `brew`
 command that does work. The problem is that the command it hands the user
-resolves to a cask still pinned at 0.1.0, because the tap-bump automation has
-not run across three releases. Each channel is individually defensible; the
+resolves to a cask that the local tap CHECKOUT reported as 0.1.0. Corrected
+2026-08-20: the tap itself was current -- `origin/main` carried 0.3.0 and the
+release job's cask-bump step had opened and merged a PR for every release. The
+clone on the investigating machine was parked on an old feature branch, and
+Homebrew serves whatever branch the tap checkout has out. A stale local clone
+looks exactly like stale automation from the outside, which is worth knowing
+before concluding a pipeline is broken. Each channel is individually
+defensible; the
 combination leaves a Homebrew contributor stranded two versions back with the
 app telling them, accurately, to run a command that will not move them.
 
@@ -386,8 +392,9 @@ A caution about how much a prose gate is worth here.
 `docs/release-runbook.md:58-72` still says no release has been published and
 that the cask carries placeholder checksums — while `app-v0.2.0`, `app-v0.2.1`
 and `app-v0.3.0` have all shipped, and the tap serves a real checksum for
-0.1.0. The Task 12 tap-bump automation described at `:74` has evidently not
-bumped the cask across three releases, and the runbook did not notice. That
+0.1.0 -- which was a stale local tap checkout, not stale automation; see the
+correction above. The runbook's own text about placeholder checksums IS stale,
+three releases after the first shipped. That
 same unbumped cask is one half of the dead-update-channel problem in "Update
 channels are part of the path" — the failure is not only that a document went
 stale, it is that a shipped install method silently stopped carrying users

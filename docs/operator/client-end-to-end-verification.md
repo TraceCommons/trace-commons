@@ -258,7 +258,10 @@ correctly disabled under Homebrew
 `mode.startsUpdater`; `macos/Sources/TCUpdates/UpdatePolicy.swift:34-37`
 returns `.managedByHomebrew` when Homebrew manages the bundle; `:18-21` makes
 `startsUpdater` true only for `.selfUpdating`), and the cask it points the
-user at has not been bumped in three releases.
+user at reports. Note a local tap checkout parked on an old branch reports a
+stale version while the tap itself is current -- confirm against
+`origin/main` of the tap, not the working copy, before reporting a bump as
+missing.
 
 | Install method | Channel under test | Pass condition |
 |---|---|---|
