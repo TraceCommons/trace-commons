@@ -66,6 +66,16 @@
                 standardises on #315FBA everywhere and drops #315FBB.
             -->
             <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#7FA0EC" />
+
+            <!-- The mark's own palette, deliberately not the semantic accents.
+                 The mark converged on the site's single accent over ink; green
+                 and blue did not move with it and still mean "good standing"
+                 and "held or ranked" everywhere else. Mirrors
+                 Scheme::bracket_open/bracket_close/surface in the
+                 trace-commons-mark crate. Change them together. -->
+            <SolidColorBrush x:Key="TcMarkAccentBrush" Color="#00D4AA" />
+            <SolidColorBrush x:Key="TcMarkInkBrush" Color="#FFFFFF" />
+            <SolidColorBrush x:Key="TcMarkFieldBrush" Color="#000000" />
             <SolidColorBrush x:Key="TcBlueIconBrush" Color="#9DB6F1" />
             <!-- The spec gives no dark chip border for blue; this is the same
                  45% alpha the light palette uses, over the dark blue. -->
@@ -136,6 +146,16 @@
 
             <!-- #315FBA, not #315FBB. See the note in the dark dictionary. -->
             <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#315FBA" />
+
+            <!-- The mark's own palette, deliberately not the semantic accents.
+                 The mark converged on the site's single accent over ink; green
+                 and blue did not move with it and still mean "good standing"
+                 and "held or ranked" everywhere else. Mirrors
+                 Scheme::bracket_open/bracket_close/surface in the
+                 trace-commons-mark crate. Change them together. -->
+            <SolidColorBrush x:Key="TcMarkAccentBrush" Color="#00D4AA" />
+            <SolidColorBrush x:Key="TcMarkInkBrush" Color="#000000" />
+            <SolidColorBrush x:Key="TcMarkFieldBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="TcBlueIconBrush" Color="#315FBA" />
             <SolidColorBrush x:Key="TcBlueChipBorderBrush" Color="#73315FBA" />
 
@@ -196,6 +216,9 @@
             <StaticResource x:Key="TcActiveTabBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
 
             <StaticResource x:Key="TcBlueBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcMarkAccentBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcMarkInkBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcMarkFieldBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcBlueIconBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcBlueChipBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
 

@@ -1,7 +1,7 @@
 //! "The Turn" -- the product mark, as pure geometry.
 //!
 //! Two corner brackets facing each other inside a hairline frame: the user's
-//! bracket top-left in green, the agent's answer bottom-right in blue, and the
+//! bracket top-left in the accent, the closing bracket bottom-right in ink, and the
 //! session implied in the space between them. No gradients, no fills other
 //! than the frame, no asset file behind any of it.
 //!
@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! frame     rect x=1 y=1 w=62 h=62, stroke-width 2
-//! green     M11 28 V11 H28          stroke-width 7
-//! blue      M53 36 v17 H36          stroke-width 7
+//! open      M11 28 V11 H28          stroke-width 7
+//! close     M53 36 v17 H36          stroke-width 7
 //! template  the same two paths in one ink, stroke-width 8, no frame
 //! ```
 //!
@@ -65,23 +65,23 @@ pub const STROKE_FRAME: u32 = 2;
 /// unit so a two-unit stroke lands its outer edge on the view box boundary.
 pub const FRAME_RECT: (u32, u32, u32, u32) = (1, 1, 62, 62);
 
-/// The user's bracket, top-left. `M11 28 V11 H28`.
-pub const PATH_GREEN: &str = "M11 28V11h17";
+/// The opening bracket, top-left. `M11 28 V11 H28`.
+pub const PATH_BRACKET_OPEN: &str = "M11 28V11h17";
 
-/// The agent's answer, bottom-right. `M53 36 v17 H36`.
-pub const PATH_BLUE: &str = "M53 36v17H36";
+/// The closing bracket, bottom-right. `M53 36 v17 H36`.
+pub const PATH_BRACKET_CLOSE: &str = "M53 36v17H36";
 
-/// The green bracket as vertices, for renderers that draw lines rather than
+/// The opening bracket as vertices, for renderers that draw lines rather than
 /// parse a path string -- cairo on Linux, `CGPath` on macOS, Win2D on Windows.
 ///
 /// The SVG path constants above say the same thing in SVG's own notation.
 /// [`tests::path_strings_agree_with_vertices`] is what keeps the two spellings
 /// from drifting; without it this would be the fifth description of the mark
 /// rather than a second view of the first.
-pub const VERTICES_GREEN: [(u32, u32); 3] = [(11, 28), (11, 11), (28, 11)];
+pub const VERTICES_BRACKET_OPEN: [(u32, u32); 3] = [(11, 28), (11, 11), (28, 11)];
 
-/// The blue bracket as vertices. See [`VERTICES_GREEN`].
-pub const VERTICES_BLUE: [(u32, u32); 3] = [(53, 36), (53, 53), (36, 53)];
+/// The closing bracket as vertices. See [`VERTICES_BRACKET_OPEN`].
+pub const VERTICES_BRACKET_CLOSE: [(u32, u32); 3] = [(53, 36), (53, 53), (36, 53)];
 
 /// Which palette the mark is drawn in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,35 +102,51 @@ impl Scheme {
         }
     }
 
-    /// Frame fill. `tc_surface`.
+    /// Frame fill. White, or black when inverted.
     pub fn surface(self) -> &'static str {
         match self {
             Scheme::Light => "#FFFFFF",
-            Scheme::Dark => "#21241E",
+            Scheme::Dark => "#000000",
         }
     }
 
-    /// Frame stroke. `tc_line`.
+    /// Frame stroke. The site draws every panel edge as a hairline in the ink
+    /// colour rather than a tinted rule, and the mark's frame is the same
+    /// object, so it is ink here too -- not the near-invisible grey it used to
+    /// be. At two units on a 64-unit box this is what carries the mark at tray
+    /// sizes, once the accent has washed out.
     pub fn line(self) -> &'static str {
         match self {
-            Scheme::Light => "#D9DFDC",
-            Scheme::Dark => "#3B4038",
+            Scheme::Light => "#000000",
+            Scheme::Dark => "#FFFFFF",
         }
     }
 
-    /// The user's bracket. `tc_green`.
-    pub fn green(self) -> &'static str {
+    /// The opening bracket, top-left. The site's one accent, and the only
+    /// colour in the mark.
+    ///
+    /// It does not change between schemes: the accent is the same value on
+    /// white and on black in the site system, and it is the constant a reader
+    /// recognises the mark by.
+    ///
+    /// On white it clears no contrast ratio worth quoting -- roughly 1.8:1 --
+    /// which is why it is never the only thing describing a shape here. The
+    /// ink frame and the closing bracket carry the form, exactly as the site's
+    /// buttons put a hairline around a teal fill rather than letting the teal
+    /// define the edge.
+    pub fn bracket_open(self) -> &'static str {
         match self {
-            Scheme::Light => "#178F70",
-            Scheme::Dark => "#3FBE9A",
+            Scheme::Light => "#00D4AA",
+            Scheme::Dark => "#00D4AA",
         }
     }
 
-    /// The agent's bracket. `tc_blue`.
-    pub fn blue(self) -> &'static str {
+    /// The closing bracket, bottom-right. Ink, so the pair reads as one accent
+    /// against one ink rather than as two colours of equal weight.
+    pub fn bracket_close(self) -> &'static str {
         match self {
-            Scheme::Light => "#315FBA",
-            Scheme::Dark => "#7FA0EC",
+            Scheme::Light => "#000000",
+            Scheme::Dark => "#FFFFFF",
         }
     }
 
@@ -140,8 +156,8 @@ impl Scheme {
     /// what it falls back to when it cannot.
     pub fn ink(self) -> &'static str {
         match self {
-            Scheme::Light => "#20241F",
-            Scheme::Dark => "#E8EAE3",
+            Scheme::Light => "#000000",
+            Scheme::Dark => "#FFFFFF",
         }
     }
 }
@@ -169,13 +185,13 @@ pub fn svg(scheme: Scheme, size: u32) -> String {
         fw = FRAME_RECT.2,
         fh = FRAME_RECT.3,
         frame_stroke = STROKE_FRAME,
-        green_path = PATH_GREEN,
-        blue_path = PATH_BLUE,
+        green_path = PATH_BRACKET_OPEN,
+        blue_path = PATH_BRACKET_CLOSE,
         stroke = STROKE_FRAMED,
         surface = scheme.surface(),
         line = scheme.line(),
-        green = scheme.green(),
-        blue = scheme.blue(),
+        green = scheme.bracket_open(),
+        blue = scheme.bracket_close(),
     )
 }
 
@@ -202,11 +218,11 @@ pub fn glyph_svg(scheme: Scheme, size: u32) -> String {
         ),
         size = size,
         view = VIEW,
-        green_path = PATH_GREEN,
-        blue_path = PATH_BLUE,
+        green_path = PATH_BRACKET_OPEN,
+        blue_path = PATH_BRACKET_CLOSE,
         stroke = STROKE_FRAMED,
-        green = scheme.green(),
-        blue = scheme.blue(),
+        green = scheme.bracket_open(),
+        blue = scheme.bracket_close(),
     )
 }
 
@@ -225,8 +241,8 @@ pub fn template_svg(ink: &str, size: u32) -> String {
         ),
         size = size,
         view = VIEW,
-        green_path = PATH_GREEN,
-        blue_path = PATH_BLUE,
+        green_path = PATH_BRACKET_OPEN,
+        blue_path = PATH_BRACKET_CLOSE,
         stroke = STROKE_TEMPLATE,
         ink = ink,
     )
@@ -263,14 +279,14 @@ pub fn geometry_json() -> String {
             concat!(
                 "{{\n      \"surface\": \"{surface}\",\n",
                 "      \"line\": \"{line}\",\n",
-                "      \"green\": \"{green}\",\n",
-                "      \"blue\": \"{blue}\",\n",
+                "      \"bracketOpen\": \"{green}\",\n",
+                "      \"bracketClose\": \"{blue}\",\n",
                 "      \"ink\": \"{ink}\"\n    }}",
             ),
             surface = s.surface(),
             line = s.line(),
-            green = s.green(),
-            blue = s.blue(),
+            green = s.bracket_open(),
+            blue = s.bracket_close(),
             ink = s.ink(),
         )
     };
@@ -282,8 +298,8 @@ pub fn geometry_json() -> String {
             "  \"strokeFrame\": {sframe},\n",
             "  \"strokeFramed\": {sframed},\n",
             "  \"strokeTemplate\": {stemplate},\n",
-            "  \"green\": [{green}],\n",
-            "  \"blue\": [{blue}],\n",
+            "  \"bracketOpen\": [{green}],\n",
+            "  \"bracketClose\": [{blue}],\n",
             "  \"schemes\": {{\n    \"light\": {light},\n    \"dark\": {dark}\n  }}\n",
             "}}",
         ),
@@ -295,8 +311,8 @@ pub fn geometry_json() -> String {
         sframe = STROKE_FRAME,
         sframed = STROKE_FRAMED,
         stemplate = STROKE_TEMPLATE,
-        green = vertices(&VERTICES_GREEN),
-        blue = vertices(&VERTICES_BLUE),
+        green = vertices(&VERTICES_BRACKET_OPEN),
+        blue = vertices(&VERTICES_BRACKET_CLOSE),
         light = scheme_object(Scheme::Light),
         dark = scheme_object(Scheme::Dark),
     )
@@ -473,8 +489,8 @@ mod tests {
         assert_eq!(STROKE_FRAME, 2);
         assert_eq!(STROKE_FRAMED, 7);
         assert_eq!(STROKE_TEMPLATE, 8);
-        assert_eq!(PATH_GREEN, "M11 28V11h17");
-        assert_eq!(PATH_BLUE, "M53 36v17H36");
+        assert_eq!(PATH_BRACKET_OPEN, "M11 28V11h17");
+        assert_eq!(PATH_BRACKET_CLOSE, "M53 36v17H36");
     }
 
     /// The frame's outer edge lands exactly on the view box boundary: inset by
@@ -501,24 +517,24 @@ mod tests {
         // horizontal. Rebuilt here from the vertices in exactly that notation.
         let green = format!(
             "M{} {}V{}h{}",
-            VERTICES_GREEN[0].0,
-            VERTICES_GREEN[0].1,
-            VERTICES_GREEN[1].1,
-            VERTICES_GREEN[2].0 - VERTICES_GREEN[1].0,
+            VERTICES_BRACKET_OPEN[0].0,
+            VERTICES_BRACKET_OPEN[0].1,
+            VERTICES_BRACKET_OPEN[1].1,
+            VERTICES_BRACKET_OPEN[2].0 - VERTICES_BRACKET_OPEN[1].0,
         );
-        assert_eq!(green, PATH_GREEN);
+        assert_eq!(green, PATH_BRACKET_OPEN);
 
         // "M53 36v17H36" -- absolute move, relative vertical, absolute
         // horizontal. The two brackets are spelled differently in the source
         // this was transcribed from, and that asymmetry is preserved.
         let blue = format!(
             "M{} {}v{}H{}",
-            VERTICES_BLUE[0].0,
-            VERTICES_BLUE[0].1,
-            VERTICES_BLUE[1].1 - VERTICES_BLUE[0].1,
-            VERTICES_BLUE[2].0,
+            VERTICES_BRACKET_CLOSE[0].0,
+            VERTICES_BRACKET_CLOSE[0].1,
+            VERTICES_BRACKET_CLOSE[1].1 - VERTICES_BRACKET_CLOSE[0].1,
+            VERTICES_BRACKET_CLOSE[2].0,
         );
-        assert_eq!(blue, PATH_BLUE);
+        assert_eq!(blue, PATH_BRACKET_CLOSE);
     }
 
     /// The two brackets are rotationally symmetric about the centre of the view
@@ -528,9 +544,12 @@ mod tests {
     /// hand-typed coordinate pairs.
     #[test]
     fn brackets_are_rotationally_symmetric() {
-        for (green, blue) in VERTICES_GREEN.iter().zip(VERTICES_BLUE.iter()) {
-            assert_eq!(VIEW - green.0, blue.0, "x of {green:?} vs {blue:?}");
-            assert_eq!(VIEW - green.1, blue.1, "y of {green:?} vs {blue:?}");
+        for (open, close) in VERTICES_BRACKET_OPEN
+            .iter()
+            .zip(VERTICES_BRACKET_CLOSE.iter())
+        {
+            assert_eq!(VIEW - open.0, close.0, "x of {open:?} vs {close:?}");
+            assert_eq!(VIEW - open.1, close.1, "y of {open:?} vs {close:?}");
         }
     }
 
@@ -553,17 +572,17 @@ mod tests {
                 scheme.name()
             );
             assert!(
-                doc.contains(scheme.green()),
+                doc.contains(scheme.bracket_open()),
                 "{} glyph lost the green bracket",
                 scheme.name()
             );
             assert!(
-                doc.contains(scheme.blue()),
+                doc.contains(scheme.bracket_close()),
                 "{} glyph lost the blue bracket",
                 scheme.name()
             );
-            assert!(doc.contains(PATH_GREEN));
-            assert!(doc.contains(PATH_BLUE));
+            assert!(doc.contains(PATH_BRACKET_OPEN));
+            assert!(doc.contains(PATH_BRACKET_CLOSE));
         }
     }
 
@@ -573,9 +592,9 @@ mod tests {
     #[test]
     fn the_glyph_variant_keeps_two_colours() {
         let doc = glyph_svg(Scheme::Light, 1024);
-        assert_ne!(Scheme::Light.green(), Scheme::Light.blue());
-        assert!(doc.contains(Scheme::Light.green()));
-        assert!(doc.contains(Scheme::Light.blue()));
+        assert_ne!(Scheme::Light.bracket_open(), Scheme::Light.bracket_close());
+        assert!(doc.contains(Scheme::Light.bracket_open()));
+        assert!(doc.contains(Scheme::Light.bracket_close()));
     }
 
     /// The palette literals here are copies of tokens that live in each
@@ -584,15 +603,15 @@ mod tests {
     #[test]
     fn palette_matches_client_tokens() {
         assert_eq!(Scheme::Light.surface(), "#FFFFFF");
-        assert_eq!(Scheme::Dark.surface(), "#21241E");
-        assert_eq!(Scheme::Light.line(), "#D9DFDC");
-        assert_eq!(Scheme::Dark.line(), "#3B4038");
-        assert_eq!(Scheme::Light.green(), "#178F70");
-        assert_eq!(Scheme::Dark.green(), "#3FBE9A");
-        assert_eq!(Scheme::Light.blue(), "#315FBA");
-        assert_eq!(Scheme::Dark.blue(), "#7FA0EC");
-        assert_eq!(Scheme::Light.ink(), "#20241F");
-        assert_eq!(Scheme::Dark.ink(), "#E8EAE3");
+        assert_eq!(Scheme::Dark.surface(), "#000000");
+        assert_eq!(Scheme::Light.line(), "#000000");
+        assert_eq!(Scheme::Dark.line(), "#FFFFFF");
+        assert_eq!(Scheme::Light.bracket_open(), "#00D4AA");
+        assert_eq!(Scheme::Dark.bracket_open(), "#00D4AA");
+        assert_eq!(Scheme::Light.bracket_close(), "#000000");
+        assert_eq!(Scheme::Dark.bracket_close(), "#FFFFFF");
+        assert_eq!(Scheme::Light.ink(), "#000000");
+        assert_eq!(Scheme::Dark.ink(), "#FFFFFF");
     }
 
     /// The tiles are named by the manifest, at the sizes their filenames
@@ -672,8 +691,8 @@ mod tests {
                 ]
             };
             for (name, hex) in [
-                ("green", Scheme::Light.green()),
-                ("blue", Scheme::Light.blue()),
+                ("bracketOpen", Scheme::Light.bracket_open()),
+                ("bracketClose", Scheme::Light.bracket_close()),
             ] {
                 let want = ink(hex);
                 assert!(
@@ -693,15 +712,15 @@ mod tests {
         let doc = svg(Scheme::Light, 512);
         assert!(doc.contains(r#"width="512" height="512""#), "{doc}");
         assert!(doc.contains(r#"viewBox="0 0 64 64""#), "{doc}");
-        assert!(doc.contains(PATH_GREEN), "{doc}");
-        assert!(doc.contains(PATH_BLUE), "{doc}");
+        assert!(doc.contains(PATH_BRACKET_OPEN), "{doc}");
+        assert!(doc.contains(PATH_BRACKET_CLOSE), "{doc}");
         assert!(doc.contains(r#"stroke-width="7""#), "{doc}");
         assert!(
             doc.contains(r#"<rect x="1" y="1" width="62" height="62""#),
             "{doc}"
         );
-        assert!(doc.contains("#178F70"), "{doc}");
-        assert!(doc.contains("#315FBA"), "{doc}");
+        assert!(doc.contains("#00D4AA"), "{doc}");
+        assert!(doc.contains("#000000"), "{doc}");
     }
 
     /// The template variant is the one that has to survive being masked to a
@@ -715,9 +734,9 @@ mod tests {
             "template must not carry a frame: {doc}"
         );
         assert!(doc.contains(r#"stroke-width="8""#), "{doc}");
-        assert!(doc.contains(PATH_GREEN), "{doc}");
-        assert!(doc.contains(PATH_BLUE), "{doc}");
-        assert!(!doc.contains("#178F70"), "template is single-ink: {doc}");
+        assert!(doc.contains(PATH_BRACKET_OPEN), "{doc}");
+        assert!(doc.contains(PATH_BRACKET_CLOSE), "{doc}");
+        assert!(!doc.contains("#00D4AA"), "template is single-ink: {doc}");
     }
 
     /// Seven documents, distinct paths, and none of them empty. The list drives
@@ -752,12 +771,12 @@ mod tests {
                 export.relative_path
             );
             assert!(
-                export.contents.contains(PATH_GREEN),
+                export.contents.contains(PATH_BRACKET_OPEN),
                 "{}",
                 export.relative_path
             );
             assert!(
-                export.contents.contains(PATH_BLUE),
+                export.contents.contains(PATH_BRACKET_CLOSE),
                 "{}",
                 export.relative_path
             );
@@ -777,16 +796,16 @@ mod tests {
         assert!(doc.contains(r#""strokeFramed": 7"#), "{doc}");
         assert!(doc.contains(r#""strokeTemplate": 8"#), "{doc}");
         assert!(
-            doc.contains(r#""green": [[11, 28], [11, 11], [28, 11]]"#),
+            doc.contains(r#""bracketOpen": [[11, 28], [11, 11], [28, 11]]"#),
             "{doc}"
         );
         assert!(
-            doc.contains(r#""blue": [[53, 36], [53, 53], [36, 53]]"#),
+            doc.contains(r#""bracketClose": [[53, 36], [53, 53], [36, 53]]"#),
             "{doc}"
         );
         assert!(doc.contains("#FFFFFF"), "{doc}");
-        assert!(doc.contains("#178F70"), "{doc}");
-        assert!(doc.contains("#7FA0EC"), "{doc}");
+        assert!(doc.contains("#00D4AA"), "{doc}");
+        assert!(doc.contains("#FFFFFF"), "{doc}");
     }
 
     /// Light and dark have to actually differ, in both treatments. Emitting the

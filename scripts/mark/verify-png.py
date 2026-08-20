@@ -123,10 +123,15 @@ def main() -> int:
         # mark. The two bracket inks are what distinguishes the mark being drawn
         # from something being drawn.
         pixels = {decoded[i : i + 4] for i in range(0, len(decoded), 4)}
-        green = bytes((0x17, 0x8F, 0x70, 0xFF))
-        blue = bytes((0x31, 0x5F, 0xBA, 0xFF))
+        # Since the mark converged on the site palette these are the accent and
+        # ink rather than two hues. Ink is still worth probing for: the tile is
+        # a white card, so opaque black is exactly what a drawn bracket adds.
+        accent = bytes((0x00, 0xD4, 0xAA, 0xFF))
+        ink = bytes((0x00, 0x00, 0x00, 0xFF))
         missing = [
-            name for name, ink in (("green", green), ("blue", blue)) if ink not in pixels
+            name
+            for name, colour in (("accent", accent), ("ink", ink))
+            if colour not in pixels
         ]
         if missing:
             print(
