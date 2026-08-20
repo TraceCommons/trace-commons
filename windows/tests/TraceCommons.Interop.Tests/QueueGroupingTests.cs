@@ -159,4 +159,28 @@ public sealed class QueueGroupingTests
     {
         Assert.Empty(QueueGrouping.ByProject(new List<QueueEntry>()));
     }
+
+    /// <summary>
+    /// KeyOf is the same rule ByProject buckets with, exposed so a caller
+    /// reconstructing which rows belong to a group (ByProject reports counts,
+    /// not membership) does not have to restate the rule and risk it drifting
+    /// from the one actually used to bucket.
+    /// </summary>
+    [Fact]
+    public void KeyOfMatchesWhatByProjectBucketsBy()
+    {
+        var entries = new List<QueueEntry>
+        {
+            Entry("e1", "proj_a", "A"),
+            Entry("e2", null, null),
+        };
+
+        Assert.Equal("proj_a", QueueGrouping.KeyOf(entries[0]));
+        Assert.Equal(string.Empty, QueueGrouping.KeyOf(entries[1]));
+
+        foreach (ProjectQueueGroup group in QueueGrouping.ByProject(entries))
+        {
+            Assert.Contains(entries, e => QueueGrouping.KeyOf(e) == group.ProjectId);
+        }
+    }
 }

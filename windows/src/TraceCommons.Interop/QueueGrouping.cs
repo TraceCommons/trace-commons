@@ -91,7 +91,7 @@ public static class QueueGrouping
         foreach (QueueEntry entry in entries)
         {
             ArgumentNullException.ThrowIfNull(entry);
-            string key = entry.ProjectId ?? string.Empty;
+            string key = KeyOf(entry);
 
             if (!counts.ContainsKey(key))
             {
@@ -106,6 +106,21 @@ public static class QueueGrouping
         return order
             .Select(key => new ProjectQueueGroup(key, labels[key], counts[key]))
             .ToList();
+    }
+
+    /// <summary>
+    /// The bucketing key for one entry -- <see cref="QueueEntry.ProjectId"/>,
+    /// empty-string if absent, never <see cref="QueueEntry.ProjectLabel"/>.
+    /// Public so a caller reconstructing which rows belong to a
+    /// <see cref="ProjectQueueGroup"/> (this method reports counts, not
+    /// membership -- see <see cref="ProjectQueueGroup"/>'s remarks) uses
+    /// exactly the same rule <see cref="ByProject"/> bucketed them with,
+    /// rather than restating it and risking the two rules drifting apart.
+    /// </summary>
+    public static string KeyOf(QueueEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return entry.ProjectId ?? string.Empty;
     }
 
     /// <summary>

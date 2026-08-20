@@ -31,14 +31,19 @@
 
         <Grid.Resources>
             <!--
-                Queue rows are cards, not list rows, so the container gives up
-                its own padding and selection chrome and contributes only the
-                14px gap between cards. Everything visible belongs to the card
-                inside it.
+                The outer list is one item per project now, not one per
+                session, see MainWindow.xaml's queue ListView, which binds
+                Groups rather than Pending. This container gives up its own
+                padding and selection chrome and contributes only the 24px
+                gap between one project's block and the next; the 14px gap
+                between cards inside a project is on each row's own Border
+                margin, in the inner ItemsControl's DataTemplate, because
+                that container is a plain ContentPresenter with no style of
+                its own to carry it.
             -->
-            <Style x:Key="TcQueueCardContainerStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+            <Style x:Key="TcQueueGroupContainerStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
                 <Setter Property="Padding" Value="0" />
-                <Setter Property="Margin" Value="0,0,0,14" />
+                <Setter Property="Margin" Value="0,0,0,24" />
                 <Setter Property="MinHeight" Value="0" />
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -491,14 +496,66 @@
                 </Grid>
 
 
-                <!-- The queue, one session card per waiting session. -->
+                <!--
+                    The queue, grouped by project. The grouping RULE, which
+                    entries share a group, group order, whether a group's
+                    "Submit all" appears, is QueueGrouping.ByProject's, in
+                    TraceCommons.Interop, and is covered by
+                    QueueGroupingTests there; this outer ListView (one item
+                    per project) and the inner ItemsControl (one item per
+                    session within it) only render what that already decided.
+                -->
                 <ListView Grid.Row="2"
-                          ItemsSource="{x:Bind ViewModel.Pending, Mode=OneWay}"
-                          ItemContainerStyle="{StaticResource TcQueueCardContainerStyle}"
+                          ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
+                          ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
                           SelectionMode="None"
                           Padding="22,18,22,22"
                           ScrollViewer.HorizontalScrollMode="Disabled">
                     <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="vm:QueueGroupViewModel">
+                            <StackPanel Spacing="12">
+                                <!--
+                                    The group header: project label, entry
+                                    count, and, only for a project with more
+                                    than one entry, see
+                                    QueueGroupViewModel.ShowSubmitAll, the
+                                    "Submit all" action. A single-entry group
+                                    offers no second way to do what its one
+                                    row's own Submit already does.
+                                -->
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                    <StackPanel Grid.Column="0"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                        <TextBlock Text="{x:Bind ProjectLabel}"
+                                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Text="{x:Bind CountText}"
+                                                   Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                   VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            Style="{StaticResource TcPrimaryButtonStyle}"
+                                            Content="{x:Bind SubmitAllText}"
+                                            Visibility="{x:Bind ShowSubmitAll}"
+                                            Tag="{x:Bind}"
+                                            ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
+                                            Click="OnSubmitAll" />
+                                </Grid>
+
+                                <!--
+                                    The rows, unchanged from a plain queue:
+                                    this ItemsControl carries no selection and
+                                    no virtualization concerns beyond what a
+                                    small per-project list already has, and
+                                    every decision each row's own buttons make
+                                    is exactly as it was when the outer list
+                                    was flat.
+                                -->
+                                <ItemsControl ItemsSource="{x:Bind Entries}">
+                                    <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:QueueEntryViewModel">
                             <!--
                                 The manifest strip bleeds to the card's inside
@@ -510,7 +567,8 @@
                             <Border Background="{ThemeResource TcSurfaceCardBrush}"
                                     BorderBrush="{ThemeResource TcHairlineBrush}"
                                     BorderThickness="1"
-                                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                                    CornerRadius="{StaticResource TcCardCornerRadius}"
+                                    Margin="0,0,0,14">
                                 <StackPanel>
                                     <!-- Header row: name, agent, then the time
                                          pushed to the far edge. -->
@@ -651,6 +709,17 @@
                                                 and TraceCommons.Interop, not
                                                 here.
 
+                                                A submit for the WHOLE project
+                                                lives on the group header this
+                                                row sits under, not here: a
+                                                row that could both submit
+                                                itself and submit its
+                                                siblings would make "Submit"
+                                                ambiguous every time it was
+                                                clicked. See the group header
+                                                below, and
+                                                QueueGroupViewModel.ShowSubmitAll.
+
                                                 "Not this one" rather than
                                                 "Dismiss", because dismiss and
                                                 ignore are different decisions
@@ -683,37 +752,15 @@
                                                         Tag="{x:Bind}"
                                                         ToolTipService.ToolTip="Sends this session without opening it. Scrubbing still runs, and Undo follows for a few seconds."
                                                         Click="OnSubmitEntry" />
-                                                <!--
-                                                    The project-group action.
-                                                    The queue is a flat list
-                                                    with no group headers today
-                                                    (nothing here groups by
-                                                    project_id yet), so this
-                                                    reaches "the project group"
-                                                    the only way this row can:
-                                                    approve every pending entry
-                                                    that shares this row's
-                                                    ProjectId, in one call. It
-                                                    is a distinct button from
-                                                    Submit rather than a second
-                                                    meaning for the same one,
-                                                    because a contributor
-                                                    clicking "Submit" on a
-                                                    session with siblings in
-                                                    the queue must not be
-                                                    surprised that it sent all
-                                                    of them.
-                                                -->
-                                                <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                        Content="Submit project"
-                                                        Tag="{x:Bind}"
-                                                        ToolTipService.ToolTip="Sends every session waiting in this project, not only this one. Scrubbing still runs, and Undo follows for a few seconds."
-                                                        Click="OnSubmitProject" />
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>
                             </Border>
+                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
                         </DataTemplate>
                     </ListView.ItemTemplate>
                 </ListView>

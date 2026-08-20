@@ -675,20 +675,23 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// "Submit project" from a row: approves every pending entry sharing this
-    /// row's <see cref="QueueEntryViewModel.ProjectId"/>, not only this one.
+    /// "Submit all" from a project's group header: one <c>approve</c> call
+    /// for every pending entry in that project, not a loop over its rows.
     /// </summary>
     /// <remarks>
-    /// Sends the id <c>entry_value</c> publishes as <c>project_id</c>, never
-    /// <see cref="QueueEntryViewModel.ProjectLabel"/> -- <see cref="MainViewModel.SubmitProjectAsync"/>
-    /// takes the id and does everything else, including refusing to call the
-    /// daemon at all for a row with no project id.
+    /// Sends <see cref="QueueGroupViewModel.ProjectId"/>, the id
+    /// <c>entry_value</c> publishes, never <see cref="QueueGroupViewModel.ProjectLabel"/>,
+    /// which is display text only. Shown only on a multi-entry group (see
+    /// <see cref="QueueGroupViewModel.ShowSubmitAll"/>), so this handler does
+    /// not need to guard against being reachable from a single-entry one.
+    /// <see cref="MainViewModel.SubmitProjectAsync"/> does everything else:
+    /// building the request, decoding the response, arming Undo.
     /// </remarks>
-    private async void OnSubmitProject(object sender, RoutedEventArgs e)
+    private async void OnSubmitAll(object sender, RoutedEventArgs e)
     {
-        if (EntryOf(sender) is QueueEntryViewModel entry)
+        if (GroupOf(sender) is QueueGroupViewModel group)
         {
-            await ViewModel.SubmitProjectAsync(entry.ProjectId);
+            await ViewModel.SubmitProjectAsync(group.ProjectId);
         }
     }
 
@@ -705,6 +708,16 @@ public sealed partial class MainWindow : Window
     private static QueueEntryViewModel? EntryOf(object sender) =>
         sender is FrameworkElement element
             ? element.Tag as QueueEntryViewModel ?? element.DataContext as QueueEntryViewModel
+            : null;
+
+    /// <summary>
+    /// Which project's group header a "Submit all" click came from. Same
+    /// Tag-first, DataContext-second pattern as <see cref="EntryOf"/>, for
+    /// the same reason: which project a click means must never be ambiguous.
+    /// </summary>
+    private static QueueGroupViewModel? GroupOf(object sender) =>
+        sender is FrameworkElement element
+            ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
             : null;
 
     private async void OnSheetDecided(QueueEntryViewModel entry, PreviewDecision decision)

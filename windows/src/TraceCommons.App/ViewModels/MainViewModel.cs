@@ -105,6 +105,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 
     /// <summary>
+    /// The same queue, grouped by project. Rebuilt alongside <see cref="Pending"/>
+    /// by <see cref="ReplacePending"/> from <see cref="QueueGrouping.ByProject"/> --
+    /// the grouping rule itself (bucket key, order, whether "Submit all"
+    /// shows) lives entirely in <c>TraceCommons.Interop</c> and is tested
+    /// there; this collection only carries that decision to the queue view.
+    /// </summary>
+    public ObservableCollection<QueueGroupViewModel> Groups { get; } = new();
+
+    /// <summary>
     /// Which of the rail's destinations is showing.
     /// </summary>
     /// <remarks>
@@ -597,33 +606,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         // cancel takes exactly one entry_id: a project-group submit approved
         // several entries in one approve call, but there is no batch cancel
-        // to recall them with, so each is recalled in turn. Best-effort --
-        // a sweep can claim one entry while this loop is still working
-        // through the others -- and the notice below says exactly how much
-        // of it actually worked rather than rounding to all-or-nothing.
-        int cancelled = 0;
+        // to recall them with, so each is recalled in turn.
+        //
+        // The spec's Undo copy is written for exactly one recall and gives
+        // no third sentence for "some of them" -- inventing one here would
+        // be exactly the drift the toast contract exists to prevent, so a
+        // partial recall is reported the same as a total refusal: honest
+        // about what it does NOT promise (a full undo), and silent about a
+        // number the spec never asked this button to say out loud. Only
+        // "every one of them came back" gets the success sentence.
+        bool allCancelled = true;
         foreach (string entryId in entryIds)
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.Cancel, SubmitParams.ForEntry(entryId))
                 .ConfigureAwait(true);
 
-            if (!response.IsError)
+            if (response.IsError)
             {
-                cancelled++;
+                allCancelled = false;
             }
         }
 
-        Notice = cancelled switch
-        {
-            0 => "Too late to undo: it has already gone out.",
-            _ when cancelled == entryIds.Count => "Undone. It stays on this machine.",
-            _ => string.Format(
-                CultureInfo.CurrentCulture,
-                "Undone for {0} of {1}; the rest had already gone out.",
-                cancelled,
-                entryIds.Count),
-        };
+        Notice = allCancelled
+            ? "Undone. It stays on this machine."
+            : "Too late to undo: it has already gone out.";
 
         await RefreshAsync().ConfigureAwait(true);
     }
@@ -934,9 +941,33 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void ReplacePending(IReadOnlyList<QueueEntry> entries)
     {
         Pending.Clear();
+
+        var rowsByEntryId = new Dictionary<string, QueueEntryViewModel>(StringComparer.Ordinal);
         foreach (QueueEntry entry in entries)
         {
-            Pending.Add(new QueueEntryViewModel(entry));
+            var row = new QueueEntryViewModel(entry);
+            Pending.Add(row);
+            rowsByEntryId[entry.EntryId] = row;
+        }
+
+        // The grouping rule itself -- bucket key, group order, whether
+        // Submit all shows -- is QueueGrouping.ByProject's, tested in
+        // TraceCommons.Interop.Tests. This only reassembles which rows go
+        // under each group, using QueueGrouping.KeyOf so membership is
+        // computed by the exact same rule the groups were bucketed with.
+        Groups.Clear();
+        foreach (ProjectQueueGroup group in QueueGrouping.ByProject(entries))
+        {
+            var rows = new ObservableCollection<QueueEntryViewModel>();
+            foreach (QueueEntry entry in entries)
+            {
+                if (QueueGrouping.KeyOf(entry) == group.ProjectId)
+                {
+                    rows.Add(rowsByEntryId[entry.EntryId]);
+                }
+            }
+
+            Groups.Add(new QueueGroupViewModel(group, rows));
         }
 
         Raise(nameof(IsEmpty));
