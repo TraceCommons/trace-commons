@@ -237,7 +237,7 @@ git show --stat HEAD
 
 ---
 
-### Task 2: approve takes a project
+### Task 3: approve takes a project
 
 **Files:**
 - Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (the `"approve"` arm, `ids` resolution)
@@ -334,7 +334,7 @@ git show --stat HEAD
 
 ---
 
-### Task 3: approve reports what it found
+### Task 4: approve reports what it found
 
 **Files:**
 - Modify: `crates/trace-commons-contributor/src/daemon/ipc.rs` (the `"approve"` arm's response)
@@ -342,7 +342,7 @@ git show --stat HEAD
 - Test: same file's `mod tests`
 
 **Interfaces:**
-- Consumes: the `built` and `flagged` accumulators from Task 1, `skipped` from Task 1.
+- Consumes: the `built` and `flagged` accumulators from Task 2, `skipped` from Task 2.
 - Produces: the approve response shape three shells render:
   `{"approved": u64, "skipped": [{"entry_id": Uuid, "reason_label": String}],
     "redactions": {String: u32}, "flagged": u64}`
@@ -431,14 +431,14 @@ git show --stat HEAD
 
 ---
 
-### Task 4: the CLI can submit without looking
+### Task 5: the CLI can submit without looking
 
 **Files:**
 - Modify: `crates/trace-commons-contributor/src/commands.rs` (the approve command, near line 2094)
 - Test: `crates/trace-commons-contributor/src/commands.rs` (its `mod tests`)
 
 **Interfaces:**
-- Consumes: the `project_id` parameter from Task 2.
+- Consumes: the `project_id` parameter from Task 3.
 - Produces: `trace-commons-contributor approve --project <id>`; existing
   `--all` and positional-id forms unchanged.
 
@@ -514,7 +514,7 @@ the socket and returns `result`, panicking on an error frame),
 
 ## What this plan does not cover
 
-The three shells. They consume Tasks 1-3 and are thin: a row action calling
+The three shells. They consume Tasks 2-4 and are thin: a row action calling
 `approve` with an entry id, a project action calling it with a project id, and
 a toast rendering the returned counts over `approval_hold_secs` with Undo
 mapped to the existing revoke path. That is a separate plan, written once this
