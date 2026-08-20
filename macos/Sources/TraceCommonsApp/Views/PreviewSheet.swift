@@ -1,5 +1,6 @@
 import SwiftUI
 import TCBridge
+import TCShellCore
 
 /// "Look inside": the one surface in the product that deliberately shows
 /// trace content, because consent to send something you cannot see is not
@@ -841,9 +842,20 @@ struct TranscriptTab: View {
     /// here reports what was read, and nothing here reports the content.
     var onFirstScreenShown: () -> Void = {}
 
-    /// Built once per body rather than per layout pass. Real pilot traces
-    /// run to 169 KB and the marker scan walks all of it.
-    @State private var rendered: AttributedString?
+    /// Built once per body rather than per layout pass, and built from the
+    /// budgeted slice rather than the whole body -- see `TranscriptBudget`.
+    /// A real session runs to 17.5 MB, and one text run that size pins the
+    /// main thread inside CoreText for minutes.
+    ///
+    /// Starts empty rather than optional-with-a-full-body-fallback. The
+    /// fallback used to be `AttributedString(transcript)`, which meant the
+    /// first layout pass typeset the entire body before the marker scan had
+    /// run -- the hang happened on that pass, before any of this state was
+    /// ever set. An empty first frame is the cost of not having that.
+    @State private var rendered = AttributedString()
+
+    /// How much of the body is on screen, and how much is not.
+    @State private var budget: TranscriptBudget.Clamped?
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
@@ -853,8 +865,23 @@ struct TranscriptTab: View {
                 .foregroundStyle(TC.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Only when the body did not fit. The tab promises "exactly what
+            // would be sent" and the button beneath approves every byte, so
+            // a slice shown without saying it is a slice would make that
+            // promise false.
+            if let budget, budget.isClamped {
+                Text(TranscriptBudget.notice(budget))
+                    .font(TC.Font_.caption)
+                    .lineSpacing(
+                        TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.caption)
+                    )
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("transcript-clamped-notice")
+            }
+
             CaptureSafeScroll {
-                Text(rendered ?? AttributedString(transcript))
+                Text(rendered)
                     .font(TC.Font_.monoTranscript)
                     .lineSpacing(
                         TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
@@ -868,8 +895,10 @@ struct TranscriptTab: View {
             .tcCard()
         }
         .task(id: transcript) {
+            let clamped = TranscriptBudget.clamp(transcript)
+            budget = clamped
             rendered = TranscriptMarkers.chipped(
-                transcript.isEmpty ? "(empty)" : transcript,
+                clamped.shown.isEmpty ? "(empty)" : clamped.shown,
                 font: TC.Font_.monoTranscript
             )
         }
