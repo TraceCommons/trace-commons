@@ -47,7 +47,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -331,7 +331,11 @@ fn push_group_if_jsonl(
         .chain(parent_modified)
         .max();
 
-    let cwd = peek_cwd(&path);
+    // Keyed on the PARENT's own size and mtime, not the group's: `peek_cwd`
+    // reads only the parent file, so a subagent transcript appearing beside
+    // it changes `size_bytes` without changing the answer, and keying on the
+    // group total would re-read the parent every time a member landed.
+    let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
     sessions.push(SessionRef {
         source: SOURCE_CLAUDE_CODE,
         path,
@@ -635,9 +639,23 @@ fn apply_group_budget(members: &mut Vec<GroupMember>, parent_len: u64, budget: u
 /// read per session file, which is far less than the full loads the
 /// interactive picker already performs.
 fn peek_cwd(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    for line in text.lines() {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // `read_until` and a lossy conversion per line, not `lines()`: the
+        // old whole-file `from_utf8_lossy` tolerated invalid UTF-8 anywhere
+        // in the file, and `lines()` would abort the iteration instead. A
+        // transcript whose later records are unreadable must still report
+        // its cwd, or `--project` filtering silently disagrees with what
+        // `submit_sessions` delivers.
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        let line = String::from_utf8_lossy(&buf);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -650,7 +668,63 @@ fn peek_cwd(path: &Path) -> Option<String> {
             return Some(c.to_string());
         }
     }
-    None
+}
+
+/// How many memoized cwd answers to hold. See `SESSION_ID_MEMO_CAP`.
+const CWD_MEMO_CAP: usize = 8192;
+
+/// One memoized answer from `peek_cwd`, valid while the file it describes
+/// still reports the same size and mtime.
+#[derive(Debug, Clone)]
+struct CwdMemo {
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Memoized even when absent: a transcript carrying no `cwd` is the
+    /// expensive case, because establishing that means reading to the end.
+    cwd: Option<String>,
+}
+
+/// Process-wide memo for `peek_cwd`, keyed on the transcript's path.
+///
+/// The sibling of `SESSION_ID_MEMO`, for the peek that comment already calls
+/// "the far more expensive whole-file cwd peek". Discovery runs on every
+/// watcher tick and peeked every parent transcript unmemoized; on a real
+/// corpus that is ~0.9GB of Claude transcripts re-read every
+/// `poll_interval_secs` to re-derive an answer that changes only when a file
+/// does. Same (size, mtime) key and the same reasoning about why that is not
+/// a trust boundary.
+static CWD_MEMO: LazyLock<Mutex<HashMap<PathBuf, CwdMemo>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `peek_cwd`, answered from `CWD_MEMO` when the file still reports the size
+/// and mtime the memoized answer was derived from.
+fn peek_cwd_memoized(
+    path: &Path,
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    if let Ok(memo) = CWD_MEMO.lock() {
+        if let Some(hit) = memo.get(path) {
+            if hit.size_bytes == size_bytes && hit.modified_at == modified_at {
+                return hit.cwd.clone();
+            }
+        }
+    }
+    let cwd = peek_cwd(path);
+    if let Ok(mut memo) = CWD_MEMO.lock() {
+        if memo.len() >= CWD_MEMO_CAP && !memo.contains_key(path) {
+            memo.clear();
+        }
+        memo.insert(
+            path.to_path_buf(),
+            CwdMemo {
+                size_bytes,
+                modified_at,
+                cwd: cwd.clone(),
+            },
+        );
+    }
+    cwd
 }
 
 /// Everything one transcript file contributes: its mapped events plus the

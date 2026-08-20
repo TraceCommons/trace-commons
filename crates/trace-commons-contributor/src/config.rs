@@ -123,6 +123,81 @@ pub struct Receipt {
     pub status: String,
 }
 
+/// The state directory's name under whichever per-user base the platform uses.
+const STATE_DIR_NAME: &str = "trace-commons";
+
+/// The default state directory for this platform.
+///
+/// Everywhere except Windows this is `dirs::config_dir()/trace-commons`:
+/// `~/.config/trace-commons` on Linux, `~/Library/Application
+/// Support/trace-commons` on macOS, matching what the native shells use.
+///
+/// Windows deliberately does *not* use `dirs::config_dir()`, which there is
+/// roaming AppData. Two reasons, and either alone is enough:
+///
+/// - Roaming profiles copy that directory between machines. It holds a
+///   device-bound Ed25519 key, a queue of local work, and a lock file. The
+///   server treats one device key as one device, so roaming it puts a single
+///   enrolled identity on several machines at once.
+/// - The native Windows application has always hosted its daemon out of
+///   LocalAppData (`DaemonHost.DefaultConfigDir`). While the CLI used roaming,
+///   the two disagreed about where "this machine's enrollment" lives: enrolling
+///   in one left the other reporting no enrollment at all, on the same account,
+///   on the same machine.
+///
+/// So on Windows the preferred directory is LocalAppData, and an enrollment
+/// left behind in the roaming location is migrated on the next run. See
+/// [`adopt_state_dir`].
+fn platform_default_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let preferred = dirs::config_local_dir()
+            .context("could not determine a local config directory for this platform")?
+            .join(STATE_DIR_NAME);
+        let legacy = dirs::config_dir()
+            .context("could not determine a config directory for this platform")?
+            .join(STATE_DIR_NAME);
+        Ok(adopt_state_dir(&preferred, &legacy))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(dirs::config_dir()
+            .context("could not determine a config directory for this platform")?
+            .join(STATE_DIR_NAME))
+    }
+}
+
+/// Pick between the preferred state directory and a legacy one, migrating an
+/// enrollment out of the legacy location when it is safe to do so.
+///
+/// "Enrolled" means the directory holds a `contributor.json`; a bare directory
+/// counts for nothing, since both the CLI and the app create theirs on first
+/// run whether or not anyone has logged in.
+///
+/// The migration is a single directory rename, so it either happens entirely
+/// or not at all. It is skipped when the preferred directory already holds
+/// state of its own, because merging two state directories is not atomic and a
+/// half-merged one -- a config from here, a device key from there -- is worse
+/// than one that simply has not moved yet. In that case the enrolled legacy
+/// directory keeps being used and the caller is none the wiser.
+#[cfg(any(windows, test))]
+fn adopt_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
+    if preferred.join(CONFIG_FILE).exists() || !legacy.join(CONFIG_FILE).exists() {
+        return preferred.to_path_buf();
+    }
+    // An empty preferred directory is the ordinary case (the app makes one on
+    // first run), and it is the only thing allowed to be in the way. Removing
+    // it fails harmlessly if it holds anything at all.
+    let _ = std::fs::remove_dir(preferred);
+    if let Some(parent) = preferred.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(legacy, preferred) {
+        Ok(()) => preferred.to_path_buf(),
+        Err(_) => legacy.to_path_buf(),
+    }
+}
+
 /// Filesystem-backed store for contributor config, device key, and receipts.
 pub struct ConfigStore {
     dir: PathBuf,
@@ -132,7 +207,7 @@ impl ConfigStore {
     /// Resolve the contributor state directory using precedence:
     /// 1. `explicit` flag
     /// 2. `TRACE_COMMONS_CONTRIBUTOR_DIR` env var
-    /// 3. `dirs::config_dir()/trace-commons`
+    /// 3. the platform default, see [`platform_default_dir`]
     ///
     /// Creates the directory (mode 0700 on unix) if it does not exist.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
@@ -141,9 +216,7 @@ impl ConfigStore {
         } else if let Ok(dir) = std::env::var("TRACE_COMMONS_CONTRIBUTOR_DIR") {
             PathBuf::from(dir)
         } else {
-            dirs::config_dir()
-                .context("could not determine a config directory for this platform")?
-                .join("trace-commons")
+            platform_default_dir()?
         };
         Self::open(dir)
     }
@@ -449,6 +522,90 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         (dir, store)
+    }
+
+    /// A directory that looks enrolled: what `adopt_state_dir` keys off.
+    fn enrolled_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join(CONFIG_FILE), b"{}").unwrap();
+    }
+
+    #[test]
+    fn state_dir_is_the_preferred_one_when_it_holds_the_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        enrolled_dir(&preferred);
+        enrolled_dir(&legacy);
+
+        // Both enrolled is the ambiguous case, and moving the legacy one over
+        // the top would destroy an enrollment. The preferred directory wins
+        // and the legacy one is left exactly where it was.
+        assert_eq!(adopt_state_dir(&preferred, &legacy), preferred);
+        assert!(legacy.join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn state_dir_migrates_an_enrollment_left_in_the_legacy_location() {
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        enrolled_dir(&legacy);
+        std::fs::write(legacy.join(DEVICE_KEY_FILE), b"key").unwrap();
+
+        assert_eq!(adopt_state_dir(&preferred, &legacy), preferred);
+        assert!(preferred.join(CONFIG_FILE).exists());
+        // The whole directory moved, not just the config: a device key left
+        // behind is an enrollment that cannot upload.
+        assert_eq!(
+            std::fs::read(preferred.join(DEVICE_KEY_FILE)).unwrap(),
+            b"key"
+        );
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn state_dir_migrates_past_an_empty_preferred_directory() {
+        // The app creates its state directory on first run whether or not
+        // anyone has enrolled, so an empty directory in the way is the normal
+        // case, not an exotic one.
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        std::fs::create_dir_all(&preferred).unwrap();
+        enrolled_dir(&legacy);
+
+        assert_eq!(adopt_state_dir(&preferred, &legacy), preferred);
+        assert!(preferred.join(CONFIG_FILE).exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn state_dir_keeps_using_the_legacy_one_rather_than_splitting_state() {
+        // Preferred holds something but no enrollment (daemon settings from
+        // the app, say). Merging two directories is not atomic, and a
+        // half-merged state directory is worse than an unmigrated one, so
+        // this keeps using the enrolled directory where it is.
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::write(preferred.join(DAEMON_SETTINGS_FILE), b"{}").unwrap();
+        enrolled_dir(&legacy);
+
+        assert_eq!(adopt_state_dir(&preferred, &legacy), legacy);
+        assert!(legacy.join(CONFIG_FILE).exists());
+        assert!(preferred.join(DAEMON_SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn state_dir_is_the_preferred_one_when_nothing_is_enrolled_anywhere() {
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+
+        assert_eq!(adopt_state_dir(&preferred, &legacy), preferred);
+        assert!(!legacy.exists());
     }
 
     fn sample_config() -> ContributorConfig {

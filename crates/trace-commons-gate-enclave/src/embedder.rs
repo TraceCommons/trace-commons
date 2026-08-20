@@ -96,10 +96,8 @@ impl Embedder for MockEmbedder {
         bytes.truncate(needed_bytes);
 
         let mut v = Vec::with_capacity(MOCK_EMBEDDING_DIM);
-        for chunk in bytes.chunks_exact(4) {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(chunk);
-            let raw = u32::from_be_bytes(buf);
+        for &chunk in bytes.as_chunks::<4>().0 {
+            let raw = u32::from_be_bytes(chunk);
             // Map u32 into [-1, 1]: ratio in [0, 1] then shift to [-1, 1].
             let ratio = raw as f64 / u32::MAX as f64;
             v.push(((ratio * 2.0) - 1.0) as f32);
