@@ -2,10 +2,18 @@
 //!
 //! The row carries what identifies a session to its author -- the project
 //! label, the agent, when, and the redacted opening prompt -- plus what would
-//! be sent and what scrubbing found. What it deliberately does **not** carry
-//! is an approve button. Approving from the row is approving without looking,
-//! which is the misclick the preview-then-approve rule exists to prevent;
-//! `Contribute` lives in the preview sheet and nowhere else.
+//! be sent and what scrubbing found, and now `Submit`: one click that builds,
+//! pins, approves, and raises the toast `crate::toast` renders from the
+//! response. `Contribute` in the preview sheet is still the only way to
+//! *look* first -- `Submit` is the way to say yes without opening it, which
+//! `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` adds
+//! deliberately: the hold window and `Undo` are what make it safe rather
+//! than a confirmation dialog.
+//!
+//! Every project with more than one session waiting gets the same gesture at
+//! its header -- `Submit all` calls `approve` with `project_id`, never by
+//! enumerating entry ids client-side, so "everything in this project" means
+//! exactly what the daemon selects for it.
 //!
 //! Recovery lives here too, on the undo bar, rather than behind the sheet.
 //! A toast takes the only path back with it when it fades; a bar on the
@@ -15,6 +23,7 @@
 //! contributor sees and `project_id` is what goes back to the daemon; the
 //! path does not cross the socket at all, so there is nothing to leak.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -22,7 +31,7 @@ use adw::prelude::*;
 use super::App;
 use super::style::{self, Tone, space};
 use crate::copy;
-use crate::model::{PreviewSummary, QueueEntry, human_bytes, human_when};
+use crate::model::{ApproveResult, PreviewSummary, QueueEntry, human_bytes, human_when};
 
 /// §4.1's `space.5.5`, the bottom of the Linux content stack, and `space.6`,
 /// the gap between the two manifest pairs. The shared scale in
@@ -226,30 +235,63 @@ pub fn wire(app: &Rc<App>) {
 
     let app_for_undo = Rc::clone(app);
     view.undo_undo.connect_clicked(move |_| {
-        // Read the id out and let the borrow end before anything else
+        // Read the ids out and let the borrow end before anything else
         // touches the cell: `dismiss_undo` takes it mutably.
-        let entry_id = {
+        let entry_ids = {
             let held = app_for_undo.undo.borrow();
             match held.as_ref() {
-                Some(undo) => undo.entry_id.clone(),
+                Some(undo) => undo.entry_ids.clone(),
                 None => return,
             }
         };
         app_for_undo.dismiss_undo();
-        app_for_undo.call(
-            "cancel",
-            serde_json::json!({ "entry_id": entry_id }),
-            |app, result| {
-                match result {
-                    Ok(_) => app.toast("Not sent. It's back in the queue."),
-                    // `cancel` is guaranteed to succeed for the whole hold,
-                    // so this is the rare late press -- and it says so
-                    // rather than pretending the press worked.
-                    Err(_) => app.toast("Too late to take that one back -- it has already gone."),
-                }
-                app.refresh();
-            },
-        );
+        if entry_ids.is_empty() {
+            return;
+        }
+        // A row's Undo cancels one entry; a project group's Undo cancels
+        // every entry that call approved. `cancel` takes one id at a time --
+        // there is no bulk form on this socket -- so a group's Undo fires
+        // one call per id and waits for all of them before it says anything,
+        // rather than reporting the first reply as though it spoke for the
+        // rest.
+        let total = entry_ids.len();
+        let outcome = Rc::new(RefCell::new((0usize, 0usize)));
+        for entry_id in entry_ids {
+            let outcome = Rc::clone(&outcome);
+            app_for_undo.call(
+                "cancel",
+                serde_json::json!({ "entry_id": entry_id }),
+                move |app, result| {
+                    let (completed, failed) = {
+                        let mut o = outcome.borrow_mut();
+                        o.0 += 1;
+                        if result.is_err() {
+                            o.1 += 1;
+                        }
+                        *o
+                    };
+                    if completed != total {
+                        return;
+                    }
+                    app.toast(match failed {
+                        0 if total == 1 => "Not sent. It's back in the queue.",
+                        0 => "Not sent. They're back in the queue.",
+                        // `cancel` is guaranteed to succeed for the whole
+                        // hold, so this is the rare late press -- and it
+                        // says so rather than pretending the press worked.
+                        f if f == total && total == 1 => {
+                            "Too late to take that one back -- it has already gone."
+                        }
+                        f if f == total => "Too late to take those back -- they have already gone.",
+                        _ => {
+                            "Some of those were already too late to take back; \
+                              the rest are in the queue again."
+                        }
+                    });
+                    app.refresh();
+                },
+            );
+        }
     });
 
     let app_for_send = Rc::clone(app);
@@ -275,8 +317,40 @@ pub fn render(app: &Rc<App>) {
     view.scroller.set_visible(!pending.is_empty());
     view.heading.set_text(&copy::waiting_heading(pending.len()));
 
+    // Grouped by project, in the order each project's first entry appears,
+    // so a project's header always sits above its own cards. Each entry
+    // keeps the index it had in the flat `pending` list -- `Look inside`
+    // opens the preview sheet by that index, and the sheet re-derives its
+    // own copy of `pending` with the identical filter, so the position this
+    // loop hands to `row` must stay the one that list agrees on, whatever
+    // order the cards are drawn in.
+    let mut groups: Vec<(&str, &str, Vec<(usize, &QueueEntry)>)> = Vec::new();
     for (index, entry) in pending.iter().enumerate() {
-        view.list.append(&row(app, entry, index));
+        match groups.iter_mut().find(|(id, _, _)| *id == entry.project_id) {
+            Some((_, _, members)) => members.push((index, entry)),
+            None => groups.push((
+                &entry.project_id,
+                &entry.project_label,
+                vec![(index, entry)],
+            )),
+        }
+    }
+
+    for (project_id, project_label, members) in &groups {
+        // A group header (and its `Submit all`) only earns its place when it
+        // says something a row's own `Submit` does not: one waiting session
+        // from a project is already covered by that row.
+        if members.len() > 1 {
+            view.list.append(&project_header(
+                app,
+                project_id,
+                project_label,
+                members.len(),
+            ));
+        }
+        for (index, entry) in members {
+            view.list.append(&row(app, entry, *index));
+        }
     }
 
     // Sessions that were queued and then resolved without being sent.
@@ -557,8 +631,17 @@ fn manifest_block(
     let look = gtk::Button::with_label(copy::LOOK_INSIDE);
     look.add_css_class("suggested-action");
     look.add_css_class("tc-primary");
+    // `Submit` is the one-click path this row gained alongside `Look
+    // inside`: it never shows a redacted transcript, so it earns its
+    // prominence from the toast and the hold window that follow it, not
+    // from crowding `Look inside` out of the accent colour.
+    let submit = gtk::Button::with_label(copy::SUBMIT);
+    submit.add_css_class("suggested-action");
+    submit.add_css_class("tc-primary");
+    submit.set_tooltip_text(Some(copy::SUBMIT_TOOLTIP));
     actions.append(&skip);
     actions.append(&look);
+    actions.append(&submit);
     block.append(&actions);
 
     let app_for_look = Rc::clone(app);
@@ -578,7 +661,121 @@ fn manifest_block(
         );
     });
 
+    let app_for_submit = Rc::clone(app);
+    let entry_id = entry.entry_id.clone();
+    let project_label = entry.project_label.clone();
+    submit.connect_clicked(move |_| {
+        submit_and_toast(
+            &app_for_submit,
+            serde_json::json!({ "entry_id": entry_id }),
+            project_label.clone(),
+            vec![entry_id.clone()],
+        );
+    });
+
     block
+}
+
+/// A project's header, drawn only when it has more than one session
+/// waiting -- see `render`. `Submit all` calls `approve` with `project_id`
+/// rather than enumerating this project's entry ids itself: the daemon is
+/// what decides which entries that selects, exactly once, and this shell
+/// does not keep its own copy of that rule.
+fn project_header(
+    app: &Rc<App>,
+    project_id: &str,
+    project_label: &str,
+    waiting: usize,
+) -> gtk::Widget {
+    let bar = style::card(gtk::Orientation::Horizontal, space::M);
+    bar.set_valign(gtk::Align::Center);
+
+    let heading = gtk::Label::builder()
+        .label(copy::project_group_heading(project_label, waiting))
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    heading.add_css_class("tc-card-title");
+    bar.append(&heading);
+
+    let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
+    submit_all.add_css_class("suggested-action");
+    submit_all.add_css_class("tc-primary");
+    submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
+    bar.append(&submit_all);
+
+    let app_for_submit = Rc::clone(app);
+    let project_id = project_id.to_string();
+    let project_label = project_label.to_string();
+    submit_all.connect_clicked(move |_| {
+        // Read fresh at click time rather than off what `render` captured
+        // when the header was drawn: the queue can change between a render
+        // and a click, and this is only ever the CANDIDATE set for the undo
+        // bar -- see `submit_and_toast` -- never what tells the daemon what
+        // to approve. `project_id` alone does that.
+        let candidates: Vec<String> = app_for_submit
+            .entries
+            .borrow()
+            .iter()
+            .filter(|e| e.state == "pending" && e.project_id == project_id)
+            .map(|e| e.entry_id.clone())
+            .collect();
+        submit_and_toast(
+            &app_for_submit,
+            serde_json::json!({ "project_id": project_id }),
+            project_label.clone(),
+            candidates,
+        );
+    });
+
+    bar.upcast()
+}
+
+/// One call to `approve`, rendered through `crate::toast` and, when it
+/// earns one, an undo bar -- the shared path for the row's `Submit` and the
+/// project group's `Submit all`.
+///
+/// `candidate_entry_ids` is every entry this call was asked to cover,
+/// known on the client before the response arrives. `approve` never
+/// returns the ids it approved -- only a count -- so the undo bar's set is
+/// derived here: `candidate_entry_ids` minus whatever the response's
+/// `skipped` list names by id. For a row that is exactly one id or none;
+/// for a project group it is best-effort against a queue that can move
+/// between the click and the reply, which is the same race `approve`
+/// itself resolves server-side by re-checking under its own lock.
+///
+/// A refusal (an unrecognised `entry_id` or `project_id`, or any other
+/// transport failure) is reported plainly rather than folded into the
+/// toast's skip clause: nothing about the request was honoured, so none of
+/// the four toast clauses describe it.
+fn submit_and_toast(
+    app: &Rc<App>,
+    params: serde_json::Value,
+    project_label: String,
+    candidate_entry_ids: Vec<String>,
+) {
+    app.call("approve", params, move |app, result| {
+        match result {
+            Ok(value) => match serde_json::from_value::<ApproveResult>(value) {
+                Ok(approve) => {
+                    let skipped_ids: std::collections::HashSet<&str> = approve
+                        .skipped
+                        .iter()
+                        .map(|s| s.entry_id.as_str())
+                        .collect();
+                    let entry_ids: Vec<String> = candidate_entry_ids
+                        .into_iter()
+                        .filter(|id| !skipped_ids.contains(id.as_str()))
+                        .collect();
+                    app.render_submit_response(&approve, entry_ids, &project_label);
+                }
+                Err(_) => app.toast(copy::SUBMIT_FAILED),
+            },
+            Err(_) => app.toast(copy::SUBMIT_FAILED),
+        }
+        app.refresh();
+    });
 }
 
 /// The "Removed by pattern" figure: the receipt's own categories, in the

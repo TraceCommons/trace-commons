@@ -3,10 +3,10 @@ import Foundation
 /// The submit toast: the daemon's counts, said in one sentence.
 ///
 /// One-click submit sends a session nobody previewed, so the toast is the
-/// only place a contributor learns what happened -- what went, what
-/// scrubbing did to it, what was held, and what never left. That makes the
-/// wording a contract rather than a presentation detail, and it is fixed in
-/// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under
+/// only place a contributor learns what happened -- what was approved, what
+/// scrubbing did to it, what was held, and what was not approved. That makes
+/// the wording a contract rather than a presentation detail, and it is fixed
+/// in `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under
 /// "The toast: normative copy". The strings below are transcribed from that
 /// section, not paraphrased from it.
 ///
@@ -28,10 +28,10 @@ public struct SubmitToast: Equatable, Sendable {
 
     /// Whether to offer Undo alongside it.
     ///
-    /// True only when something was actually sent. Offering Undo on any
+    /// True only when something was actually approved. Offering Undo on any
     /// successful response was correct while every approval succeeded and
     /// is wrong now that entries can be skipped: a skipped entry with an
-    /// undo timer behind it reads as sent.
+    /// undo timer behind it reads as approved.
     public let offerUndo: Bool
 
     public init(line: String, offerUndo: Bool) {
@@ -53,14 +53,10 @@ public struct SubmitToast: Equatable, Sendable {
         flagged: UInt64,
         skipped: [String]
     ) -> SubmitToast {
-        var clauses = [sentClause(approved), scrubClause(redactions)]
+        var clauses = [approvedClause(approved), scrubClause(redactions)]
 
-        if flagged > 0 {
-            clauses.append(flaggedClause(flagged))
-        }
-
-        if !skipped.isEmpty {
-            clauses.append(skippedClause(skipped))
+        if let joined = flaggedAndSkippedClause(flagged, skipped) {
+            clauses.append(joined)
         }
 
         return SubmitToast(line: clauses.joined(separator: " "), offerUndo: approved > 0)
@@ -68,12 +64,17 @@ public struct SubmitToast: Equatable, Sendable {
 
     // --- The clauses ---------------------------------------------------
 
-    /// Clause 1: what was sent.
-    static func sentClause(_ approved: UInt64) -> String {
+    /// Clause 1: what happened.
+    ///
+    /// Corrected 2026-08-20: this used to say "Sent", and that was false.
+    /// At toast time nothing has left the machine -- the approval is
+    /// recorded and the watcher sends it on its next sweep. A toast reading
+    /// "Sent." while still offering Undo contradicted itself.
+    static func approvedClause(_ approved: UInt64) -> String {
         switch approved {
-        case 0: return "Nothing sent."
-        case 1: return "Sent."
-        default: return "Sent \(approved) sessions."
+        case 0: return "Nothing approved."
+        case 1: return "Approved."
+        default: return "Approved \(approved)."
         }
     }
 
@@ -89,34 +90,57 @@ public struct SubmitToast: Equatable, Sendable {
     static func scrubClause(_ totalRedactions: UInt64) -> String {
         switch totalRedactions {
         case 0: return "Scrubbing matched nothing."
-        case 1: return "Scrubbing removed 1 thing."
-        default: return "Scrubbing removed \(totalRedactions) things."
+        default: return "Scrubbing removed \(totalRedactions)."
         }
     }
 
-    /// Clause 3: what was flagged. Rendered only when `flagged > 0`.
-    static func flaggedClause(_ flagged: UInt64) -> String {
-        "\(flagged) flagged."
-    }
-
-    /// Clause 4: what was not sent. Rendered only when something was
-    /// skipped.
+    /// Clauses 3 and 4: what was flagged, and what was not approved.
     ///
-    /// The count is entries; the list is distinct reasons. Those are
-    /// different numbers whenever several entries were skipped for the same
-    /// reason, and the sentence says both because a contributor needs the
-    /// first to know how much is still queued and the second to know what
-    /// to do about it.
-    static func skippedClause(_ skipped: [String]) -> String {
-        var reasons: [String] = []
-        for (_, human) in skipReasons where skipped.contains(where: { reasonLabel($0) == human }) {
-            reasons.append(human)
-        }
-        if skipped.contains(where: { reasonLabel($0) == skipReasonUnknown }) {
-            reasons.append(skipReasonUnknown)
+    /// Corrected 2026-08-20: these used to be two independent clauses. The
+    /// spec now joins them into one, comma-separated, with each half
+    /// present only when non-zero -- `nil` when both are zero, i.e. the
+    /// whole clause is absent.
+    ///
+    /// The skip count is entries; the reason list is distinct reasons.
+    /// Those are different numbers whenever several entries were skipped
+    /// for the same reason, and the sentence says both because a
+    /// contributor needs the first to know how much is still queued and
+    /// the second to know what to do about it.
+    ///
+    /// `skipReasonUnknown` now happens to share text with one of the
+    /// table's own labels (`not-pinned`), so the reason list is
+    /// deduplicated by its rendered text rather than assembled
+    /// positionally -- otherwise a batch mixing `not-pinned` and an
+    /// unrecognised label would print "could not be prepared" twice.
+    static func flaggedAndSkippedClause(_ flagged: UInt64, _ skipped: [String]) -> String? {
+        let flaggedHalf: String? = flagged > 0 ? "\(flagged) flagged" : nil
+
+        let skippedHalf: String?
+        if skipped.isEmpty {
+            skippedHalf = nil
+        } else {
+            var reasons: [String] = []
+            for (_, human) in skipReasons
+            where !reasons.contains(human) && skipped.contains(where: { reasonLabel($0) == human }) {
+                reasons.append(human)
+            }
+            if !reasons.contains(skipReasonUnknown)
+                && skipped.contains(where: { reasonLabel($0) == skipReasonUnknown }) {
+                reasons.append(skipReasonUnknown)
+            }
+            skippedHalf = "\(skipped.count) not approved: \(reasons.joined(separator: ", "))"
         }
 
-        return "\(skipped.count) not sent: \(reasons.joined(separator: ", "))."
+        switch (flaggedHalf, skippedHalf) {
+        case (nil, nil):
+            return nil
+        case let (f?, nil):
+            return "\(f)."
+        case let (nil, s?):
+            return "\(s)."
+        case let (f?, s?):
+            return "\(f), \(s)."
+        }
     }
 
     // --- The reason table ----------------------------------------------
@@ -143,12 +167,18 @@ public struct SubmitToast: Equatable, Sendable {
 
     /// What an unrecognised wire label is called instead of itself.
     ///
+    /// Corrected 2026-08-20: this used to read "could not be sent"; that
+    /// word belonged to the old, now-false "Sent" clause 1. Fixed to
+    /// "could not be prepared", which happens to coincide with
+    /// `not-pinned`'s own label -- both are, honestly, the least specific
+    /// true statement available.
+    ///
     /// The spec's table is closed today, but a daemon newer than the shell
     /// can send a label this build has never been taught, and the one thing
     /// that must not then happen is the shell echoing protocol vocabulary
     /// at a contributor. So an unknown label degrades to the least specific
     /// true statement available, and is listed last.
-    public static let skipReasonUnknown = "could not be sent"
+    public static let skipReasonUnknown = "could not be prepared"
 
     /// Translate one wire reason label. Never returns its argument.
     public static func reasonLabel(_ wire: String) -> String {

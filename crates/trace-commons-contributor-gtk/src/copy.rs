@@ -63,6 +63,47 @@ pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
 pub const NOT_THIS_ONE_TOOLTIP: &str =
     "Skips this session only. This project will keep being offered.";
+
+/// The one-click send on a queue row. See
+/// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click
+/// builds, pins, and approves, then raises the toast that says what
+/// happened -- see [`crate::toast`].
+///
+/// The tooltip says "approves", never "sends": nothing leaves the machine
+/// at click time, only at the watcher's next sweep -- [`UNDO_BODY`] states
+/// that for the undo bar, and a toast that once said "Sent." while still
+/// offering Undo was the same contradiction this tooltip must not repeat.
+pub const SUBMIT: &str = "Submit";
+pub const SUBMIT_TOOLTIP: &str = "Approves this session now. Scrubbing runs first; the watcher \
+     sends it on its next sweep, and you can undo before then.";
+
+/// The same gesture at the project level, on the group's header rather than
+/// on a row. Calls `approve` with a `project_id` rather than an `entry_id`
+/// -- the daemon selects that project's pending entries, this shell never
+/// enumerates them itself.
+pub const SUBMIT_ALL: &str = "Submit all";
+pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this project now. \
+     Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
+     then.";
+
+/// A project group's header line: the label and how many are waiting under
+/// it. Deliberately plain -- the manifest strip already carries the figures
+/// a contributor weighs; this is only what tells the sessions below apart
+/// from the ones above.
+pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
+    match waiting {
+        1 => format!("{project_label} -- 1 waiting"),
+        n => format!("{project_label} -- {n} waiting"),
+    }
+}
+
+/// Shown instead of the toast's own sentence when `approve` itself refused
+/// the call -- an unrecognised `entry_id` or `project_id`, or any other
+/// transport failure. This is not a skip: nothing about the request was
+/// honoured, so none of the four toast clauses apply, and presenting it as
+/// one would claim the daemon looked at entries it never touched.
+pub const SUBMIT_FAILED: &str = "That couldn't be approved just now. Nothing has been approved.";
+
 pub const QUEUE_EMPTY_TITLE: &str = "Nothing waiting";
 pub const QUEUE_EMPTY_BODY: &str = "When a session finishes and goes quiet, it shows up here. \
      Nothing is sent unless you say so.";
@@ -178,8 +219,6 @@ pub const CLOSE: &str = "Close";
 
 pub const SENDING: &str = "Sending…";
 pub const UNDO: &str = "Undo";
-/// Used when the daemon reports no hold, so no undo may be offered.
-pub const APPROVED_NO_UNDO: &str = "Approved. It goes out on the next pass.";
 
 pub fn undo_headline(project_label: &str) -> String {
     format!("Approved {project_label}. Still on this machine.")
@@ -1228,12 +1267,17 @@ pub fn scope_title(wire_name: &str) -> String {
 //
 // `crate::toast` assembles these into the finished line.
 
-/// Clause 1: what was sent.
-pub fn submit_sent_clause(approved: u64) -> String {
+/// Clause 1: what happened.
+///
+/// Corrected 2026-08-20: this used to say "Sent", and that was false. At
+/// toast time nothing has left the machine -- the approval is recorded and
+/// the watcher sends it on its next sweep (`copy.rs:192`). A toast reading
+/// "Sent." while still offering Undo contradicted itself.
+pub fn submit_approved_clause(approved: u64) -> String {
     match approved {
-        0 => "Nothing sent.".to_string(),
-        1 => "Sent.".to_string(),
-        n => format!("Sent {n} sessions."),
+        0 => "Nothing approved.".to_string(),
+        1 => "Approved.".to_string(),
+        n => format!("Approved {n}."),
     }
 }
 
@@ -1249,14 +1293,8 @@ pub fn submit_sent_clause(approved: u64) -> String {
 pub fn submit_scrub_clause(total_redactions: u64) -> String {
     match total_redactions {
         0 => "Scrubbing matched nothing.".to_string(),
-        1 => "Scrubbing removed 1 thing.".to_string(),
-        n => format!("Scrubbing removed {n} things."),
+        n => format!("Scrubbing removed {n}."),
     }
-}
-
-/// Clause 3: what was flagged. Rendered only when `flagged > 0`.
-pub fn submit_flagged_clause(flagged: u64) -> String {
-    format!("{flagged} flagged.")
 }
 
 /// The human label for each wire reason an entry can be skipped for, in the
@@ -1278,12 +1316,17 @@ pub const SUBMIT_SKIP_REASONS: [(&str, &str); 6] = [
 
 /// What an unrecognised wire label is called instead of itself.
 ///
+/// Corrected 2026-08-20: this used to read "could not be sent"; that word
+/// belonged to the old, now-false "Sent" clause 1. Fixed to "could not be
+/// prepared", which happens to coincide with `not-pinned`'s own label --
+/// both are, honestly, the least specific true statement available.
+///
 /// The spec's table is closed today, but a daemon newer than the shell can
 /// send a label this build has never been taught, and the one thing that
 /// must not then happen is the shell echoing protocol vocabulary at a
 /// contributor. So an unknown label degrades to the least specific true
 /// statement available, and is listed last.
-pub const SUBMIT_SKIP_REASON_UNKNOWN: &str = "could not be sent";
+pub const SUBMIT_SKIP_REASON_UNKNOWN: &str = "could not be prepared";
 
 /// Translate one wire reason label. Never returns its argument.
 pub fn submit_skip_reason_label(wire: &str) -> &'static str {
@@ -1294,27 +1337,58 @@ pub fn submit_skip_reason_label(wire: &str) -> &'static str {
         .unwrap_or(SUBMIT_SKIP_REASON_UNKNOWN)
 }
 
-/// Clause 4: what was not sent. Rendered only when something was skipped.
+/// Clauses 3 and 4: what was flagged, and what was not approved.
 ///
-/// The count is entries; the list is distinct reasons. Those are different
-/// numbers whenever several entries were skipped for the same reason, and
-/// the sentence says both because a contributor needs the first to know how
-/// much is still queued and the second to know what to do about it.
-pub fn submit_skipped_clause(skipped: &[&str]) -> String {
-    let mut reasons: Vec<&'static str> = Vec::new();
-    for (_, human) in SUBMIT_SKIP_REASONS {
-        if skipped.iter().any(|w| submit_skip_reason_label(w) == human) {
-            reasons.push(human);
-        }
-    }
-    if skipped
-        .iter()
-        .any(|w| submit_skip_reason_label(w) == SUBMIT_SKIP_REASON_UNKNOWN)
-    {
-        reasons.push(SUBMIT_SKIP_REASON_UNKNOWN);
-    }
+/// Corrected 2026-08-20: these used to be two independent clauses. The
+/// spec now joins them into one, comma-separated, with each half present
+/// only when non-zero -- `None` when both are zero, i.e. the whole clause
+/// is absent.
+///
+/// The skip count is entries; the reason list is distinct reasons. Those
+/// are different numbers whenever several entries were skipped for the same
+/// reason, and the sentence says both because a contributor needs the first
+/// to know how much is still queued and the second to know what to do about
+/// it.
+///
+/// `SUBMIT_SKIP_REASON_UNKNOWN` now happens to share text with one of the
+/// table's own labels (`not-pinned`), so the reason list is deduplicated by
+/// its rendered text rather than assembled positionally -- otherwise a
+/// batch mixing `not-pinned` and an unrecognised label would print "could
+/// not be prepared" twice.
+pub fn submit_flagged_and_skipped_clause(flagged: u64, skipped: &[&str]) -> Option<String> {
+    let flagged_half = (flagged > 0).then(|| format!("{flagged} flagged"));
 
-    format!("{} not sent: {}.", skipped.len(), reasons.join(", "))
+    let skipped_half = if skipped.is_empty() {
+        None
+    } else {
+        let mut reasons: Vec<&'static str> = Vec::new();
+        for (_, human) in SUBMIT_SKIP_REASONS {
+            if !reasons.contains(&human)
+                && skipped.iter().any(|w| submit_skip_reason_label(w) == human)
+            {
+                reasons.push(human);
+            }
+        }
+        if !reasons.contains(&SUBMIT_SKIP_REASON_UNKNOWN)
+            && skipped
+                .iter()
+                .any(|w| submit_skip_reason_label(w) == SUBMIT_SKIP_REASON_UNKNOWN)
+        {
+            reasons.push(SUBMIT_SKIP_REASON_UNKNOWN);
+        }
+        Some(format!(
+            "{} not approved: {}",
+            skipped.len(),
+            reasons.join(", ")
+        ))
+    };
+
+    match (flagged_half, skipped_half) {
+        (None, None) => None,
+        (Some(f), None) => Some(format!("{f}.")),
+        (None, Some(s)) => Some(format!("{s}.")),
+        (Some(f), Some(s)) => Some(format!("{f}, {s}.")),
+    }
 }
 
 #[cfg(test)]

@@ -997,13 +997,22 @@ impl Sheet {
         );
     }
 
-    /// Approve exactly the bytes this sheet described, then offer a real
-    /// undo.
+    /// Approve exactly the bytes this sheet described, render the toast
+    /// `crate::toast` builds from what came back, and offer a real undo
+    /// when the response earns one.
     ///
     /// The undo itself is the queue's, not the sheet's: recovery lives on
     /// the screen a contributor lands on after deciding, not behind a sheet
     /// that has already closed or moved on to the next session. See
     /// `App::offer_undo`.
+    ///
+    /// `App::render_submit_response` decides whether Undo is offered --
+    /// through `ApproveResult::offers_undo`, which is the fix for the
+    /// defect this used to carry: a decode failure used to fall back to
+    /// `approved: 1` and call `offer_undo` unconditionally, so any `Ok`
+    /// response looked sent. The fallback here is `ApproveResult::default()`
+    /// (`approved: 0`), which renders "Nothing sent" and offers no undo --
+    /// fail-closed, the same rule a genuinely skipped entry gets.
     fn approve_current(self: &Rc<Self>) {
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
@@ -1016,17 +1025,15 @@ impl Sheet {
             move |app, result| {
                 match result {
                     Ok(value) => {
-                        let approved: ApproveResult =
-                            serde_json::from_value(value).unwrap_or(ApproveResult {
-                                approved: 1,
-                                hold_secs: 0,
-                                hold_until: None,
-                            });
-                        app.offer_undo(&entry_id, &project_label, approved.hold_until);
+                        let approve: ApproveResult =
+                            serde_json::from_value(value).unwrap_or_default();
+                        app.render_submit_response(
+                            &approve,
+                            vec![entry_id.clone()],
+                            &project_label,
+                        );
                     }
-                    Err(_) => {
-                        app.toast("That couldn't be approved just now. Nothing has been sent.")
-                    }
+                    Err(_) => app.toast(copy::SUBMIT_FAILED),
                 }
                 app.refresh();
                 sheet.advance();
