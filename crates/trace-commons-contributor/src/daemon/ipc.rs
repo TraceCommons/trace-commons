@@ -1248,11 +1248,14 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
         }
     }
-    // Entries nobody previewed have no artifact behind them. Build one now:
-    // the uploader rebuilds at send time and compares against this pin, so
-    // an approval without it is refused and re-offered rather than sent --
-    // which is what "approve from the tray, without opening anything"
-    // would otherwise silently amount to.
+    // Entries nobody previewed have no artifact behind them. Build one now.
+    //
+    // What is at stake if this is not done, or is done and does not stick:
+    // an entry with no pin is not refused at upload. `approved_envelope_for`
+    // returns `Ok(None)` for a missing pin, and `submit` treats `None` as
+    // "build one" -- so the uploader silently constructs a fresh envelope
+    // and sends it. Approving from the tray without this would mean sending
+    // bytes no contributor was ever shown, reported back as a success.
     //
     // The build is async and must not run under the queue lock, so the
     // entries are cloned out under a short lock of their own and the lock
@@ -1266,14 +1269,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             .collect()
     };
     // Fixed labels, one per entry that could not be given an artifact.
-    // Nothing here is approved: an approval the uploader will refuse is
-    // worse than a refusal the contributor can see.
+    // Nothing here is approved: sending something the contributor was never
+    // shown is worse than a refusal they can see.
     let mut skipped: Vec<(Uuid, &'static str)> = Vec::new();
     for (id, entry) in unpinned {
-        // An unenrolled build is deliberately never pinned -- it is a
-        // placeholder-identity artifact, not the one an upload would send
-        // -- so there is nothing for approve to do with it. Refuse rather
-        // than run the pipeline and approve something unpinnable.
+        // An unenrolled build is never pinned -- it is a placeholder
+        // -identity artifact, not the one an upload would send -- so there
+        // is nothing for approve to do with it. This is an optimisation of
+        // the pin re-check below, which would skip such an entry anyway,
+        // and it exists only so the caller gets the specific label rather
+        // than a generic one.
         if cfg.is_none() {
             skipped.push((id, "not-enrolled"));
             continue;
@@ -1289,6 +1294,21 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     for id in &ids {
         let id = *id;
         if skipped_ids.contains(&id) {
+            continue;
+        }
+        // The pin is re-checked here, under the lock that approves, rather
+        // than inferred from the build returning `Ok`. `build_and_pin_preview`
+        // is `Ok` whenever the *build* succeeded, and `pin_previewed_envelope`
+        // declines silently when the envelope could not be written, when the
+        // queue write failed, or when the entry left `Pending` while the
+        // build was running. Trusting `Ok` would approve an entry with no
+        // artifact behind it, which is the one thing the uploader does not
+        // catch. An entry that is still unpinned here is left `Pending` for
+        // the contributor to approve again.
+        if queue
+            .get(id)
+            .is_none_or(|e| e.previewed_envelope_digest.is_none())
+        {
             continue;
         }
         if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {

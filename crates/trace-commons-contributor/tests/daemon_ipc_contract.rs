@@ -1032,3 +1032,54 @@ async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
         "the pinned digest must name the bytes actually persisted"
     );
 }
+
+#[tokio::test]
+async fn an_approval_whose_envelope_cannot_be_stored_is_not_reported_as_approved() {
+    // The hole a build returning `Ok` hides. `pin_previewed_envelope`
+    // declines silently when the envelope cannot be written, so the build
+    // succeeds and the entry stays unpinned -- and an unpinned entry is not
+    // refused at upload: `approved_envelope_for` returns `Ok(None)` and
+    // `submit` builds a fresh envelope from that `None` and sends it. An
+    // approval reported as successful here would mean bytes nobody was
+    // shown going out. So the pin is re-checked before the entry is
+    // approved, and an entry that could not be pinned stays `Pending`.
+    //
+    // The write is made to fail by planting a directory where the stored
+    // envelope's file has to go: the atomic rename onto it cannot succeed,
+    // and nothing else on the store is disturbed.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    std::fs::create_dir_all(
+        store.daemon_path(
+            &trace_commons_contributor::daemon::approved_envelope::file_name(entry_id),
+        ),
+    )
+    .unwrap();
+
+    let mut c = connect_to(&store_dir).await;
+    c.send(&format!(
+        r#"{{"id":1,"method":"approve","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    assert_eq!(
+        resp["result"]["approved"], 0,
+        "an entry with no artifact behind it must not be counted as approved: {resp}"
+    );
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    assert!(
+        entry.previewed_envelope_digest.is_none(),
+        "the fixture must actually have prevented the pin, or this test \
+         proves nothing"
+    );
+    assert_eq!(
+        entry.state,
+        QueueState::Pending,
+        "an entry that could not be pinned stays pending rather than \
+         becoming an approval the uploader would satisfy by building and \
+         sending something nobody saw"
+    );
+}
