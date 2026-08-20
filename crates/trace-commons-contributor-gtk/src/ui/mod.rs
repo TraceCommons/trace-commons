@@ -25,7 +25,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::copy;
-use crate::model::{HistoryRollup, PreviewSummary, QueueEntry, Status};
+use crate::model::{ApproveResult, HistoryRollup, PreviewSummary, QueueEntry, Status};
 use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
@@ -71,7 +71,11 @@ type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 /// response. Nothing here is computed from a duration this process picked --
 /// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
 pub struct PendingUndo {
-    pub entry_id: String,
+    /// Every entry this approval covers. A row's Submit holds exactly one; a
+    /// project group's Submit all holds every entry `approve` reported
+    /// approved, which is why Undo must cancel each of them rather than
+    /// assuming there is only ever one.
+    pub entry_ids: Vec<String>,
     pub project_label: String,
     /// When this window offered the undo, which is what the bar's "held 41s"
     /// counts up from. It counts *up* on purpose: the app cannot see the
@@ -634,6 +638,48 @@ impl App {
         self.queue_badge.set_visible(waiting > 0);
     }
 
+    /// Render the sentence `approve` earns -- see `crate::toast` -- and, when
+    /// it says Undo belongs with it, offer one.
+    ///
+    /// This is the single place both the queue row's Submit and the project
+    /// group's Submit all reach the toast, so the two controls cannot drift
+    /// in how they read the same response. `entry_ids` is the set the undo
+    /// bar's `Undo` must cancel: one id for a row, every entry a project
+    /// call approved for a group.
+    ///
+    /// `offer_undo` is only called when the daemon returned a `hold_until`:
+    /// `approve > 0` with no `hold_until` means the hold is configured off,
+    /// which the rendered sentence already reports as sent, and there is
+    /// nothing left to hold open.
+    pub fn render_submit_response(
+        self: &Rc<Self>,
+        approve: &ApproveResult,
+        entry_ids: Vec<String>,
+        project_label: &str,
+    ) {
+        let skipped: Vec<&str> = approve
+            .skipped
+            .iter()
+            .map(|s| s.reason_label.as_str())
+            .collect();
+        let rendered = crate::toast::toast(
+            approve.approved,
+            approve.total_redactions(),
+            approve.flagged,
+            &skipped,
+        );
+        self.toast(&rendered.line);
+        // `ApproveResult::offers_undo` is the single source of truth for
+        // this decision -- see its doc comment for the defect it fixes --
+        // so this checks it directly rather than re-deriving `rendered`'s
+        // half of the same rule here.
+        if approve.offers_undo() {
+            if let Some(hold_until) = approve.hold_until {
+                self.offer_undo(entry_ids, project_label, hold_until);
+            }
+        }
+    }
+
     /// Offer to take back an approval, on the queue rather than in a toast.
     ///
     /// Recovery belongs on the surface a contributor is already looking at:
@@ -641,21 +687,17 @@ impl App {
     /// whereas the bar stays for the whole of the daemon's hold and says in
     /// words what it can and cannot promise.
     ///
-    /// `hold_until` is the daemon's instant from the `approve` response.
-    /// `None` means no undo may be offered, so none is -- the contributor is
-    /// told plainly instead.
+    /// `hold_until` is the daemon's instant from the `approve` response, and
+    /// is mandatory here -- see [`App::render_submit_response`] for the
+    /// caller-side rule about when it is safe to call this at all.
     pub fn offer_undo(
         self: &Rc<Self>,
-        entry_id: &str,
+        entry_ids: Vec<String>,
         project_label: &str,
-        hold_until: Option<chrono::DateTime<chrono::Utc>>,
+        hold_until: chrono::DateTime<chrono::Utc>,
     ) {
-        let Some(hold_until) = hold_until else {
-            self.toast(copy::APPROVED_NO_UNDO);
-            return;
-        };
         *self.undo.borrow_mut() = Some(PendingUndo {
-            entry_id: entry_id.to_string(),
+            entry_ids,
             project_label: project_label.to_string(),
             approved_at: chrono::Utc::now(),
             hold_until,

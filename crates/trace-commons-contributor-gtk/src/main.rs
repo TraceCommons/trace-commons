@@ -33,6 +33,15 @@ fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
     let open_preview = std::env::args().any(|a| a == "--open-preview");
+    // Photographs the submit toast at its longest realistic form -- all
+    // four clauses non-empty at once -- which a real queue is unlikely to
+    // hand a container run on demand: getting a skip clause out of a real
+    // `approve` call means engineering an entry the daemon actually
+    // refuses. The sentence itself is not typed here; it is
+    // `crate::toast::toast`'s own output, so this can only ever photograph
+    // what that function really renders, never a hand-written stand-in for
+    // it. Approves nothing -- same rule as every other debug driver below.
+    let show_toast = std::env::args().any(|a| a == "--show-toast");
     let search_term = std::env::args()
         .position(|a| a == "--search")
         .and_then(|i| std::env::args().nth(i + 1));
@@ -99,6 +108,7 @@ fn main() -> anyhow::Result<()> {
         preview_tab,
         start_page,
         onboarding_page,
+        show_toast,
     });
 
     application.connect_activate(move |application| {
@@ -120,6 +130,7 @@ struct Drivers {
     preview_tab: Option<String>,
     start_page: Option<String>,
     onboarding_page: Option<String>,
+    show_toast: bool,
 }
 
 /// Start the shell, or ask which folders it may watch and then start it.
@@ -204,6 +215,34 @@ fn start_or_ask(
         let preview_tab = drivers.preview_tab.clone();
         gtk::glib::timeout_add_seconds_local(3, move || {
             ui::preview::open_with_search(&app, 0, search_term.clone(), preview_tab.clone());
+            gtk::glib::ControlFlow::Break
+        });
+    }
+
+    if drivers.show_toast {
+        let app = app.clone();
+        gtk::glib::timeout_add_seconds_local(3, move || {
+            // All four clauses, non-empty at once -- the longest realistic
+            // shape `crate::toast::toast` renders. Composed from real
+            // numbers via the real function, not typed out here, so this
+            // photographs what the toast actually says rather than a
+            // stand-in for it.
+            let rendered = trace_commons_contributor_gtk::toast::toast(
+                47,
+                213,
+                3,
+                &["not-enrolled", "not-pending", "envelope-too-large"],
+            );
+            // Built directly rather than through `App::toast`, and given no
+            // timeout: libadwaita's default auto-dismiss (a few seconds) is
+            // right for a person who is done reading, and wrong for a
+            // container run whose camera has to find the same toast a
+            // fixed number of seconds later. `App::toast`'s ordinary
+            // timeout is unaffected -- this is the debug driver's own
+            // widget, never shared with the production path.
+            let toast = adw::Toast::new(&rendered.line);
+            toast.set_timeout(0);
+            app.toasts.add_toast(toast);
             gtk::glib::ControlFlow::Break
         });
     }
