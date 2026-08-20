@@ -226,11 +226,34 @@ echo "--- notarizing (this waits for Apple's verdict)"
 rm -f "$WORK/notary.p8"
 ( umask 077; echo "$MACOS_NOTARY_ASC_KEY_P8_BASE64" | base64 --decode > "$WORK/notary.p8" )
 chmod 600 "$WORK/notary.p8"
-xcrun notarytool submit "$DMG" \
+# --timeout, because `--wait` alone has no upper bound and a hung connection
+# is indistinguishable from a slow queue until the job is killed. On
+# 2026-08-20 the 0.4.0 release burned its entire 60-minute budget here: the
+# log reached "Conducting pre-submission checks" and never printed a
+# submission id, so nothing was ever queued, and the runner terminated
+# notarytool as an orphan process at cleanup. The build before it took four
+# minutes. Failing at 20 leaves room to retry inside one job rather than
+# spending an hour to learn nothing.
+# On failure, ask Apple what it thinks happened before giving up. A hang at
+# the first round-trip cannot distinguish "never reached the service" from
+# "submitted, and the client never reported it" -- and those want opposite
+# responses. `history` answers it in one call, with the credentials already
+# to hand, which no amount of reading the client's own silence can.
+if ! xcrun notarytool submit "$DMG" \
   --key "$WORK/notary.p8" \
   --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
   --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" \
+  --timeout 20m \
   --wait
+then
+  echo "--- notarization failed; asking Apple for this key's recent submissions" >&2
+  xcrun notarytool history \
+    --key "$WORK/notary.p8" \
+    --key-id "$MACOS_NOTARY_ASC_KEY_ID" \
+    --issuer "$MACOS_NOTARY_ASC_ISSUER_ID" >&2 || \
+    echo "history call also failed: the service is unreachable from this runner" >&2
+  exit 1
+fi
 
 echo "--- stapling"
 # Stapling is what makes the DMG open without a network round trip to Apple.
