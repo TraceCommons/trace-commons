@@ -46,6 +46,12 @@ struct QueueView: View {
 struct QueueContent: View {
     @EnvironmentObject private var model: AppModel
     @Binding var previewing: QueueEntry?
+    /// What this run of the view currently believes is on screen, purely so
+    /// each row's `onAppear`/`onDisappear` can report a delta rather than
+    /// the whole set every time. The daemon's actual idea of "visible" is
+    /// `AppModel`'s, behind `setPreviewVisible` -- this is not published and
+    /// nothing reads it directly.
+    @State private var visibleRowIDs: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -112,10 +118,19 @@ struct QueueContent: View {
                         entries: model.awaitingDecision.filter { $0.projectID == group.id },
                         summaries: model.summaries,
                         summaryErrors: model.summaryErrors,
+                        tooLarge: model.tooLarge,
                         onLookInside: { previewing = $0 },
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
-                        onSubmitAll: { model.submitProject(id: group.id) }
+                        onSubmitAll: { model.submitProject(id: group.id) },
+                        onVisibilityChange: { id, visible in
+                            if visible {
+                                visibleRowIDs.insert(id)
+                            } else {
+                                visibleRowIDs.remove(id)
+                            }
+                            model.setPreviewVisible(visibleRowIDs)
+                        }
                     )
                 }
             }
@@ -140,10 +155,12 @@ private struct ProjectQueueGroup: View {
     let entries: [QueueEntry]
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
+    let tooLarge: [String: PreviewTooLarge]
     let onLookInside: (QueueEntry) -> Void
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
+    let onVisibilityChange: (String, Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -168,10 +185,13 @@ private struct ProjectQueueGroup: View {
                         entry: entry,
                         summary: summaries[entry.entryID],
                         summaryError: summaryErrors[entry.entryID],
+                        tooLarge: tooLarge[entry.entryID],
                         onLookInside: { onLookInside(entry) },
                         onSubmit: { onSubmit(entry) },
                         onDismiss: { onDismiss(entry) }
                     )
+                    .onAppear { onVisibilityChange(entry.entryID, true) }
+                    .onDisappear { onVisibilityChange(entry.entryID, false) }
                 }
             }
         }
@@ -190,6 +210,10 @@ struct QueueRow: View {
     let entry: QueueEntry
     let summary: PreviewSummary?
     let summaryError: String?
+    /// Set when the daemon's preview scheduler refused this session for
+    /// being over the admission cap. Renders as "too large to preview" plus
+    /// the raw stat -- never a would-send estimate; see `PreviewTooLarge`.
+    let tooLarge: PreviewTooLarge?
     let onLookInside: () -> Void
     let onSubmit: () -> Void
     let onDismiss: () -> Void
@@ -242,6 +266,15 @@ struct QueueRow: View {
                     .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, TC.Font_.LineHeight.body))
                     .lineLimit(3)
                     .textSelection(.enabled)
+            } else if let tooLarge {
+                // Exactly `raw_session_bytes`, a `stat`, and nothing derived
+                // from it -- never a synthesized would-send figure. See the
+                // scheduler design's "Admission control by size": this card
+                // is a consent surface, and a plausible-looking wrong number
+                // here is worse than no number.
+                Text("Too large to preview (\(Format.bytes(tooLarge.rawSessionBytes))).")
+                    .font(TC.Font_.body)
+                    .foregroundStyle(.secondary)
             } else if let summaryError {
                 Text("Couldn't read this one yet (\(summaryError)). Nothing has been sent.")
                     .font(TC.Font_.body)
