@@ -381,9 +381,11 @@ In `preview_scheduler.rs` (unit) and `tests/daemon_ipc_contract.rs`
 - A 367.5 MB session is never parsed, and its refusal carries no
   `would_send_bytes` and no `summary`.
 - Over the socket: `preview_request` returns `queued` without building,
-  the `preview_ready` event carries a real envelope digest and non-zero
-  redaction counts and no unredacted trace text, and the second request is
-  answered `ready` with the identical digest and publishes no second event.
+  the `preview_ready` event carries a real would-send size and non-zero
+  redaction counts and no unredacted trace text, and carries **no** envelope
+  digest -- the runner builds through `preview::build_preview_card`, which
+  does not produce one and does not pin. The second request is answered
+  `ready` with an identical summary and publishes no second event.
 
 ## Rejected alternatives
 
