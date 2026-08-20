@@ -1211,6 +1211,112 @@ pub fn scope_title(wire_name: &str) -> String {
     }
 }
 
+// --- The submit toast --------------------------------------------------
+//
+// One-click submit sends without a preview, so this sentence is the only
+// account a contributor gets of what happened. It is specified rather than
+// suggested, in
+// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md` under "The
+// toast: normative copy", and transcribed here: the macOS shell holds the
+// identical strings in `macos/Sources/TCShellCore/SubmitToast.swift` and the
+// Windows shell in `windows/src/TraceCommons.Interop/SubmitToast.cs`. All
+// three assert the spec's four worked examples, because a sentence reworded
+// in one client is precisely the drift that section exists to prevent.
+//
+// The vocabulary is `residual_risk_line`'s on purpose: the toast is the same
+// fact said in fewer words, not a second way of saying it.
+//
+// `crate::toast` assembles these into the finished line.
+
+/// Clause 1: what was sent.
+pub fn submit_sent_clause(approved: u64) -> String {
+    match approved {
+        0 => "Nothing sent.".to_string(),
+        1 => "Sent.".to_string(),
+        n => format!("Sent {n} sessions."),
+    }
+}
+
+/// Clause 2: what scrubbing did.
+///
+/// Always present, including when it did nothing. A count of zero is a fact
+/// the contributor is owed, not an absence to omit -- and it is the case
+/// worth weighing, which is why it is never silently dropped.
+///
+/// The count is the sum of the response's `redactions` map. Categories are
+/// deliberately not named here; the preview sheet is where a contributor
+/// sees which detector fired.
+pub fn submit_scrub_clause(total_redactions: u64) -> String {
+    match total_redactions {
+        0 => "Scrubbing matched nothing.".to_string(),
+        1 => "Scrubbing removed 1 thing.".to_string(),
+        n => format!("Scrubbing removed {n} things."),
+    }
+}
+
+/// Clause 3: what was flagged. Rendered only when `flagged > 0`.
+pub fn submit_flagged_clause(flagged: u64) -> String {
+    format!("{flagged} flagged.")
+}
+
+/// The human label for each wire reason an entry can be skipped for, in the
+/// spec table's order -- which is also the order they are listed in when
+/// several apply.
+///
+/// The wire spellings are the daemon's and belong to the protocol; the
+/// human halves belong to the contributor. Nothing here ever shows the
+/// left-hand column, and nothing here shows an entry id: an id in a toast
+/// is noise a contributor cannot act on.
+pub const SUBMIT_SKIP_REASONS: [(&str, &str); 6] = [
+    ("not-enrolled", "not connected to a commons"),
+    ("not-pending", "already decided"),
+    ("not-pinned", "could not be prepared"),
+    ("envelope-too-large", "too large to send"),
+    ("session-file-vanished", "the session file is gone"),
+    ("preview-failed", "could not be read"),
+];
+
+/// What an unrecognised wire label is called instead of itself.
+///
+/// The spec's table is closed today, but a daemon newer than the shell can
+/// send a label this build has never been taught, and the one thing that
+/// must not then happen is the shell echoing protocol vocabulary at a
+/// contributor. So an unknown label degrades to the least specific true
+/// statement available, and is listed last.
+pub const SUBMIT_SKIP_REASON_UNKNOWN: &str = "could not be sent";
+
+/// Translate one wire reason label. Never returns its argument.
+pub fn submit_skip_reason_label(wire: &str) -> &'static str {
+    SUBMIT_SKIP_REASONS
+        .iter()
+        .find(|(label, _)| *label == wire)
+        .map(|(_, human)| *human)
+        .unwrap_or(SUBMIT_SKIP_REASON_UNKNOWN)
+}
+
+/// Clause 4: what was not sent. Rendered only when something was skipped.
+///
+/// The count is entries; the list is distinct reasons. Those are different
+/// numbers whenever several entries were skipped for the same reason, and
+/// the sentence says both because a contributor needs the first to know how
+/// much is still queued and the second to know what to do about it.
+pub fn submit_skipped_clause(skipped: &[&str]) -> String {
+    let mut reasons: Vec<&'static str> = Vec::new();
+    for (_, human) in SUBMIT_SKIP_REASONS {
+        if skipped.iter().any(|w| submit_skip_reason_label(w) == human) {
+            reasons.push(human);
+        }
+    }
+    if skipped
+        .iter()
+        .any(|w| submit_skip_reason_label(w) == SUBMIT_SKIP_REASON_UNKNOWN)
+    {
+        reasons.push(SUBMIT_SKIP_REASON_UNKNOWN);
+    }
+
+    format!("{} not sent: {}.", skipped.len(), reasons.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
