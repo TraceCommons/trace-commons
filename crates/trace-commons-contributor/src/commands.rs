@@ -2158,23 +2158,111 @@ pub fn daemon_preview(store: &ConfigStore, entry_id: &str, json: bool) -> Result
     })
 }
 
+/// Refuse an ambiguous or empty approve selector; `Some(message)` is the
+/// error to surface, `None` means exactly one selector was given.
+///
+/// The daemon's `approve` accepts all three of `entry_id`, `all: true`, and
+/// `project_id` at once and resolves the ambiguity with a documented
+/// precedence (`all` > `project_id` > `entry_id`, see
+/// `docs/contributor-daemon-ipc-v1_1.md`'s approve row). That precedence
+/// exists for protocol robustness, not as something a human should have to
+/// know to use this CLI safely -- so the CLI refuses here rather than
+/// silently picking a winner and approving something other than what was
+/// asked for.
+fn approve_selector_error(
+    entry_id: Option<&str>,
+    all: bool,
+    project: Option<&str>,
+) -> Option<String> {
+    let selected = [entry_id.is_some(), all, project.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if selected == 1 {
+        None
+    } else {
+        Some("give exactly one of: an entry id, --all, or --project <id>".to_string())
+    }
+}
+
+/// Manual arg-slice parser used only to unit-test the approve selector rule
+/// against CLI-shaped input without depending on the `clap::Parser` type
+/// defined in the `trace-commons-contributor` binary (which this lib crate
+/// does not, and should not, depend on). Recognizes `--all` and `--project
+/// <id>`; anything else is treated as the positional entry id.
+///
+/// The parsed selectors are handed to [`daemon_approve`] itself, not to
+/// [`approve_selector_error`] directly: what has to hold is that the command
+/// an operator actually runs refuses to act, and a test that only exercises
+/// the predicate would still pass if `daemon_approve` stopped consulting it.
+/// An ambiguous selector bails before any socket is touched, so the store
+/// here is never connected to anything.
+#[cfg(test)]
+fn approve_args_error(args: &[&str]) -> String {
+    let mut entry_id = None;
+    let mut all = false;
+    let mut project = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--all" => all = true,
+            "--project" => {
+                i += 1;
+                project = args.get(i).copied();
+            }
+            other => entry_id = Some(other),
+        }
+        i += 1;
+    }
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    match daemon_approve(&store, entry_id, all, project, false) {
+        Ok(()) => String::new(),
+        Err(e) => e.to_string(),
+    }
+}
+
 pub fn daemon_approve(
     store: &ConfigStore,
     entry_id: Option<&str>,
     all: bool,
+    project: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    if !all && entry_id.is_none() {
-        anyhow::bail!("give an entry id, or --all");
+    if let Some(err) = approve_selector_error(entry_id, all, project) {
+        anyhow::bail!(err);
     }
     let params = if all {
         serde_json::json!({ "all": true })
+    } else if let Some(project) = project {
+        serde_json::json!({ "project_id": project })
     } else {
         serde_json::json!({ "entry_id": entry_id })
     };
     let resp = daemon_call(store, "approve", params)?;
     render(resp, json, |v| {
         println!("approved {}", v["approved"]);
+        let flagged = v["flagged"].as_u64().unwrap_or(0);
+        if flagged > 0 {
+            println!("flagged {flagged}");
+        }
+        if let Some(redactions) = v["redactions"].as_object() {
+            let total: u64 = redactions.values().filter_map(|c| c.as_u64()).sum();
+            if total > 0 {
+                println!("redactions {total}");
+            }
+        }
+        let empty = Vec::new();
+        let skipped = v["skipped"].as_array().unwrap_or(&empty);
+        if !skipped.is_empty() {
+            println!("skipped {}:", skipped.len());
+            for s in skipped {
+                println!(
+                    "  {} ({})",
+                    s["entry_id"].as_str().unwrap_or("-"),
+                    s["reason_label"].as_str().unwrap_or("-"),
+                );
+            }
+        }
     })
 }
 
@@ -2735,8 +2823,17 @@ mod daemon_command_tests {
     #[test]
     fn approving_with_neither_an_id_nor_all_is_an_error() {
         let (_d, store) = crate::config::tests_support::temp_store();
-        let err = daemon_approve(&store, None, false, false).unwrap_err();
+        let err = daemon_approve(&store, None, false, None, false).unwrap_err();
         assert!(err.to_string().contains("--all"), "{err}");
+    }
+
+    #[test]
+    fn approve_accepts_a_project_or_an_id_or_all_but_not_two_at_once() {
+        let err = approve_args_error(&["--all", "--project", "proj_abc"]);
+        assert!(
+            err.contains("one of"),
+            "ambiguous selection must be refused, got: {err}"
+        );
     }
 
     #[test]

@@ -20,7 +20,11 @@ use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::health::{HealthState, LABEL_INGEST_UNREACHABLE};
 use trace_commons_contributor::daemon::policy::ProjectMode;
 use trace_commons_contributor::daemon::queue::{QueueEntry, QueueState, entry_id_for};
+use trace_commons_contributor::daemon::settings::{DaemonSettings, SourceDeclaration};
 use trace_commons_contributor::daemon::{EmbeddedDaemon, ipc, start_embedded};
+use trace_commons_contributor::identity::DeviceIdentity;
+use trace_commons_contributor::source::TraceSource;
+use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 
 /// A daemon that is genuinely running: locked, socket bound, server task
 /// serving. Deliberately does *not* run the supervise loop -- these tests
@@ -31,12 +35,60 @@ struct Running {
     store: ConfigStore,
     shared: Arc<ipc::DaemonShared>,
     embedded: Option<EmbeddedDaemon>,
+    /// The one real session every seeded entry points at. `approve` builds
+    /// and pins an envelope for anything unpreviewed, so an entry over a
+    /// path that does not exist is skipped rather than approved -- these
+    /// tests are about the control surface reaching the running daemon, so
+    /// the fixture gives it something it can actually build.
+    session_path: std::path::PathBuf,
 }
 
 impl Running {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+
+        let sessions_root = dir.path().join("sessions/projects");
+        let project = sessions_root.join("-Users-testuser-code-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("55555555-5555-5555-5555-555555555555.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+             \"content\":\"list the files\"},\
+             \"cwd\":\"/Users/testuser/code/proj\",\
+             \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"55555555-5555-5555-5555-555555555555\",\
+             \"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(sessions_root.clone());
+        let session_path = TraceSource::discover(&src).unwrap().remove(0).path;
+
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = trace_commons_contributor::config::ContributorConfig {
+            schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
+                .into(),
+            issuer_url: "http://issuer.invalid".into(),
+            ingest_url: "http://ingest.invalid".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+        };
+        store.save_config(&cfg).unwrap();
+        let mut settings = DaemonSettings::load(&store).unwrap();
+        settings.claude_source = Some(SourceDeclaration::Watch {
+            path: sessions_root.clone(),
+        });
+        settings.save(&store).unwrap();
+
         let embedded = start_embedded(ConfigStore::open(dir.path().to_path_buf()).unwrap())
             .await
             .unwrap();
@@ -46,6 +98,7 @@ impl Running {
             store,
             shared,
             embedded: Some(embedded),
+            session_path,
         }
     }
 
@@ -66,7 +119,7 @@ impl Running {
                     source: "claude-code".to_string(),
                     project_key: project_key.to_string(),
                     project_label: "proj".to_string(),
-                    path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                    path: self.session_path.clone(),
                     size_bytes: 1,
                     discovered_at: Utc::now(),
                     state: QueueState::Pending,
@@ -115,7 +168,7 @@ async fn daemon_approve_reaches_the_running_daemon_not_just_the_file() {
     let store = h.cli_store();
     let entry_id_str = entry_id.to_string();
     tokio::task::spawn_blocking(move || {
-        commands::daemon_approve(&store, Some(&entry_id_str), false, true).unwrap()
+        commands::daemon_approve(&store, Some(&entry_id_str), false, None, true).unwrap()
     })
     .await
     .unwrap();
@@ -267,4 +320,42 @@ async fn with_no_daemon_running_commands_still_work_against_the_files() {
 
     let policy = trace_commons_contributor::daemon::policy::ProjectPolicy::load(&store).unwrap();
     assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
+}
+
+/// `approve --project <id>` must reach the running daemon *and* stop at the
+/// project boundary. The second entry is the whole point: a selector that
+/// approves everything passes any assertion that only checks the intended
+/// entry became `Approved`, and approving a queue when one project was meant
+/// is the exact failure the CLI's refusal of ambiguous selectors exists to
+/// prevent. Both halves are asserted here.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_approve_by_project_approves_only_that_project() {
+    let h = Running::new().await;
+    let mine = h.seed_pending("/tmp/mine", "sha256:c1");
+    let other = h.seed_pending("/tmp/other", "sha256:c2");
+    assert_eq!(h.state_of(mine), QueueState::Pending);
+    assert_eq!(h.state_of(other), QueueState::Pending);
+
+    // The opaque handle the CLI is given, derived the same way the daemon
+    // derives it for `list_pending` -- never the raw project key.
+    let project_id = trace_commons_contributor::daemon::policy::project_id_for("/tmp/mine");
+    let store = h.cli_store();
+    tokio::task::spawn_blocking(move || {
+        commands::daemon_approve(&store, None, false, Some(&project_id), true).unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        h.state_of(mine),
+        QueueState::Approved,
+        "the selected project's pending entry must be approved in the \
+         running daemon's own queue"
+    );
+    assert_eq!(
+        h.state_of(other),
+        QueueState::Pending,
+        "an entry in a different project must be untouched; a project \
+         selector that approves the whole queue is the failure mode"
+    );
 }

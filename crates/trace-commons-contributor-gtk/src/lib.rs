@@ -23,6 +23,7 @@ pub mod copy;
 pub mod model;
 pub mod notify;
 pub mod portal;
+pub mod toast;
 pub mod tray;
 pub mod ui;
 pub mod update;
