@@ -2672,7 +2672,7 @@ version = "0.1.0"
 
 [[package]]
 name = "trace-commons-contributor"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-gtk"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-channel",
