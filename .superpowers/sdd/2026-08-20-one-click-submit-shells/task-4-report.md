@@ -229,3 +229,159 @@ squarely to the App-project files above and was not exercisable here.
    toast path -- but the two cases are NOT the same thing, and the dispatch's
    framing conflates them. Flagging for the daemon-side implementer to
    confirm actual behavior once Task 3 of the daemon plan lands.
+
+---
+
+## Follow-up: project grouping, and three review fixes
+
+Follow-up dispatch, approved by Zaki. Adds real project-group headers with a
+"Submit all" action, and fixes three issues from the first report/pass.
+
+### Status
+
+Complete for the verifiable part (`TraceCommons.Interop`, now exercised
+against the real native library, not just the managed tests). The
+`TraceCommons.App` grouping UI is written but still uncompiled, same
+limitation as before.
+
+### What changed
+
+**1. Real project grouping, in Interop.**
+
+- `windows/src/TraceCommons.Interop/QueueGrouping.cs` (new) --
+  `QueueGrouping.ByProject(IEnumerable<QueueEntry>)` buckets pending entries
+  by `project_id` (never `project_label`), in first-seen order, returning one
+  `ProjectQueueGroup` per project with `ProjectId`, `ProjectLabel`, `Count`,
+  and `ShowSubmitAll` (`Count > 1`, matching the macOS shell's
+  `ProjectQueueGroup` semantics -- confirmed by reading
+  `macos/Sources/TraceCommonsApp/Views/QueueView.swift` on
+  `impl-macos-submit-task3`; a single-entry group's own row already has a
+  `Submit` that does what the group action would, so I agree with macOS's
+  rule rather than deviating from it). `QueueGrouping.KeyOf(QueueEntry)`
+  exposes the bucketing key itself, so a caller reconstructing which rows
+  belong to a group uses the exact same rule the groups were bucketed with
+  instead of restating it.
+  `ProjectQueueGroup` deliberately holds counts, not entries -- a group is a
+  view over the same queue data, not a second copy of it.
+
+- `windows/tests/TraceCommons.Interop.Tests/QueueGroupingTests.cs` (new) --
+  8 tests: bucket by id not label; mismatched labels under the same id still
+  form one group; first-seen group order; `ShowSubmitAll` only on multi-entry
+  groups; entries with no project id group together rather than vanishing;
+  the label fallback chain (label -> id -> "Unknown project"); an empty
+  queue produces no groups; `KeyOf` matches what `ByProject` actually
+  bucketed by.
+
+**2. App-side grouping UI (uncompiled).**
+
+- `windows/src/TraceCommons.App/ViewModels/QueueGroupViewModel.cs` (new) --
+  a thin, read-only wrapper pairing one `ProjectQueueGroup` with its rows
+  (`ObservableCollection<QueueEntryViewModel>`), exposing `CountText` and
+  `SubmitAllText` for display. Carries no decision `QueueGrouping` did not
+  already make.
+- `windows/src/TraceCommons.App/ViewModels/MainViewModel.cs` -- `Groups`
+  (new `ObservableCollection<QueueGroupViewModel>`), rebuilt in
+  `ReplacePending` alongside `Pending` via `QueueGrouping.ByProject` +
+  `QueueGrouping.KeyOf`.
+- `windows/src/TraceCommons.App/MainWindow.xaml` -- the queue's outer
+  `ListView` now binds `Groups` instead of `Pending`: one item per project,
+  each with a header (label, entry count, and a "Submit all (N)" button
+  shown only via `ShowSubmitAll`) and a nested `ItemsControl` holding the
+  unchanged per-row card `DataTemplate`. The improvised per-row "Submit
+  project" button added in the first pass is removed -- it is superseded by
+  the real header action, and keeping both would have let a contributor
+  submit a whole project two different ways from two different controls with
+  no way to tell them apart by looking. `Submit all` calls `approve` with
+  `{"project_id": ...}` once, not a loop over rows (`MainViewModel.SubmitProjectAsync`,
+  unchanged from the first pass, already worked this way).
+- `windows/src/TraceCommons.App/MainWindow.xaml.cs` -- `OnSubmitProject`
+  replaced with `OnSubmitAll` (reads the group from the header's `Tag`/
+  `DataContext`, same pattern `EntryOf` already used for rows, now mirrored
+  by a new `GroupOf`).
+
+### Mutation testing (grouping)
+
+Two mutations, both compile cleanly:
+
+1. Bucket by `ProjectLabel` instead of `ProjectId` in `QueueGrouping.ByProject`.
+2. `ShowSubmitAll => Count >= 1` instead of `Count > 1`.
+
+Filtered run with both applied:
+```
+Failed QueueGroupingTests.MismatchedLabelsUnderTheSameIdStillFormOneGroup
+Failed QueueGroupingTests.EntriesGroupByProjectIdNotLabel
+Failed QueueGroupingTests.SubmitAllAppearsOnlyOnMultiEntryGroups
+Failed QueueGroupingTests.GroupsAppearInFirstSeenOrder
+Failed! - Failed: 4, Passed: 3, Skipped: 0, Total: 7
+```
+Both reverted; re-run confirmed `Passed: 7, Failed: 0, Total: 7`.
+
+### Fixes from the earlier pass
+
+- **Invented partial-undo wording, removed.** `UndoAsync`'s "Undone for N
+  of M; the rest had already gone out." string is gone (I did not propose
+  replacement wording for the spec -- the dispatch offered either path and
+  removal was the more conservative one for a batch Undo whose behavior
+  itself is already a judgment call, not something normative copy has
+  addressed yet). A project-group Undo that only partially lands is now
+  reported identically to a total refusal ("Too late to undo: it has already
+  gone out."); only every entry actually coming back gets "Undone. It stays
+  on this machine."
+- **`TC_FFI_LIB_DIR` set for every test run in this pass.** `cargo build -p
+  trace-commons-contributor-ffi`, then
+  `export TC_FFI_LIB_DIR="$PWD/target/debug"` before `dotnet test`. Final run:
+  **346 total, 346 passed, 0 failed** -- the 26 `NativeRoundTripTests` that
+  failed in the first pass (no native lib available) now pass against the
+  real cdylib. This supersedes the first report's 337/311/26 evidence.
+- **Refusal vs. known-empty-project, confirmed distinct.** Per the
+  correction, `ipc.rs:1241` refuses an unrecognised `project_id` as
+  `bad_params`/`project_id_unrecognized` (an error frame); a known project
+  with nothing pending succeeds with `approved: 0`. No code change was
+  needed -- `ApprovalHold.Parse` already returns `null` for any error frame
+  and a real `ApprovalHold` for any success, including a zero-count one --
+  but the first pass never pinned the distinction with a test. Added
+  `AnUnrecognisedProjectIsDistinctFromAKnownEmptyOne`, which asserts both
+  halves in one place.
+- **No more hardcoded toast copy in my tests.** The three
+  `ApprovalHoldTests` that asserted a literal English sentence (written
+  before I knew `SubmitToast.cs`'s copy was about to change) now assert
+  against `SubmitToast.Render(...)`'s own output for the same arguments,
+  never a string literal. `SubmitToast.cs` was not touched by this pass.
+
+### Test summary (this pass, final)
+
+```
+export PATH="/opt/homebrew/opt/dotnet@8/bin:$PATH"
+cargo build -p trace-commons-contributor-ffi
+export TC_FFI_LIB_DIR="$PWD/target/debug"
+cd windows/tests/TraceCommons.Interop.Tests && dotnet test --nologo
+```
+`Passed! - Failed: 0, Passed: 346, Skipped: 0, Total: 346`
+
+### Commits
+
+3. `c6998f3d` -- Group the queue by project_id, and stop asserting toast copy literals
+4. `f140082d` -- Render real project group headers, and stop inventing partial-undo copy
+
+### Concerns for the next reviewer
+
+1. **Grouping UI is still uncompiled**, same limitation the first pass
+   flagged for the rest of `TraceCommons.App`. `MainWindow.xaml` was checked
+   by hand for XML well-formedness (again caught and fixed several illegal
+   `--` sequences inside comments -- same mistake, same detection method, as
+   the first pass; worth remembering next time I write a XAML comment) and
+   the `.cs`/view-model changes were checked for balanced braces and correct
+   call sites, but nothing here has run.
+2. **`ItemsControl` nested inside `ListView`, not `CollectionViewSource`
+   grouping.** WinUI has a native grouped-`ListView` mechanism
+   (`CollectionViewSource`/`GroupStyle`/`ICollectionViewGroup`), which I did
+   not use -- it does not compose cleanly with `x:Bind`'s compile-time
+   binding without extra indirection, and the outer-list-of-groups,
+   inner-list-of-rows shape is a closer structural match to what macOS
+   actually built (nested `VStack`s) besides. If the team has a house style
+   preference for `CollectionViewSource` on Windows, this should be revisited
+   by someone who can actually build and look at it.
+3. **The still-open concern from the first report stands**: `UndoHeadline`
+   showing the real toast sentence instead of old fixed copy, for both the
+   preview-approve path and the new one-click paths, is a visible copy
+   change this task was not explicitly asked to make and remains uncompiled.
