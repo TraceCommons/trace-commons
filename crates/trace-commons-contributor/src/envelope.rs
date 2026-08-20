@@ -277,10 +277,34 @@ pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
 }
 
 /// Serialized size of a finished envelope before upload.
+///
+/// Drives the serializer into a counting sink rather than a `Vec<u8>`: the
+/// only thing any caller wants here is the byte count, and a redacted
+/// envelope can run to hundreds of megabytes for a large session, so
+/// collecting a full serialized copy just to call `.len()` on it once was an
+/// allocation purely in service of measuring it.
 pub fn envelope_size(envelope: &TraceContributionEnvelope) -> Result<usize> {
-    serde_json::to_vec(envelope)
-        .map(|bytes| bytes.len())
-        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, envelope)
+        .map_err(|_| anyhow::anyhow!("envelope-serialize-failed"))?;
+    Ok(counter.0)
+}
+
+/// A `std::io::Write` sink that counts bytes written and discards them.
+///
+/// Used to measure a serializer's output size in O(1) memory instead of
+/// collecting the bytes into a buffer only to read their length.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Map a locally discovered transcript into a `RawTraceContribution` ready
@@ -843,6 +867,41 @@ mod tests {
         let size = envelope_size_ok(&envelope)
             .expect("a hackathon-scale session envelope must be accepted");
         assert!(size > 1_500_000, "fixture must exceed the pre-raise cap");
+    }
+
+    /// `envelope_size` now serializes into a counting `std::io::Write` sink
+    /// rather than a `Vec<u8>`, so it never holds a second full copy of the
+    /// envelope just to call `.len()` on it. The byte count must be
+    /// unchanged: this pins it against `serde_json::to_vec(...).len()` --
+    /// the ground truth the old implementation computed directly -- on a
+    /// non-trivial envelope (real fixture content plus a multi-megabyte
+    /// event, so a bug that dropped or double-counted a chunk would not
+    /// hide inside a tiny fixture).
+    #[tokio::test]
+    async fn envelope_size_matches_a_plain_to_vec_len() {
+        const CONTENT_BYTES: usize = 3_000_000;
+        let mut t = fixture_transcript();
+        t.events.push(crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("y".repeat(CONTENT_BYTES)),
+            structured: serde_json::Value::Null,
+            tool_name: None,
+            token_counts: None,
+        });
+        let cfg = test_config();
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        let ground_truth = serde_json::to_vec(&envelope).unwrap().len();
+        assert!(
+            ground_truth > CONTENT_BYTES,
+            "fixture must actually be non-trivial: {ground_truth}"
+        );
+        assert_eq!(envelope_size(&envelope).unwrap(), ground_truth);
     }
 
     #[test]
