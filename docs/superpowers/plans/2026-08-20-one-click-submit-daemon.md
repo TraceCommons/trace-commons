@@ -123,8 +123,9 @@ which is correct for this test.
 #[tokio::test]
 async fn approving_without_a_preview_still_pins_an_envelope() {
     // The uploader rebuilds and compares against the pin; an approval with
-    // no pin fail-closes into a re-offer, so an unpinned approval is not a
-    // submission at all.
+    // no pin means the uploader builds a fresh envelope and sends it
+    // (uploader.rs:191 -> submit.rs:518), so an unpinned approval uploads
+    // bytes nobody was shown and reports success.
     let (daemon, store) = enrolled_daemon_with_one_pending_session().await;
     let id = first_pending_entry_id(&daemon).await;
     assert!(

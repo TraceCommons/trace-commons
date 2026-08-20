@@ -10,11 +10,20 @@ row, and no way to say yes to everything in a project.
 
 That is more than a missing button. `preview` is where the redacted envelope
 is built, persisted, and pinned to the entry via `previewed_envelope_digest`
-(`daemon/queue.rs:433`). The uploader rebuilds the envelope at send time and
-compares it to that pin; a mismatch re-offers the entry rather than uploading
-it (`daemon/uploader.rs:22`). An approval with no pin therefore has no
-artifact behind it, and fail-closes. Looking is not merely encouraged by the
-UI -- it is how the bytes come to exist.
+(`daemon/queue.rs:433`). The uploader compares a rebuild against that pin; a
+MISMATCH re-offers the entry rather than uploading it (`daemon/uploader.rs:22`).
+
+But an ABSENT pin is not a mismatch, and does not fail closed. Corrected
+2026-08-20, after this design was written on the opposite assumption:
+`approved_envelope_for` returns `Ok(None)` when there is no pin
+(`uploader.rs:191`), `use_approved_envelope(None)` stores that
+(`uploader.rs:291`), and `submit.rs:518` takes the `None` arm and builds a
+fresh envelope and sends it.
+
+So an approval with no pin uploads bytes nobody was shown, and reports
+success. That is a stronger reason for this work than the one this spec
+originally gave: it is not only that looking is how the bytes come to exist,
+it is that approving without them already sends something unseen.
 
 ## What this changes
 
@@ -86,7 +95,7 @@ one: an entry already approved has had its terms fixed.
 The properties live in Rust, next to the invariants they protect:
 
 - An approval with no prior preview produces an upload the uploader accepts,
-  rather than the re-offer it fail-closes into today. This is the whole
+  rather than the silent rebuild-and-send it does today. This is the whole
   feature; if it holds, the buttons are decoration.
 - The project filter selects exactly that project's pending entries -- not
   another project's, not entries in a terminal state.
