@@ -243,8 +243,7 @@ it to finish the job:
 | --- | --- |
 | Linux | `~/.config/trace-commons` |
 | macOS | `~/Library/Application Support/trace-commons` |
-| Windows (CLI) | `%APPDATA%\trace-commons` |
-| Windows (desktop app) | `%LOCALAPPDATA%\trace-commons` |
+| Windows | `%LOCALAPPDATA%\trace-commons` (CLI and app share it) |
 | Linux flatpak app | `~/.var/app/ai.tracecommons.Contributor/config/trace-commons` |
 
 If `TRACE_COMMONS_CONTRIBUTOR_DIR` was set, that path wins over all of these.

@@ -177,11 +177,12 @@ it.
 
 ## Local state
 
-All local state lives under one directory (default:
-`$XDG_CONFIG_HOME/trace-commons`, i.e. `~/.config/trace-commons` on Linux
-and the platform config dir elsewhere; override with
-`TRACE_COMMONS_CONTRIBUTOR_DIR` or `--config-dir`). The directory is
-created mode `0700` on unix; every file in it is `0600`:
+All local state lives under one directory (override with
+`TRACE_COMMONS_CONTRIBUTOR_DIR` or `--config-dir`; otherwise
+`$XDG_CONFIG_HOME/trace-commons`, i.e. `~/.config/trace-commons`, on Linux,
+`~/Library/Application Support/trace-commons` on macOS, and
+`%LOCALAPPDATA%\trace-commons` on Windows). The directory is created mode
+`0700` on unix; every file in it is `0600`:
 
 - `contributor.json` — issuer/ingest URLs, tenant id, device key id, consent
   scopes, PII filter choice, allowed-hosts pin. No secrets.
@@ -192,6 +193,11 @@ created mode `0700` on unix; every file in it is `0600`:
 
 The daemon keeps its settings, queue, projects, history, audit log, and the
 account session beside those, in the same directory.
+
+On Windows this is LocalAppData rather than the roaming AppData
+`dirs::config_dir()` would give: roaming profiles copy that directory between
+machines, and a device key is bound to one machine. An enrollment left in the
+old roaming location by an earlier CLI is moved across on the next run.
 
 `logout` deletes all of the above and sweeps any orphaned atomic-write temp
 files left behind by a crash mid-write. It leaves the directory itself, so
