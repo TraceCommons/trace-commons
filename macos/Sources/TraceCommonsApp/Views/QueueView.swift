@@ -10,8 +10,11 @@ import SwiftUI
 /// which was written when an approval with no prior preview silently
 /// uploaded bytes nobody was shown; the daemon now builds and pins the
 /// envelope itself when none exists, so a blind Submit sends exactly what a
-/// preview would have shown, never something unseen. `Look inside` stays,
-/// unchanged, for a contributor who wants to read before deciding.
+/// preview would have shown, never something unseen.
+///
+/// `Look inside` stays the row's primary action, with its original
+/// emphasis -- see `QueueRow.actions` for why: one click is availability,
+/// not a recommendation to skip looking.
 struct QueueView: View {
     @EnvironmentObject private var model: AppModel
     @State private var previewing: QueueEntry?
@@ -365,38 +368,47 @@ struct QueueRow: View {
 
     // MARK: - Actions
 
-    /// All three actions at the trailing edge, adjacent, default action
-    /// last -- the macOS convention, and one eye movement instead of the
-    /// full width of the window. `Submit` is the new default: one-click
-    /// submit means it is the action a contributor reaches for most, and it
-    /// sends exactly what `Look inside` would have shown -- the daemon pins
-    /// the same envelope either way.
+    /// Three actions at the trailing edge, adjacent, default action last --
+    /// the macOS convention, and one eye movement instead of the full width
+    /// of the window.
+    ///
+    /// `Look inside` keeps its original emphasis as the row's primary
+    /// action. One-click submit adds AVAILABILITY -- a contributor CAN
+    /// decide without opening the session -- but primary styling is a
+    /// RECOMMENDATION, and only the first was asked for. This product's
+    /// pitch to a contributor is "that scrubbing is good and it is not
+    /// perfect -- which is why you get to look first"; promoting `Submit`
+    /// above `Look inside` would quietly change what the app advises on the
+    /// screen where that advice matters most. (Decided 2026-08-20, after
+    /// this file briefly made `Submit` the accented default; see the
+    /// one-click-submit design doc.) `Submit` therefore renders as a peer of
+    /// `Not this one` -- same weight class, untinted -- not demoted below
+    /// them and not promoted above `Look inside`.
     private var actions: some View {
         HStack(spacing: TC.Space.s) {
             Button("Not this one", action: onDismiss)
                 // Untinted on purpose. A bordered button inherits the
                 // app accent, and "Not this one" rendered in the same
-                // green as "Submit" reads as a second approval.
+                // green as "Look inside" reads as a second approval.
                 .tint(.primary)
                 .help("Skips this session only. This project will keep being offered.")
-            Button("Look inside", action: onLookInside)
-                // Untinted for the same reason "Not this one" is: reading
-                // before deciding is not the decision, and should not look
-                // like one.
+            Button("Submit", action: onSubmit)
+                // Untinted, and the same weight as "Not this one": a
+                // shortcut is not a recommendation. See the note above.
                 .tint(.primary)
-                .help("Opens the redacted preview before deciding.")
+                .help("""
+                Sends this session now. Scrubbing runs the same as it always does, and \
+                you'll get a moment to undo.
+                """)
             // No keyboard shortcut. Return used to be bound here as the
             // default action, which meant a two-row queue registered the
             // same shortcut twice and neither row could say which one a
             // keystroke would open. In this app Return is reserved for the
             // recovery surface -- see `UndoBar` -- and is bound to nothing
             // that moves a transcript.
-            Button("Submit", action: onSubmit)
+            Button("Look inside", action: onLookInside)
                 .tcPrimaryAction()
-                .help("""
-                Sends this session now. Scrubbing runs the same as it always does, and \
-                you'll get a moment to undo.
-                """)
+                .help("Opens the redacted preview before deciding.")
         }
         .fixedSize()
     }
@@ -472,11 +484,11 @@ struct WeekBand: View {
 /// on a timer, because a recovery path that removes itself while recovery is
 /// still possible is worse than no timer at all.
 ///
-/// **When `undo.offerUndo` is false** -- "Nothing sent", or every attempted
-/// entry was skipped -- there is nothing to recover, but the sentence still
-/// needs to be seen: `SubmitToast.offerUndo` is `approved > 0` and only
-/// that, so this bar renders without the Undo control rather than not at
-/// all.
+/// **When `undo.offerUndo` is false** -- "Nothing approved", or every
+/// attempted entry was skipped -- there is nothing to recover, but the
+/// sentence still needs to be seen: `SubmitToast.offerUndo` is
+/// `approved > 0` and only that, so this bar renders without the Undo
+/// control rather than not at all.
 struct UndoBar: View {
     let undo: AppModel.Undo
     let onUndo: () -> Void

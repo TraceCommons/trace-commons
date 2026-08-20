@@ -58,8 +58,8 @@ final class AppModel: ObservableObject {
         let entryIDs: [String]
         let toastLine: String
         /// Whether the Undo control itself is shown. False for "Nothing
-        /// sent" and fully-skipped responses -- the toast still needs to be
-        /// seen, but there is nothing to undo. See `SubmitToast.offerUndo`.
+        /// approved" and fully-skipped responses -- the toast still needs to
+        /// be seen, but there is nothing to undo. See `SubmitToast.offerUndo`.
         let offerUndo: Bool
         /// When the approval was made, on this machine's clock.
         let approvedAt: Date
