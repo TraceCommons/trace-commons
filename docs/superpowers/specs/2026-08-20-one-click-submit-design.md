@@ -87,11 +87,16 @@ said in fewer words.
 
 Built in four clauses, in order. Clauses 3 and 4 appear only when non-zero.
 
-**1. What was sent.**
+**1. What happened.** Corrected 2026-08-20: this clause said "Sent", and that
+was false. `copy.rs:192` states the contract -- "The watcher sends approved
+sessions on its next sweep. Undo works until the sweep starts." At toast time
+nothing has left the machine; the approval is recorded and the send happens
+later. A toast reading "Sent." while offering Undo contradicts itself, and this
+product does not get to be careless about that sentence in particular.
 
-> `approved == 1`  ->  **Sent.**
-> `approved > 1`   ->  **Sent {n} sessions.**
-> `approved == 0`  ->  **Nothing sent.**
+> `approved == 1`  ->  **Approved.**
+> `approved > 1`   ->  **Approved {n} sessions.**
+> `approved == 0`  ->  **Nothing approved.**
 
 **2. What scrubbing did.** Always present, including when it did nothing: a
 count of zero is a fact the contributor is owed, not an absence to omit.
@@ -108,10 +113,10 @@ the preview sheet is where a contributor sees which detector fired.
 > `1`  ->  **1 flagged.**
 > `n`  ->  **{n} flagged.**
 
-**4. What was not sent**, only when `skipped` is non-empty:
+**4. What was not approved**, only when `skipped` is non-empty:
 
-> `1`  ->  **1 not sent: {reason}.**
-> `n`  ->  **{n} not sent: {reasons}.**
+> `1`  ->  **1 not approved: {reason}.**
+> `n`  ->  **{n} not approved: {reasons}.**
 
 `{reasons}` is the distinct human labels below, comma-separated, in the order
 listed here. Never the raw wire label, never an entry id -- an id in a toast is
@@ -125,7 +130,7 @@ noise a contributor cannot act on.
 | `envelope-too-large` | too large to send | never |
 | `session-file-vanished` | the session file is gone | no |
 | `preview-failed` | could not be read | yes |
-| *anything else* | could not be sent | unknown |
+| *anything else* | could not be prepared | unknown |
 
 The last row is forward compatibility, not a wire label. A daemon newer than a
 shell can send a reason the shell has never heard of; echoing it would put
@@ -139,10 +144,10 @@ so the next submit rebuilds.
 
 Worked examples:
 
-> Sent. Scrubbing removed 4 things. 1 flagged.
-> Sent 47 sessions. Scrubbing removed 213 things. 3 flagged.
-> Sent 44 sessions. Scrubbing removed 213 things. 3 not sent: too large to send.
-> Nothing sent. Scrubbing matched nothing. 2 not sent: already decided.
+> Approved. Scrubbing removed 4 things. 1 flagged.
+> Approved 47 sessions. Scrubbing removed 213 things. 3 flagged.
+> Approved 44 sessions. Scrubbing removed 213 things. 3 not approved: too large to send.
+> Nothing approved. Scrubbing matched nothing. 2 not approved: already decided.
 
 **A defect this fixes, not only a feature.** `gtk/src/ui/preview.rs` currently
 calls `offer_undo` on any `Ok` response, ignoring `approved`. That was correct
