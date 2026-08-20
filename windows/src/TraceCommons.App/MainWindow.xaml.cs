@@ -4,7 +4,11 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
@@ -41,6 +45,30 @@ public sealed partial class MainWindow : Window
     private IReadOnlyList<ProjectSetting> _trayProjects = Array.Empty<ProjectSetting>();
     private HistoryRollup _trayRollup = new();
 
+    /// <summary>
+    /// Which project group each currently realized queue container shows,
+    /// keyed by container identity so a recycled container's old association
+    /// is simply overwritten rather than needing to be told apart from a
+    /// fresh one. See <see cref="OnQueueContainerContentChanging"/>.
+    /// </summary>
+    private readonly Dictionary<SelectorItem, QueueGroupViewModel?> _queueContainerGroups = new();
+
+    /// <summary>
+    /// The queue ListView's own scroll surface, found once its template is
+    /// realized. WinUI does not expose a ListView's ScrollViewer directly;
+    /// <see cref="FindDescendant{T}"/> is the standard visual-tree walk for
+    /// it.
+    /// </summary>
+    private ScrollViewer? _queueScrollViewer;
+
+    /// <summary>
+    /// Coalesces every visibility-worthy signal -- a container realizing, a
+    /// scroll settling -- into one recompute a short interval after the last
+    /// one, so a burst of either produces exactly one
+    /// <c>preview_visible</c> call rather than one per signal.
+    /// </summary>
+    private readonly DispatcherQueueTimer _visibilityDebounceTimer;
+
     private bool _quitConfirmed;
 
     /// <summary>
@@ -73,6 +101,10 @@ public sealed partial class MainWindow : Window
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
 
+        // Found once the template is realized, not here: the ScrollViewer
+        // inside a ListView's default template does not exist before Loaded.
+        QueueListView.Loaded += OnQueueListViewLoaded;
+
         // The tray reflects daemon state and never drives it: it re-reads
         // status on the same events the queue does rather than being told
         // what to show by the view model, so the two cannot drift.
@@ -89,6 +121,11 @@ public sealed partial class MainWindow : Window
         AppWindow.Closing += OnAppWindowClosing;
         Closed += OnClosed;
         Activated += OnFirstActivated;
+
+        _visibilityDebounceTimer = _host.Dispatcher.CreateTimer();
+        _visibilityDebounceTimer.Interval = TimeSpan.FromMilliseconds(200);
+        _visibilityDebounceTimer.IsRepeating = false;
+        _visibilityDebounceTimer.Tick += (_, _) => RecomputeVisiblePreviews();
     }
 
     /// <summary>
@@ -719,6 +756,140 @@ public sealed partial class MainWindow : Window
         sender is FrameworkElement element
             ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
             : null;
+
+    /// <summary>
+    /// Finds the ScrollViewer once <see cref="QueueListView"/>'s template is
+    /// realized, so its <c>ViewChanged</c> can be watched for a scroll
+    /// settling. Runs at most once: a second Loaded (a theme change, a
+    /// re-parent) would otherwise double-subscribe the handler.
+    /// </summary>
+    private void OnQueueListViewLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_queueScrollViewer is not null)
+        {
+            return;
+        }
+
+        _queueScrollViewer = FindDescendant<ScrollViewer>(QueueListView);
+        if (_queueScrollViewer is not null)
+        {
+            _queueScrollViewer.ViewChanged += OnQueueScrollViewChanged;
+        }
+    }
+
+    /// <summary>
+    /// One signal a settle may have happened. <c>IsIntermediate</c> is true
+    /// for every frame of an active scroll or manipulation and false for the
+    /// final event once it stops, which is the scroll-settled signal the
+    /// design spec asks <c>preview_visible</c> to follow -- but this still
+    /// routes through the debounce timer rather than recomputing inline,
+    /// because a fling can still produce several "final" events in quick
+    /// succession as inertia settles in stages.
+    /// </summary>
+    private void OnQueueScrollViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (e.IsIntermediate)
+        {
+            return;
+        }
+
+        ScheduleVisibilityRecompute();
+    }
+
+    /// <summary>
+    /// Records which project group a queue container now shows.
+    ///
+    /// Runs unconditionally, whether <c>InRecycleQueue</c> is set or not:
+    /// <c>args.Item</c> is always the item this container currently displays,
+    /// so simply overwriting the entry keyed by container identity keeps
+    /// <see cref="_queueContainerGroups"/> correct without this code needing
+    /// to reason about exactly when a container is "leaving" one item versus
+    /// "arriving" at another -- whichever the ABI's event ordering turns out
+    /// to be, the dictionary converges on the container's current item once
+    /// the burst of events for one realization pass is over, and the
+    /// debounce below waits for exactly that.
+    /// </summary>
+    private void OnQueueContainerContentChanging(
+        ListViewBase sender,
+        ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer is SelectorItem container)
+        {
+            _queueContainerGroups[container] = args.Item as QueueGroupViewModel;
+        }
+
+        ScheduleVisibilityRecompute();
+    }
+
+    private void ScheduleVisibilityRecompute()
+    {
+        _visibilityDebounceTimer.Stop();
+        _visibilityDebounceTimer.Start();
+    }
+
+    /// <summary>
+    /// Tells the view model which entries are on screen right now, from
+    /// whichever project containers are currently realized.
+    /// </summary>
+    /// <remarks>
+    /// This is realization-based, not a pixel-precise viewport test: a
+    /// realized container carries WinUI's own small look-ahead buffer above
+    /// and below the visible area, so the reported set can be a little wider
+    /// than what a contributor's eye actually sees. That is the safe
+    /// direction and a deliberate simplification -- the design spec is
+    /// explicit that visibility decides preview build ORDER and never
+    /// membership, so a card scheduled a little early because its container
+    /// was realized just outside the viewport is never a correctness bug,
+    /// only a slightly generous priority. The inner ItemsControl does not
+    /// virtualize its own rows at all (see its own doc comment in
+    /// MainWindow.xaml), so every session under a realized project group is
+    /// already in the visual tree and is reported whole.
+    /// </remarks>
+    private void RecomputeVisiblePreviews()
+    {
+        var visible = new List<string>();
+        foreach (QueueGroupViewModel? group in _queueContainerGroups.Values)
+        {
+            if (group is null)
+            {
+                continue;
+            }
+
+            foreach (QueueEntryViewModel entry in group.Entries)
+            {
+                visible.Add(entry.EntryId);
+            }
+        }
+
+        _ = ViewModel.SetVisiblePreviewsAsync(visible);
+    }
+
+    /// <summary>
+    /// Walks the visual tree for the first descendant of type
+    /// <typeparamref name="T"/>. WinUI does not expose a ListView's own
+    /// ScrollViewer as a named property; this is the standard way to reach
+    /// it once the control's template has been applied.
+    /// </summary>
+    private static T? FindDescendant<T>(DependencyObject root)
+        where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(root, i);
+            if (child is T typed)
+            {
+                return typed;
+            }
+
+            if (FindDescendant<T>(child) is T found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
 
     private async void OnSheetDecided(QueueEntryViewModel entry, PreviewDecision decision)
     {

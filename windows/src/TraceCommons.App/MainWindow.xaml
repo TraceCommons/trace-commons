@@ -504,13 +504,26 @@
                     QueueGroupingTests there; this outer ListView (one item
                     per project) and the inner ItemsControl (one item per
                     session within it) only render what that already decided.
+
+                    Named, and given a ContainerContentChanging handler,
+                    because the preview scheduler needs to know which project
+                    groups are actually on screen: see
+                    OnQueueContainerContentChanging and RecomputeVisiblePreviews
+                    in MainWindow.xaml.cs. The inner ItemsControl does NOT
+                    virtualize its own rows (see its own comment below), so
+                    once a project's container is realized here, every session
+                    row under it is already in the visual tree; the outer
+                    ListView's own virtualization is the only realization
+                    signal there is to read.
                 -->
-                <ListView Grid.Row="2"
+                <ListView x:Name="QueueListView"
+                          Grid.Row="2"
                           ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
                           ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
                           SelectionMode="None"
                           Padding="22,18,22,22"
-                          ScrollViewer.HorizontalScrollMode="Disabled">
+                          ScrollViewer.HorizontalScrollMode="Disabled"
+                          ContainerContentChanging="OnQueueContainerContentChanging">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="vm:QueueGroupViewModel">
                             <StackPanel Spacing="12">
@@ -684,6 +697,51 @@
                                                        Visibility="{x:Bind HasAttempts}"
                                                        Style="{StaticResource TcCaptionSmallTextStyle}"
                                                        Foreground="{ThemeResource TcInkSecondaryBrush}" />
+
+                                            <!--
+                                                The card's own preview, requested through the
+                                                daemon's bounded scheduler (preview_request) rather
+                                                than driven in process here, see
+                                                docs/superpowers/specs/2026-08-20-preview-scheduler-design.md.
+                                                Exactly one of the three blocks below is on screen at
+                                                a time. Every one of these three bindings needs
+                                                Mode=OneWay: Preview changes after this row is already
+                                                drawn (MainViewModel.RequestPreviewAsync or the
+                                                preview_ready event fills it in later), and the
+                                                default x:Bind mode is OneTime, which would leave the
+                                                card showing "Loading preview..." forever.
+                                            -->
+                                            <TextBlock Text="Loading preview…"
+                                                       Visibility="{x:Bind IsPreviewPending, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}" />
+
+                                            <!--
+                                                Refused by the admission cap. raw_session_bytes is a
+                                                stat of the file, never an estimate, and TooLargeText
+                                                (QueueEntryViewModel) carries nothing else: this card
+                                                is a consent surface, and a would-send figure derived
+                                                from anything but the envelope that would actually be
+                                                sent is a false number in the one place this product
+                                                cannot put one.
+                                            -->
+                                            <TextBlock Text="{x:Bind TooLargeText, Mode=OneWay}"
+                                                       Visibility="{x:Bind IsTooLargeToPreview, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                       TextWrapping="Wrap" />
+
+                                            <StackPanel Visibility="{x:Bind HasOpeningPrompt, Mode=OneWay}"
+                                                        Spacing="2">
+                                                <TextBlock Text="{x:Bind OpeningPromptText, Mode=OneWay}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxLines="2"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind ScrubbingReceiptText, Mode=OneWay}"
+                                                           Visibility="{x:Bind HasScrubbingReceipt, Mode=OneWay}"
+                                                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                           Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                                            </StackPanel>
 
                                             <!--
                                                 The row's three actions.
