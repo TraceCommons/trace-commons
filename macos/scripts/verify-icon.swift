@@ -66,16 +66,21 @@ for index in 0..<count {
     let bytes = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
 
     var colors = Set<UInt32>()
-    var greenTopLeft = 0
-    var blueBottomRight = 0
+    var accentTopLeft = 0
+    var inkBottomRight = 0
 
     // Row 0 of a CGBitmapContext's buffer is the TOP row of the image, even
     // though CoreGraphics' drawing coordinate system has its origin at the
     // bottom left. Getting this backwards inverts the quadrants and reports
-    // "no green bracket" on a correct icon -- checked against the same image
-    // decoded by an independent decoder, which puts 1176 green-dominant
-    // pixels in the top-left quadrant and 1308 blue-dominant in the
-    // bottom-right.
+    // "no accent bracket" on a correct icon.
+    //
+    // The two brackets are probed differently because they are no longer two
+    // hues. Since the mark converged on the site palette the opening bracket
+    // is the accent teal -- still green-dominant, so that half is unchanged --
+    // and the closing bracket is plain ink, which has no dominant channel at
+    // all. Ink is found by being dark and near-neutral instead. On a white
+    // card that is unambiguous; the glass treatment lightens it but does not
+    // tint it enough to reach the neutrality bound.
     for y in 0..<h {
         for x in 0..<w {
             let p = (y * w + x) * 4
@@ -89,8 +94,9 @@ for index in 0..<count {
             // A margin of 12 is comfortably above channel noise in the glass
             // gradient and comfortably below a drawn bracket, which clears it
             // by an order of magnitude even after compositing.
-            if g > r + 12 && g > b + 12 && isTop && isLeft { greenTopLeft += 1 }
-            if b > r + 12 && b > g + 12 && !isTop && !isLeft { blueBottomRight += 1 }
+            if g > r + 12 && g > b + 12 && isTop && isLeft { accentTopLeft += 1 }
+            let isInk = max(r, max(g, b)) < 128 && abs(r - g) < 24 && abs(g - b) < 24
+            if isInk && !isTop && !isLeft { inkBottomRight += 1 }
         }
     }
 
@@ -98,21 +104,21 @@ for index in 0..<count {
         fail("representation \(index) (\(w)x\(h)) is a single flat colour")
     }
     let quadrant = Double((w / 2) * (h / 2))
-    let greenShare = Double(greenTopLeft) / quadrant
-    let blueShare = Double(blueBottomRight) / quadrant
-    guard greenShare >= minimumShare else {
+    let accentShare = Double(accentTopLeft) / quadrant
+    let inkShare = Double(inkBottomRight) / quadrant
+    guard accentShare >= minimumShare else {
         fail(
-            "representation \(index) (\(w)x\(h)) has no green bracket "
-                + "(\(greenTopLeft) green-dominant pixels in the top-left quadrant)")
+            "representation \(index) (\(w)x\(h)) has no accent bracket "
+                + "(\(accentTopLeft) accent-dominant pixels in the top-left quadrant)")
     }
-    guard blueShare >= minimumShare else {
+    guard inkShare >= minimumShare else {
         fail(
-            "representation \(index) (\(w)x\(h)) has no blue bracket "
-                + "(\(blueBottomRight) blue-dominant pixels in the bottom-right quadrant)")
+            "representation \(index) (\(w)x\(h)) has no ink bracket "
+                + "(\(inkBottomRight) ink pixels in the bottom-right quadrant)")
     }
-    let greenPct = String(format: "%.1f", greenShare * 100)
-    let bluePct = String(format: "%.1f", blueShare * 100)
-    print("  \(w)x\(h): \(colors.count) colours, green \(greenPct)%, blue \(bluePct)%")
+    let accentPct = String(format: "%.1f", accentShare * 100)
+    let inkPct = String(format: "%.1f", inkShare * 100)
+    print("  \(w)x\(h): \(colors.count) colours, accent \(accentPct)%, ink \(inkPct)%")
 }
 
 print("\(path) carries the mark at all \(count) representations")

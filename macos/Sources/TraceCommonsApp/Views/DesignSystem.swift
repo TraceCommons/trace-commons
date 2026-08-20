@@ -411,6 +411,25 @@ enum TC {
     /// chip text. Light is `#315FBA`, not the mockups' `#315FBB` -- see `blue`.
     static let blueIcon = dynamic(hex(0x315FBA), hex(0x9DB6F1))
     /// Spec `gold.brand`, site `--gold`. Weigh this before deciding.
+    // MARK: The mark
+
+    /// The mark's own palette, and deliberately not the semantic accents.
+    ///
+    /// The mark converged on the site's single accent over ink. `green` and
+    /// `blue` did not move with it: they still mean "good standing" and "held
+    /// or ranked" on every chip, row and badge in the app, and repainting the
+    /// logo is not a reason to repaint status. The two palettes are related
+    /// only by history, so they are separate tokens now.
+    ///
+    /// Mirrors `Scheme::bracket_open`, `bracket_close` and `surface` in the
+    /// trace-commons-mark crate, which is the source of truth for the
+    /// generated icon files. Change them together.
+    static let markAccent = dynamic(hex(0x00D4AA), hex(0x00D4AA))
+    /// The closing bracket, the frame, and the template variant's single ink.
+    static let markInk = dynamic(hex(0x000000), hex(0xFFFFFF))
+    /// Inside the frame.
+    static let markField = dynamic(hex(0xFFFFFF), hex(0x000000))
+
     static let gold = dynamic(hex(0xB9821F), hex(0xDCAA43))
     /// Spec `gold.highlight`. The wash behind a matched search term inside
     /// excerpt text. A fill, never a text colour.

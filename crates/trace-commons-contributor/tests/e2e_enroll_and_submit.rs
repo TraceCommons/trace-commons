@@ -891,6 +891,7 @@ async fn enroll_mint_submit_round_trip() {
         None,
         None,
         Some("debugging_evaluation,model_training"),
+        false,
     )
     .await
     .unwrap();
