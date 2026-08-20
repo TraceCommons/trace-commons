@@ -34,14 +34,14 @@
                      exactly on the 64x64 edge. -->
                 <Rectangle Canvas.Left="1" Canvas.Top="1"
                            Width="62" Height="62"
-                           Fill="{ThemeResource TcSurfaceCardBrush}"
-                           Stroke="{ThemeResource TcHairlineBrush}"
+                           Fill="{ThemeResource TcMarkFieldBrush}"
+                           Stroke="{ThemeResource TcMarkInkBrush}"
                            StrokeThickness="2" />
                 <Path Data="M11 28V11h17"
-                      Stroke="{ThemeResource TcGreenBrandBrush}"
+                      Stroke="{ThemeResource TcMarkAccentBrush}"
                       StrokeThickness="7" />
                 <Path Data="M53 36v17H36"
-                      Stroke="{ThemeResource TcBlueBrandBrush}"
+                      Stroke="{ThemeResource TcMarkInkBrush}"
                       StrokeThickness="7" />
             </Canvas>
 

@@ -43,6 +43,17 @@ enum Command {
         /// floor when not running in a terminal)
         #[arg(long)]
         scopes: Option<String>,
+        /// Skip the interactive consent menu and take its default answer (no)
+        /// for every optional scope, enrolling with the always-on
+        /// debugging_evaluation floor only. For agents and other scripted
+        /// callers, which have a terminal but no one to answer the prompts.
+        /// Use --scopes to grant anything beyond the floor.
+        #[arg(
+            long = "default",
+            visible_alias = "defaults",
+            conflicts_with = "scopes"
+        )]
+        default_consent: bool,
     },
     /// List discoverable local sessions
     List {
@@ -315,6 +326,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             invite,
             allowed_hosts,
             scopes,
+            default_consent,
         } => {
             commands::login(
                 &store,
@@ -322,6 +334,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 invite.as_deref(),
                 allowed_hosts.as_deref(),
                 scopes.as_deref(),
+                default_consent,
             )
             .await
         }

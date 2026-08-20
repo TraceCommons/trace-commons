@@ -8,13 +8,16 @@
 //! payload. `reasoning` items are captured as `Reasoning` events.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Value, json};
 
 use super::{
-    SOURCE_CODEX, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
-    session_hash,
+    SOURCE_CODEX, SessionEvent, SessionEventKind, SessionHasher, SessionRef, SessionTranscript,
+    TraceSource,
 };
 
 pub struct CodexSource {
@@ -92,7 +95,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             .modified()
             .ok()
             .map(chrono::DateTime::<chrono::Utc>::from);
-        let cwd = peek_cwd(&path);
+        let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
         // Derive the label from the cwd we just peeked, the same way
         // `load_session` does further down. Leaving this `None` meant every
         // Codex row in the picker rendered as `-`, so a contributor choosing
@@ -125,24 +128,43 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
 /// Cheap discovery-time peek at a session file's true working directory:
 /// parses each line as JSON in turn and stops at the first `session_meta`
 /// record carrying a `payload.cwd` field, skipping the full parse of the
-/// file's events. Reads the file the same way `load_session` does
-/// (`std::fs::read` then `String::from_utf8_lossy`), so an invalid-UTF-8
-/// line elsewhere in the file does not abort the scan before it reaches a
-/// later cwd-bearing line. `load_session` never errors on bad UTF-8 either,
-/// so peek and load must tolerate it identically, or `--project` filtering
-/// can silently disagree with what `submit_sessions` actually delivers.
+/// file's events. Tolerates invalid UTF-8 the same way `load_session` does
+/// -- both convert one line at a time with `String::from_utf8_lossy`, so an
+/// unreadable line elsewhere in the file does not abort the scan before it
+/// reaches a later cwd-bearing line. `load_session` never errors on bad
+/// UTF-8 either, so peek and load must tolerate it identically, or
+/// `--project` filtering can silently disagree with what `submit_sessions`
+/// actually delivers.
 /// Mirrors the exact field path `load_session` uses
 /// (`payload.and_then(|p| p.get("cwd"))`). Returns `None` if the file
 /// cannot be read or no record carries `cwd`.
 ///
-/// Cost: the file is still read whole (as `load_session` does); what is
-/// saved is parsing and building every event. Discovery therefore pays one
-/// read per session file, which is far less than the full loads the
-/// interactive picker already performs.
+/// Cost: one line at a time, stopping at the answer. `session_meta` is the
+/// first record a rollout writes, so in practice this reads a few hundred
+/// bytes of a file that may be hundreds of megabytes. It used to
+/// `std::fs::read` the whole file and then allocate a second copy through
+/// `String::from_utf8_lossy` -- on a real machine, 11.5GB of Codex rollouts
+/// read end to end on every watcher tick to learn what line one already
+/// said. Prefer `peek_cwd_memoized` from discovery; this is the uncached
+/// read behind it.
 fn peek_cwd(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    for line in text.lines() {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // `read_until` rather than `lines()`, and a lossy conversion per
+        // line rather than over the file: `lines()` fails the whole
+        // iteration on invalid UTF-8, where the old whole-file
+        // `from_utf8_lossy` tolerated it. A session whose later records are
+        // unreadable must still report its cwd, or `--project` filtering
+        // silently disagrees with what `submit_sessions` delivers.
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        let line = String::from_utf8_lossy(&buf);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -162,13 +184,120 @@ fn peek_cwd(path: &Path) -> Option<String> {
             return Some(c.to_string());
         }
     }
-    None
 }
 
+/// How many memoized cwd answers to hold before dropping the lot.
+///
+/// Mirrors `claude_code::SESSION_ID_MEMO_CAP`, and for the same reason: a
+/// bound that a real corpus does not reach, so the memo does not grow
+/// without limit on a machine that accumulates sessions for years. Clearing
+/// wholesale rather than evicting one entry costs one discovery pass paying
+/// what every pass used to pay.
+const CWD_MEMO_CAP: usize = 8192;
+
+/// One memoized answer from `peek_cwd`, valid while the file it describes
+/// still reports the same size and mtime.
+#[derive(Debug, Clone)]
+struct CwdMemo {
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Memoized even when absent: a rollout carrying no `session_meta` is
+    /// the expensive case, because establishing that means reading it to
+    /// the end. Re-deriving that absence every tick is the worst thing this
+    /// memo can prevent.
+    cwd: Option<String>,
+}
+
+/// Process-wide memo for `peek_cwd`, keyed on the rollout's path.
+///
+/// `discover` runs on every watcher tick, and it peeks every rollout. This
+/// mirrors `claude_code::SESSION_ID_MEMO` exactly, including why it lives at
+/// module scope: `watcher::tick_blocking` builds its sources fresh each
+/// tick, so a memo owned by the adapter would be discarded before the pass
+/// that needs it.
+///
+/// Keying on (size, mtime) assumes only what `watcher::resolve_cwd`'s own
+/// cwd cache already assumes -- that a file whose size and mtime are
+/// unchanged has unchanged contents. That is not a trust boundary: the cwd
+/// decides which project a session is filed under, and anyone able to
+/// backdate an mtime can equally well write the cwd they want into the
+/// file, so the memo grants no capability the unmemoized path withheld.
+static CWD_MEMO: LazyLock<Mutex<HashMap<PathBuf, CwdMemo>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `peek_cwd`, answered from `CWD_MEMO` when the file still reports the size
+/// and mtime the memoized answer was derived from.
+fn peek_cwd_memoized(
+    path: &Path,
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    // A poisoned memo is a cache, not state anything depends on: fall
+    // through to the read rather than propagating another thread's panic
+    // into discovery.
+    if let Ok(memo) = CWD_MEMO.lock() {
+        if let Some(hit) = memo.get(path) {
+            if hit.size_bytes == size_bytes && hit.modified_at == modified_at {
+                return hit.cwd.clone();
+            }
+        }
+    }
+    let cwd = peek_cwd(path);
+    if let Ok(mut memo) = CWD_MEMO.lock() {
+        if memo.len() >= CWD_MEMO_CAP && !memo.contains_key(path) {
+            memo.clear();
+        }
+        memo.insert(
+            path.to_path_buf(),
+            CwdMemo {
+                size_bytes,
+                modified_at,
+                cwd: cwd.clone(),
+            },
+        );
+    }
+    cwd
+}
+
+/// The largest rollout this adapter will load, mirroring
+/// `claude_code::GROUP_RAW_BYTE_BUDGET` and set to the same 64 MB.
+///
+/// Streaming stopped the loader holding two copies of a file, but the events
+/// it builds are still proportional to what it parses, and a rollout has no
+/// upper bound: the machine this was measured on had a 385 MB one. The
+/// Claude adapter has bounded its equivalent since it was written; Codex
+/// bounding nothing was an asymmetry rather than a decision.
+///
+/// One number, not two, because these bound the same thing -- how much of
+/// one conversation may become resident on its way to being discarded.
+///
+/// On the measured corpus this declines 10 of 3,066 rollouts (0.3%). It is a
+/// guard against pathology, not a filter: the median rollout is 541 KB and
+/// the 99th percentile is 40 MB.
+const ROLLOUT_BYTE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
-    let bytes = std::fs::read(path)?;
-    let hash = session_hash(&bytes);
-    let text = String::from_utf8_lossy(&bytes);
+    // Declined rather than truncated, and named rather than silent. A
+    // half-parsed transcript would upload as though it were the whole
+    // conversation, which is worse than not offering it: the contributor
+    // would be consenting to something the preview misdescribes. The size is
+    // the contributor's own file's, not operator-secret, so it is safe to
+    // state -- but the path is not, and is deliberately absent.
+    let declared = std::fs::metadata(path)?.len();
+    if declared > ROLLOUT_BYTE_BUDGET {
+        anyhow::bail!(
+            "rollout-too-large: {declared} bytes exceeds the {ROLLOUT_BYTE_BUDGET}-byte budget"
+        );
+    }
+    // Streamed rather than read whole. A rollout can be hundreds of
+    // megabytes, and the old `fs::read` plus `from_utf8_lossy` held two
+    // copies of it at once before a single event was built. The hash is
+    // accumulated over the same bytes in the same order, so the session id
+    // is unchanged -- see `SessionHasher`.
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = SessionHasher::new();
+    let mut raw = Vec::new();
 
     let mut events = Vec::new();
     let mut model: Option<String> = None;
@@ -177,7 +306,13 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     let mut started_at: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut unparseable = 0usize;
 
-    for line in text.lines() {
+    loop {
+        raw.clear();
+        if reader.read_until(b'\n', &mut raw)? == 0 {
+            break;
+        }
+        hasher.update(&raw);
+        let line = String::from_utf8_lossy(&raw);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -264,7 +399,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         project,
         cwd,
         started_at,
-        session_hash: hash,
+        session_hash: hasher.finish(),
         events,
         subagent_count: 0,
         subagents_dropped: 0,
@@ -422,6 +557,122 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex")
+    }
+
+    /// A rollout past the budget is declined by name, not truncated.
+    ///
+    /// Truncating would upload a fragment described by a preview that says
+    /// it is the whole conversation. The refusal names the size, which is
+    /// the contributor's own, and never the path.
+    #[test]
+    fn a_rollout_past_the_budget_is_declined_rather_than_part_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-08-20T10-00-02-big.jsonl");
+        let head = serde_json::to_string(&json!({
+            "type": "session_meta", "payload": { "cwd": "/Users/z/code/proj" }
+        }))
+        .unwrap();
+        let mut bytes = head.into_bytes();
+        bytes.push(b'\n');
+        bytes.resize(ROLLOUT_BYTE_BUDGET as usize + 1, b'x');
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = load_session(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("rollout-too-large"),
+            "expected a named refusal, got: {err}"
+        );
+        assert!(
+            !err.contains("rollout-2026-08-20"),
+            "the refusal must not carry the path: {err}"
+        );
+
+        // The same file one byte under the budget still loads, so the bound
+        // is a bound and not an off-by-one that declines healthy sessions.
+        bytes.truncate(ROLLOUT_BYTE_BUDGET as usize);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load_session(&path).is_ok());
+    }
+
+    /// `peek_cwd` must answer from the head of the file and stop.
+    ///
+    /// The tail here is invalid UTF-8 and megabytes long. A whole-file read
+    /// would pay for all of it on every discovery pass to learn something
+    /// the first line already said; streaming stops at the answer. The
+    /// invalid bytes also pin the lenient handling the old
+    /// `from_utf8_lossy` gave: a session whose later records are unreadable
+    /// still reports its cwd rather than vanishing from discovery.
+    #[test]
+    fn peek_cwd_answers_from_the_first_record_and_ignores_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-08-20T10-00-00-x.jsonl");
+        let mut bytes = serde_json::to_vec(&json!({
+            "type": "session_meta",
+            "payload": { "cwd": "/Users/z/code/proj" }
+        }))
+        .unwrap();
+        bytes.push(b'\n');
+        bytes.extend(std::iter::repeat_n(0xF5u8, 4 * 1024 * 1024));
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(peek_cwd(&path).as_deref(), Some("/Users/z/code/proj"));
+    }
+
+    /// A file whose size and mtime have not changed must not be read twice.
+    ///
+    /// Discovery runs on every watcher tick, so an unmemoized peek re-reads
+    /// the whole corpus every `poll_interval_secs` to re-derive an answer
+    /// that only changes when a file does. This rewrites the contents while
+    /// holding size and mtime fixed: a memoized peek keeps the first
+    /// answer, and a re-reading one reports the second.
+    #[test]
+    fn peek_cwd_is_memoized_while_size_and_mtime_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-08-20T10-00-01-y.jsonl");
+
+        let first = serde_json::to_string(&json!({
+            "type": "session_meta", "payload": { "cwd": "/first/answer" }
+        }))
+        .unwrap();
+        let second = serde_json::to_string(&json!({
+            "type": "session_meta", "payload": { "cwd": "/secnd/answer" }
+        }))
+        .unwrap();
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "sizes must match to hold size fixed"
+        );
+
+        std::fs::write(&path, format!("{first}\n")).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from);
+
+        assert_eq!(
+            peek_cwd_memoized(&path, size, mtime).as_deref(),
+            Some("/first/answer")
+        );
+
+        std::fs::write(&path, format!("{second}\n")).unwrap();
+        // Restore the mtime through std rather than adding a dependency for
+        // it: the memo key is (size, mtime), so the rewrite has to be
+        // invisible to that key for this test to mean anything.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(meta.modified().unwrap())
+            .unwrap();
+
+        assert_eq!(
+            peek_cwd_memoized(&path, size, mtime).as_deref(),
+            Some("/first/answer"),
+            "an unchanged file must be answered from the memo, not re-read"
+        );
     }
 
     #[test]

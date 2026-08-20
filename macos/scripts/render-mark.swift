@@ -26,8 +26,8 @@ import UniformTypeIdentifiers
 struct SchemeColors: Decodable {
     let surface: String
     let line: String
-    let green: String
-    let blue: String
+    let bracketOpen: String
+    let bracketClose: String
     let ink: String
 }
 
@@ -37,8 +37,8 @@ struct Geometry: Decodable {
     let strokeFrame: Int
     let strokeFramed: Int
     let strokeTemplate: Int
-    let green: [[Int]]
-    let blue: [[Int]]
+    let bracketOpen: [[Int]]
+    let bracketClose: [[Int]]
     let schemes: [String: SchemeColors]
 }
 
@@ -147,11 +147,11 @@ func render(size: Int, to outPath: String) {
         context.setStrokeColor(color(palette.line))
         context.setLineWidth(CGFloat(geometry.strokeFrame))
         context.stroke(rect)
-        stroke(geometry.green, color(palette.green), geometry.strokeFramed)
-        stroke(geometry.blue, color(palette.blue), geometry.strokeFramed)
+        stroke(geometry.bracketOpen, color(palette.bracketOpen), geometry.strokeFramed)
+        stroke(geometry.bracketClose, color(palette.bracketClose), geometry.strokeFramed)
     case "template":
-        stroke(geometry.green, color(palette.ink), geometry.strokeTemplate)
-        stroke(geometry.blue, color(palette.ink), geometry.strokeTemplate)
+        stroke(geometry.bracketOpen, color(palette.ink), geometry.strokeTemplate)
+        stroke(geometry.bracketClose, color(palette.ink), geometry.strokeTemplate)
     default:
         fail("unknown variant \(variant)")
     }

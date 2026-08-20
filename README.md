@@ -220,6 +220,89 @@ consent on already-submitted traces are deferred to a future slice. See
 [`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`](docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md)
 for the full design.
 
+#### Uninstalling
+
+Two things come off separately: the *local state* (device key, config,
+receipts, daemon queue and history) and the *installed program*. Start with
+the state, because `logout` also stops a running daemon before it wipes the
+credentials that daemon uploads with:
+
+```bash
+trace-commons-contributor logout
+```
+
+Uninstalling is not withdrawal. Traces you already submitted stay on the
+server; `daemon withdraw <submission-id>` — or `--all-quarantined` — is what
+removes them, and it needs the account session, so do any withdrawing
+*before* you log out.
+
+`logout` empties the state directory but leaves the directory itself. Remove
+it to finish the job:
+
+| Platform | State directory |
+| --- | --- |
+| Linux | `~/.config/trace-commons` |
+| macOS | `~/Library/Application Support/trace-commons` |
+| Windows | `%LOCALAPPDATA%\trace-commons` (CLI and app share it) |
+| Linux flatpak app | `~/.var/app/ai.tracecommons.Contributor/config/trace-commons` |
+
+If `TRACE_COMMONS_CONTRIBUTOR_DIR` was set, that path wins over all of these.
+
+Then remove the program itself, by however it was installed:
+
+```bash
+# CLI, scripts/install.sh (macOS, Linux)
+rm ~/.local/bin/trace-commons-contributor    # or $TC_INSTALL_DIR, or --dir
+
+# CLI, Homebrew
+brew uninstall trace-commons-contributor
+
+# CLI, winget
+winget uninstall TraceCommons.Contributor
+
+# Desktop app, Homebrew cask (macOS)
+brew uninstall --cask trace-commons
+
+# Desktop app, flatpak (Linux) -- --delete-data also removes ~/.var/app state
+flatpak uninstall --delete-data ai.tracecommons.Contributor
+
+# and, if you want the tap gone too
+brew untap TraceCommons/tap
+```
+
+```powershell
+# CLI, scripts/install.ps1
+Remove-Item -Recurse "$env:LOCALAPPDATA\Programs\TraceCommons"
+# install.ps1 appended that directory to your user PATH; take it back out
+$p = [Environment]::GetEnvironmentVariable('Path','User') -split ';' |
+  Where-Object { $_.TrimEnd('\') -ine "$env:LOCALAPPDATA\Programs\TraceCommons" }
+[Environment]::SetEnvironmentVariable('Path', ($p -join ';'), 'User')
+
+# Desktop app, MSIX / .appinstaller -- also ends the update subscription
+Get-AppxPackage Iqlusion.TraceCommons | Remove-AppxPackage
+```
+
+Autostart registrations are the part an uninstall is easiest to leave
+behind:
+
+- **Linux, CLI daemon.** `systemctl --user disable --now
+  trace-commons-contributor.service`, then `trace-commons-contributor daemon
+  uninstall` to remove the unit file
+  (`~/.config/systemd/user/trace-commons-contributor.service`).
+- **macOS app.** Registered through `SMAppService`. Turn off "Run at login"
+  in Settings before deleting the app, or clear the leftover entry in System
+  Settings → General → Login Items.
+- **Windows, MSIX app.** A packaged startup task; `Remove-AppxPackage` takes
+  it with the package.
+- **Windows, portable app.** The portable build uses the per-user Run key
+  instead, which deleting the folder does not touch:
+  `Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Trace Commons'`.
+
+The macOS app itself is `TraceCommons.app` (bundle id `ai.tracecommons.shell`)
+in `/Applications` when installed from the DMG rather than the cask; quit it,
+then move it to the Trash. The Windows portable build is just the unzipped
+folder — delete it.
+
 #### Contributing sessions from other harnesses
 
 The CLI reads Claude Code and Codex sessions natively. For any other harness

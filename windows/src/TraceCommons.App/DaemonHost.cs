@@ -77,6 +77,15 @@ public sealed class DaemonHost : IAsyncDisposable
     /// The per-user state directory, matching where the contributor CLI keeps
     /// its own. Under %LOCALAPPDATA% on Windows; the fallback keeps this class
     /// constructible in a non-Windows test host.
+    /// <para>
+    /// The CLI's half of this agreement is <c>platform_default_dir</c> in
+    /// <c>crates/trace-commons-contributor/src/config.rs</c>, which special-cases
+    /// Windows for the same reason: <c>dirs::config_dir()</c> is roaming AppData,
+    /// which roaming profiles copy between machines, and this directory holds a
+    /// machine-bound device key. The two disagreed until then -- enrolling in one
+    /// left the other reporting no enrollment on the same machine -- so changing
+    /// this path means changing that one.
+    /// </para>
     /// </summary>
     public static string DefaultConfigDir()
     {
