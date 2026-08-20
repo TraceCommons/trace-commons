@@ -16,7 +16,7 @@ final class TranscriptBudgetTests: XCTestCase {
     }
 
     /// A body exactly at the budget is not clamped. Off-by-one here would
-    /// put a "showing the first 256 KB of 256 KB" notice on screen.
+    /// put a "showing the first 64 KB of 64 KB" notice on screen.
     func testBodyExactlyAtBudgetIsNotClamped() {
         let text = String(repeating: "a", count: TranscriptBudget.limitBytes)
         let clamped = TranscriptBudget.clamp(text)
@@ -92,14 +92,14 @@ final class TranscriptBudgetTests: XCTestCase {
 
         XCTAssertEqual(
             notice,
-            "Showing the first 256 KB of 17.2 MB. "
+            "Showing the first 64 KB of 17.2 MB. "
                 + "The rest is not displayed here. Approving still covers the whole body."
         )
     }
 
     /// The reported "shown" figure is the size of what is actually on
     /// screen, not the budget constant. A cut that backs off to a line
-    /// boundary shows slightly less than 256 KB, and the notice must not
+    /// boundary shows slightly less than 64 KB, and the notice must not
     /// round that into a claim about bytes the reader cannot see.
     func testNoticeReportsBytesActuallyShown() {
         let line = String(repeating: "x", count: 999) + "\n"

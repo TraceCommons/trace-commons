@@ -25,10 +25,16 @@
 
 /// The slice size, in bytes of UTF-8.
 ///
-/// Chosen to be far above any plausible "read the first screenful" need and
-/// far below where whole-buffer tag application gets slow: 256 KB is about
-/// 3,000 lines of transcript.
-pub const LIMIT_BYTES: usize = 256 * 1024;
+/// Measured, not guessed: single-run layout of a transcript is quadratic in
+/// its size, and 64 KB is the last size that reads as a pause rather than a
+/// freeze. The table of measurements is in the reference implementation,
+/// `macos/Sources/TCShellCore/TranscriptBudget.swift`. GTK's `TextView` is
+/// line-virtualized and so suffers less than the other two shells, but the
+/// budget is shared because the notice it produces is shared.
+///
+/// Several hundred lines of transcript: far more than the "first screenful"
+/// the read gate actually claims.
+pub const LIMIT_BYTES: usize = 64 * 1024;
 
 /// A body clamped to the budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +155,7 @@ mod tests {
     }
 
     /// A body exactly at the budget is not clamped. Off-by-one here would
-    /// put a "showing the first 256 KB of 256 KB" notice on screen.
+    /// put a "showing the first 64 KB of 64 KB" notice on screen.
     #[test]
     fn body_exactly_at_budget_is_not_clamped() {
         let text = "a".repeat(LIMIT_BYTES);
@@ -241,14 +247,14 @@ mod tests {
 
         assert_eq!(
             notice,
-            "Showing the first 256 KB of 17.2 MB. \
+            "Showing the first 64 KB of 17.2 MB. \
              The rest is not displayed here. Approving still covers the whole body."
         );
     }
 
     /// The reported "shown" figure is the size of what is actually on
     /// screen, not the budget constant. A cut that backs off to a line
-    /// boundary shows slightly less than 256 KB, and the notice must not
+    /// boundary shows slightly less than 64 KB, and the notice must not
     /// round that into a claim about bytes the reader cannot see.
     #[test]
     fn notice_reports_bytes_actually_shown() {

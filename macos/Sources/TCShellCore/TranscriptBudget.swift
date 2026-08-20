@@ -29,10 +29,28 @@ import Foundation
 public enum TranscriptBudget {
     /// The slice size, in bytes of UTF-8.
     ///
-    /// Chosen to be far above any plausible "read the first screenful"
-    /// need and far below where single-run text layout gets slow: 256 KB is
-    /// about 3,000 lines of transcript, and lays out in well under a frame.
-    public static let limitBytes = 256 * 1024
+    /// Measured, not guessed. Single-run layout of a monospaced transcript
+    /// at this sheet's width costs, on an M-series laptop:
+    ///
+    ///     32 KB   0.036 s
+    ///     64 KB   0.142 s
+    ///     128 KB  0.569 s
+    ///     256 KB  2.186 s
+    ///
+    /// That is quadratic -- each doubling costs about four times as much --
+    /// which is what turns a 17.5 MB body into a window that never comes
+    /// back: extrapolated, it is on the order of hours, not seconds.
+    ///
+    /// 64 KB is the last size that still reads as a pause rather than a
+    /// freeze, and it is several hundred lines of transcript: far more than the
+    /// "first screenful" the read gate actually claims. The first draft of
+    /// this used 256 KB and was measured at 2.2 seconds of frozen main
+    /// thread, which is why the number is written down with its evidence.
+    ///
+    /// The real fix is to lay out only the visible chunk and let the reader
+    /// page through the whole body. Until that exists, this is a bound on
+    /// the damage rather than a way to read a large trace.
+    public static let limitBytes = 64 * 1024
 
     /// A body clamped to the budget.
     public struct Clamped: Equatable, Sendable {

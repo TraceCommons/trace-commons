@@ -41,11 +41,16 @@ public static class TranscriptBudget
     /// <summary>
     /// The slice size, in bytes of UTF-8.
     ///
-    /// Chosen to be far above any plausible "read the first screenful" need
-    /// and far below where single-run text layout gets slow: 256 KB is about
-    /// 3,000 lines of transcript, and lays out in well under a frame.
+    /// Measured, not guessed: single-run layout of a transcript is
+    /// quadratic in its size, and 64 KB is the last size that reads as a
+    /// pause rather than a freeze. The table of measurements is in the
+    /// reference implementation,
+    /// macos/Sources/TCShellCore/TranscriptBudget.swift.
+    ///
+    /// Several hundred lines of transcript: far more than the "first
+    /// screenful" the read gate actually claims.
     /// </summary>
-    public const int LimitBytes = 256 * 1024;
+    public const int LimitBytes = 64 * 1024;
 
     /// <summary>A body clamped to the budget.</summary>
     public sealed class Clamped
