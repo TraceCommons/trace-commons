@@ -88,6 +88,10 @@ struct Sheet {
 
     whats_in_it: gtk::Box,
     body_view: gtk::TextView,
+    /// The transcript-budget clamp notice, above the transcript card. Empty
+    /// and hidden whenever the body fit inside the budget; see
+    /// `transcript_budget`.
+    body_notice: gtk::Label,
     permissions: gtk::Box,
 
     /// The read gate. The first box is set by opening the transcript tab and
@@ -316,6 +320,12 @@ impl Sheet {
             .wrap(true)
             .build();
         body_caption.add_css_class("tc-meta");
+        // Set only when the body exceeded `transcript_budget::LIMIT_BYTES`;
+        // see `fill`. Hidden by default so the common, unclamped case shows
+        // nothing.
+        let body_notice = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        body_notice.add_css_class("tc-meta");
+        body_notice.set_visible(false);
         let body_panel = style::card(gtk::Orientation::Vertical, 0);
         body_panel.append(&body_scroller);
         let body_page = gtk::Box::builder()
@@ -327,6 +337,7 @@ impl Sheet {
             .margin_end(space::L)
             .build();
         body_page.append(&body_caption);
+        body_page.append(&body_notice);
         body_page.append(&body_panel);
         stack.add_titled(&body_page, Some(TRANSCRIPT_TAB), copy::TAB_WOULD_BE_SENT);
 
@@ -515,6 +526,7 @@ impl Sheet {
             recent_row,
             whats_in_it,
             body_view,
+            body_notice,
             permissions,
             gate_opened: gate_opened.clone(),
             gate_acknowledged: gate_acknowledged.clone(),
@@ -627,6 +639,8 @@ impl Sheet {
         self.search_summary.set_text("");
         self.clear_results();
         self.set_manifest(None);
+        self.body_notice.set_visible(false);
+        self.body_notice.set_text("");
         self.body_view
             .buffer()
             .set_text("Working out exactly what would be sent…");
@@ -693,14 +707,26 @@ impl Sheet {
         *self.body.borrow_mut() = body.clone();
         match &body {
             Some(text) => {
+                // The full body can be many megabytes; laying all of it out
+                // in one `TextBuffer` and tagging redactions across the
+                // whole thing is the bug this exists to fix. See
+                // `crate::transcript_budget`.
+                let clamped = crate::transcript_budget::clamp(text);
                 let buffer = self.body_view.buffer();
-                buffer.set_text(text);
-                highlight_redactions(&buffer, text);
+                buffer.set_text(&clamped.shown);
+                highlight_redactions(&buffer, &clamped.shown);
+
+                let notice = crate::transcript_budget::notice(&clamped);
+                self.body_notice.set_visible(!notice.is_empty());
+                self.body_notice.set_text(&notice);
             }
-            None => self
-                .body_view
-                .buffer()
-                .set_text(copy::BODY_NOT_AVAILABLE_HERE),
+            None => {
+                self.body_notice.set_visible(false);
+                self.body_notice.set_text("");
+                self.body_view
+                    .buffer()
+                    .set_text(copy::BODY_NOT_AVAILABLE_HERE);
+            }
         }
 
         // "What's in it", from what the contract actually reports. Files
@@ -810,6 +836,8 @@ impl Sheet {
             }
             _ => "Something went wrong working out what would be sent. Nothing has been sent.",
         };
+        self.body_notice.set_visible(false);
+        self.body_notice.set_text("");
         self.body_view.buffer().set_text(sentence);
         self.search_summary.set_text(sentence);
     }
