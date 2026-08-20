@@ -8,17 +8,46 @@
 //! `docs/release-runbook.md` for those gates.
 
 use std::path::PathBuf;
+// Only the bash-invoking tests below use this, and they are all `cfg(unix)`
+// -- the scripts they run are bash describing a macOS bundle. Left ungated,
+// the import is unused on Windows, and these tests build under
+// `-D warnings`, so that is a build failure rather than a lint.
+#[cfg(unix)]
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
+/// Reads a repository file with line endings normalized to LF.
+///
+/// Git on Windows defaults `core.autocrlf` to true, so a Windows checkout
+/// delivers these workflow and script files with CRLF endings -- 1367 pairs
+/// in `release-apps.yml` alone. Every assertion below is textual by design
+/// (see the module comment), so an unnormalized read makes each one
+/// platform-dependent: `contains` of any multi-line fragment stops matching,
+/// and byte offsets computed from line lengths drift. Normalizing once here
+/// keeps the tests asserting about content rather than about the checkout
+/// that produced it.
 fn read(relative: &str) -> String {
     let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    raw.replace("\r\n", "\n")
 }
 
+/// Executes `macos/scripts/info-plist.sh`, so it is unix-only: the script is
+/// bash describing a macOS bundle, and Windows has no `bash` on PATH to run
+/// it with. Without this gate the test does not skip on Windows, it panics
+/// with `NotFound "program not found"` -- a failure about the runner rather
+/// than about the plist.
+///
+/// The gate is per-test rather than on the whole target: most of this file
+/// pins Windows release behaviour (`windows_msix_*`,
+/// `ci_packages_and_validates_the_windows_app_feed_identity`,
+/// `windows_signing_is_timestamped`), and those are exactly the assertions
+/// most worth running ON Windows.
+#[cfg(unix)]
 #[test]
 fn info_plist_script_injects_the_version_it_is_given() {
     let script = repo_root().join("macos/scripts/info-plist.sh");
@@ -47,15 +76,58 @@ fn info_plist_script_injects_the_version_it_is_given() {
         !plist.contains("0.1.0"),
         "the hardcoded 0.1.0 is still present:\n{plist}"
     );
-    // Regressions here are silent and severe: without LSUIElement the menu-bar
-    // app grows a Dock icon, and without the bundle id notifications break.
+    // This assertion used to run the other way, requiring LSUIElement, because
+    // the app was a menu-bar utility and "grows a Dock icon" was the
+    // regression. That decision was reversed deliberately: on a notched Mac
+    // with a full menu bar the status item is assigned a frame in the dead
+    // band past the notch and never drawn, which makes a menu-bar-only app
+    // unreachable rather than merely discreet. The Dock icon is now the way
+    // in, so LSUIElement returning is the regression.
     assert!(
-        plist.contains("<key>LSUIElement</key><true/>"),
-        "LSUIElement lost"
+        !plist.contains("<key>LSUIElement</key>"),
+        "LSUIElement is back; the app would lose its Dock icon:\n{plist}"
+    );
+    // The artwork can sit in Contents/Resources and still not be used:
+    // without these keys macOS falls back to the generic application icon,
+    // which looks exactly like a build that forgot the artwork.
+    //
+    // Both are asserted because losing either is a silent downgrade rather
+    // than a failure. CFBundleIconName resolves AppIcon out of Assets.car --
+    // the macOS 26 icon with the Liquid Glass treatment -- and dropping it
+    // quietly demotes the app to the flat legacy icns, which still renders
+    // and so would pass any check that only asked whether an icon appeared.
+    assert!(
+        plist.contains("<key>CFBundleIconName</key><string>AppIcon</string>"),
+        "CFBundleIconName lost; the Dock would fall back to the legacy icns:\n{plist}"
+    );
+    assert!(
+        plist.contains("<key>CFBundleIconFile</key><string>AppIcon</string>"),
+        "CFBundleIconFile lost; the Dock would show the generic icon:\n{plist}"
     );
     assert!(
         plist.contains("<key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>"),
         "bundle id lost"
+    );
+    // A dead deep link is the silent, severe regression this test exists for:
+    // nothing crashes and nothing logs, the app simply stops answering invite
+    // mail. That is how the gap survived to 0.3.0, with onOpenURL wired and
+    // nothing declared.
+    //
+    // Two assertions, not one. A declaration carrying a renamed or mistyped
+    // scheme passes a presence-only check while leaving the link just as dead.
+    //
+    // The limit is worth stating: this proves the plist DECLARES the scheme.
+    // It cannot prove LaunchServices ROUTES it, which depends on the
+    // registration database and on which bundle wins when several claim the
+    // same identifier. That half is the manual gate in the release runbook,
+    // so a green test here is not proof the feature works.
+    assert!(
+        plist.contains("<key>CFBundleURLTypes</key>"),
+        "CFBundleURLTypes lost; tracecommons:// invite links would go dead:\n{plist}"
+    );
+    assert!(
+        plist.contains("<string>tracecommons</string>"),
+        "the tracecommons scheme is not declared:\n{plist}"
     );
 }
 
@@ -1069,6 +1141,12 @@ fn flatpak_manifest_pinned_toolchain_meets_the_crates_rust_version_floor() {
 }
 
 /// Runs info-plist.sh with a given TC_SPARKLE_PUBLIC_ED_KEY (None = unset).
+///
+/// Unix-only for the same reason as its two callers below: it shells out to
+/// bash. It carries its own `cfg` rather than relying on theirs, because an
+/// ungated helper whose only callers are gated is dead code on Windows, and
+/// this crate builds its tests under `-D warnings`.
+#[cfg(unix)]
 fn info_plist_with_key(key: Option<&str>) -> String {
     let script = repo_root().join("macos/scripts/info-plist.sh");
     let mut command = Command::new("bash");
@@ -1090,6 +1168,8 @@ fn info_plist_with_key(key: Option<&str>) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Unix-only: runs `macos/scripts/info-plist.sh` through bash.
+#[cfg(unix)]
 #[test]
 fn info_plist_carries_the_approved_sparkle_configuration() {
     let plist = info_plist_with_key(Some("dGVzdC1wdWJsaWMta2V5LWJhc2U2NC12YWx1ZQ=="));
@@ -1125,6 +1205,8 @@ fn info_plist_carries_the_approved_sparkle_configuration() {
     );
 }
 
+/// Unix-only: runs `macos/scripts/info-plist.sh` through bash.
+#[cfg(unix)]
 #[test]
 fn info_plist_ships_no_feed_at_all_without_a_public_key() {
     // Fail closed. A bundle with a feed but no key would ask Sparkle to
@@ -1298,14 +1380,22 @@ fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("expected to find job {name}"));
     let body_start = start + marker.len();
     let rest = &workflow[body_start..];
+    // `split_inclusive` keeps the terminator in each item, so `line.len()` is
+    // the true byte width whether the file ends its lines with LF or CRLF.
+    // `str::lines()` strips a trailing `\r` but the cursor here only added one
+    // byte back, so under CRLF every line under-counted by one, the drift
+    // accumulated down the file, and the job body was returned truncated --
+    // which surfaced as an assertion claiming a step near the end of the job
+    // did not exist. See `workflow_parsing_survives_a_crlf_checkout`.
     let end = rest
-        .lines()
+        .split_inclusive('\n')
         .scan(0usize, |pos, line| {
             let this_pos = *pos;
-            *pos += line.len() + 1;
+            *pos += line.len();
             Some((this_pos, line))
         })
         .find(|(_, line)| {
+            let line = line.trim_end_matches(['\r', '\n']);
             !line.is_empty()
                 && line.starts_with("  ")
                 && !line.starts_with("    ")
@@ -1558,6 +1648,33 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
         assert!(
             job.contains(expected),
             "the Windows release job must consistently use the canonical MSIX identity: {expected}"
+        );
+    }
+}
+
+/// A Windows checkout has CRLF line endings -- `core.autocrlf` defaults to
+/// true there, and the box this was found on reported 1367 CRLF pairs in
+/// `release-apps.yml` alone. That must not change what these tests read.
+///
+/// The bug this pins was silent and total. `extract_job` walked lines with
+/// `str::lines()`, which strips a trailing `\r`, while advancing its byte
+/// cursor by `line.len() + 1`. Under CRLF every line under-counted by one
+/// byte, the drift accumulated down the file, and the job body was sliced
+/// short -- so an assertion about a step near the END of a job failed
+/// claiming the step was absent, which is indistinguishable from the step
+/// genuinely having been deleted. It cost a Windows debugging session to
+/// tell those two apart.
+#[test]
+fn workflow_parsing_survives_a_crlf_checkout() {
+    let lf = read(".github/workflows/release-apps.yml");
+    let crlf = lf.replace('\n', "\r\n");
+
+    for job in ["windows-app", "macos", "version"] {
+        let from_lf = extract_job(&lf, job);
+        let from_crlf = extract_job(&crlf, job).replace("\r\n", "\n");
+        assert_eq!(
+            from_lf, from_crlf,
+            "extract_job({job}) disagreed between an LF and a CRLF checkout"
         );
     }
 }

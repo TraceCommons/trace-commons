@@ -13,6 +13,12 @@
 //! Every test here talks to the daemon the way that window does: a bare unix
 //! socket, JSON per line, no access to the daemon's memory.
 
+#![cfg(unix)]
+// The daemon's IPC transport is a unix socket here and a named pipe on
+// Windows, so this file's fixtures are unix-only. Without this gate the
+// whole test target fails to COMPILE on Windows -- which is why the
+// contributor crate's suite had never run there at all, not merely skipped.
+
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -94,7 +100,11 @@ impl Harness {
         store.save_config(&cfg).unwrap();
 
         let mut settings = DaemonSettings::load(&store).unwrap();
-        settings.claude_root = Some(sessions_root);
+        settings.claude_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: sessions_root,
+            },
+        );
         settings.save(&store).unwrap();
 
         let entry_id = entry_id_for("preview-body-test-hash");

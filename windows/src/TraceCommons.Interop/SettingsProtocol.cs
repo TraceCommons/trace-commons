@@ -115,6 +115,20 @@ public sealed class ProjectSetting
 
     [JsonPropertyName("configured")]
     public bool Configured { get; set; }
+
+    /// <summary>
+    /// Marks the row holding sessions whose project the daemon cannot name.
+    ///
+    /// The daemon decides this, because the daemon is what enforces it: it
+    /// refuses <c>auto_upload</c> for that bucket in two independent places.
+    /// A client MUST NOT infer the row from <c>project_label</c> -- see
+    /// <c>docs/contributor-daemon-ipc-v1_1.md</c> -- because the wire carries
+    /// the slug <c>unknown-project</c> as that label, and any project a
+    /// contributor happened to name the same would be told it can never be
+    /// armed.
+    /// </summary>
+    [JsonPropertyName("is_unresolved_bucket")]
+    public bool IsUnresolvedBucket { get; set; }
 }
 
 /// <summary><c>list_audit</c>'s privacy-safe local change log.</summary>

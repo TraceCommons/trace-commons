@@ -5,14 +5,23 @@ members = [
     "crates/trace-commons-contributor-ffi",
     "crates/trace-commons-gate-api",
     "crates/trace-commons-gate-enclave",
+    "crates/trace-commons-mark",
     "crates/trace-commons-operator-client",
     "crates/trace-commons-protocol",
     "crates/trace-commons-server",
 ]
-# The Linux contributor shell is its own workspace. It links GTK 4 and
-# libadwaita and cannot build on macOS, where the crates above are developed
-# and checked; excluding it keeps a `cargo check` here honest rather than
-# newly broken, and keeps the GTK dependency tree out of this lockfile.
+# The Linux contributor shell is its own workspace. Excluding it keeps the
+# GTK dependency tree out of this lockfile, and keeps a `cargo check` here
+# from depending on GTK 4 and libadwaita being installed.
+#
+# It does NOT mean the shell cannot be built on macOS: with Homebrew's gtk4
+# and libadwaita present it builds and its whole test suite runs there. The
+# comment here used to say it could not, which is worth correcting rather
+# than deleting -- believing it meant the crate went unbuilt and unchecked
+# by anyone developing on a Mac, and it drifted accordingly.
+#
+# Being outside this workspace also puts it outside `cargo fmt --all` and the
+# root clippy job, so ci.yml runs both against its own manifest explicitly.
 # Build it with scripts/linux-build.sh.
 exclude = ["crates/trace-commons-contributor-gtk"]
 resolver = "2"

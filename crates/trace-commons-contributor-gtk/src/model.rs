@@ -214,6 +214,19 @@ pub struct Project {
     pub mode: String,
     #[serde(default)]
     pub configured: bool,
+    /// The row holding sessions whose working directory had no usable final
+    /// segment. It can be silenced but never armed -- `Policy` refuses
+    /// `auto_upload` for it in two independent places -- so a shell reports
+    /// that rather than enforcing it.
+    ///
+    /// The daemon says so explicitly because it is the only side that knows
+    /// it for free. Deriving it would mean re-deriving `project_id_for`'s
+    /// hash, and the IPC contract states clients MUST NOT recognise the row
+    /// by `project_label`: that string is display text, and every shell
+    /// rewords it precisely because the raw slug is not something a
+    /// contributor should read.
+    #[serde(default)]
+    pub is_unresolved_bucket: bool,
 }
 
 /// `list_history`.

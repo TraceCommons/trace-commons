@@ -128,6 +128,22 @@ const CSS: &str = r#"
   color: #000000;
 }
 
+/* The emphatic weight of `body.brand`, for the one line in a run of prose
+   that carries the consent -- "You decide what gets contributed" on the
+   welcome page, and each scope's title in the consent list. The brand palette
+   has no second colour to reach for here (ink, paper, accent, rim, tint,
+   muted, and nothing else), so emphasis is weight, which is how the rest of
+   this sheet distinguishes a label from its body. Applied on its own as well
+   as beside `.tc-brand-body`, so it sets the family and size rather than
+   assuming a partner class. */
+.tc-brand-emphasis {
+  font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", "Nimbus Sans", sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.13px;
+  color: #000000;
+}
+
 /* `field.value`: 500 / 15px, mono for the handle and sans for the bio.
    The 1px field box, not the 2px panel frame. */
 .tc-brand-field {

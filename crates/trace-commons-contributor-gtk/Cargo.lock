@@ -2712,9 +2712,15 @@ dependencies = [
  "tokio",
  "trace-commons-build-info",
  "trace-commons-contributor",
+ "trace-commons-mark",
+ "trace-commons-protocol",
  "uuid",
  "zbus",
 ]
+
+[[package]]
+name = "trace-commons-mark"
+version = "0.1.0"
 
 [[package]]
 name = "trace-commons-operator-client"

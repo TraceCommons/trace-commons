@@ -79,6 +79,10 @@ struct OnboardingCoordinatorView: View {
     /// does not lose the choice.
     @State private var selectedScopes: Set<String> = []
     @State private var consentSaveFailed = false
+    /// Reference material for screen 1, presented as a sheet rather than a
+    /// seventh step -- it asks for no decision, and this flow is six screens
+    /// with one decision each.
+    @State private var showingWhatGetsRemoved = false
 
     init(startAt: Step = .welcome, onComplete: @escaping () -> Void = {}) {
         self.startAt = startAt
@@ -92,6 +96,9 @@ struct OnboardingCoordinatorView: View {
                 backBar
             }
             content
+        }
+        .sheet(isPresented: $showingWhatGetsRemoved) {
+            WhatGetsRemovedSheet()
         }
     }
 
@@ -118,7 +125,12 @@ struct OnboardingCoordinatorView: View {
     private var content: some View {
         switch step {
         case .welcome:
-            OnboardingWelcomeView(onGetStarted: { step = .connect })
+            // `onWhatGetsRemoved` used to be left at its `= {}` default here,
+            // so the link on that screen was live, clickable and did nothing.
+            OnboardingWelcomeView(
+                onGetStarted: { step = .connect },
+                onWhatGetsRemoved: { showingWhatGetsRemoved = true }
+            )
 
         case .connect:
             OnboardingConnectView(onEnrolled: { step = .consent })

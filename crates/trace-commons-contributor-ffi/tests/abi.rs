@@ -9,10 +9,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
-    tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_handle,
-    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
-    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_string_free, tc_subscribe,
-    tc_unsubscribe,
+    tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
+    tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_scrub_detector_names,
+    tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -26,7 +26,7 @@ fn cstr_str(s: &str) -> CString {
 /// Point the daemon's session roots at empty tempdirs before starting it,
 /// the way `trace-commons-contributor`'s own watcher tests already do
 /// (`WatcherFixture`). Without this, `tc_daemon_start` -- via the settings
-/// default of `claude_root: None` / `codex_root: None`, meaning "the
+/// default of `claude_source: None` / `codex_source: None`, meaning "the
 /// conventional per-user location" -- scans the machine owner's *real*
 /// `~/.claude`/`~/.codex` session roots: a real privacy problem for a test
 /// (it reads the developer's actual coding transcripts), and also what made
@@ -40,8 +40,16 @@ fn write_tempdir_session_roots(dir: &Path) {
     std::fs::create_dir_all(&codex_root).unwrap();
     let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
     let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
-        claude_root: Some(claude_root),
-        codex_root: Some(codex_root),
+        claude_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root,
+            },
+        ),
+        codex_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: codex_root,
+            },
+        ),
         ..Default::default()
     };
     settings.save(&store).unwrap();
@@ -113,6 +121,101 @@ fn a_second_start_against_the_same_directory_fails_on_the_lock() {
     stop(a);
 }
 
+/// The reproduction that started sub-project G, pinned.
+///
+/// A hand-written `daemon-settings.json` -- the shape a person actually
+/// writes, missing `schema_version` and most required fields -- used to
+/// report the opaque `daemon-start-failed`, leaving a contributor and two
+/// agents with nothing to act on. It must name itself now.
+#[test]
+fn an_unparseable_settings_file_is_named_rather_than_flattened() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("daemon-settings.json"),
+        r#"{"claude_root":"/tmp/x","codex_root":"/tmp/y"}"#,
+    )
+    .unwrap();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(h.is_null(), "an unparseable settings file must not start");
+    assert_eq!(take_err(err), "settings-unreadable");
+
+    // And the failure must not leave behind the file every other reader
+    // treats as proof a daemon is running here.
+    assert!(
+        !dir.path().join("daemon.lock").exists(),
+        "a failed start left daemon.lock behind"
+    );
+}
+
+/// Lock contention names itself too, rather than sharing one label with
+/// every other way a start can fail.
+#[test]
+fn a_second_start_reports_lock_contention_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let b = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(b.is_null());
+    assert_eq!(take_err(err), "already-running");
+
+    stop(a);
+}
+
+/// No label crossing this boundary may carry a filesystem path.
+///
+/// A general guard rather than one case per label: the errors behind these
+/// embed the state-directory and lock-file paths for local stderr, so the
+/// failure mode is a future `format!` forwarding one, and that would not be
+/// caught by asserting the labels we happen to know about today. The
+/// contributor's home directory is checked explicitly because it carries the
+/// OS username, which is the specific disclosure that matters.
+#[test]
+fn no_start_failure_label_carries_a_path() {
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    // Each of these fails a start a different way.
+    let unparseable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unparseable.path().join("daemon-settings.json"),
+        r#"{"claude_root":"/tmp/x"}"#,
+    )
+    .unwrap();
+
+    let missing = unparseable.path().join("no-such-directory");
+
+    let contended = tempfile::tempdir().unwrap();
+    let held = start(contended.path());
+
+    let mut labels = Vec::new();
+    for dir in [unparseable.path(), missing.as_path(), contended.path()] {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(cstr(dir).as_ptr(), &mut err) };
+        assert!(h.is_null(), "these directories must all fail to start");
+        labels.push(take_err(err));
+    }
+    stop(held);
+
+    for label in &labels {
+        assert!(
+            !label.contains('/') && !label.contains('\\'),
+            "a start-failure label carried a path separator: {label}"
+        );
+        assert!(
+            home.is_empty() || !label.contains(&home),
+            "a start-failure label carried the contributor's home directory: {label}"
+        );
+        assert!(
+            label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+            "a start-failure label must be a fixed kebab-case token: {label}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_method_returns_an_error_frame_rather_than_crashing() {
     let dir = tempfile::tempdir().unwrap();
@@ -177,7 +280,7 @@ fn tc_daemon_start_null_config_dir_is_an_error() {
 fn tc_daemon_start_null_err_out_param_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     // Same tempdir session roots every other test gets: without this the
-    // settings default of `claude_root: None` / `codex_root: None` means
+    // settings default of `claude_source: None` / `codex_source: None` means
     // "the conventional per-user location", so the supervisor's first tick
     // would scan and hash the *developer's real* ~/.claude and ~/.codex
     // transcripts on every run of this suite. `start()` is not reused here
@@ -1175,4 +1278,239 @@ fn tc_invite_issuer_host_is_null_for_anything_unusable() {
 fn tc_invite_issuer_host_tolerates_null() {
     let out = unsafe { tc_invite_issuer_host(std::ptr::null()) };
     assert!(out.is_null());
+}
+
+// --- Fail-closed session roots. See
+// docs/superpowers/specs/2026-08-19-fail-closed-roots-parity-design.md. ---
+
+/// Read `*err` and free it, so a refusal's label can be asserted on without
+/// leaking the owned string each of these tests produces.
+fn take_err(err: *mut c_char) -> String {
+    assert!(!err.is_null(), "a refusal must set the error out-param");
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    msg
+}
+
+#[test]
+fn tc_daemon_start_refuses_when_no_roots_are_declared() {
+    // No `write_tempdir_session_roots` on purpose: this is the fresh-install
+    // state, where both roots are None and the daemon would otherwise take
+    // that to mean the contributor's real ~/.claude and ~/.codex.
+    let dir = tempfile::tempdir().unwrap();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+
+    assert!(h.is_null(), "undeclared roots must refuse to start");
+    assert_eq!(
+        take_err(err),
+        "roots-not-declared",
+        "the label must be distinguishable from daemon-start-failed, because \
+         the shells route a roots refusal to the roots screen and everything \
+         else to the generic failure notice"
+    );
+    assert_eq!(last_error().as_deref(), Some("roots-not-declared"));
+}
+
+#[test]
+fn tc_daemon_start_refuses_when_only_one_root_is_declared() {
+    // The `||`-instead-of-`&&` fail-open: an unset codex_root does not mean
+    // "no codex source", it means the real ~/.codex.
+    let dir = tempfile::tempdir().unwrap();
+    let claude_root = dir.path().join("claude-root");
+    std::fs::create_dir_all(&claude_root).unwrap();
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+    trace_commons_contributor::daemon::settings::DaemonSettings {
+        claude_source: Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root,
+            },
+        ),
+        codex_source: None,
+        ..Default::default()
+    }
+    .save(&store)
+    .unwrap();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe { tc_daemon_start(cstr(dir.path()).as_ptr(), &mut err) };
+
+    assert!(h.is_null(), "half a declaration must refuse");
+    assert_eq!(take_err(err), "roots-not-declared");
+}
+
+#[test]
+fn tc_daemon_start_with_settings_may_declare_the_roots_that_let_it_start() {
+    // The whole point of the settings-bearing start: the roots screen has
+    // just collected two folders, and one call both persists them and starts
+    // the daemon. Without this there is no way out of the refusal.
+    let dir = tempfile::tempdir().unwrap();
+    let claude_root = dir.path().join("claude-root");
+    let codex_root = dir.path().join("codex-root");
+    std::fs::create_dir_all(&claude_root).unwrap();
+    std::fs::create_dir_all(&codex_root).unwrap();
+
+    let settings_json = serde_json::json!({
+        "claude_root": claude_root.to_str().unwrap(),
+        "codex_root": codex_root.to_str().unwrap(),
+    })
+    .to_string();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(
+        !h.is_null(),
+        "declaring both roots at start must be accepted: {:?}",
+        last_error()
+    );
+    stop(h);
+}
+
+#[test]
+fn tc_daemon_start_with_settings_refuses_when_the_settings_declare_only_one_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_root = dir.path().join("claude-root");
+    std::fs::create_dir_all(&claude_root).unwrap();
+
+    let settings_json = serde_json::json!({
+        "claude_root": claude_root.to_str().unwrap(),
+    })
+    .to_string();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(h.is_null(), "half a declaration must refuse here too");
+    assert_eq!(take_err(err), "roots-not-declared");
+}
+
+#[test]
+fn discovery_answers_without_a_handle_and_describes_both_sources() {
+    // It has to work with no daemon: the screen that consumes it is the one
+    // clearing the refusal that stops a daemon from starting.
+    let out = tc_discover_sources();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let items = parsed.as_array().expect("an array");
+    assert_eq!(items.len(), 2, "one candidate per known agent: {json}");
+
+    let sources: Vec<&str> = items
+        .iter()
+        .map(|i| i["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, vec!["claude-code", "codex"]);
+
+    for item in items {
+        // The fields a consent prompt needs to be specific rather than
+        // abstract.
+        assert!(item["path"].is_string());
+        assert!(item["exists"].is_boolean());
+        assert!(item["session_count"].is_u64());
+        assert!(item["relocated_by_env"].is_boolean());
+        assert!(item["most_recent"].is_string() || item["most_recent"].is_null());
+    }
+}
+
+#[test]
+fn a_roots_refusal_never_echoes_a_path_back_across_the_boundary() {
+    // settings_json is the one input at this boundary that may itself carry
+    // a filesystem path; trace_commons.h is explicit that it must not come
+    // back out. A refusal label is fixed and content-free by construction,
+    // and this pins that.
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("acme-unreleased-product");
+    std::fs::create_dir_all(&secret).unwrap();
+
+    let settings_json = serde_json::json!({ "claude_root": secret.to_str().unwrap() }).to_string();
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(h.is_null());
+    let msg = take_err(err);
+    assert!(
+        !msg.contains("acme-unreleased-product") && !msg.contains(dir.path().to_str().unwrap()),
+        "a refusal must not echo settings_json back: {msg}"
+    );
+}
+
+#[test]
+fn scrub_detector_names_are_generated_from_the_real_table() {
+    // The point of the export: a shell showing this list must be showing what
+    // the scrubber actually looks for, not a transcription that stops being
+    // true the day a detector is added.
+    let out = tc_scrub_detector_names();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let names: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|n| n.as_str().expect("a string"))
+        .collect();
+
+    // Compared against the table itself rather than a list written here --
+    // pinning the names in this test would be the same transcription bug one
+    // layer down.
+    let expected = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+    assert_eq!(names, expected, "the export must mirror the detector table");
+    assert!(
+        !names.is_empty(),
+        "an empty list would claim nothing is scrubbed"
+    );
+}
+
+#[test]
+fn the_detector_export_never_carries_a_pattern() {
+    // Names only. Publishing the regexes would tell someone trying to slip a
+    // secret past the scrubber exactly what to avoid, so this asserts on what
+    // actually crosses the boundary rather than trusting the implementation to
+    // stay as written.
+    let out = tc_scrub_detector_names();
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    // Each NAME, not the raw envelope: `[` and `{` are JSON's own delimiters
+    // and are always present in a valid array.
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    for name in parsed.as_array().expect("an array") {
+        let name = name.as_str().expect("a string");
+        for meta in ['\\', '^', '$', '[', '(', '{', '+', '?', '|', '*'] {
+            assert!(
+                !name.contains(meta),
+                "a regex metacharacter {meta:?} reached the boundary in {name:?}"
+            );
+        }
+    }
 }

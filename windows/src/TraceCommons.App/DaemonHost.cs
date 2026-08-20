@@ -113,12 +113,27 @@ public sealed class DaemonHost : IAsyncDisposable
     /// and performs the first filesystem scan, and blocking the UI thread on
     /// that is a visible hang on a large session history.
     /// </summary>
+    /// <param name="settingsJson">
+    /// Settings applied and persisted BEFORE the watcher's first tick, or null
+    /// to use whatever is already persisted.
+    ///
+    /// This is how the roots screen's answer reaches the daemon. The refusal
+    /// is evaluated after these settings are applied, so a declaration passed
+    /// here clears the refusal that the persisted file alone would have
+    /// earned -- which is the difference between a contributor who just
+    /// answered and one who has to restart the app to be believed.
+    /// </param>
     /// <exception cref="TcException">
-    /// The daemon could not start -- most commonly because another instance of
-    /// this app, or the contributor CLI's daemon, already holds the lock for
-    /// this state directory.
+    /// The daemon could not start -- because the session sources are
+    /// undeclared (<see cref="TcException.IsRootsNotDeclared"/>, which the
+    /// caller should route to the roots screen rather than report as a
+    /// fault), or most commonly because another instance of this app, or the
+    /// contributor CLI's daemon, already holds the lock for this state
+    /// directory.
     /// </exception>
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(
+        string? settingsJson = null,
+        CancellationToken cancellationToken = default)
     {
         if (_daemon is not null)
         {
@@ -127,11 +142,14 @@ public sealed class DaemonHost : IAsyncDisposable
 
         Directory.CreateDirectory(_configDir);
 
-        // Settings are left to whatever is persisted: this app watches the
-        // contributor's real session store, which is the whole point of it.
-        // Passing settings here is for hosts relocating that store, and for
-        // tests that must not read it.
-        TcDaemon daemon = await Task.Run(() => new TcDaemon(_configDir), cancellationToken)
+        // Nothing is watched that the contributor did not name. With no
+        // settings passed, the daemon reads what is persisted and refuses to
+        // start when that does not declare both sources -- it does NOT fall
+        // back to the real ~/.claude and ~/.codex. That fallback is what this
+        // client used to get, and it meant a contributor's whole session
+        // history was scanned on the strength of never having been asked.
+        TcDaemon daemon = await Task
+            .Run(() => new TcDaemon(_configDir, settingsJson), cancellationToken)
             .ConfigureAwait(true);
 
         _daemon = daemon;

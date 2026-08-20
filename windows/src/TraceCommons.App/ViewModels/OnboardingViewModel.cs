@@ -183,6 +183,27 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     public ObservableCollection<ProjectViewModel> Projects { get; } = new();
 
+    /// <summary>
+    /// True when the daemon reported no projects at all, so screen 5 can say
+    /// so rather than rendering a heading above nothing.
+    /// </summary>
+    public bool HasNoProjects => Projects.Count == 0;
+
+    // Screen 5's words come from WatchCopy rather than being repeated as XAML
+    // literals, so the strings the tests check are the strings that render.
+    // The same idiom the roots window uses.
+    public string WatchSubtitle => WatchCopy.Subtitle;
+
+    public string WatchSection => WatchCopy.Section.ToUpperInvariant();
+
+    public string WatchEmpty => WatchCopy.Empty;
+
+    /// <summary>
+    /// The link under screen 1's scrubbing paragraph. Bound rather than
+    /// repeated so the label and the dialog it opens cannot drift apart.
+    /// </summary>
+    public string WhatGetsRemovedLabel => ScrubDetectorCopy.LinkLabel;
+
     public void GetStarted() => Step = OnboardingStep.Connect;
 
     /// <summary>
@@ -360,6 +381,11 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Projects.Add(new ProjectViewModel(project));
             }
         }
+
+        // An empty list is a real state, not a transient one: it is what every
+        // machine showed before the local_path deserialisation bug was fixed,
+        // and it rendered as a title above nothing at all.
+        Raise(nameof(HasNoProjects));
     }
 
     /// <summary>
@@ -545,9 +571,14 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(project);
         ProjectId = project.ProjectId;
-        ProjectLabel = string.IsNullOrWhiteSpace(project.ProjectLabel)
-            ? "Unknown project"
-            : project.ProjectLabel;
+
+        // Both the name and the line beneath it come from WatchCopy, which is
+        // in the interop assembly precisely so they are exercised by tests on a
+        // machine that cannot build WinUI. Which row this IS comes from the
+        // daemon's own flag, never from the label and never from re-deriving
+        // the opaque id.
+        IsUnresolvable = project.IsUnresolvedBucket;
+        ProjectLabel = WatchCopy.LabelFor(IsUnresolvable, project.ProjectLabel);
         _isIgnored = project.Mode == "ignore";
     }
 
@@ -556,6 +587,21 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     public string ProjectId { get; }
 
     public string ProjectLabel { get; }
+
+    /// <summary>
+    /// True for the bucket holding sessions whose project the daemon cannot
+    /// name. It can be silenced but never armed, and the daemon enforces that
+    /// on its own -- this flag only decides what the row says.
+    /// </summary>
+    public bool IsUnresolvable { get; }
+
+    /// <summary>
+    /// The line beneath the name: the mode for an ordinary row, and for the
+    /// unresolvable bucket the note explaining why it can never be armed. The
+    /// note REPLACES the mode rather than joining it, because "you'll always be
+    /// asked" already says what "Ask me first" says.
+    /// </summary>
+    public string SubLine => WatchCopy.SubLineFor(IsUnresolvable, _isIgnored ? "ignore" : "ask");
 
     public bool IsIgnored
     {
@@ -570,6 +616,7 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
             _isIgnored = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsIgnored)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsNotIgnored)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SubLine)));
         }
     }
 

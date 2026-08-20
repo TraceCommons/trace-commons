@@ -7302,6 +7302,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "trace-commons-contributor",
+ "trace-commons-protocol",
 ]
 
 [[package]]
@@ -7335,6 +7336,10 @@ dependencies = [
  "usearch",
  "uuid 1.23.1",
 ]
+
+[[package]]
+name = "trace-commons-mark"
+version = "0.1.0"
 
 [[package]]
 name = "trace-commons-operator-client"

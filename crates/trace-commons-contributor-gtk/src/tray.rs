@@ -131,7 +131,7 @@ pub fn spawn() -> async_channel::Receiver<()> {
     // may only be read from the main thread. Everything after this point
     // runs on a thread that must never touch GTK, so the icons are written
     // -- and their paths frozen -- here.
-    let icons = install_icons(mark::Scheme::current());
+    let icons = install_icons(mark::current_scheme());
     let icon_name = icons
         .map(|icons| icons.status_name.clone())
         .unwrap_or_else(|| crate::ui::APP_ID.to_string());

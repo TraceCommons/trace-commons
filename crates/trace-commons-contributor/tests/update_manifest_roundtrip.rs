@@ -3,6 +3,12 @@
 //! broke every installed client, which is the failure this file exists to
 //! prevent.
 
+#![cfg(unix)]
+// Drives `scripts/updates/generate-manifest.sh` and `openssl` as child
+// processes. Windows cannot execute the shell script, so every test here
+// fails there for the environment rather than for the property it asserts --
+// the same reason the info-plist tests are gated.
+
 use std::process::Command;
 
 use trace_commons_contributor::update::manifest::{ManifestError, verify_manifest};

@@ -103,13 +103,73 @@ pub struct DaemonSettings {
     /// Privacy-filter credentials, persisted so a service-managed daemon can
     /// reach the filter without a shell environment.
     pub near_ai: Option<NearAiSettings>,
-    /// Session roots to watch. `None` means the conventional per-user
-    /// location for that agent. Overridable so the daemon can follow a
-    /// relocated store, and so tests never touch the real one.
+    /// What the contributor said about each agent's sessions.
+    ///
+    /// `None` is "never asked", and it is the ONLY state that still falls
+    /// back to the conventional per-user location -- which is why the
+    /// application shells refuse to start on it. `Some(Off)` is a real
+    /// answer and is never a fallback; see [`SourceDeclaration`].
     #[serde(default)]
-    pub claude_root: Option<PathBuf>,
+    pub claude_source: Option<SourceDeclaration>,
     #[serde(default)]
-    pub codex_root: Option<PathBuf>,
+    pub codex_source: Option<SourceDeclaration>,
+
+    /// Legacy spellings, read on load and never written.
+    ///
+    /// Settings files written before source declarations existed carry
+    /// `claude_root` / `codex_root` strings meaning "watch this path".
+    /// [`DaemonSettings::load`] folds them into the fields above so an
+    /// install that already declared its roots is not asked again. They are
+    /// `skip_serializing` so a file rewritten by this version stops carrying
+    /// two spellings of the same fact.
+    /// Public only because `DaemonSettings { .. }` literals live in other
+    /// crates; treat it as private. Read by `load` and never written.
+    #[serde(default, rename = "claude_root", skip_serializing)]
+    pub legacy_claude_root: Option<PathBuf>,
+    /// See `legacy_claude_root`.
+    #[serde(default, rename = "codex_root", skip_serializing)]
+    pub legacy_codex_root: Option<PathBuf>,
+}
+
+/// What the contributor said about one agent's session store.
+///
+/// The tri-state this replaces was `Option<PathBuf>`, where `None` had to
+/// carry both "never asked" and "I don't use this agent" -- and the daemon
+/// resolved that ambiguity by watching the real `~/.claude` or `~/.codex`
+/// (`crate::source::all_sources`). So the one answer a privacy-conscious
+/// contributor is most likely to give was the one answer that silently
+/// scanned their work.
+///
+/// Serialized tagged rather than as a bare string, so `off` can never be
+/// mistaken for a path and a future third state has somewhere to go:
+///
+/// ```json
+/// "claude_source": { "mode": "watch", "path": "/Users/x/.claude/projects" }
+/// "codex_source":  { "mode": "off" }
+/// ```
+///
+/// Deliberately NOT a sentinel path (an empty directory, a temp dir, "/dev/null").
+/// A sentinel that is a real filesystem location is a lie every later reader
+/// has to decode, and it stops being true the moment somebody creates that
+/// directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SourceDeclaration {
+    /// Watch this directory. The contributor chose it.
+    Watch { path: PathBuf },
+    /// The contributor said they do not use this agent. Nothing is watched
+    /// for it, and there is no fallback.
+    Off,
+}
+
+impl SourceDeclaration {
+    /// The directory to watch, or `None` when the source is off.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            SourceDeclaration::Watch { path } => Some(path.as_path()),
+            SourceDeclaration::Off => None,
+        }
+    }
 }
 
 fn default_approval_hold_secs() -> u64 {
@@ -140,8 +200,10 @@ impl Default for DaemonSettings {
             approval_hold_secs: DEFAULT_APPROVAL_HOLD_SECS,
             local_notifications: false,
             near_ai: None,
-            claude_root: None,
-            codex_root: None,
+            claude_source: None,
+            codex_source: None,
+            legacy_claude_root: None,
+            legacy_codex_root: None,
         }
     }
 }
@@ -153,7 +215,38 @@ impl DaemonSettings {
         let Some(body) = store.read_daemon_file(DAEMON_SETTINGS_FILE)? else {
             return Ok(Self::default());
         };
-        serde_json::from_slice(&body).context("parsing daemon settings")
+        // The serde context stays for local stderr and journals, where the
+        // parser's own "missing field `schema_version` at line 1 column 65"
+        // is the whole diagnosis. `StartFailure` rides alongside it so a
+        // caller across the C ABI -- which must not receive that text, since
+        // the file it names is in the contributor's home directory -- can
+        // still tell this apart from every other start failure.
+        let mut settings: Self = serde_json::from_slice(&body)
+            .context("parsing daemon settings")
+            .context(crate::daemon::StartFailure::SettingsUnreadable)?;
+        settings.absorb_legacy_roots();
+        Ok(settings)
+    }
+
+    /// Fold `claude_root` / `codex_root` from an older file into the source
+    /// declarations. A legacy path means "watch this"; it never means off,
+    /// because off could not be expressed before this existed.
+    ///
+    /// An explicit declaration always wins, so a file carrying both (written
+    /// by a version in between, or edited by hand) is not downgraded.
+    fn absorb_legacy_roots(&mut self) {
+        if self.claude_source.is_none()
+            && let Some(path) = self.legacy_claude_root.take()
+        {
+            self.claude_source = Some(SourceDeclaration::Watch { path });
+        }
+        if self.codex_source.is_none()
+            && let Some(path) = self.legacy_codex_root.take()
+        {
+            self.codex_source = Some(SourceDeclaration::Watch { path });
+        }
+        self.legacy_claude_root = None;
+        self.legacy_codex_root = None;
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -170,6 +263,28 @@ pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// A recognized key held a value of the wrong JSON type (or, for
 /// `claude_root`/`codex_root`, a JSON type other than string/null).
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+
+/// Whether the contributor has said which session folders to watch.
+///
+/// BOTH, not either. `claude_root: None` does not mean "no Claude source" --
+/// `DaemonSettings` documents it as meaning the conventional per-user
+/// location, so an undeclared root is the real `~/.claude` or `~/.codex`.
+/// Half a declaration therefore buys none of the protection while reading as
+/// though it had, which is why an `||` here would be a fail-open.
+///
+/// This is the ONLY place the rule is written. The application shells consult
+/// it -- macOS and Windows through the C ABI's start functions, the GTK shell
+/// by calling it directly -- rather than each transcribing the predicate into
+/// its own language, because three copies of a rule that decides whether a
+/// developer's source tree gets scanned is three chances for one of them to
+/// drift. Compare `tc_daemon_start_with_settings`, which shares
+/// `set_settings`' validator for exactly this reason.
+///
+/// The daemon core does not consult it: `trace-commons-contributor daemon` is
+/// someone typing a command on purpose, and the CLI keeps its defaults.
+pub fn roots_declared(settings: &DaemonSettings) -> bool {
+    settings.claude_source.is_some() && settings.codex_source.is_some()
+}
 
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
@@ -221,11 +336,23 @@ pub fn apply_settings_object(
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            // The path spellings. A string declares "watch this"; null
+            // clears the declaration back to never-asked, which is what the
+            // application shells refuse to start on. Kept because the C ABI
+            // documents these exact keys and both native shells send them.
             "claude_root" => {
-                settings.claude_root = parse_optional_root(value)?;
+                settings.claude_source = parse_optional_root(value)?;
             }
             "codex_root" => {
-                settings.codex_root = parse_optional_root(value)?;
+                settings.codex_source = parse_optional_root(value)?;
+            }
+            // The full declaration, including the one thing a path cannot
+            // say: off.
+            "claude_source" => {
+                settings.claude_source = parse_source_declaration(value)?;
+            }
+            "codex_source" => {
+                settings.codex_source = parse_source_declaration(value)?;
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -239,10 +366,27 @@ pub fn apply_settings_object(
 /// formats `value` into the error -- see `apply_settings_object`'s doc.
 fn parse_optional_root(
     value: &serde_json::Value,
-) -> std::result::Result<Option<PathBuf>, &'static str> {
+) -> std::result::Result<Option<SourceDeclaration>, &'static str> {
     match value {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(s) => Ok(Some(PathBuf::from(s))),
+        serde_json::Value::String(s) => Ok(Some(SourceDeclaration::Watch {
+            path: PathBuf::from(s),
+        })),
+        _ => Err(ERR_SETTINGS_INVALID_VALUE),
+    }
+}
+
+/// `{"mode":"watch","path":"..."}`, `{"mode":"off"}`, or null to clear the
+/// declaration back to never-asked. Never formats `value` into the error --
+/// see `apply_settings_object`'s doc; a declaration carries a path.
+fn parse_source_declaration(
+    value: &serde_json::Value,
+) -> std::result::Result<Option<SourceDeclaration>, &'static str> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(_) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
 }
@@ -311,6 +455,129 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.approval_hold_secs, 30, "a rejected value changes nothing");
+    }
+
+    #[test]
+    fn a_source_can_be_declared_off_and_that_survives_a_round_trip() {
+        // "I don't use Codex" has to be a durable, readable declaration --
+        // distinguishable from "watching a path" AND from "never asked".
+        // Before this existed the only way to express it was to leave the
+        // field unset, which the daemon reads as the real ~/.codex: the
+        // exact fail-open the refusal exists to prevent.
+        let (_d, store) = temp_store();
+        let s = DaemonSettings {
+            claude_source: Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/somewhere/claude"),
+            }),
+            codex_source: Some(SourceDeclaration::Off),
+            ..Default::default()
+        };
+        s.save(&store).unwrap();
+
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.codex_source, Some(SourceDeclaration::Off));
+        assert_eq!(
+            loaded.claude_source,
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/somewhere/claude")
+            })
+        );
+    }
+
+    #[test]
+    fn off_is_not_the_same_as_never_asked() {
+        let never = DaemonSettings::default();
+        assert_eq!(
+            never.codex_source, None,
+            "a fresh install has been asked nothing"
+        );
+
+        let off = DaemonSettings {
+            codex_source: Some(SourceDeclaration::Off),
+            ..Default::default()
+        };
+        assert_ne!(
+            off.codex_source, never.codex_source,
+            "an answered 'I don't use this' must not collapse into 'not answered'"
+        );
+    }
+
+    #[test]
+    fn a_legacy_settings_file_using_claude_root_still_loads() {
+        // Built from a real serialized default so this fixture cannot drift
+        // out of sync with the struct, then downgraded to the old spelling:
+        // source declarations removed, claude_root / codex_root added back.
+        let (_d, store) = temp_store();
+        let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("claude_source");
+        obj.remove("codex_source");
+        obj.insert(
+            "claude_root".to_string(),
+            serde_json::Value::String("/legacy/claude".to_string()),
+        );
+        obj.insert(
+            "codex_root".to_string(),
+            serde_json::Value::String("/legacy/codex".to_string()),
+        );
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            loaded.claude_source,
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/legacy/claude")
+            })
+        );
+        assert!(
+            roots_declared(&loaded),
+            "an install that already declared both roots must not be re-asked"
+        );
+
+        // And the rewrite drops the old spelling rather than carrying two.
+        loaded.save(&store).unwrap();
+        let raw = String::from_utf8(
+            store
+                .read_daemon_file(DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !raw.contains("claude_root"),
+            "legacy key must not be rewritten: {raw}"
+        );
+        assert!(raw.contains("claude_source"));
+    }
+
+    #[test]
+    fn roots_are_declared_only_when_both_are_set() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            !roots_declared(&s),
+            "a fresh settings object declares neither source"
+        );
+
+        s.claude_source = Some(SourceDeclaration::Watch {
+            path: PathBuf::from("/somewhere/claude"),
+        });
+        assert!(
+            !roots_declared(&s),
+            "half a declaration is the fail-open case: an undeclared codex \
+             source means the daemon watches the real ~/.codex"
+        );
+
+        s.codex_source = Some(SourceDeclaration::Off);
+        assert!(
+            roots_declared(&s),
+            "'I don't use Codex' is an answer. Declared-off is declared -- \
+             that is the entire reason it has to be representable"
+        );
+
+        s.claude_source = None;
+        assert!(!roots_declared(&s), "the rule is symmetric");
     }
 
     #[test]

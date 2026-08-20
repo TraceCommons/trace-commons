@@ -56,14 +56,47 @@ let package = Package(
             dependencies: ["TCUpdates"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // State-directory resolution and the shell's refusal rules. Carved
+        // out for the same reason TCUpdates was: the app target links the
+        // FFI dylib, so nothing in it can be a unit test. The bug this
+        // target exists to prevent -- resolving the state directory from an
+        // environment variable a Finder launch never has -- shipped in a
+        // notarized build precisely because there was nowhere to test it.
+        .target(
+            name: "TCShellCore",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TCShellCoreTests",
+            dependencies: ["TCShellCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "TraceCommonsApp",
             dependencies: [
                 "TCBridge",
+                "TCShellCore",
                 "TCUpdates",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L", ffiLibDir,
+                    "-ltrace_commons_contributor_ffi",
+                ])
+            ]
+        ),
+        // The one test target that links the dylib. Everything testable
+        // without it lives in TCShellCore and is tested there -- but "every
+        // detector the scrubber actually has is labelled" cannot be asserted
+        // against a fixture, only against the real table, and a list of what
+        // is removed that quietly falls back to a de-slugged name is exactly
+        // the drift this screen exists to avoid.
+        .testTarget(
+            name: "TCBridgeTests",
+            dependencies: ["TCBridge", "TCShellCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", ffiLibDir,

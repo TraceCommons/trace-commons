@@ -37,7 +37,7 @@ use adw::prelude::*;
 
 use super::App;
 use super::community_brand;
-use super::mark::Scheme;
+use super::mark::{Scheme, current_scheme};
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{HistoryRecord, HistoryRollup, human_when};
@@ -784,7 +784,7 @@ fn icon(glyph: Glyph, size: i32) -> gtk::DrawingArea {
     // announcing "circle" before each of them is noise.
     area.set_can_focus(false);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_glyph(cr, glyph, Scheme::current(), width as f64, height as f64);
+        draw_glyph(cr, glyph, current_scheme(), width as f64, height as f64);
     });
     follow_scheme(&area);
     area

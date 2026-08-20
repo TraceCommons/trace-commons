@@ -20,6 +20,11 @@
 //! those bytes. The tests here drive that against a classifier that really
 //! does move between calls.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -176,8 +181,16 @@ impl Harness {
         let shared = Arc::new(DaemonShared::load(store).unwrap());
         {
             let mut s = shared.settings.lock().unwrap();
-            s.claude_root = Some(claude_root.clone());
-            s.codex_root = Some(dir.path().join("codex"));
+            s.claude_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: claude_root.clone(),
+                },
+            );
+            s.codex_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex"),
+                },
+            );
             s.near_ai = Some(NearAiSettings {
                 api_key: "test-key".into(),
                 base_url: Some(filter),

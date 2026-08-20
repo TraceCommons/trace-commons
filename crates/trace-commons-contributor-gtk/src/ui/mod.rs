@@ -6,11 +6,13 @@
 //! application tells a contributor to install a shell extension.
 
 pub mod community_brand;
+mod css_contract;
 pub mod history;
 pub mod mark;
 pub mod onboarding;
 pub mod preview;
 pub mod queue;
+pub mod roots;
 pub mod settings;
 pub mod style;
 pub mod update;

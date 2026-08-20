@@ -35,12 +35,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adw::prelude::*;
-
 use crate::copy;
 use crate::model::Project;
 use crate::ui::App;
 use crate::ui::style::space;
+use adw::prelude::*;
 
 /// Where a run of onboarding has got to.
 ///
@@ -162,6 +161,18 @@ pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>
     if logged_in && is_complete(tenant_id) {
         return;
     }
+    // Camera only, in the same family as TC_FORCE_CONNECT_NOTICES below.
+    //
+    // The headless fixture is deliberately not enrolled, so onboarding is
+    // correct to open over every other screen -- which makes the main
+    // window's own surfaces unphotographable. Satisfying the real condition
+    // would mean the fixture minting a config and an Ed25519 device key, a
+    // pile of machinery that can drift from the schema it imitates and would
+    // then lie about what a real install looks like. Suppressing the modal
+    // for a screenshot changes nothing about what is underneath it.
+    if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
+        return;
+    }
     // `refresh` runs on every daemon event, and this is called from its
     // `status` handler, so without a latch a contributor part-way through
     // the flow would have a second window thrown in front of the first
@@ -206,6 +217,20 @@ pub fn present(app: &Rc<App>) {
 
 /// Build and show the window, optionally opening on a specific screen.
 fn present_at(app: &Rc<App>, start: Option<Step>) {
+    // Same reason the roots screen does it: this window wears `tc-brand-*`
+    // classes, and on an install whose roots are already declared it can be
+    // the first window opened -- the roots screen never shows, and neither
+    // history nor settings has run. `install()` is idempotent, so the cost of
+    // calling it on a path that already has the provider is a bool check.
+    // BOTH sheets, the way roots.rs does it. This window mixes the two
+    // vocabularies -- `tc-brand-*` for its frame and type, `tc-refused` and
+    // `tc-meta` for the states that have an established treatment elsewhere --
+    // and it is reachable as the first window on an install whose roots are
+    // already declared. Installing one and using names from the other is how
+    // four classes came to render as nothing at all. Both are idempotent.
+    super::style::install();
+    super::community_brand::install();
+
     let window = adw::Window::builder()
         .transient_for(&app.window)
         .modal(true)
@@ -229,13 +254,19 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
         .wrap(true)
         .visible(false)
         .build();
-    invite_error.add_css_class("tc-error");
+    // The same class the roots screen gives its failure line: a refusal
+    // sentence reads as a refusal because of its colour, and this one shipped
+    // wearing `tc-error`, which no stylesheet defines -- so a contributor whose
+    // invite was rejected got that news in the same black as the instructions.
+    invite_error.add_css_class("tc-refused");
     let invite_instance = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .visible(false)
         .build();
-    invite_instance.add_css_class("tc-muted");
+    // A secondary annotation under a field, which is what `tc-meta` is for --
+    // the roots screen uses it for the evidence line in the same position.
+    invite_instance.add_css_class("tc-meta");
     let connect_button = gtk::Button::builder()
         .label(copy::ONBOARD_CONNECT_BUTTON)
         .sensitive(false)
@@ -331,6 +362,27 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
 /// A label with no action never reaches this, because the button is hidden
 /// for those -- but an unknown label returning early is the safe direction
 /// rather than opening a screen that answers nothing.
+/// Open onboarding directly on a named page, for the camera.
+///
+/// `--start-page` drives the MAIN window's stack; onboarding is a separate
+/// modal with its own steps, so it had no way to be photographed past its
+/// first screen. That is how four class names no stylesheet defines reached
+/// pages nobody had ever seen. Returns false for an unknown name rather than
+/// guessing a page.
+pub fn present_at_page(app: &Rc<App>, page: &str) -> bool {
+    let step = match page {
+        "welcome" => Step::Welcome,
+        "connect" => Step::Connect,
+        "consent" => Step::Consent,
+        "scan" => Step::Scan,
+        "watch" => Step::Watch,
+        "done" => Step::Done,
+        _ => return false,
+    };
+    present_at(app, Some(step));
+    true
+}
+
 pub fn present_for_health(app: &Rc<App>, label: &str) {
     let Some(step) = health_step(label) else {
         return;
@@ -407,6 +459,59 @@ fn body_label(text: &str) -> gtk::Label {
     label
 }
 
+/// The "What gets removed?" disclosure.
+///
+/// The list is GENERATED from the protocol's detector table, never
+/// transcribed. A hand-written list of what this product scrubs is a privacy
+/// claim that stops being true the day a detector is added, and nobody would
+/// notice: the sentence would still read correctly.
+///
+/// A dialog rather than a page or an inline expander. The flow is six screens
+/// and this is reference material read once, not a decision; an expander would
+/// also have to push the promise and `Get started` down a page that does not
+/// scroll.
+fn present_what_gets_removed(parent: &adw::Window) {
+    let dialog = adw::MessageDialog::new(
+        Some(parent),
+        Some(copy::ONBOARD_WHAT_REMOVED_HEADING),
+        Some(copy::ONBOARD_WHAT_REMOVED_INTRO),
+    );
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::M)
+        .build();
+    let list = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(space::XXS)
+        .build();
+    for slug in trace_commons_protocol::trace_contribution::secret_leak_pattern_names() {
+        let item = gtk::Label::builder()
+            .label(copy::scrub_detector_label(slug))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        item.add_css_class("tc-body");
+        list.append(&item);
+    }
+    content.append(&list);
+
+    // The list and its limit travel together. A list on its own reads as a
+    // guarantee, and this one is not: the same concession the preview sheet
+    // makes before every decision.
+    let concession = gtk::Label::builder()
+        .label(copy::RESIDUAL_RISK)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    concession.add_css_class("tc-meta");
+    content.append(&concession);
+
+    dialog.set_extra_child(Some(&content));
+    dialog.add_response("close", copy::CLOSE);
+    dialog.present();
+}
+
 fn button_row(button: &gtk::Button) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -419,12 +524,61 @@ fn button_row(button: &gtk::Button) -> gtk::Box {
 
 fn welcome_page(onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_WELCOME_TITLE);
+
+    // The mark, on the one screen whose job is to introduce the product.
+    // `mark::framed` documents 84 as a size for "the larger surfaces" and
+    // nothing had ever asked for one: the two call sites are header bars
+    // taking 20. A cover is what a large mark is for, and this page had a
+    // heading, four paragraphs and then a quarter of the window left empty.
+    //
+    // Left-aligned, not centred. Every other element on this page -- heading,
+    // prose, notice -- hangs off the same left edge, and a centred mark would
+    // be the only thing on screen not doing so.
+    //
+    // Prepended rather than passed through `page()`, because the other five
+    // onboarding screens are not covers and should not grow one.
+    let mark = super::mark::framed(84);
+    mark.set_halign(gtk::Align::Start);
+    outer.prepend(&mark);
+
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_1));
     body.append(&body_label(copy::ONBOARD_WELCOME_BODY_2));
-    let decides = body_label(copy::ONBOARD_WELCOME_DECIDES);
-    decides.add_css_class("tc-brand-emphasis");
-    body.append(&decides);
     body.append(&body_label(copy::ONBOARD_WELCOME_SCRUB));
+    // Directly under the sentence that raises the question, not beside
+    // `Get started` where the shared spec puts it. See the note on the
+    // notice box below: the promise is the terminal beat on this page, and a
+    // second button in the footer competes with it from the one position that
+    // should be uncontested. Here it is answerable where it is asked.
+    let removed = gtk::Button::with_label(copy::ONBOARD_WHAT_REMOVED);
+    removed.add_css_class("tc-brand-link");
+    removed.set_halign(gtk::Align::Start);
+    removed.connect_clicked({
+        let onboarding = onboarding.clone();
+        move |_| present_what_gets_removed(&onboarding.window)
+    });
+    body.append(&removed);
+    // The promise gets the notice box, not a heavier weight of the same
+    // prose. `roots.rs` reached this conclusion first for the sentence that
+    // makes its own screen mean anything: "leave it as prose and it reads as
+    // the third paragraph of an intro nobody finishes". That is exactly what
+    // the first photograph of this page showed -- `tc-brand-emphasis` was
+    // rendering, and a bolder paragraph in a stack of four still reads as a
+    // paragraph. The two screens a contributor sees first should state their
+    // load-bearing promise the same way.
+    //
+    // It comes LAST, after the scrubbing paragraph rather than before it, so
+    // the promise is the final beat before `Get started` instead of landing
+    // mid-prose. It also makes the page an argument in order: here is what
+    // this machine does mechanically, here is the limit of it, therefore you
+    // are the one who decides. NOTE this is a different order from the shared
+    // spec's screen 1, which runs the promise inline in paragraph 2 and ends
+    // on scrubbing.
+    //
+    // `tc-brand-emphasis` keeps its other call site in `render_scopes`, so
+    // the rule stays live.
+    let decides = body_label(copy::ONBOARD_WELCOME_DECIDES);
+    decides.add_css_class("tc-brand-notice");
+    body.append(&decides);
 
     let next = gtk::Button::with_label(copy::ONBOARD_GET_STARTED);
     next.add_css_class("suggested-action");
@@ -442,6 +596,21 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     body.append(&onboarding.invite);
     body.append(&onboarding.invite_instance);
     body.append(&onboarding.invite_error);
+
+    // Both notices are hidden until a connect attempt resolves, so neither is
+    // on screen for a camera -- which is exactly how they shipped wearing
+    // class names no stylesheet defined. Under Xvfb, reveal them with
+    // placeholder text so `scripts/onboarding-shots.sh` can photograph the
+    // states a contributor only meets when something has gone wrong. Guarded
+    // by an environment variable rather than a flag: nothing in a real
+    // session sets it, and a contributor cannot reach it by accident.
+    if std::env::var_os("TC_FORCE_CONNECT_NOTICES").is_some() {
+        onboarding
+            .invite_instance
+            .set_label("This invite is for issuer.example.org.");
+        onboarding.invite_instance.set_visible(true);
+        onboarding.invite_error.set_visible(true);
+    }
 
     // Resolve and show the instance before committing, per the spec. The
     // host is all this asks for: `invite_issuer_host` exists so a shell
@@ -489,7 +658,7 @@ fn connect_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         // done. Clearing it keeps the invite out of the
                         // window for the rest of the session.
                         onboarding.invite.set_text("");
-                        load_consent_options(&app, &onboarding);
+                        load_consent_options(app, &onboarding);
                         onboarding.go(Step::Consent);
                     }
                     Err(_) => {
@@ -556,7 +725,12 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
             .xalign(0.0)
             .wrap(true)
             .build();
-        heading.add_css_class("tc-section-header");
+        // A heading over a group of scope rows. `tc-card-title` is the
+        // existing 14px/700 group heading; `tc-section-header` was defined by
+        // no stylesheet, so these three group headings -- including the one
+        // that is a whole sentence -- set at body weight and disappeared into
+        // the rows beneath them.
+        heading.add_css_class("tc-card-title");
         onboarding.consent_body.append(&heading);
         for scope in rows {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -698,10 +872,25 @@ fn scan_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
 
 fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
     let (outer, body) = page(copy::ONBOARD_WATCH_TITLE);
-    let list = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(space::S)
-        .build();
+    // The screen had a title and then a list, and said nowhere what the list
+    // was or what `Ignore` did to a row of it -- on the screen that decides
+    // which repositories are eligible to leave this machine.
+    body.append(&body_label(copy::ONBOARD_WATCH_SUBTITLE));
+    // The eyebrow-and-hairline that every other surface in this application
+    // uses to say a different kind of thing starts here. This page was built
+    // from bare boxes and used none of it.
+    body.append(&super::style::section(copy::ONBOARD_WATCH_SECTION));
+
+    // A card, so the list is a bounded region rather than labels floating on
+    // the window. Spacing 0 because the rules between rows do the separating,
+    // which is the same construction `roots.rs` uses between its two sources.
+    let list = super::style::card(gtk::Orientation::Vertical, 0);
+    // The card hugs its rows. The scroller vexpands so `Continue` stays at
+    // the foot of the window, and without this the card inherited that
+    // stretch: one project drew as a single row at the top of a card-shaped
+    // box of white, which points at the emptiness harder than plain space
+    // does.
+    list.set_valign(gtk::Align::Start);
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -749,27 +938,121 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
             let projects: Vec<Project> =
                 serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
                     .unwrap_or_default();
-            for project in projects {
+            // The state this screen was in on every machine until the
+            // `local_path` deserialisation bug was fixed, and it drew as a
+            // title above nothing. An empty screen is an invitation to act,
+            // or at minimum an explanation -- never a blank.
+            if projects.is_empty() {
+                let empty = gtk::Label::builder()
+                    .label(copy::ONBOARD_WATCH_EMPTY)
+                    .xalign(0.0)
+                    .wrap(true)
+                    .build();
+                empty.add_css_class("tc-meta");
+                list.append(&empty);
+                return;
+            }
+            for (index, project) in projects.into_iter().enumerate() {
+                // A hairline ahead of every row but the first: the same rule
+                // the history cells and the roots sources use, so a list of
+                // projects looks like every other list in the application.
+                if index > 0 {
+                    let rule = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .margin_top(space::S)
+                        .margin_bottom(space::S)
+                        .build();
+                    rule.add_css_class("tc-rule");
+                    list.append(&rule);
+                }
+                // The bucket for sessions whose working directory the daemon
+                // could not name. The daemon marks it, which is cheaper and
+                // more honest than the id comparison this used to do: that
+                // re-derived `project_id_for`'s hash to learn something the
+                // wire already states.
+                let unresolvable = project.is_unresolved_bucket;
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+                // Name over state, in a column, so the row reads as one thing
+                // with a property rather than two peers.
+                let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+                column.set_hexpand(true);
                 // The label, never a path. `list_projects` names a project by
                 // `project_id` on the wire and `project_label` on screen, and
                 // a path appears in neither direction -- the same rule
                 // `settings::render_projects` states where it draws the same
                 // list.
                 let label = gtk::Label::builder()
-                    .label(&project.project_label)
+                    // The wire carries the slug `unknown-project` for the
+                    // bucket, which is an identifier and not a name. Every
+                    // other row's label is already a display name.
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_LABEL
+                    } else {
+                        project.project_label.as_str()
+                    })
                     .xalign(0.0)
                     .hexpand(true)
                     .wrap(true)
                     .build();
+                // It wore no class at all and rendered at GTK's default body
+                // size, which is why a project name looked like debug output
+                // beside a button twice its weight.
+                label.add_css_class("tc-card-title");
+                column.append(&label);
+                // What will happen to this project, stated rather than left to
+                // be inferred from the absence of a control. Ask-first is the
+                // outcome for every row a contributor never touches.
+                //
+                // The unresolvable bucket says why it can never be anything
+                // else, which is the note the shared spec asks for. It stands
+                // in place of the state line rather than adding a third: the
+                // note ends "you'll always be asked", which is what the state
+                // line would have said.
+                let state = gtk::Label::builder()
+                    .label(if unresolvable {
+                        copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                    } else {
+                        copy::ONBOARD_WATCH_ASK_FIRST
+                    })
+                    .xalign(0.0)
+                    .wrap(true)
+                    .build();
+                state.add_css_class("tc-meta");
+                column.append(&state);
                 let ignore = gtk::Button::with_label(copy::ONBOARD_IGNORE);
+                // An outlined chip, centred against the two-line column.
+                //
+                // The raised grey button this replaced outranked the project
+                // it acts on. `flat` corrected that and overshot: with no
+                // border, no fill and no surface, it photographed as plain
+                // bold text and did not read as clickable at all. The cost of
+                // that is asymmetric -- a contributor who does not notice they
+                // can exclude a repository leaves a client repo at ask-first
+                // rather than ignored, which is a privacy outcome and not an
+                // aesthetic one.
+                //
+                // `tc-chip` is the button treatment `preview.rs` already uses
+                // for its recent searches: a hairline pill at 12px/600, so it
+                // stays subordinate to the 14px/700 project name above it,
+                // and its `:hover` turns the border green, which is the
+                // affordance a static frame cannot show.
+                ignore.add_css_class("tc-chip");
+                ignore.set_valign(gtk::Align::Center);
                 ignore.connect_clicked({
                     let app = app.clone();
                     let project_id = project.project_id.clone();
                     let row_label = label.clone();
+                    let row_state = state.clone();
                     move |button| {
                         button.set_sensitive(false);
-                        row_label.add_css_class("tc-muted");
+                        // Greying an ignored row is a colour change, not a
+                        // size change, so `tc-neutral` rather than `tc-meta`.
+                        row_label.add_css_class("tc-neutral");
+                        // The state line says what the row now is. The button
+                        // that produced it said "Ignore", so this says
+                        // "Ignored" -- one name for the mode, through the
+                        // whole flow.
+                        row_state.set_label(copy::ONBOARD_WATCH_IGNORED);
                         app.call(
                             "set_project_mode",
                             // `project_id`, which is what the daemon accepts:
@@ -778,6 +1061,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                             serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
                             {
                                 let row_label = row_label.clone();
+                                let row_state = row_state.clone();
                                 move |app, result| {
                                     if result.is_err() {
                                         // Put the row back rather than leave
@@ -787,7 +1071,18 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                                         // control whose whole purpose is
                                         // excluding a project someone did not
                                         // want watched.
-                                        row_label.remove_css_class("tc-muted");
+                                        row_label.remove_css_class("tc-neutral");
+                                        // And put the state back with it, or
+                                        // the row would claim to be ignored
+                                        // while the daemon still offers it.
+                                        // The unresolvable bucket goes back to
+                                        // its note, not to the state line it
+                                        // never had.
+                                        row_state.set_label(if unresolvable {
+                                            copy::ONBOARD_WATCH_UNKNOWN_NOTE
+                                        } else {
+                                            copy::ONBOARD_WATCH_ASK_FIRST
+                                        });
                                         app.toast(copy::PROJECT_MODE_FAILED);
                                     }
                                 }
@@ -795,7 +1090,7 @@ fn watch_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
                         );
                     }
                 });
-                row.append(&label);
+                row.append(&column);
                 row.append(&ignore);
                 list.append(&row);
             }

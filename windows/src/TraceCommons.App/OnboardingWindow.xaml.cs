@@ -15,6 +15,14 @@ namespace TraceCommons.App;
 /// </summary>
 public sealed partial class OnboardingWindow : Window
 {
+    /// <summary>
+    /// Guards against a second removed-list dialog, which would throw. The link
+    /// stays clickable behind an open dialog, so this is a double click away
+    /// rather than a theoretical race. Same reasoning as
+    /// <see cref="MainWindow"/>'s quit dialog.
+    /// </summary>
+    private bool _removedDialogOpen;
+
     public OnboardingWindow(DaemonHost host, OnboardingState state)
     {
         InitializeComponent();
@@ -87,6 +95,73 @@ public sealed partial class OnboardingWindow : Window
         await ViewModel.FinishWatchingAsync();
 
     private void OnFinish(object sender, RoutedEventArgs e) => ViewModel.Finish();
+
+    /// <summary>
+    /// Answers "What gets removed?" with the scrubber's own detector names.
+    /// </summary>
+    /// <remarks>
+    /// A dialog rather than a seventh screen: this is reference material read
+    /// once, and an expander would push the promise and Get started down a page
+    /// that does not scroll.
+    ///
+    /// The list comes from <see cref="ScrubDetectors"/>, which reads the
+    /// scrubber's table through the ABI. It is never written here, because a
+    /// hand-maintained list of what is removed is the kind of claim that
+    /// silently stops being true. Names only: the patterns stay unpublished so
+    /// they cannot be read as a guide to what slips past.
+    ///
+    /// The re-entrancy guard is the one <see cref="MainWindow"/> documents. A
+    /// second ContentDialog throws, and the link stays clickable behind an open
+    /// dialog.
+    /// </remarks>
+    private async void OnWhatGetsRemoved(object sender, RoutedEventArgs e)
+    {
+        if (_removedDialogOpen)
+        {
+            return;
+        }
+
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(new TextBlock
+        {
+            Text = ScrubDetectorCopy.Intro,
+            TextWrapping = TextWrapping.Wrap,
+        });
+
+        foreach (string label in ScrubDetectors.Labels())
+        {
+            body.Children.Add(new TextBlock { Text = label, TextWrapping = TextWrapping.Wrap });
+        }
+
+        // The concession travels with the list. Shown alone, a list of what is
+        // caught reads as a guarantee, and this screen's credibility rests on
+        // conceding the gap before a contributor discovers it.
+        body.Children.Add(new TextBlock
+        {
+            Text = ScrubDetectorCopy.ResidualRisk,
+            TextWrapping = TextWrapping.Wrap,
+            Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
+        });
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = ScrubDetectorCopy.Heading,
+            Content = body,
+            CloseButtonText = ScrubDetectorCopy.Close,
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        _removedDialogOpen = true;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            _removedDialogOpen = false;
+        }
+    }
 
     private void OnFinished() => Close();
 }

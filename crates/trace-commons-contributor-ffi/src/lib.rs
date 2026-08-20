@@ -97,9 +97,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::ConfigStore;
-use trace_commons_contributor::daemon::EmbeddedDaemon;
 use trace_commons_contributor::daemon::ipc::{self, ERR_BAD_PARAMS, Response};
-use trace_commons_contributor::daemon::settings::{DaemonSettings, apply_settings_object};
+use trace_commons_contributor::daemon::settings::{
+    DaemonSettings, apply_settings_object, roots_declared,
+};
+use trace_commons_contributor::daemon::{EmbeddedDaemon, StartFailure};
 
 /// Catches a panic; on an ordinary `Err`, returns a fixed, content-free
 /// label rather than forwarding the underlying `anyhow::Error`'s `Display`
@@ -270,6 +272,66 @@ fn registry_is(ptr: usize, kind: AllocKind) -> bool {
 /// See the module doc's "What never crosses this boundary" section.
 const ERR_DAEMON_START_FAILED: &str = "daemon-start-failed";
 
+/// The contributor has not said which session folders to watch, so the
+/// daemon will not start and has scanned nothing.
+///
+/// Distinct from `ERR_DAEMON_START_FAILED` on purpose. That label is
+/// deliberately opaque because the failures behind it may embed a path;
+/// this one is a fixed, content-free fact about configuration, and the
+/// application shells have to tell the two apart -- a roots refusal routes
+/// the contributor to the roots screen, every other start failure to the
+/// generic notice. Flattening this into `daemon-start-failed` would leave
+/// the shells guessing, and the only screen that can clear the refusal
+/// unreachable.
+const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
+
+/// Fixed labels for the start failures the daemon can name, each mapped from
+/// a [`StartFailure`] variant rather than from the error's prose.
+///
+/// Every one exists because a contributor facing it has a different next
+/// action. `ERR_DAEMON_START_FAILED` remains for everything else, and remains
+/// opaque for the reason `finish_daemon_start` documents -- these are not a
+/// relaxation of that rule but the cases where a fixed, content-free fact can
+/// be stated without carrying any part of the underlying error across.
+const ERR_ALREADY_RUNNING: &str = "already-running";
+const ERR_STATE_DIR_NOT_WRITABLE: &str = "state-directory-not-writable";
+const ERR_SETTINGS_UNREADABLE: &str = "settings-unreadable";
+const ERR_IPC_BIND_FAILED: &str = "ipc-bind-failed";
+
+/// The fixed label for a start failure, or `ERR_DAEMON_START_FAILED` when the
+/// daemon did not name one.
+///
+/// Matches on the typed variant, never on the error text: the `anyhow` chain
+/// behind these embeds state-directory and lock-file paths, and reading it to
+/// decide a label is one careless `format!` away from forwarding them.
+fn start_failure_label(err: &anyhow::Error) -> &'static str {
+    match err.downcast_ref::<StartFailure>() {
+        Some(StartFailure::AlreadyRunning) => ERR_ALREADY_RUNNING,
+        Some(StartFailure::StateDirectoryNotWritable) => ERR_STATE_DIR_NOT_WRITABLE,
+        Some(StartFailure::SettingsUnreadable) => ERR_SETTINGS_UNREADABLE,
+        Some(StartFailure::IpcBindFailed) => ERR_IPC_BIND_FAILED,
+        None => ERR_DAEMON_START_FAILED,
+    }
+}
+
+/// Whether this store's persisted settings declare both session roots, as
+/// `daemon::settings::roots_declared` defines it -- the single definition of
+/// the rule, deliberately not restated here.
+///
+/// A settings file that cannot be read is NOT reported as a roots refusal:
+/// the contributor's answer to "which folders?" is unknown rather than
+/// absent, and pointing them at the roots screen would be a guess. It falls
+/// through to the opaque start failure instead, which is also what
+/// `start_embedded` would have produced from the same unreadable file.
+fn roots_refusal(store: &ConfigStore) -> Option<&'static str> {
+    let settings = DaemonSettings::load(store).ok()?;
+    if roots_declared(&settings) {
+        None
+    } else {
+        Some(ERR_ROOTS_NOT_DECLARED)
+    }
+}
+
 /// The daemon that is actually running: the pieces `daemon::start_embedded`
 /// returns, plus the `JoinHandle` for the supervise-loop task this crate
 /// spawns itself (see `daemon::run_supervisor`'s doc for why `tc_handle`,
@@ -385,10 +447,11 @@ fn finish_daemon_start(result: anyhow::Result<tc_handle>, err: *mut *mut c_char)
             registry_insert(ptr as usize, AllocKind::Handle);
             ptr
         }
-        Err(_) => {
-            set_last_error(ERR_DAEMON_START_FAILED);
+        Err(e) => {
+            let label = start_failure_label(&e);
+            set_last_error(label);
             if !err.is_null() {
-                unsafe { *err = to_owned_cstring(ERR_DAEMON_START_FAILED) };
+                unsafe { *err = to_owned_cstring(label) };
             }
             std::ptr::null_mut()
         }
@@ -412,11 +475,27 @@ pub unsafe extern "C" fn tc_daemon_start(
     err: *mut *mut c_char,
 ) -> *mut tc_handle {
     let outcome = guard(|| {
-        let result: anyhow::Result<tc_handle> = (|| {
+        let store_result: anyhow::Result<ConfigStore> = (|| {
             let dir = unsafe { borrow_str(config_dir) }?;
-            let store = ConfigStore::open(std::path::PathBuf::from(dir))?;
-            start_daemon_handle(store)
+            ConfigStore::open(std::path::PathBuf::from(dir))
         })();
+        let store = match store_result {
+            Ok(store) => store,
+            Err(e) => return Ok(finish_daemon_start(Err(e), err)),
+        };
+
+        // Fail closed before anything can scan. `tc_daemon_start` takes no
+        // settings, so undeclared roots here can only mean the persisted
+        // file never declared them -- there is no argument that could have.
+        if let Some(label) = roots_refusal(&store) {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            return Ok(std::ptr::null_mut());
+        }
+
+        let result = start_daemon_handle(store);
         // Everything from here on, including turning a failure into the
         // out-param the caller sees, stays inside `guard`'s catch_unwind:
         // `set_last_error` and `to_owned_cstring` are audited not to panic
@@ -569,6 +648,18 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
         // in memory only, or after `start_embedded`, would still beat that
         // first tick.
         if let Err(label) = unsafe { apply_pre_start_settings(&store, settings_json) } {
+            set_last_error(label);
+            if !err.is_null() {
+                unsafe { *err = to_owned_cstring(label) };
+            }
+            return Ok(std::ptr::null_mut());
+        }
+
+        // After the pre-start settings, not before: the roots screen's whole
+        // purpose is to supply the declaration in this same call, so a
+        // settings object that declares both roots must be allowed to clear
+        // a refusal the persisted file alone would have earned.
+        if let Some(label) = roots_refusal(&store) {
             set_last_error(label);
             if !err.is_null() {
                 unsafe { *err = to_owned_cstring(label) };
@@ -1453,4 +1544,66 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
     }
     let c = unsafe { CStr::from_ptr(ptr) };
     c.to_str().map_err(|_| anyhow::anyhow!("invalid-utf8"))
+}
+
+/// Describe the session stores on this machine, so a roots screen can ask
+/// the contributor about something specific.
+///
+/// Needs no handle: it runs BEFORE any daemon exists, which is the whole
+/// point -- the screen that uses it is the one clearing the refusal that
+/// stops a daemon from starting.
+///
+/// Returns an owned JSON array; free it with [`tc_string_free`]. Each
+/// element carries `source`, `path`, `exists`, `session_count`,
+/// `most_recent` (RFC 3339 or null) and `relocated_by_env`.
+///
+/// This is the one place in this ABI that deliberately returns a filesystem
+/// path. Everywhere else a path is withheld, because elsewhere the caller is
+/// being told about a trace. Here the caller is the contributor's own
+/// machine asking the contributor which of their own folders to watch, and a
+/// consent prompt that will not name what it is asking about is not a
+/// consent prompt. It reads directory entries and metadata only, and never
+/// opens a session file.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_discover_sources() -> *mut c_char {
+    guard(|| {
+        let found = trace_commons_contributor::source::discovery::probe_this_machine();
+        let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The names of the secret detectors the scrubber runs, so a shell can tell
+/// a contributor what is removed without transcribing the list.
+///
+/// Needs no handle: it describes the build, not a running daemon, and the
+/// screen that asks is the first one a contributor sees.
+///
+/// Returns an owned JSON array of strings; free it with [`tc_string_free`].
+///
+/// NAMES ONLY. The patterns are deliberately not exposed here and must not
+/// be added: a contributor deciding whether to trust the scrubbing needs to
+/// know what it looks for, but publishing the regexes would tell someone
+/// trying to slip a secret past it exactly what to avoid. The generated list
+/// is the point -- a hand-written copy in a shell is a privacy claim that
+/// silently stops being true the day a detector is added.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_scrub_detector_names() -> *mut c_char {
+    guard(|| {
+        let names = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+        let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
 }

@@ -107,11 +107,6 @@ struct OnboardingWelcomeContent: View {
                     .tracking(CommunityBrand.Font_.monoTracking)
                     .foregroundStyle(CommunityBrand.ink)
                 Spacer(minLength: TC.Space.m)
-                Button("What gets removed?", action: onWhatGetsRemoved)
-                    .buttonStyle(.plain)
-                    .font(CommunityBrand.Font_.linkMono)
-                    .underline()
-                    .foregroundStyle(CommunityBrand.ink)
             }
             Rectangle().fill(CommunityBrand.ink).frame(height: CommunityBrand.Metric.frame)
         }
@@ -310,11 +305,23 @@ struct OnboardingWelcomeContent: View {
             """)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("""
-            Before anything leaves this machine it is scrubbed locally for secrets, \
-            keys, and tokens. That scrubbing is good and it is not perfect — which \
-            is why you get to look first.
-            """)
+            // The link sits directly under the sentence that raises the
+            // question, not in the header where it started. Beside the
+            // wordmark it was chrome, a page-width away from the paragraph
+            // that makes anyone want it -- and on this screen the question
+            // "removed how, exactly?" arises here or nowhere.
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                Text("""
+                Before anything leaves this machine it is scrubbed locally for secrets, \
+                keys, and tokens. That scrubbing is good and it is not perfect — which \
+                is why you get to look first.
+                """)
+                Button("What gets removed?", action: onWhatGetsRemoved)
+                    .buttonStyle(.plain)
+                    .font(CommunityBrand.Font_.linkMono)
+                    .underline()
+                    .foregroundStyle(CommunityBrand.ink)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(CommunityBrand.Font_.body)

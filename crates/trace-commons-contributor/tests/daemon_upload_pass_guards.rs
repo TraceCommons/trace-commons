@@ -10,6 +10,11 @@
 //!   upload is genuinely in flight.
 //! - An approval covers the consent scopes it was given under.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::{Arc, Mutex};
 
 use axum::{Json, Router, routing::post};
@@ -133,8 +138,16 @@ impl Harness {
         };
         {
             let mut s = shared.settings.lock().unwrap();
-            s.claude_root = Some(claude_root.clone());
-            s.codex_root = Some(dir.path().join("codex"));
+            s.claude_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: claude_root.clone(),
+                },
+            );
+            s.codex_source = Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex"),
+                },
+            );
             if let Some(base_url) = filter_base {
                 s.near_ai = Some(NearAiSettings {
                     api_key: "test-key".into(),
@@ -434,8 +447,16 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     let shared = Arc::new(DaemonShared::load(store).unwrap());
     {
         let mut s = shared.settings.lock().unwrap();
-        s.claude_root = Some(claude_root.clone());
-        s.codex_root = Some(dir.path().join("codex"));
+        s.claude_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root.clone(),
+            },
+        );
+        s.codex_source = Some(
+            trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                path: dir.path().join("codex"),
+            },
+        );
     }
     shared
         .policy

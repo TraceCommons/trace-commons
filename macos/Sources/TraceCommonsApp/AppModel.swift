@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import TCBridge
+import TCShellCore
 
 /// Everything the UI reads, and the only thing that talks to the daemon.
 ///
@@ -15,6 +16,15 @@ final class AppModel: ObservableObject {
         case running
         /// Refused to start, with a sentence a person can act on.
         case refused(String)
+        /// Refused because nobody has said which session folders to watch.
+        ///
+        /// Separate from `.refused` because it is the one refusal with a way
+        /// out: the roots screen collects two folders and starts the daemon
+        /// with them. Before this case existed the refusal rendered as a
+        /// static notice and every screen that could clear it lived behind
+        /// the daemon it was blocking, so a fresh install could never
+        /// finish onboarding.
+        case needsRoots
     }
 
     /// The recovery hold that follows an approval.
@@ -109,6 +119,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// The resolved state directory, once `start()` has named one.
+    ///
+    /// Held so the roots screen starts the daemon against the same directory
+    /// that refused, rather than re-resolving and possibly disagreeing with
+    /// it.
+    private(set) var configDirectory: String = ""
+
     func start() {
         guard case .starting = startup else { return }
         let resolved: DaemonHost.Resolution
@@ -118,14 +135,30 @@ final class AppModel: ObservableObject {
             startup = .refused("\(error)")
             return
         }
+        configDirectory = resolved.path
+        startDaemon(at: resolved.path, settingsJSON: nil)
+    }
+
+    /// Start (or restart) the in-process daemon against an already-resolved
+    /// state directory.
+    ///
+    /// `settingsJSON` is the roots screen's mechanism: the C ABI persists it
+    /// and only then evaluates whether both session roots are declared, so
+    /// one call both records the contributor's answer and starts the watcher.
+    func startDaemon(at path: String, settingsJSON: String?) {
         do {
-            let daemon = try TCDaemon(configDir: resolved.path)
+            let daemon = try TCDaemon(configDir: path, settingsJSON: settingsJSON)
             let client = DaemonClient(daemon: daemon)
             self.daemon = daemon
             self.client = client
             startup = .running
             subscribe()
             refreshAll()
+        } catch TCDaemon.TCError.rootsNotDeclared {
+            // Not a dead end any more: the roots screen renders on this
+            // state and calls back into `startDaemon` with the two folders
+            // the contributor picked.
+            startup = .needsRoots
         } catch {
             startup = .refused("\(error)")
         }
@@ -161,6 +194,14 @@ final class AppModel: ObservableObject {
             // publish `status_changed` for a queue change, so a status
             // fetched at launch would stay at 0 forever.
             refreshStatus()
+            // A queue change is when a project can first become visible:
+            // `list_projects` reports discovered projects from the queue, and
+            // a session for a project nobody has ruled on is exactly what a
+            // queue change delivers. Projects were fetched only by
+            // `refreshAll()` at launch and after `setProjectMode`, so a
+            // project discovered while the app was open stayed invisible in
+            // both Settings and onboarding screen 5 until a relaunch.
+            refreshProjects()
         case .statusChanged:
             refreshStatus()
         case .digestDue(let count, _):
@@ -262,15 +303,14 @@ final class AppModel: ObservableObject {
     /// `lastActionError`, same as every other action here, and the caller
     /// must leave its own state alone until this succeeds.
     ///
-    /// `project.projectLabel` is the only identifier `ProjectRow` carries.
-    /// It is not guaranteed to be a `project_key` the daemon will accept --
-    /// see the comment on `DaemonClient.setProjectMode` -- so callers
-    /// should expect `project-key-unrecognized` today and must surface it
-    /// rather than assume success.
+    /// Named by `project.projectId`, the opaque id `list_projects` mints for
+    /// every row. This used to send `projectLabel` as a `project_key`, which
+    /// is a final path segment rather than a key and was refused with
+    /// `project-key-unrecognized`.
     func setProjectMode(_ project: ProjectRow, mode: ProjectMode) {
         perform(
             "set_project_mode",
-            work: { try $0.setProjectMode(projectKey: project.projectLabel, mode: mode) }
+            work: { try $0.setProjectMode(projectID: project.projectId, mode: mode) }
         ) { _ in
             self.refreshProjects()
             // Arming or disarming a project is one of the changes the daemon

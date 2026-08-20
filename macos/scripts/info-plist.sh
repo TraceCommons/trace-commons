@@ -62,9 +62,44 @@ cat <<PLIST
     <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHumanReadableCopyright</key><string>Trace Commons</string>
-    <!-- Menu-bar item, no Dock icon: the shape macOS users expect from a
-         background utility. -->
-    <key>LSUIElement</key><true/>
+    <!-- There is no LSUIElement here, and its absence is the decision.
+
+         This app was a menu-bar-only utility until a contributor could not
+         find it: on a display with a notch, once the menu bar fills up, the
+         status item is still assigned a frame -- the accessibility API
+         answers with a plausible 18x24 rectangle -- but it is placed past
+         the notch in a band that never draws. Nothing renders, nothing
+         reports an error, and the app has no other way in. A menu-bar-only
+         app is one crowded menu bar away from being unreachable.
+
+         So the app is a regular one: Dock icon, App menu, Cmd-Tab. The
+         MenuBarExtra stays, because it is still the right place for
+         at-a-glance status; it is simply no longer the only door. -->
+    <!-- Both keys, which is the pair actool's own partial Info.plist emits
+         for a compiled .icon. CFBundleIconName resolves AppIcon out of
+         Assets.car, which is what macOS 26 draws and what carries the Liquid
+         Glass treatment; CFBundleIconFile names the AppIcon.icns beside it,
+         which is the fallback for anything that wants a file icon. Dropping
+         either one is a silent downgrade rather than a build failure: with
+         no IconName the system falls back to the flat legacy icns, and with
+         no IconFile a caller asking for the file icon gets the generic
+         document. -->
+    <key>CFBundleIconName</key><string>AppIcon</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <!-- Invite mail carries a tracecommons:// link to contributors on all
+         three platforms. onOpenURL has been wired in the Connect screen
+         since before the first release, but nothing was ever declared
+         here, so every link macOS received went nowhere. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLName</key><string>ai.tracecommons.shell.invite</string>
+        <key>CFBundleURLSchemes</key><array><string>tracecommons</string></array>
+        <!-- Viewer, not Editor: the app shows what the URL names and waits
+             for a person to press the button. A deep link never enrols. -->
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+      </dict>
+    </array>
 ${SPARKLE_KEYS}
 </dict>
 </plist>

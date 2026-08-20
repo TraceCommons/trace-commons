@@ -60,17 +60,56 @@ Six screens, one decision each.
 > shared pool that isn't.
 >
 > This app watches for finished Claude Code and Codex sessions on this machine
-> and shows them to you. **You decide what gets contributed. Nothing is sent
-> unless you say so.**
+> and shows them to you.
 >
 > Before anything leaves this machine it is scrubbed locally for secrets,
 > keys, and tokens. That scrubbing is good and it is not perfect — which is
 > why you get to look first.
 >
-> [ Get started ]   [ What gets removed? ]
+> *What gets removed?*  (quiet link, directly under the scrubbing paragraph)
+>
+> **You decide what gets contributed. Nothing is sent unless you say so.**
+>
+> [ Get started ]
 
 "Good and not perfect" is load-bearing. A developer knows automatic redaction
 is imperfect; conceding it first is what makes the rest credible.
+
+`What gets removed?` moved out of the footer 2026-08-19, having been
+photographed in both positions. Beside `Get started` it sat some 220px from
+the sentence that raises the question, on the far side of the promise, putting
+a second element against the one beat that should be uncontested. Under the
+paragraph it is answerable where it is asked, and the footer keeps a single
+clear action. It opens a DIALOG, not a seventh screen: this is reference
+material read once, and an expander would push the promise and the button down
+a page that does not scroll.
+
+Its contents are GENERATED from the scrubber's own detector table
+(`secret_leak_pattern_names()`), never hand-written -- a hand-maintained list
+of what is removed is exactly the kind of claim that silently stops being
+true. Names only, never the patterns: publishing the regexes would tell
+someone trying to slip a secret past the scrubber what to avoid. The list is
+shown with the residual-risk concession beneath it, because a list of what is
+caught is not a guarantee.
+
+Order revised 2026-08-19, after the GTK client became the first shell anyone
+had seen rendered. The promise was inline in paragraph 2 and the screen ended
+on scrubbing; photographed, it read as the fourth sentence of a stack nobody
+finishes. It is now a separate terminal block, given the same standing
+treatment the roots screen gives its caveat, and the page reads as an argument
+in sequence: here is what this machine does mechanically, here is the limit of
+it, therefore you are the one who decides.
+
+The RULE IS THE INTENT, not the position: **the promise must be the dominant
+beat of this screen.** Ending on it is how a shell achieves that when the page
+is a column of prose, which is the GTK case that prompted this. A shell whose
+design makes the promise the hero -- largest element, read first, as macOS
+does -- satisfies the intent maximally, and demoting it to a terminal position
+would make it worse. What no shell may do is what GTK did before this revision:
+run the promise inline mid-paragraph so it reads as one sentence among four.
+Whichever form a shell takes, `What gets removed?` sits under the scrubbing
+paragraph that raises the question, not in the footer beside the primary
+action.
 
 ### 2. Connect
 
@@ -166,6 +205,46 @@ this moment and never returns, whereas arming automation before seeing a
 single preview is asking for trust not yet earned. Sessions with no resolvable
 project get a permanent plain-English note that they can never be armed.
 
+The screen's words, added 2026-08-19. This section previously specified only
+behaviour and gave the screen no copy, so it shipped as a bare title over an
+unlabelled list -- on the one screen deciding which of a contributor's
+repositories are eligible to leave the machine. All three shells transcribe
+these; do not reword them in one client alone.
+
+> **What to watch**
+>
+> Every project starts at ask-first: you see each session before anything is
+> sent. Ignore a project to leave it out entirely.
+>
+> `PROJECTS` (section eyebrow)
+>
+> Per row: the project name, with its mode beneath as **Ask me first** or
+> **Ignored**. `Ask me first` is the vocabulary Settings already uses for this
+> mode -- two screens setting one field must not name it two ways, and
+> `Ignored` echoes the button that produced it rather than introducing a third
+> name.
+>
+> Empty: **No projects yet. Sessions you run later will appear here, and in
+> Settings.**
+>
+> The unresolvable bucket, rendered as its own row: **Sessions with no
+> project** / *Trace Commons can't tell which folder these ran in, so they can
+> never be contributed automatically. You'll always be asked.*
+
+That row is recognised by the id of `UNKNOWN_PROJECT_KEY`, not by its label.
+The daemon already refuses `auto_upload` for it in two independent places, so
+the note describes enforcement that exists rather than asking a client to
+enforce anything. Phrase it as a consequence, not a fault: the bucket exists
+because a cwd with no usable final segment has no label but itself, and
+`project_label` reaches `daemon-audit.jsonl`, notification text and
+`HistoryRecord` -- so naming it would write a full local path into all three.
+Not being armable is the protective half of that, and nothing in it is a
+contributor's to fix. `Ignore` stays offered: the bucket can be silenced even
+though it cannot be armed.
+
+The subtitle states the default before the exception on purpose: the default
+is what happens to a contributor who reads nothing and clicks Continue.
+
 ### 6. Done
 
 > **You're set up. Nothing has been sent.**
@@ -173,6 +252,41 @@ project get a permanent plain-English note that they can never be armed.
 > Trace Commons lives in your menu bar. When a session finishes and goes quiet
 > for 30 minutes, it'll show up there. You'll get at most one notification
 > every 4 hours, and none at all if there's nothing waiting.
+
+## The unresolvable bucket in Settings
+
+Settings lists every project with its mode. The unresolvable bucket appears in
+that list like any other row, and every shell rendered it as the raw slug
+`unknown-project` with no explanation.
+
+The shells differ in how far the defect went, and the difference matters.
+**GTK** offers a real three-position mode dropdown, so a contributor could
+select **Contributed without asking** on a row the daemon refuses to arm at
+`policy.rs:98` and `policy.rs:125` -- a control offering a choice it cannot
+deliver, which is the serious form of this. **macOS and Windows** offer only a
+two-way Ignore / Ask-again button and never present `auto_upload` as a choice
+at all, so on those two only the label was wrong. Do not "fix" a picker that
+does not exist; do check, per shell, which case you are in.
+
+Required on all three shells, using the same words screen 5 uses, because it is
+the same fact stated on a second surface:
+
+> **Sessions with no project**
+>
+> *Trace Commons can't tell which folder these ran in, so they can never be
+> contributed automatically. You'll always be asked.*
+
+- Recognise the row by the `is_unresolved_bucket` flag on the `list_projects`
+  payload. Never by `project_label`, which is display text and is not stable.
+- Wherever a shell CAN express `auto_upload`, it must not offer it for this
+  row. Offering a mode the daemon will refuse is worse than omitting it: it
+  invites a contributor to believe they have armed something that cannot be
+  armed. `Ignore` and ask-first remain, because the bucket can be silenced even
+  though it cannot be armed. A shell with no arming control has nothing to
+  remove, but should still encode the rule where a future picker would find it,
+  rather than leaving the next author to rediscover the refusal.
+- The note is a statement of what the daemon does, not an apology. Nothing in
+  it is a contributor's to fix.
 
 ## Credit, framed honestly
 

@@ -46,10 +46,59 @@ pub mod withdraw;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::config::{ConfigStore, DAEMON_LOCK_FILE, DAEMON_SOCK_FILE};
+
+/// Why a daemon start did not succeed, as a fact the caller can act on.
+///
+/// `start_embedded` attaches one of these to the error it returns, so a
+/// caller can tell the cases apart by `downcast_ref` rather than by matching
+/// on prose. That matters most across the C ABI: `trace-commons-contributor-
+/// ffi` maps each variant to a fixed label, and the alternative -- string
+/// matching on `anyhow` text -- would break silently the first time someone
+/// improved the wording.
+///
+/// The variants are deliberately coarse. Each one exists because a
+/// contributor facing it has a *different next action*; a distinction that
+/// does not change what somebody should do belongs in the error's context
+/// chain, which is where the operator-facing detail already lives.
+///
+/// These carry no payload on purpose. The underlying `anyhow` errors embed
+/// state-directory and lock-file paths for local stderr and journals, and the
+/// FFI must be able to name the failure without carrying any of that across
+/// the boundary. See that crate's module doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartFailure {
+    /// Another daemon already holds the lock for this state directory.
+    AlreadyRunning,
+    /// The state directory could not be written -- the lock file itself could
+    /// not be created or opened.
+    StateDirectoryNotWritable,
+    /// `daemon-settings.json` exists but this version cannot parse it.
+    SettingsUnreadable,
+    /// The control socket (or Windows named pipe) could not be bound. The
+    /// usual cause is a state-directory path whose socket path exceeds the
+    /// platform limit, or a stale socket file.
+    IpcBindFailed,
+}
+
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::AlreadyRunning => {
+                "another trace-commons-contributor daemon is already running for this state directory"
+            }
+            Self::StateDirectoryNotWritable => "the state directory could not be written",
+            Self::SettingsUnreadable => "the daemon settings file could not be read",
+            Self::IpcBindFailed => "the daemon control socket could not be bound",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for StartFailure {}
 
 /// Run the daemon in the foreground. A service manager, or the contributor's
 /// own terminal, is what puts it in the background.
@@ -127,12 +176,18 @@ impl EmbeddedDaemon {
 /// function (not `run`) is now the one place that takes `daemon.lock`, so a
 /// second `start_embedded` -- or a second `run` -- against the same state
 /// directory still fails loudly on the `try_lock`, whether or not the caller
-/// is the same process. The failure is a plain `anyhow::Error` built with
-/// `bail!`, not a structured variant, so a caller that needs to distinguish
-/// "lock held by another daemon" from other failures (a state-directory
-/// permissions problem, a socket bind failure) has to match on the message
-/// text; see `tests::a_second_start_embedded_fails_specifically_on_the_lock`
-/// for the exact text this asserts.
+/// is the same process. That failure, and every other one here, carries a
+/// [`StartFailure`] the caller can `downcast_ref` -- so distinguishing "lock
+/// held by another daemon" from a state-directory permissions problem or a
+/// socket bind failure is a type match rather than a search through prose
+/// that any later rewording would break.
+///
+/// The lock file does not outlive a failed start. `close` unlinks it on clean
+/// shutdown, so its presence means "a daemon is running here"; leaving it
+/// behind on a failure that never reached a running daemon states something
+/// false to every other reader. The one exception is a start that lost the
+/// `try_lock`: that file belongs to the daemon holding it, and this function
+/// must not touch it.
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
@@ -144,12 +199,14 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // path there carries the OS username. The caller already knows
         // which state directory it asked for.
         .open(&lock_path)
-        .context("opening the daemon lock file in the state directory")?;
+        .context("opening the daemon lock file in the state directory")
+        .context(StartFailure::StateDirectoryNotWritable)?;
     if lock.try_lock().is_err() {
-        bail!(
-            "another trace-commons-contributor daemon is already running for \
-             this state directory"
-        );
+        // Return before the cleanup scope below is entered. The lock file
+        // belongs to the daemon that holds it, and a loser that unlinked it
+        // would hand the next starter a false all-clear against a daemon
+        // still serving the socket.
+        return Err(anyhow::Error::new(StartFailure::AlreadyRunning));
     }
 
     // A verified update parked by an earlier check is applied here, at the
@@ -172,28 +229,57 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         }
     }
 
-    let shared = Arc::new(ipc::DaemonShared::load(store)?);
-    // The two transports are the same protocol over different plumbing: a
-    // unix socket guarded by its 0700 state directory, or a Windows named
-    // pipe guarded by its DACL. See `win_pipe` for why the Windows side
-    // carries the whole access control itself.
-    #[cfg(unix)]
-    let listener = ipc::bind(&shared.store).await?;
-    #[cfg(windows)]
-    let listener = win_pipe::bind(&shared.store).await?;
+    // Everything past the lock runs inside this block so that any failure
+    // can release the lock and unlink the file on the way out.
+    //
+    // `close` removes the lock file on clean shutdown, which makes its
+    // presence the thing every other reader treats as "a daemon is running
+    // here". A failed start that left the file behind would be asserting
+    // something untrue -- and it did: during this project's own development
+    // a zero-byte `daemon.lock` from a failed start was read as proof the
+    // daemon had started, and produced a confident wrong diagnosis.
+    let started = async {
+        let shared = Arc::new(ipc::DaemonShared::load(store)?);
+        // The two transports are the same protocol over different plumbing: a
+        // unix socket guarded by its 0700 state directory, or a Windows named
+        // pipe guarded by its DACL. See `win_pipe` for why the Windows side
+        // carries the whole access control itself.
+        #[cfg(unix)]
+        let listener = ipc::bind(&shared.store)
+            .await
+            .context(StartFailure::IpcBindFailed)?;
+        #[cfg(windows)]
+        let listener = win_pipe::bind(&shared.store)
+            .await
+            .context(StartFailure::IpcBindFailed)?;
 
-    let serve_shared = Arc::clone(&shared);
-    #[cfg(unix)]
-    let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
-    #[cfg(windows)]
-    let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
+        let serve_shared = Arc::clone(&shared);
+        #[cfg(unix)]
+        let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
+        #[cfg(windows)]
+        let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
 
-    Ok(EmbeddedDaemon {
-        shared,
-        lock_path,
-        lock,
-        server,
-    })
+        Ok::<_, anyhow::Error>((shared, server))
+    }
+    .await;
+
+    match started {
+        Ok((shared, server)) => Ok(EmbeddedDaemon {
+            shared,
+            lock_path,
+            lock,
+            server,
+        }),
+        Err(e) => {
+            // Release before unlinking, so the lock is genuinely available to
+            // the next start rather than only appearing to be: a stranded
+            // advisory lock on an unlinked inode would present as contention
+            // with a daemon that does not exist.
+            drop(lock);
+            let _ = std::fs::remove_file(&lock_path);
+            Err(e)
+        }
+    }
 }
 
 /// Run the periodic watch/upload/digest/history pass to completion -- i.e.,
@@ -376,12 +462,12 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    let (near_ai, claude_root, codex_root) = {
+    let (near_ai, claude_source, codex_source) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.near_ai.clone(),
-            s.claude_root.clone(),
-            s.codex_root.clone(),
+            s.claude_source.clone(),
+            s.codex_source.clone(),
         )
     };
     // These options are envelope-determining and are NOT covered by
@@ -415,7 +501,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
 
-    let sources = crate::source::all_sources(claude_root, codex_root, None);
+    let sources = crate::source::all_sources(claude_source, codex_source, None);
     let mut changed = false;
     // A fail-closed precondition (`SubmitPreconditionFailure`) aborts the
     // pass. It is held here rather than propagated with `?` so the pass's
@@ -937,7 +1023,7 @@ mod tests {
     /// that crate's module doc on why). This test, against
     /// `start_embedded` directly rather than through the FFI, is the one
     /// that actually proves the second failure is the lock, not something
-    /// else: it asserts on `anyhow::Error`'s `Display` text.
+    /// else: it asserts on the typed `StartFailure` the error carries.
     #[tokio::test]
     async fn a_second_start_embedded_fails_specifically_on_the_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -949,11 +1035,82 @@ mod tests {
             Ok(_) => panic!("a second start_embedded against a locked directory must fail"),
             Err(e) => e,
         };
-        assert!(
-            format!("{err:#}").contains("already running"),
-            "expected a lock-contention message, got: {err:#}"
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::AlreadyRunning),
+            "expected a lock-contention failure, got: {err:#}"
         );
 
+        // The loser must not take the winner's lock file with it. This is the
+        // other half of the cleanup rule: a failed start removes the lock only
+        // when the lock was its own, never when the file belongs to a daemon
+        // that is genuinely running.
+        assert!(
+            dir.path().join(DAEMON_LOCK_FILE).exists(),
+            "a losing second start deleted the running daemon's lock file"
+        );
+
+        embedded.close();
+    }
+
+    /// Write a `daemon-settings.json` this version cannot parse.
+    ///
+    /// Hand-authored rather than built from `DaemonSettings`: a file with
+    /// every required field present is exactly what this is arranging to
+    /// avoid. It is also the file shape a person writes by hand, which is how
+    /// the failure was first hit.
+    fn write_unparseable_settings(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join(crate::config::DAEMON_SETTINGS_FILE),
+            r#"{"claude_root":"/tmp/x","codex_root":"/tmp/y"}"#,
+        )
+        .unwrap();
+    }
+
+    /// A start that fails must not leave `daemon.lock` behind.
+    ///
+    /// `close` removes the lock on clean shutdown, so the file's presence is
+    /// what every other reader treats as "a daemon is running here". A failed
+    /// start that leaves it is not untidy, it is a false statement -- it was
+    /// read as proof of a running daemon during this project's own
+    /// development and produced a wrong diagnosis.
+    #[tokio::test]
+    async fn a_failed_start_leaves_no_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_unparseable_settings(dir.path());
+
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let err = match start_embedded(store).await {
+            Ok(_) => panic!("start_embedded must fail on a settings file it cannot parse"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::SettingsUnreadable),
+            "expected a settings failure, got: {err:#}"
+        );
+        assert!(
+            !dir.path().join(DAEMON_LOCK_FILE).exists(),
+            "a failed start left daemon.lock behind, where it reads as a running daemon"
+        );
+    }
+
+    /// The cleanup releases the lock rather than merely unlinking the file.
+    #[tokio::test]
+    async fn a_failed_start_does_not_strand_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        write_unparseable_settings(dir.path());
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        assert!(start_embedded(store).await.is_err());
+
+        // Repair the settings and start for real. Had the failed attempt
+        // stranded the lock, this would fail as contention against a daemon
+        // that does not exist.
+        std::fs::remove_file(dir.path().join(crate::config::DAEMON_SETTINGS_FILE)).unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let embedded = start_embedded(store)
+            .await
+            .expect("a start after a failed start must not see stale lock contention");
         embedded.close();
     }
 }

@@ -50,6 +50,35 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  mark-assets-drift:
+    name: mark assets match the generator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The committed files under assets/mark exist so a checkout is usable
+    # without running Rust first. This is what stops them being authoritative:
+    # hand-committed artwork nobody could regenerate is how three solid squares
+    # of #315FBA shipped as the Windows tiles.
+    #
+    # The MSIX tiles are checked here too, and that is the point of rendering
+    # them in Rust. They used to be produced by CoreGraphics on a Mac, which
+    # meant this ubuntu job could not regenerate them and so could not compare
+    # them to anything -- the same hole the flat squares lived in. The .icns
+    # still needs macOS and still regenerates inside the release job.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/mark/check-drift.sh
+      # The renderer writes its own PNGs, including a hand-rolled deflate.
+      # Checking that with the encoder's own assumptions proves very little, so
+      # this decodes the output with the standard library's zlib -- a different
+      # implementation by different people -- and compares it to the raw pixel
+      # buffer. It is what caught a maximal-run length code being emitted at the
+      # wrong bit width, which small tiles hide completely.
+      - name: Verify the PNGs against an independent decoder
+        run: |
+          cargo run -q -p trace-commons-mark --example emit-verify -- "${RUNNER_TEMP}/mark-verify"
+          python3 scripts/mark/verify-png.py "${RUNNER_TEMP}/mark-verify"
+
   cargo-clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
@@ -254,6 +283,48 @@ jobs:
       - name: Verify the pipe excludes a second local user
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
+
+  # The contributor crate's Rust tests, on Windows. Nothing ran them there
+  # before this job existed, and the cost was not that some tests were
+  # skipped -- it was that six integration targets FAILED TO COMPILE on
+  # Windows for an unknown length of time and no signal existed anywhere.
+  #
+  # They imported UnixStream, UnixListener and ipc::bind/serve at the top
+  # level. Those are cfg(unix) in the library, so on Windows the targets did
+  # not skip, they broke the build of the whole test suite -- which is also
+  # why the failure hid: a suite that never compiles never reports.
+  #
+  # The other Windows jobs cannot catch this. windows-pipe-acl builds one
+  # binary, windows-contributor-app builds the cdylib and runs the .NET
+  # tests, and none of them invoke cargo test. The gating that fixed it
+  # rots the first time somebody adds another ungated unix import, so the
+  # gate needs an observer rather than a convention.
+  #
+  # This is also the only place the daemon's Windows behaviour is exercised
+  # in Rust at all: the transport is a named pipe rather than a unix socket,
+  # and session discovery resolves %USERPROFILE% rather than $HOME.
+  windows-contributor-tests:
+    name: windows contributor crate tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-contributor-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-contributor-tests-
+      # RUSTFLAGS=-D warnings comes from the workflow-level env, so an
+      # unused import behind a cfg gate fails here the way it would in the
+      # unix jobs.
+      - name: Test the contributor and FFI crates
+        run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
 
   windows-update-conformance:
     name: windows update conformance
@@ -484,6 +555,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: actions/cache@v5
         with:
           path: |
@@ -518,7 +591,27 @@ jobs:
             imagemagick \
             tesseract-ocr \
             tesseract-ocr-eng \
-            fonts-dejavu-core
+            fonts-dejavu-core \
+            desktop-file-utils \
+            appstream
+      # The desktop entry has always named an icon; until the icon slice
+      # nothing installed one, and a dangling Icon= is invisible until a
+      # software centre shows a blank tile. appstreamcli validate is the only
+      # thing that checks the metainfo at all, and Flathub runs it on
+      # submission, so it is better to fail here.
+      - name: Validate the desktop entry and AppStream metainfo
+        run: |
+          desktop-file-validate \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop
+          appstreamcli validate --no-net --pedantic \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml
+          # The entry names an icon; the manifest must install a file under
+          # that name. Checked as a pair because each half looks fine alone.
+          icon_name="$(sed -n 's/^Icon=//p' \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop)"
+          grep -q "apps/${icon_name}.svg" \
+            crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml \
+            || { echo "the flatpak manifest installs no icon named ${icon_name}" >&2; exit 1; }
       # trace-commons-contributor is a root-workspace crate; the shell links
       # it directly (see the crate's own Cargo.toml comment on why -- both
       # sides are Rust on Linux, no FFI boundary needed).
@@ -532,6 +625,19 @@ jobs:
       # pure and needs no display -- but without this step nothing runs it.
       - name: Test the shell
         run: cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+      # Being its own workspace also puts this crate outside the root
+      # `cargo fmt --all` and the root clippy job, so for as long as it has
+      # existed nothing has checked either one here and it drifted. Same
+      # allow-list as the root job, deliberately not widened.
+      - name: Check the shell's formatting
+        run: cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml -- --check
+      - name: Clippy the shell
+        run: |
+          cargo clippy --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
       - name: Run weston + portal verification
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
 

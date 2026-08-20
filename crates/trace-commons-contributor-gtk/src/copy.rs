@@ -977,6 +977,39 @@ pub const ONBOARD_WELCOME_SCRUB: &str = "Before anything leaves this machine it 
      That scrubbing is good and it is not perfect — which is why you get to look first.";
 pub const ONBOARD_GET_STARTED: &str = "Get started";
 
+/// The second button the shared spec gives screen 1 and the shell never had.
+pub const ONBOARD_WHAT_REMOVED: &str = "What gets removed?";
+pub const ONBOARD_WHAT_REMOVED_HEADING: &str = "What gets removed";
+/// The list is generated from `trace_commons_protocol::secret_leak_pattern_names`,
+/// so this sentence introduces it without claiming to enumerate it.
+pub const ONBOARD_WHAT_REMOVED_INTRO: &str =
+    "Before a trace leaves this machine, these are found and replaced:";
+
+/// A named detector, in words. `slug` is a name from the protocol's table.
+///
+/// The LIST is generated; only the prettification is a lookup, and an
+/// unrecognised slug still renders -- de-slugged rather than dropped -- so a
+/// detector added upstream can never silently vanish from a screen that tells
+/// a contributor what is scrubbed. `every_detector_has_a_human_label` fails
+/// the build if one arrives without a label, so the fallback is a safety net
+/// and not the plan.
+pub fn scrub_detector_label(slug: &str) -> String {
+    match slug {
+        "openai_api_key" => "OpenAI API keys".to_string(),
+        "github_token" => "GitHub tokens".to_string(),
+        "aws_access_key" => "AWS access keys".to_string(),
+        // The regex behind this one covers Stripe, GitLab and Slack prefixes.
+        // Naming them beats "provider tokens", which tells a contributor
+        // nothing about whether their own provider is covered.
+        "provider_token" => "Stripe, GitLab and Slack tokens".to_string(),
+        "jwt" => "JSON Web Tokens".to_string(),
+        "npm_token" => "npm tokens".to_string(),
+        "google_api_key" => "Google API keys".to_string(),
+        "pem_header_orphan" => "Private keys in PEM blocks".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
 pub const ONBOARD_CONNECT_TITLE: &str = "Connect";
 pub const ONBOARD_CONNECT_PROMPT: &str =
     "Paste the invite link someone sent you, or click it from your email.";
@@ -1018,6 +1051,68 @@ pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 
+// ---------------------------------------------------------------------------
+// NOT YET IN THE SHARED SPEC. The five strings below are new product copy, not
+// transcription: `### 5. What to watch` specifies the screen's BEHAVIOUR (all
+// projects at ask-first, `Ignore` offered and `auto_upload` withheld) and
+// gives it no words at all. The screen therefore shipped as a bare title over
+// an unlabelled list, which says neither what the list is nor what `Ignore`
+// does -- on the one screen that decides which of a contributor's repositories
+// are eligible to leave the machine.
+//
+// They must land in `docs/superpowers/specs/2026-08-08-contributor-shell-shared-design.md`
+// before macOS and Windows transcribe them, or the three shells will describe
+// the same decision differently. Flagged for approval rather than quietly
+// adopted.
+// ---------------------------------------------------------------------------
+
+/// The subtitle screen 5 never had. States the default first, because the
+/// default is what happens to a contributor who reads nothing and clicks
+/// Continue -- which is most of them.
+pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you see each session before anything is sent. Ignore a \
+     project to leave it out entirely.";
+
+/// The eyebrow over the list. `style::section` uppercases it.
+pub const ONBOARD_WATCH_SECTION: &str = "Projects";
+
+/// The per-row state, in the vocabulary `settings.rs` already uses for the
+/// same mode -- its dropdown reads "Ask me first". Two screens that set the
+/// same field must not name it two ways.
+pub const ONBOARD_WATCH_ASK_FIRST: &str = "Ask me first";
+
+/// The state after `Ignore`. Echoes the button that produced it rather than
+/// introducing a third name for the mode.
+pub const ONBOARD_WATCH_IGNORED: &str = "Ignored";
+
+/// Shown when `list_projects` returns nothing. This was the state of the
+/// screen on EVERY machine until the `local_path` deserialisation bug was
+/// fixed, and it rendered as a title above nothing at all.
+pub const ONBOARD_WATCH_EMPTY: &str =
+    "No projects yet. Sessions you run later will appear here, and in Settings.";
+
+/// The human name for `policy::UNKNOWN_PROJECT_KEY`. The wire carries the
+/// slug `unknown-project` as this row's `project_label`, because
+/// `project_label_for` deliberately returns the constant rather than risk
+/// deriving a name from a path. A slug is the right answer on the socket and
+/// the wrong one on a screen.
+pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
+
+/// The note the shared spec asks for: "sessions with no resolvable project
+/// get a permanent plain-English note that they can never be armed."
+///
+/// Stated as a consequence rather than a fault. The daemon buckets these
+/// because a cwd with no usable final segment has no label but itself, and
+/// `project_label` reaches `daemon-audit.jsonl`, OS notification text and
+/// `HistoryRecord` -- so naming them would have written a full local path
+/// into all three. Not being armable is the protective half of that, not a
+/// degradation, and the wording should not read as an error a contributor
+/// might try to fix.
+///
+/// It replaces the state line rather than adding a third: "you'll always be
+/// asked" already says what `Ask me first` says.
+pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = "Trace Commons can't tell which folder these ran in, so they can never be contributed \
+     automatically. You'll always be asked.";
+
 /// The per-project control on screen 5. `Ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
 /// live thought at this moment and never returns, whereas arming automation
@@ -1040,6 +1135,61 @@ pub const ONBOARD_DONE_BODY: &str = "Trace Commons lives in your system tray. Wh
      minutes, it'll show up there. You'll get at most one notification every 4 hours, and none \
      at all if there's nothing waiting.";
 pub const ONBOARD_DONE_BUTTON: &str = "Finish";
+
+// The roots screen. It runs BEFORE the daemon starts, so it is not one of
+// the six onboarding screens above -- those are all daemon-backed, which is
+// exactly why the roots refusal used to be a dead end.
+
+pub const ROOTS_TITLE: &str = "Which folders may this app watch?";
+pub const ROOTS_BODY: &str = "Trace Commons reads coding-session transcripts. It will not guess where they are, and it \
+     will not watch anything until you say so.";
+/// Says the consequence, per the copy rules. Without this sentence "skip it"
+/// reads as safe, and it is the opposite of safe: an unanswered source is
+/// the one that falls back to the real location.
+pub const ROOTS_BOTH: &str = "Answer for both. Leaving one blank is not the same as skipping it -- an unanswered folder \
+     falls back to the standard location, which is probably your real work.";
+pub const ROOTS_CLAUDE: &str = "Claude Code sessions";
+pub const ROOTS_CODEX: &str = "Codex sessions";
+pub const ROOTS_WATCH: &str = "Watch this folder";
+pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
+pub const ROOTS_CONTINUE: &str = "Continue";
+pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
+/// Shown against a path that is not on this machine. Not an error: naming a
+/// folder that does not exist yet is allowed, and saying so is more use than
+/// refusing it.
+pub const ROOTS_ABSENT: &str = "Not on this machine";
+pub const ROOTS_EMPTY: &str = "No sessions yet";
+/// Said when an environment variable moved the store, so a path that is not
+/// the usual one does not read as a mistake.
+pub const ROOTS_RELOCATED: &str = "Set by an environment variable";
+
+/// The evidence line under a discovered folder.
+///
+/// A count and a recency, because that is what makes this a consent prompt
+/// rather than a text field: "946 sessions, most recent 2 hours ago" tells a
+/// contributor what they are agreeing to.
+pub fn roots_evidence(session_count: u64, recent: Option<&str>) -> String {
+    let sessions = if session_count == 1 {
+        "1 session".to_string()
+    } else {
+        format!("{session_count} sessions")
+    };
+    match recent {
+        Some(when) => format!("{sessions}, most recent {when}"),
+        None => sessions,
+    }
+}
+
+/// A coarse "how long ago", in the vocabulary the rest of the app uses.
+pub fn roots_ago(seconds: i64) -> String {
+    match seconds {
+        s if s < 90 => "just now".to_string(),
+        s if s < 5400 => format!("{} minutes ago", (s + 30) / 60),
+        s if s < 172_800 => format!("{} hours ago", (s + 1800) / 3600),
+        s => format!("{} days ago", (s + 43200) / 86400),
+    }
+}
 
 /// The short bold label for a consent scope.
 ///
@@ -1064,6 +1214,39 @@ pub fn scope_title(wire_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_evidence_line_counts_one_session_without_a_plural() {
+        assert_eq!(roots_evidence(1, None), "1 session");
+        assert_eq!(roots_evidence(0, None), "0 sessions");
+        assert_eq!(roots_evidence(946, None), "946 sessions");
+    }
+
+    #[test]
+    fn the_evidence_line_carries_the_recency_when_there_is_one() {
+        assert_eq!(
+            roots_evidence(946, Some("2 hours ago")),
+            "946 sessions, most recent 2 hours ago"
+        );
+    }
+
+    #[test]
+    fn ago_reads_in_the_largest_unit_that_fits() {
+        assert_eq!(roots_ago(5), "just now");
+        assert_eq!(roots_ago(600), "10 minutes ago");
+        assert_eq!(roots_ago(7200), "2 hours ago");
+        assert_eq!(roots_ago(86_400 * 3), "3 days ago");
+    }
+
+    #[test]
+    fn the_roots_copy_says_what_leaving_one_blank_actually_does() {
+        // The rule is "always state the data consequence". A screen that
+        // said only "answer both" would leave the contributor thinking a
+        // blank means "skip that one", which is the fail-open this whole
+        // slice removes.
+        assert!(ROOTS_BOTH.contains("falls back"));
+        assert!(ROOTS_BODY.contains("will not watch anything until you say"));
+    }
 
     #[test]
     fn no_health_sentence_names_an_internal_mechanism() {
@@ -1483,5 +1666,32 @@ mod tests {
         let unknown = profile_failure_sentence("https://ingest.example/v1/community/profile");
         assert!(!unknown.contains("https://"));
         assert_eq!(unknown, profile_failure_sentence("something-else"));
+    }
+
+    #[test]
+    fn every_detector_has_a_human_label() {
+        // The list on screen is generated from this table, so a detector
+        // added upstream appears whether or not anyone taught this shell to
+        // say its name. This fails the day that happens, so the name it
+        // appears under is a decision rather than a de-slugged accident.
+        for slug in trace_commons_protocol::trace_contribution::secret_leak_pattern_names() {
+            let label = scrub_detector_label(slug);
+            assert_ne!(
+                label,
+                slug.replace('_', " "),
+                "detector {slug} has no human label in scrub_detector_label"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detector_nobody_named_still_renders() {
+        // The safety net, asserted rather than assumed: an unrecognised slug
+        // must not render as an empty row on a screen whose whole job is
+        // saying what is scrubbed.
+        assert_eq!(
+            scrub_detector_label("some_new_vendor_key"),
+            "some new vendor key"
+        );
     }
 }

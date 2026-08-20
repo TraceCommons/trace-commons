@@ -663,6 +663,27 @@ fn audit_sentence(action: &str) -> &'static str {
 
 /// Projects, named by `project_id` on the wire and by `project_label` on
 /// screen. A path never appears in either direction.
+/// The modes a row may be set to: display name beside the wire name.
+///
+/// `auto_upload` is absent for the unresolvable bucket. `Policy` refuses it
+/// there in two independent places, so offering it invited a contributor to
+/// select "Contribute automatically" and have the daemon silently decline --
+/// believing they had armed something that cannot be armed. Silencing still
+/// works, so `ignore` stays.
+///
+/// Paired rather than positional, and lifted out here so the pairing is
+/// testable without a display. The old code carried the mapping twice, as
+/// hardcoded indices into a list assumed to be the same length for every
+/// row; one shorter row turns that into a control that sets the wrong mode.
+fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)> {
+    let mut choices: Vec<(&'static str, &'static str)> = vec![("Ask me first", "notify_only")];
+    if !is_unresolved_bucket {
+        choices.push(("Contribute automatically", "auto_upload"));
+    }
+    choices.push(("Never offer this one", "ignore"));
+    choices
+}
+
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
     let view = &app.settings.projects;
     while let Some(child) = view.first_child() {
@@ -705,42 +726,82 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
 
     for project in projects {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        // Name over note, so the row reads as one thing with a property.
+        // Every row but the bucket has no note and this collapses to the
+        // single label it was.
+        let column = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+        column.set_hexpand(true);
+        // The wire label for the unresolvable bucket is the slug
+        // `unknown-project`, which is an identifier and not a name. Screen 5
+        // says the same thing about the same bucket, so it says it in the
+        // same words rather than in a second wording of one fact.
+        let display_label = if project.is_unresolved_bucket {
+            copy::ONBOARD_WATCH_UNKNOWN_LABEL
+        } else {
+            project.project_label.as_str()
+        };
         let label = gtk::Label::builder()
-            .label(&project.project_label)
+            .label(display_label)
             .xalign(0.0)
             .hexpand(true)
+            .wrap(true)
             .build();
         label.add_css_class("tc-body");
-        row.append(&label);
+        column.append(&label);
+        if project.is_unresolved_bucket {
+            let note = gtk::Label::builder()
+                .label(copy::ONBOARD_WATCH_UNKNOWN_NOTE)
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            note.add_css_class("tc-meta");
+            column.append(&note);
+        }
+        row.append(&column);
 
-        let modes = gtk::DropDown::from_strings(&[
-            "Ask me first",
-            "Contribute automatically",
-            "Never offer this one",
-        ]);
+        // The modes this row may actually be set to, display name beside the
+        // wire name.
+        //
+        // `auto_upload` is omitted for the unresolvable bucket. `Policy`
+        // refuses it there in two independent places, so offering it invited
+        // a contributor to select "Contribute automatically" and have the
+        // daemon silently decline -- believing they had armed something that
+        // cannot be armed. Silencing still works, so `Ignore` stays.
+        //
+        // Paired rather than positional. The old code carried the mapping
+        // twice, once in `set_selected` and once in `selected_notify`, as
+        // hardcoded indices into a list assumed to be the same length for
+        // every row. The moment one row is shorter that assumption turns
+        // into a control that sets the wrong mode, silently, on the screen
+        // that decides what leaves the machine.
+        let choices = mode_choices(project.is_unresolved_bucket);
+
+        let display: Vec<&str> = choices.iter().map(|(shown, _)| *shown).collect();
+        let modes = gtk::DropDown::from_strings(&display);
         // The project name sits in a separate label, so the control has to
         // say what it controls on its own.
         modes.update_property(&[gtk::accessible::Property::Label(&format!(
-            "How to treat {}",
-            project.project_label
+            "How to treat {display_label}"
         ))]);
-        modes.set_selected(match project.mode.as_str() {
-            "auto_upload" => 1,
-            "ignore" => 2,
-            _ => 0,
-        });
+        let selected = choices
+            .iter()
+            .position(|(_, wire)| *wire == project.mode)
+            .unwrap_or(0);
+        modes.set_selected(selected as u32);
         row.append(&modes);
         view.append(&row);
 
+        let wire_modes: Vec<String> = choices
+            .iter()
+            .map(|(_, wire)| (*wire).to_string())
+            .collect();
         let app = Rc::clone(app);
         let project = project.clone();
         modes.connect_selected_notify(move |dropdown| {
-            let wanted = match dropdown.selected() {
-                1 => "auto_upload",
-                2 => "ignore",
-                _ => "notify_only",
+            let Some(wanted) = wire_modes.get(dropdown.selected() as usize) else {
+                return;
             };
-            if wanted == project.mode {
+            if *wanted == project.mode {
                 return;
             }
             if wanted == "auto_upload" {
@@ -1633,5 +1694,38 @@ mod tests {
         // overstate how long the watcher actually waits.
         assert_eq!(knob_shown(90, 60), 1.0);
         assert_eq!(knob_shown(0, 60), 0.0);
+    }
+
+    #[test]
+    fn the_unresolvable_bucket_is_never_offered_auto_upload() {
+        // The daemon refuses auto_upload for this bucket in two independent
+        // places. A control that offers it is inviting a contributor to
+        // believe they armed something that cannot be armed.
+        let choices = mode_choices(true);
+        assert!(
+            !choices.iter().any(|(_, wire)| *wire == "auto_upload"),
+            "auto_upload must not be offered for the unresolvable bucket"
+        );
+        // Silencing is still available: the bucket cannot be armed, but it
+        // can be told to stop offering.
+        assert!(choices.iter().any(|(_, wire)| *wire == "ignore"));
+        assert!(choices.iter().any(|(_, wire)| *wire == "notify_only"));
+    }
+
+    #[test]
+    fn an_ordinary_project_keeps_every_mode() {
+        let choices = mode_choices(false);
+        let wires: Vec<&str> = choices.iter().map(|(_, wire)| *wire).collect();
+        assert_eq!(wires, vec!["notify_only", "auto_upload", "ignore"]);
+    }
+
+    #[test]
+    fn a_position_yields_the_mode_that_position_shows() {
+        // The defect this guards is silent: with a shorter list on one row, a
+        // positional mapping sets a mode the contributor did not pick. Index 1
+        // is auto_upload on an ordinary row and ignore on the bucket, and each
+        // row must resolve against its own list.
+        assert_eq!(mode_choices(true)[1].1, "ignore");
+        assert_eq!(mode_choices(false)[1].1, "auto_upload");
     }
 }

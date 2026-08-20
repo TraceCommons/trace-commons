@@ -20,9 +20,29 @@ mean two things to code-sign, notarize, update, and keep in sync, and the
 supported way to ship a real helper (`SMAppService.agent` with an embedded
 LaunchAgent plist) is more machinery than being the app.
 
-`LSUIElement = true`: menu-bar item, **no Dock icon**. macOS users expect
+~~`LSUIElement = true`: menu-bar item, **no Dock icon**. macOS users expect
 exactly this shape from a background utility, and a Dock presence is the tell
-that something was ported rather than designed here.
+that something was ported rather than designed here.~~
+
+**REVERSED 2026-08-19.** The app is now a regular one: Dock icon *and*
+menu-bar item. See
+`docs/superpowers/specs/2026-08-19-macos-shell-shape-design.md`.
+
+The reasoning above is still true about what a background utility should look
+like. It was wrong about the menu bar being a reliable place to be found. On a
+display with a notch, once the menu bar fills up, the status item is still
+assigned a frame -- the accessibility API reports a plausible 18x24 rectangle
+-- but it is placed in a band that never draws. Measured on a 1512pt-wide
+display: notch spans x 663..848, the item was assigned x 887, and the leftmost
+glyph that actually renders starts near x 917. Nothing draws, nothing errors,
+and a menu-bar-only app has no other door. A contributor who cannot find the
+app cannot use it, and that outranks looking native.
+
+Worth being precise about what was and was not established: a five-rung
+bisect showed there is no rendering defect in the mark -- a solid black
+`Rectangle` label and a minimal standalone app are equally invisible in that
+band. The mark was never disproven, only never seen. That is a separate
+question from this reversal.
 
 ## Technology
 
@@ -86,7 +106,9 @@ in release notes rather than discovered.
 
 ## Acceptance
 
-The shared checklist, plus: no Dock icon appears; the app shows in Login Items
+The shared checklist, plus: ~~no Dock icon appears~~ (reversed 2026-08-19 --
+a Dock icon appears, and carries the mark rather than the generic
+application icon); the app shows in Login Items
 after opting in; `daemon status` in a terminal answers while the app runs;
 quitting the app with "Quit and stop watching" releases the lock so a
 subsequent `daemon run` succeeds; notification actions are exactly Review and

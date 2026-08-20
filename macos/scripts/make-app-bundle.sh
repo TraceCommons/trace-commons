@@ -91,6 +91,23 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"
 
+# The app icon. Contents/Resources was created empty by every build before
+# the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
+# there was none to show.
+#
+# This is the Icon Composer .icon route: it writes both Assets.car, which is
+# what macOS 26 draws and what carries the Liquid Glass treatment, and
+# AppIcon.icns as the legacy fallback. scripts/info-plist.sh declares
+# CFBundleIconName for the former and CFBundleIconFile for the latter, which
+# is the pair actool's own partial Info.plist emits.
+#
+# scripts/make-icons.sh is the earlier, flat .icns-only route. It is kept
+# because it produces the full ten-representation ladder that iconutil wants
+# and this one produces four, so it is the thing to fall back to if the .icon
+# route ever has to be backed out. It is not wired into this build.
+./scripts/make-icon-document.sh "$REPO_ROOT/assets/mark" \
+  "$APP/Contents/Resources"
+
 # cargo stamps the dylib with an absolute install name under target/. Repoint
 # it inside the bundle so the app does not depend on this checkout's path.
 install_name_tool -id "@rpath/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME" 2>/dev/null

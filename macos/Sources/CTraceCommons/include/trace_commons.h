@@ -110,6 +110,71 @@ typedef struct tc_preview tc_preview;
  * one worker, an in-flight tc_subscribe callback and tc_daemon_stop's join
  * on the supervisor are mutually exclusive demands on the only worker, and
  * tc_daemon_stop is documented as callable from inside a callback.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS. If the persisted settings do
+ * not declare BOTH claude_root and codex_root, this returns NULL with the
+ * fixed label "roots-not-declared" and nothing is scanned. An unset root
+ * does not mean "no source for that agent" -- it means the conventional
+ * per-user location, i.e. the contributor's real ~/.claude or ~/.codex --
+ * so half a declaration is a fail-open and is refused exactly like none.
+ *
+ * That label is deliberately distinct from the opaque
+ * "daemon-start-failed": a host must be able to route a roots refusal to
+ * whatever screen collects the folders, and every other start failure to a
+ * generic notice. tc_daemon_start takes no settings, so the only way out of
+ * this refusal through this ABI is tc_daemon_start_with_settings below.
+ *
+ * NAMED START FAILURES. Every other way a start can fail also reports a
+ * fixed, content-free label, so a host can tell them apart without parsing
+ * prose:
+ *
+ *   "already-running"              another daemon holds this state
+ *                                  directory's lock. Not an error to repair:
+ *                                  the daemon the contributor wants is
+ *                                  already up.
+ *   "state-directory-not-writable" the lock file could not be created or
+ *                                  opened. A permissions or disk problem
+ *                                  with the state directory itself.
+ *   "settings-unreadable"          daemon-settings.json exists and this
+ *                                  version cannot parse it. Re-running
+ *                                  whatever screen writes settings repairs
+ *                                  it; hand-edited files are the usual
+ *                                  cause.
+ *   "ipc-bind-failed"              the control socket could not be bound.
+ *                                  Most often a config_dir whose socket path
+ *                                  exceeds the platform limit (see the
+ *                                  104-byte note above), or a stale socket.
+ *   "daemon-start-failed"          anything else, and deliberately opaque:
+ *                                  the errors behind it embed filesystem
+ *                                  paths that must not cross this boundary.
+ *
+ * These are the complete set; treat an unrecognized label as equivalent to
+ * "daemon-start-failed" rather than assuming it is safe to display.
+ *
+ * SESSION SOURCE KEYS. Settings carry one declaration per agent, under
+ * "claude_source" and "codex_source". Each is an object in one of exactly
+ * two shapes:
+ *
+ *   {"mode":"watch","path":"/absolute/path/to/sessions"}
+ *   {"mode":"off"}
+ *
+ * ABSENT IS NOT "off", AND CONFLATING THEM IS A FAIL-OPEN. A key that is
+ * absent means the contributor has never been asked, and an unasked source
+ * still falls back to the conventional per-user location -- the real
+ * ~/.claude/projects or ~/.codex/sessions. {"mode":"off"} means they were
+ * asked and declined, and nothing for that agent is watched or read. A host
+ * that emits nothing to mean "the contributor does not use this agent" has
+ * asked the daemon to watch that agent's real session store.
+ *
+ * "roots-not-declared" is refused on absence, never on {"mode":"off"}: a
+ * contributor who declined both agents has declared their roots as surely as
+ * one who named two folders.
+ *
+ * The legacy string spellings "claude_root" / "codex_root" still load and
+ * are folded into the shapes above, then dropped the next time settings are
+ * written, so an install that declared its roots before this schema existed
+ * is not asked again. Emit the source keys; do not emit the legacy spellings
+ * in new code.
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
@@ -144,10 +209,64 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * The returned handle is exactly a tc_daemon_start handle: same lifetime,
  * same teardown, freed by tc_handle_free after tc_daemon_stop.
+ *
+ * FAILS CLOSED ON UNDECLARED SESSION ROOTS, on the same rule and with the
+ * same "roots-not-declared" label as tc_daemon_start -- but evaluated AFTER
+ * settings_json has been applied and persisted. That ordering is the point:
+ * a settings_json declaring both roots clears a refusal the persisted file
+ * alone would have earned, which is what makes this the one call a host can
+ * use to turn "the contributor just named two folders" into a running
+ * daemon. Declaring only one root here is refused exactly as it is above.
  */
 tc_handle*  tc_daemon_start_with_settings(const char* config_dir,
                                           const char* settings_json,
                                           char** err);
+
+/* Describe the session stores on this machine, so a roots screen can ask the
+ * contributor about something specific rather than showing an empty field.
+ *
+ * Takes no handle: it runs BEFORE any daemon exists, which is the point --
+ * the screen that uses it is the one clearing the refusal that stops a
+ * daemon from starting.
+ *
+ * Returns an owned JSON array; free it with tc_string_free. Each element:
+ *   source            "claude-code" | "codex"
+ *   path              where this store would be watched
+ *   exists            whether that directory is there right now
+ *   session_count     how many session files, counted recursively
+ *   most_recent       RFC 3339 timestamp, or null
+ *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *
+ * This is the ONE place in this ABI that deliberately returns a filesystem
+ * path. Everywhere else a path is withheld because the caller is being told
+ * about a trace; here the caller is the contributor's own machine asking
+ * which of their own folders to watch, and a consent prompt that will not
+ * name what it is asking about is not a consent prompt.
+ *
+ * Reads directory entries and metadata only; never opens a session file.
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_discover_sources(void);
+
+/* The names of the secret detectors the scrubber runs, so a shell can tell a
+ * contributor what is removed without transcribing the list.
+ *
+ * Takes no handle: it describes the build, not a running daemon, and the
+ * screen that asks is the first one a contributor sees.
+ *
+ * Returns an owned JSON array of strings; free it with tc_string_free.
+ *
+ * NAMES ONLY. The patterns are deliberately absent and must not be added: a
+ * contributor deciding whether to trust the scrubbing needs to know what it
+ * looks for, but publishing the regexes would tell someone trying to slip a
+ * secret past it exactly what to avoid. The list being generated is the
+ * point -- a hand-written copy in a shell is a privacy claim that silently
+ * stops being true the day a detector is added.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_scrub_detector_names(void);
+
 
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --
  * including from inside a tc_subscribe callback -- and safe to call
@@ -269,6 +388,47 @@ const char* tc_preview_summary_json(const tc_preview*);  /* counts, sizes, openi
  * (if non-NULL) is set to NULL -- there is nothing to free.
  */
 int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matches_json);
+
+/* The turn index over a redacted preview body:
+ *   {entry_id, body_digest, envelope_digest, turn_count,
+ *    turns: [{index, role, tool_name, byte_offset, byte_len}]}
+ *
+ * An OVERLAY on the body, never a replacement for it. Render the bytes
+ * tc_preview_body returned verbatim and draw a separator at each
+ * byte_offset; the offsets index that exact string. The daemon does not
+ * re-render the transcript, because a prose re-render would drop the fields
+ * that have no prose form (structured_payload, token_counts, latency_ms,
+ * cost_usd, failure_modes) and so would show less than the artifact an
+ * approval covers.
+ *
+ * body_digest is required and is the anchor: "sha256:<lowercase hex>" over
+ * the exact UTF-8 bytes of the body being displayed. A body that is not
+ * that one is refused with preview-body-changed rather than indexed --
+ * offsets against the wrong string still look like a transcript.
+ *
+ * Returns an OWNED JSON string; free with tc_string_free. Returns NULL and
+ * sets *err (owned; also freed with tc_string_free) on failure.
+ */
+char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
+                                  const char* body_digest, char** err);
+
+/* The instance an invite link names, as an owned UTF-8 string, or NULL if
+ * the argument is not a usable invite.
+ *
+ * Exists so a shell can resolve and show the instance before a contributor
+ * commits to an invite, WITHOUT being handed the invite's code. The parsed
+ * invite carries that code; only the host crosses this boundary, and a shell
+ * cannot leak what it was never given.
+ *
+ * NULL covers every rejection. A caller must not try to distinguish "not a
+ * URL" from "no code in it" -- this interface deliberately does not tell the
+ * two apart, matching the single failure sentence the invite path shows.
+ *
+ * Not a daemon method: it is a pure function of its argument, touches no
+ * daemon state, and needs no handle. Returns an OWNED string; free it with
+ * tc_string_free.
+ */
+char*       tc_invite_issuer_host(const char* invite);
 
 /* Free a preview handle. Safe to call with NULL. Invalidates every
  * const char* previously returned by tc_preview_body /

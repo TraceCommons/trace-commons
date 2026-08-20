@@ -53,6 +53,9 @@ struct OnboardingConnectContent: View {
 
     @State private var inviteText: String
     @State private var phase: Phase
+    /// An invite that arrived by URL before this screen existed. See
+    /// `PendingInvite`.
+    @ObservedObject private var pendingInvite = PendingInvite.shared
 
     var onEnrolled: () -> Void
 
@@ -75,11 +78,28 @@ struct OnboardingConnectContent: View {
         .padding(TC.Space.xxl)
         .tcColumn(TC.Measure.prose)
         .tcScreen()
-        .onOpenURL { url in
-            guard let invite = DeepLink.inviteURL(from: url) else { return }
-            inviteText = invite
-            resolve()
-        }
+        // Not `onOpenURL`. That fires only on a mounted view, and the app's
+        // resting state is running with no window at all -- so a link clicked
+        // by a contributor who already has the app running used to land on
+        // nothing. `AppDelegate.application(_:open:)` receives it above the
+        // view layer and parks it in `PendingInvite`; this screen collects it
+        // whenever it next exists.
+        .onAppear { consumePendingInvite() }
+        // And again while already on screen, which `onAppear` would miss --
+        // the window can be sitting open on this very screen when the link
+        // arrives.
+        .onChange(of: pendingInvite.value) { _, _ in consumePendingInvite() }
+    }
+
+    /// Takes the parked invite, if there is one, and shows what it resolves
+    /// to. It deliberately stops there: filling the field and naming the
+    /// issuer is as far as a link may go, because which commons to join is
+    /// the decision this screen exists to ask. Both other clients say the
+    /// same thing at their own registration sites.
+    private func consumePendingInvite() {
+        guard let invite = pendingInvite.take() else { return }
+        inviteText = invite
+        resolve()
     }
 
     private var header: some View {
@@ -226,6 +246,15 @@ enum DeepLink {
               url.host?.lowercased() == "enroll",
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return nil }
-        return components.queryItems?.first(where: { $0.name == "invite" })?.value
+        // The empty value is dropped, not passed on. `tracecommons://enroll?invite=`
+        // used to yield Some("") here and drive the screen into a resolve of
+        // nothing, with an empty field and an error. Rust filters it
+        // (`commands.rs`, `.filter(|v| !v.is_empty())`) and Windows returns
+        // null (`DeepLink.cs`); one invite mail reaches all three clients, so
+        // the parse is a contract and this was the one place it diverged.
+        return components.queryItems?
+            .first(where: { $0.name == "invite" })?
+            .value
+            .flatMap { $0.isEmpty ? nil : $0 }
     }
 }

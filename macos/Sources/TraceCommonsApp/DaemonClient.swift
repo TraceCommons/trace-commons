@@ -1,5 +1,6 @@
 import Foundation
 import TCBridge
+import TCShellCore
 
 /// The typed layer over the daemon's JSON. Every method here is one
 /// `trace_commons.daemon.v1_1` call, in and out of Swift types.
@@ -70,26 +71,25 @@ final class DaemonClient {
         return try call("list_projects", as: Wrapper.self).projects
     }
 
-    /// Sets `projectKey`'s mode. The daemon still accepts a `label`
-    /// parameter for compatibility with older clients and always ignores
-    /// it -- `project_label` is derived by the daemon from `project_key`,
-    /// never accepted from a caller (see "Project keys and labels" in the
-    /// contract) -- so this wrapper never sends one.
+    /// Sets a project's mode, naming it by the opaque id `list_projects`
+    /// gave us.
     ///
-    /// `projectKey` must be something the daemon can validate: its locked
-    /// unknown-cwd sentinel, a key already known to it (discovered on a
-    /// queued session or already in its project policy), or an absolute
-    /// path that exists on this machine and canonicalizes to itself.
-    /// Anything else is refused with `project-key-unrecognized`. Neither
-    /// `list_projects` nor `list_pending` ever puts a real `project_key` on
-    /// the wire -- both carry `project_label` only, by the same
-    /// never-a-path rule that keeps this app from rendering one -- so this
-    /// app has no source for a `projectKey` that is guaranteed to satisfy
-    /// that check. See `docs/superpowers/plans/macos-set-project-mode-report.md`.
-    func setProjectMode(projectKey: String, mode: ProjectMode) throws {
+    /// The daemon accepts `project_id` OR `project_key`, and the id is the
+    /// only one this app can honestly produce. A `project_key` is a full
+    /// local path, and by the never-a-path rule neither `list_projects` nor
+    /// `list_pending` ever puts one on the wire -- so this call used to send
+    /// `project_label`, a final path segment, which the daemon refuses with
+    /// `project-key-unrecognized` because it is not a key at all. The old
+    /// doc comment said as much: the app had no source for a key that would
+    /// satisfy the check. It had a source for an id all along.
+    ///
+    /// The daemon still accepts a `label` parameter from older clients and
+    /// always ignores it -- labels are derived from the key inside the
+    /// daemon, never accepted from a caller -- so this wrapper sends none.
+    func setProjectMode(projectID: String, mode: ProjectMode) throws {
         _ = try rawResult(
             "set_project_mode",
-            params: ["project_key": projectKey, "mode": mode.rawValue]
+            params: ["project_id": projectID, "mode": mode.rawValue]
         )
     }
 

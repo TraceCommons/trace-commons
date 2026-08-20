@@ -36,18 +36,33 @@
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="This app watches for finished Claude Code and Codex sessions on this machine and shows them to you." />
             <!--
-                The promise the whole product is judged against, so it is set
-                apart from the paragraph rather than buried inside it.
-            -->
-            <TextBlock Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap"
-                       Text="You decide what gets contributed. Nothing is sent unless you say so." />
-            <!--
                 "Good and it is not perfect" is load bearing. A developer
                 knows automatic redaction is imperfect, and conceding it
                 first is what makes the rest credible. Do not soften this.
             -->
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="Before anything leaves this machine it is scrubbed locally for secrets, keys, and tokens. That scrubbing is good and it is not perfect, which is why you get to look first." />
+            <!--
+                Answerable where it is asked: directly under the paragraph
+                that raises the question, not in the footer beside Get
+                started, where it sat on the far side of the promise and put
+                a second element against the one beat that should be
+                uncontested. A HyperlinkButton rather than a Button, because
+                it is a quiet aside and not a second action.
+            -->
+            <HyperlinkButton Content="{x:Bind ViewModel.WhatGetsRemovedLabel}"
+                             HorizontalAlignment="Left"
+                             Padding="0" Click="OnWhatGetsRemoved" />
+            <!--
+                The promise the whole product is judged against, and the last
+                thing read before the button. The screen argues in sequence:
+                here is what this machine does mechanically, here is the limit
+                of it, therefore you are the one who decides. All three shells
+                end this screen on the promise; do not restore the inline form
+                here alone.
+            -->
+            <TextBlock Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap"
+                       Text="You decide what gets contributed. Nothing is sent unless you say so." />
             <Button Content="Get started" HorizontalAlignment="Right" Click="OnGetStarted" />
         </StackPanel>
 
@@ -184,33 +199,67 @@
         </StackPanel>
 
         <!-- 5. What to watch -->
-        <Grid RowDefinitions="Auto,*,Auto" RowSpacing="16"
+        <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" RowSpacing="12"
               Visibility="{x:Bind ViewModel.IsWatch, Mode=OneWay}">
             <TextBlock Grid.Row="0" Style="{StaticResource TcTitleScreenTextStyle}" Text="What to watch" />
+            <!--
+                The subtitle states the DEFAULT before the exception, on
+                purpose: the default is what happens to a contributor who
+                reads nothing and clicks Continue, which is most of them.
+            -->
+            <TextBlock Grid.Row="1" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
+                       Text="{x:Bind ViewModel.WatchSubtitle}" />
+            <!--
+                Uppercased by the view model rather than by the style: WinUI
+                has no text transform, and TcEyebrowTextStyle does not apply
+                one. GTK passes "Projects" because its section helper
+                uppercases for it. The rendered result is what the spec pins.
+            -->
+            <TextBlock Grid.Row="2" Style="{StaticResource TcEyebrowTextStyle}"
+                       Text="{x:Bind ViewModel.WatchSection}" />
             <!--
                 Everything starts at ask first. Ignore is offered here and
                 auto upload deliberately is not: excluding the client repo
                 is a live thought at this moment and never returns, whereas
                 arming automation before a single preview has been seen is
                 asking for trust that has not been earned yet.
+
+                Ignore stays offered on the unresolvable bucket too. It can
+                be silenced even though it can never be armed.
             -->
-            <ScrollViewer Grid.Row="1">
-                <ItemsControl ItemsSource="{x:Bind ViewModel.Projects}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ProjectViewModel">
-                            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,10">
-                                <TextBlock Grid.Column="0" Style="{StaticResource TcBodyDenseTextStyle}"
-                                           Text="{x:Bind ProjectLabel}" TextWrapping="Wrap"
-                                           VerticalAlignment="Center" />
-                                <Button Grid.Column="1" Content="Ignore"
-                                        IsEnabled="{x:Bind IsNotIgnored, Mode=OneWay}"
-                                        Click="OnIgnoreProject" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+            <ScrollViewer Grid.Row="3">
+                <StackPanel Spacing="10">
+                    <TextBlock Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap"
+                               Text="{x:Bind ViewModel.WatchEmpty}"
+                               Visibility="{x:Bind ViewModel.HasNoProjects, Mode=OneWay}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Projects}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ProjectViewModel">
+                                <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,10">
+                                    <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   Text="{x:Bind ProjectLabel}" TextWrapping="Wrap" />
+                                        <!--
+                                            The mode for an ordinary row, and
+                                            for the unresolvable bucket the
+                                            note saying it can never be armed.
+                                            The note replaces the mode rather
+                                            than joining it.
+                                        -->
+                                        <TextBlock Style="{StaticResource TcCaptionTextStyle}"
+                                                   Text="{x:Bind SubLine, Mode=OneWay}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="Ignore"
+                                            VerticalAlignment="Top"
+                                            IsEnabled="{x:Bind IsNotIgnored, Mode=OneWay}"
+                                            Click="OnIgnoreProject" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
             </ScrollViewer>
-            <Button Grid.Row="2" Content="Continue" HorizontalAlignment="Right" Click="OnWatch" />
+            <Button Grid.Row="4" Content="Continue" HorizontalAlignment="Right" Click="OnWatch" />
         </Grid>
 
         <!-- 6. Done -->

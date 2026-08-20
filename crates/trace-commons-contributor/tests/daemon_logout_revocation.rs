@@ -7,6 +7,11 @@
 //! receipts file that no longer exists, and leaving the next person to enroll
 //! on this machine holding the previous contributor's auto-upload opt-ins.
 
+#![cfg(unix)]
+// Drives the daemon over its unix-socket IPC (`ipc::bind`/`ipc::serve`, both
+// `#[cfg(unix)]`). Ungated, this target fails to COMPILE on Windows rather
+// than skipping, which is why the suite had never run there.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,8 +157,16 @@ async fn logout_makes_a_real_running_daemon_exit() {
         // test's business.
         let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
             poll_interval_secs: 3600,
-            claude_root: Some(dir.path().join("empty-claude")),
-            codex_root: Some(dir.path().join("empty-codex")),
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("empty-claude"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("empty-codex"),
+                },
+            ),
             ..Default::default()
         };
         settings.save(&store).unwrap();
