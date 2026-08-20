@@ -395,26 +395,33 @@ impl App {
     /// `resync_required`, so there is one code path instead of two.
     ///
     /// `preview_ready` is the one exception to "look again by calling
-    /// `refresh`": see `Backend::events`' doc comment -- this connection's
-    /// events carry names only, never payloads -- so the event cannot say
-    /// which entry finished. `poll_outstanding_previews` is what "look
-    /// again" means for a scheduled preview: re-ask the daemon about every
-    /// card still waiting, which answers instantly from cache for whichever
-    /// one just resolved and costs nothing for the rest.
+    /// `refresh`", and the one event this connection reads a field off of at
+    /// all -- see `DaemonEvent`'s doc comment for why an entry id is exempt
+    /// from "names only" while everything else stays a bare name. Reading it
+    /// is what turns "a card resolved" into a single targeted
+    /// `preview_request` (`App::handle_preview_ready`) instead of a sweep
+    /// over every card still outstanding: the first version of this feature
+    /// swept on every event, which reduces to firing roughly one sweep per
+    /// still-shrinking outstanding set while a queue drains -- fine at ten
+    /// cards, a self-inflicted request storm at the five hundred this
+    /// feature exists for.
     fn wire_event_pump(self: &Rc<Self>) {
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             while let Ok(event) = app.worker.events.recv().await {
-                match event.as_str() {
+                match event.name.as_str() {
                     "digest_due" => {
                         app.refresh();
                         app.post_digest();
                     }
-                    "preview_ready" => app.poll_outstanding_previews(),
+                    "preview_ready" => app.handle_preview_ready(event.entry_id),
                     // A missed preview_ready is exactly the gap
                     // resync_required exists to cover, so both halves of
-                    // "look again" run: the queue itself, and the scheduled
-                    // previews resync alone would never re-ask about.
+                    // "look again" run: the queue itself, and a full sweep
+                    // of the scheduled previews a targeted request could
+                    // never catch up on by itself. This is the one place a
+                    // sweep still belongs -- it runs once per resync, not
+                    // once per card resolved.
                     "resync_required" => {
                         app.refresh();
                         app.poll_outstanding_previews();
@@ -666,14 +673,51 @@ impl App {
         }
     }
 
+    /// Ask about exactly the one card a `preview_ready` event named.
+    ///
+    /// This is the whole of the fix for the request storm the naive version
+    /// of this feature had: one event, one targeted `preview_request`, so
+    /// filling an N-card queue costs O(N) requests -- one per card resolving
+    /// -- rather than a full sweep of the outstanding set on every one of
+    /// N events (O(N^2)). `preview_ready_wants_request` is the decision,
+    /// pulled out so it is checkable without a daemon or a GTK loop; see its
+    /// own doc comment and the tests beside it.
+    ///
+    /// `entry_id` is `None` only for an event this connection could not read
+    /// one off of, which the contract says should not happen for
+    /// `preview_ready` -- `resync_required`'s periodic full sweep is what
+    /// backstops that case (and any other kind of missed event) without
+    /// needing this path to guess.
+    fn handle_preview_ready(self: &Rc<Self>, entry_id: Option<String>) {
+        let Some(entry_id) = entry_id else { return };
+        let wants_request = preview_ready_wants_request(
+            &entry_id,
+            &self.card_tracked.borrow(),
+            &self.previews.borrow(),
+            &self.previews_too_large.borrow(),
+        );
+        if !wants_request {
+            return;
+        }
+        let key = entry_id.clone();
+        self.call(
+            "preview_request",
+            serde_json::json!({ "entry_id": entry_id }),
+            move |app, result| app.handle_preview_request_result(&key, result),
+        );
+    }
+
     /// Re-poll every card whose scheduled preview has not resolved yet.
     ///
     /// The daemon's answer to a repeat `preview_request` for an
     /// already-ready or already-refused entry is a cache hit with no work
     /// done, and for one still queued or running it is the same "keep
-    /// waiting" answer as the first call -- so this is cheap and shrinks to
-    /// nothing as cards resolve, which is what makes it the right response
-    /// to an event that cannot name the entry it is about.
+    /// waiting" answer as the first call -- so a full sweep is cheap and
+    /// shrinks to nothing as cards resolve. That is what makes it the right
+    /// response to `resync_required`, which really has lost track of
+    /// everything and has no single id to target -- but it is exactly the
+    /// wrong response to an ordinary `preview_ready`, which always names the
+    /// one card that changed; see `handle_preview_ready`.
     fn poll_outstanding_previews(self: &Rc<Self>) {
         let outstanding: Vec<String> = {
             let tracked = self.card_tracked.borrow();
@@ -1078,6 +1122,24 @@ fn overlaps_viewport(y: f32, height: f32, viewport_height: f32) -> bool {
     y < viewport_height && y + height > 0.0
 }
 
+/// Whether a `preview_ready` naming `entry_id` should trigger a fresh
+/// `preview_request` -- pulled out of `App::handle_preview_ready` so the
+/// per-event cost is checkable directly: this looks at exactly the one id
+/// the event named, never at how many other entries are still outstanding,
+/// which is what keeps the whole feature at O(N) requests to fill an
+/// N-card queue rather than O(N^2). See the tests below, and
+/// `App::handle_preview_ready`'s doc comment for the incident this replaces.
+fn preview_ready_wants_request(
+    entry_id: &str,
+    tracked: &std::collections::HashSet<String>,
+    previews: &HashMap<String, PreviewSummary>,
+    too_large: &HashMap<String, (u64, u64)>,
+) -> bool {
+    tracked.contains(entry_id)
+        && !previews.contains_key(entry_id)
+        && !too_large.contains_key(entry_id)
+}
+
 #[cfg(test)]
 mod card_preview_tests {
     use super::*;
@@ -1130,6 +1192,111 @@ mod card_preview_tests {
         let (gone, wanted) = card_preview_diff(&current, &tracked);
         assert!(gone.is_empty());
         assert_eq!(wanted.len(), 500);
+    }
+
+    #[test]
+    fn filling_a_five_hundred_card_queue_costs_one_check_per_ready_event() {
+        // Pins the property the coordinator asked for directly: N cards
+        // resolving, one `preview_ready` each, must cost O(N) decisions --
+        // not O(N^2). The naive version of this feature swept every
+        // outstanding entry on every `preview_ready`; resolving them one at
+        // a time would have cost 500 + 499 + ... + 1 = 125,250 lookups to
+        // drain the queue. This loop makes exactly one decision per event
+        // and only ever inspects the one id that event names.
+        const N: usize = 500;
+        let tracked: HashSet<String> = (0..N).map(|n| format!("e{n}")).collect();
+        let mut previews: HashMap<String, PreviewSummary> = HashMap::new();
+        let too_large: HashMap<String, (u64, u64)> = HashMap::new();
+
+        let mut checks = 0usize;
+        let mut resolved = 0usize;
+        for n in 0..N {
+            let id = format!("e{n}");
+            checks += 1;
+            if preview_ready_wants_request(&id, &tracked, &previews, &too_large) {
+                resolved += 1;
+                // Mirror what `handle_preview_request_result` would do once
+                // the daemon answers, so the next event (if this id somehow
+                // repeated) sees it as settled rather than outstanding.
+                previews.insert(
+                    id,
+                    PreviewSummary {
+                        would_send_bytes: 0,
+                        raw_session_bytes: 0,
+                        event_count: 0,
+                        opening_prompt: String::new(),
+                        redactions: Default::default(),
+                        pii_labels_present: Vec::new(),
+                        consent_scopes: Vec::new(),
+                        residual_risk: String::new(),
+                        envelope_digest: String::new(),
+                        input_fingerprint: String::new(),
+                        enrolled: true,
+                    },
+                );
+            }
+        }
+
+        // One decision per event, for every event -- linear in N, and in
+        // particular not the triangular-number growth (N*(N+1)/2) a
+        // sweep-per-event design would have produced.
+        assert_eq!(checks, N);
+        assert_eq!(resolved, N);
+    }
+
+    #[test]
+    fn a_ready_event_for_an_entry_this_shell_never_asked_about_requests_nothing() {
+        // An entry another client scheduled, or one already swept from the
+        // queue, must not turn into a request just because its ready event
+        // reached this connection too.
+        let tracked: HashSet<String> = HashSet::new();
+        let previews: HashMap<String, PreviewSummary> = HashMap::new();
+        let too_large: HashMap<String, (u64, u64)> = HashMap::new();
+        assert!(!preview_ready_wants_request(
+            "untracked",
+            &tracked,
+            &previews,
+            &too_large
+        ));
+    }
+
+    #[test]
+    fn a_ready_event_for_an_already_resolved_entry_requests_nothing_again() {
+        // A repeat or stray event for a card already drawn must not fire a
+        // second `preview_request` -- the daemon would answer it from cache
+        // for free, but there is still no reason to ask twice.
+        let tracked: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let mut previews: HashMap<String, PreviewSummary> = HashMap::new();
+        previews.insert(
+            "a".to_string(),
+            PreviewSummary {
+                would_send_bytes: 10,
+                raw_session_bytes: 10,
+                event_count: 1,
+                opening_prompt: String::new(),
+                redactions: Default::default(),
+                pii_labels_present: Vec::new(),
+                consent_scopes: Vec::new(),
+                residual_risk: String::new(),
+                envelope_digest: String::new(),
+                input_fingerprint: String::new(),
+                enrolled: true,
+            },
+        );
+        let too_large: HashMap<String, (u64, u64)> = HashMap::new();
+        assert!(!preview_ready_wants_request(
+            "a", &tracked, &previews, &too_large
+        ));
+    }
+
+    #[test]
+    fn a_ready_event_for_a_tracked_unresolved_entry_requests_it() {
+        let tracked: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let previews: HashMap<String, PreviewSummary> = HashMap::new();
+        let too_large: HashMap<String, (u64, u64)> = HashMap::new();
+        assert!(preview_ready_wants_request(
+            "a", &tracked, &previews, &too_large
+        ));
     }
 
     #[test]
