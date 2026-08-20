@@ -24,6 +24,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use trace_commons_contributor::daemon::preview_scheduler::{STATE_READY, STATE_TOO_LARGE};
+
 use crate::copy;
 use crate::model::{ApproveResult, HistoryRollup, PreviewSummary, QueueEntry, Status};
 use crate::worker::{Outcome, Worker};
@@ -130,8 +132,33 @@ pub struct App {
     /// inside one hold window are the normal path, not an edge case.
     undo_tick: RefCell<Option<glib::SourceId>>,
     /// Preview summaries, keyed by entry id, so a row can show what would be
-    /// sent without re-running the pipeline on every redraw.
+    /// sent without re-running the pipeline on every redraw. Filled in by
+    /// `handle_preview_request_result` for a scheduled card preview, and by
+    /// the preview sheet's own full preview when it pins one -- see
+    /// `ui::preview::Sheet::load`.
     pub previews: RefCell<HashMap<String, PreviewSummary>>,
+    /// Entries the daemon's admission control refused to preview at all,
+    /// keyed by entry id, carrying `(raw_session_bytes, limit_bytes)` and
+    /// nothing else -- never a would-send estimate. Mutually exclusive with
+    /// `previews`: an entry lands in exactly one of the two, once, and never
+    /// moves. See `docs/superpowers/specs/2026-08-20-preview-scheduler-design.md`.
+    pub previews_too_large: RefCell<HashMap<String, (u64, u64)>>,
+    /// Every pending entry this shell has asked the daemon's preview
+    /// scheduler about. Superset of `previews.keys()` and
+    /// `previews_too_large.keys()`: an id lands here the moment
+    /// `preview_request` is sent and leaves only when the entry itself
+    /// leaves the pending list, which is also the signal to tell the
+    /// daemon `preview_cancel` -- see `App::reconcile_card_previews`.
+    card_tracked: RefCell<std::collections::HashSet<String>>,
+    /// Each rendered card's own widget, keyed by entry id, so a scroll
+    /// settle can ask every card its bounds against the scroller without
+    /// keeping a second copy of the queue's layout. Rebuilt every render,
+    /// in step with `queue::render` rebuilding `QueueView::list` itself.
+    card_widgets: RefCell<HashMap<String, gtk::Widget>>,
+    /// The pending debounce timer for `preview_visible`, so a scroll drag
+    /// reschedules the same single call rather than stacking one per
+    /// `value-changed` signal.
+    scroll_debounce: RefCell<Option<glib::SourceId>>,
     /// What each withdrawal attempt did, keyed by submission id.
     ///
     /// Kept here rather than in a screen-level banner because a failure
@@ -150,21 +177,16 @@ pub struct App {
     /// search term is the contributor's own sensitive string -- a client
     /// name, usually. It does not need to outlive the process to do its job.
     pub recent_searches: RefCell<Vec<String>>,
-    /// Guards against stacking a second preview request for a row that is
-    /// already being previewed.
-    prefetching: RefCell<std::collections::HashSet<String>>,
     quit_confirmed: Cell<bool>,
 }
 
-/// How many queue rows get their "would send / scrubbed" line filled in
-/// automatically.
+/// How long a scroll must sit still before `preview_visible` is sent.
 ///
-/// The shared spec puts that line on the row, but the only way to compute it
-/// is a full preview -- which redacts the session and, under an external
-/// scanner, makes a network call. Previewing 500 queued sessions to draw a
-/// list would be absurd, so the first screenful is prefetched and the rest
-/// fill in when opened. See the report for the contract note.
-const PREVIEW_PREFETCH_LIMIT: usize = 12;
+/// Cheap and idempotent on the daemon's side, so this only needs to beat a
+/// drag: any value that turns a continuous `value-changed` stream into a
+/// single call after it stops is enough. There is no throughput reason to
+/// tune it further -- see the design's "Priority" section.
+const SCROLL_SETTLE_DEBOUNCE_MS: u64 = 250;
 
 impl App {
     pub fn build(application: &adw::Application, worker: Worker) -> Rc<Self> {
@@ -291,10 +313,13 @@ impl App {
             undo: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
+            previews_too_large: RefCell::new(HashMap::new()),
+            card_tracked: RefCell::new(Default::default()),
+            card_widgets: RefCell::new(HashMap::new()),
+            scroll_debounce: RefCell::new(None),
             withdrawals: RefCell::new(HashMap::new()),
             outcome_counts: RefCell::new(Default::default()),
             recent_searches: RefCell::new(Vec::new()),
-            prefetching: RefCell::new(Default::default()),
             quit_confirmed: Cell::new(false),
         });
 
@@ -368,6 +393,14 @@ impl App {
     /// Daemon events are treated as "something moved, look again" rather
     /// than as deltas to apply. That is also the only correct response to
     /// `resync_required`, so there is one code path instead of two.
+    ///
+    /// `preview_ready` is the one exception to "look again by calling
+    /// `refresh`": see `Backend::events`' doc comment -- this connection's
+    /// events carry names only, never payloads -- so the event cannot say
+    /// which entry finished. `poll_outstanding_previews` is what "look
+    /// again" means for a scheduled preview: re-ask the daemon about every
+    /// card still waiting, which answers instantly from cache for whichever
+    /// one just resolved and costs nothing for the rest.
     fn wire_event_pump(self: &Rc<Self>) {
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
@@ -376,6 +409,15 @@ impl App {
                     "digest_due" => {
                         app.refresh();
                         app.post_digest();
+                    }
+                    "preview_ready" => app.poll_outstanding_previews(),
+                    // A missed preview_ready is exactly the gap
+                    // resync_required exists to cover, so both halves of
+                    // "look again" run: the queue itself, and the scheduled
+                    // previews resync alone would never re-ask about.
+                    "resync_required" => {
+                        app.refresh();
+                        app.poll_outstanding_previews();
                     }
                     _ => app.refresh(),
                 }
@@ -507,7 +549,7 @@ impl App {
                     .unwrap_or_default();
             *app.entries.borrow_mut() = entries;
             queue::render(app);
-            app.prefetch_previews();
+            app.reconcile_card_previews();
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -542,31 +584,170 @@ impl App {
         settings::refresh(self);
     }
 
-    /// Fill in the "would send / scrubbed" line for the first screenful of
-    /// rows. Bounded on purpose -- see `PREVIEW_PREFETCH_LIMIT`.
-    fn prefetch_previews(self: &Rc<Self>) {
-        let wanted: Vec<String> = self
+    /// Keep the daemon's scheduled preview for every pending card in sync
+    /// with the queue.
+    ///
+    /// This is the whole of the fan-out this shell now does: one
+    /// `preview_request` per card that has not been asked about, and one
+    /// `preview_cancel` for every entry that has stopped being pending --
+    /// approved, dismissed, expired, or superseded. `dismiss` already
+    /// cancels its own entry's scheduled preview implicitly (see the IPC
+    /// doc's "Scheduled previews" section), so the cancel sent here for that
+    /// case is a harmless no-op (`dropped: false`) rather than a duplicate
+    /// of work the daemon already did; what this covers that `dismiss`
+    /// cannot is every other way an entry leaves `pending`.
+    fn reconcile_card_previews(self: &Rc<Self>) {
+        let current: std::collections::HashSet<String> = self
             .entries
             .borrow()
             .iter()
             .filter(|e| e.state == "pending")
-            .take(PREVIEW_PREFETCH_LIMIT)
             .map(|e| e.entry_id.clone())
-            .filter(|id| {
-                !self.previews.borrow().contains_key(id) && !self.prefetching.borrow().contains(id)
-            })
             .collect();
-        for entry_id in wanted {
-            self.prefetching.borrow_mut().insert(entry_id.clone());
-            let key = entry_id.clone();
-            self.preview(&entry_id, move |app, result| {
-                app.prefetching.borrow_mut().remove(&key);
-                if let Ok((summary, _)) = result {
-                    app.previews.borrow_mut().insert(key.clone(), summary);
-                    queue::render(app);
-                }
-            });
+        let (gone, wanted) = card_preview_diff(&current, &self.card_tracked.borrow());
+
+        for entry_id in gone {
+            self.card_tracked.borrow_mut().remove(&entry_id);
+            self.previews.borrow_mut().remove(&entry_id);
+            self.previews_too_large.borrow_mut().remove(&entry_id);
+            self.call(
+                "preview_cancel",
+                serde_json::json!({ "entry_id": entry_id }),
+                |_app, _result| {},
+            );
         }
+
+        for entry_id in wanted {
+            self.card_tracked.borrow_mut().insert(entry_id.clone());
+            let key = entry_id.clone();
+            self.call(
+                "preview_request",
+                serde_json::json!({ "entry_id": entry_id }),
+                move |app, result| app.handle_preview_request_result(&key, result),
+            );
+        }
+    }
+
+    /// What `preview_request` (and, on a cache hit, `preview_ready`) answers
+    /// with for one entry.
+    ///
+    /// `ready` and `too_large` are the only states that ever draw anything:
+    /// `queued` and `running` mean the card stays "checking" until an event
+    /// or a later poll answers again, and `failed` is left the same way
+    /// rather than risking a wrong or alarming label -- the fan-out this
+    /// replaces had the identical gap for a `preview` call that errored.
+    fn handle_preview_request_result(
+        self: &Rc<Self>,
+        entry_id: &str,
+        result: Result<serde_json::Value, String>,
+    ) {
+        let Ok(value) = result else { return };
+        match parse_preview_outcome(&value) {
+            Some(CardOutcome::Ready(summary)) => {
+                self.previews
+                    .borrow_mut()
+                    .insert(entry_id.to_string(), summary);
+                queue::render(self);
+            }
+            Some(CardOutcome::TooLarge {
+                raw_session_bytes,
+                limit_bytes,
+            }) => {
+                self.previews_too_large
+                    .borrow_mut()
+                    .insert(entry_id.to_string(), (raw_session_bytes, limit_bytes));
+                queue::render(self);
+            }
+            // `queued` / `running`: wait for `preview_ready` or a later
+            // poll. `failed`, and any object this daemon build's contract
+            // does not answer with: leave the card "checking" rather than
+            // drawing a wrong or alarming label.
+            None => {}
+        }
+    }
+
+    /// Re-poll every card whose scheduled preview has not resolved yet.
+    ///
+    /// The daemon's answer to a repeat `preview_request` for an
+    /// already-ready or already-refused entry is a cache hit with no work
+    /// done, and for one still queued or running it is the same "keep
+    /// waiting" answer as the first call -- so this is cheap and shrinks to
+    /// nothing as cards resolve, which is what makes it the right response
+    /// to an event that cannot name the entry it is about.
+    fn poll_outstanding_previews(self: &Rc<Self>) {
+        let outstanding: Vec<String> = {
+            let tracked = self.card_tracked.borrow();
+            let previews = self.previews.borrow();
+            let too_large = self.previews_too_large.borrow();
+            tracked
+                .iter()
+                .filter(|id| !previews.contains_key(*id) && !too_large.contains_key(*id))
+                .cloned()
+                .collect()
+        };
+        for entry_id in outstanding {
+            let key = entry_id.clone();
+            self.call(
+                "preview_request",
+                serde_json::json!({ "entry_id": entry_id }),
+                move |app, result| app.handle_preview_request_result(&key, result),
+            );
+        }
+    }
+
+    /// Reschedule the debounced `preview_visible` call.
+    ///
+    /// Called on every scroll movement and after every render, so a drag
+    /// through the whole list or a queue that just changed shape both
+    /// settle on one call a quarter-second after the last thing happened,
+    /// rather than one per pixel or one per render.
+    pub fn schedule_visible_preview_update(self: &Rc<Self>) {
+        if let Some(source) = self.scroll_debounce.borrow_mut().take() {
+            source.remove();
+        }
+        let app = Rc::clone(self);
+        let source = glib::timeout_add_local(
+            std::time::Duration::from_millis(SCROLL_SETTLE_DEBOUNCE_MS),
+            move || {
+                app.scroll_debounce.borrow_mut().take();
+                app.send_visible_previews();
+                glib::ControlFlow::Break
+            },
+        );
+        *self.scroll_debounce.borrow_mut() = Some(source);
+    }
+
+    /// Tell the daemon which cards are actually on screen right now.
+    ///
+    /// Wholesale, matching `preview_visible`'s own contract: this is not a
+    /// diff against the last call, it is what is visible *now*, and
+    /// visibility only ever reorders scheduled work -- see item 3 of "What
+    /// each shell must do" in the preview-scheduler design.
+    fn send_visible_previews(self: &Rc<Self>) {
+        let ids: Vec<String> = self
+            .card_widgets
+            .borrow()
+            .iter()
+            .filter(|(_, widget)| self.card_is_visible(widget))
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.call(
+            "preview_visible",
+            serde_json::json!({ "entry_ids": ids }),
+            |_app, _result| {},
+        );
+    }
+
+    /// Whether a card's widget overlaps the queue's own scrolled viewport,
+    /// measured in the scroller's coordinate space -- which already accounts
+    /// for however far the list is scrolled, so this needs no adjustment
+    /// value of its own.
+    fn card_is_visible(&self, widget: &gtk::Widget) -> bool {
+        let Some(bounds) = widget.compute_bounds(&self.queue.scroller) else {
+            return false;
+        };
+        let viewport_height = self.queue.scroller.height() as f32;
+        overlaps_viewport(bounds.y(), bounds.height(), viewport_height)
     }
 
     fn render_health(self: &Rc<Self>, status: &Status) {
@@ -834,4 +1015,231 @@ pub fn titled_paragraph(title: &str, body: &str) -> gtk::Box {
     paragraph.add_css_class("tc-body");
     container.append(&paragraph);
     container
+}
+
+/// What a `preview_request` (or a cache-hit `preview_ready`) result decoded
+/// to, once the wire object has been read -- see
+/// `App::handle_preview_request_result`.
+enum CardOutcome {
+    Ready(PreviewSummary),
+    TooLarge {
+        raw_session_bytes: u64,
+        limit_bytes: u64,
+    },
+}
+
+/// Decode a `preview_request` result object into what this shell draws.
+///
+/// `queued` and `running` -- and anything this build does not recognise --
+/// decode to `None`: there is nothing to draw yet, and the caller's answer
+/// to `None` is to leave the card exactly as it was. Pulled out from
+/// `App::handle_preview_request_result` so the parsing can be checked
+/// against real wire shapes without a running daemon.
+fn parse_preview_outcome(value: &serde_json::Value) -> Option<CardOutcome> {
+    match value.get("state").and_then(|v| v.as_str()) {
+        Some(STATE_READY) => {
+            let summary = serde_json::from_value(value.get("summary")?.clone()).ok()?;
+            Some(CardOutcome::Ready(summary))
+        }
+        Some(STATE_TOO_LARGE) => Some(CardOutcome::TooLarge {
+            raw_session_bytes: value.get("raw_session_bytes")?.as_u64()?,
+            limit_bytes: value.get("limit_bytes")?.as_u64()?,
+        }),
+        _ => None,
+    }
+}
+
+/// What `App::reconcile_card_previews` does to the tracked set, as pure data
+/// rather than daemon calls -- so the actual decision (which ids to cancel,
+/// which to request) is checkable without a running `App`.
+///
+/// Returns `(gone, wanted)`: `gone` is every tracked id no longer in
+/// `current` (cancel and forget it), `wanted` is every current id not yet
+/// tracked (request one). Both are sorted, only so a test can assert an
+/// exact `Vec` rather than a set.
+fn card_preview_diff(
+    current: &std::collections::HashSet<String>,
+    tracked: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut gone: Vec<String> = tracked.difference(current).cloned().collect();
+    let mut wanted: Vec<String> = current.difference(tracked).cloned().collect();
+    gone.sort();
+    wanted.sort();
+    (gone, wanted)
+}
+
+/// Whether a widget spanning `[y, y + height)` in the scroller's coordinate
+/// space overlaps the visible `[0, viewport_height)` band -- the same
+/// interval-overlap test `App::card_is_visible` applies to a real widget's
+/// `compute_bounds`, pulled out so the edge cases (exactly at an edge,
+/// entirely above, entirely below, taller than the viewport) are checkable
+/// with plain numbers.
+fn overlaps_viewport(y: f32, height: f32, viewport_height: f32) -> bool {
+    y < viewport_height && y + height > 0.0
+}
+
+#[cfg(test)]
+mod card_preview_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_newly_pending_entry_is_wanted_and_nothing_is_gone() {
+        let current = set(&["a", "b"]);
+        let tracked = set(&["a"]);
+        let (gone, wanted) = card_preview_diff(&current, &tracked);
+        assert_eq!(gone, Vec::<String>::new());
+        assert_eq!(wanted, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn an_entry_that_left_pending_is_gone_and_nothing_new_is_wanted() {
+        // Covers approval, dismissal, expiry, and supersession alike: this
+        // function only sees "no longer in `current`", not why.
+        let current = set(&["a"]);
+        let tracked = set(&["a", "b"]);
+        let (gone, wanted) = card_preview_diff(&current, &tracked);
+        assert_eq!(gone, vec!["b".to_string()]);
+        assert_eq!(wanted, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_id_already_tracked_is_neither_gone_nor_wanted_again() {
+        // The dedup that keeps a render loop from re-requesting a card every
+        // time it redraws.
+        let current = set(&["a"]);
+        let tracked = set(&["a"]);
+        let (gone, wanted) = card_preview_diff(&current, &tracked);
+        assert!(gone.is_empty());
+        assert!(wanted.is_empty());
+    }
+
+    #[test]
+    fn a_queue_of_five_hundred_reduces_to_exactly_the_new_ones() {
+        // The shape of the real incident: a large queue appearing at once
+        // must produce exactly the wanted set, not a truncated prefix --
+        // this replaces the old `PREVIEW_PREFETCH_LIMIT` fan-out, and the
+        // whole point of moving to the daemon's scheduler is that the shell
+        // no longer bounds this itself.
+        let current: HashSet<String> = (0..500).map(|n| format!("e{n}")).collect();
+        let tracked: HashSet<String> = HashSet::new();
+        let (gone, wanted) = card_preview_diff(&current, &tracked);
+        assert!(gone.is_empty());
+        assert_eq!(wanted.len(), 500);
+    }
+
+    #[test]
+    fn a_widget_entirely_above_the_viewport_does_not_overlap() {
+        assert!(!overlaps_viewport(-200.0, 100.0, 600.0));
+    }
+
+    #[test]
+    fn a_widget_entirely_below_the_viewport_does_not_overlap() {
+        assert!(!overlaps_viewport(700.0, 100.0, 600.0));
+    }
+
+    #[test]
+    fn a_widget_straddling_the_bottom_edge_overlaps() {
+        assert!(overlaps_viewport(590.0, 100.0, 600.0));
+    }
+
+    #[test]
+    fn a_widget_straddling_the_top_edge_overlaps() {
+        assert!(overlaps_viewport(-50.0, 100.0, 600.0));
+    }
+
+    #[test]
+    fn a_widget_taller_than_the_viewport_still_overlaps() {
+        assert!(overlaps_viewport(-1000.0, 5000.0, 600.0));
+    }
+
+    #[test]
+    fn a_widget_exactly_touching_the_bottom_edge_does_not_overlap() {
+        // Half-open on purpose: a card whose top is exactly at the bottom
+        // edge shows none of its own pixels.
+        assert!(!overlaps_viewport(600.0, 100.0, 600.0));
+    }
+
+    #[test]
+    fn a_ready_result_decodes_the_real_summary_fields() {
+        let value = serde_json::json!({
+            "entry_id": "e1",
+            "state": "ready",
+            "summary": {
+                "would_send_bytes": 4096,
+                "raw_session_bytes": 2048,
+                "event_count": 12,
+                "opening_prompt": "fix the thing",
+                "redactions": {"generic_secret": 2},
+                "pii_labels_present": ["email"],
+                "consent_scopes": ["model_training"],
+                "residual_risk": "low",
+                "envelope_digest": "",
+                "input_fingerprint": "fp1",
+                "enrolled": true,
+            },
+        });
+        match parse_preview_outcome(&value) {
+            Some(CardOutcome::Ready(summary)) => {
+                assert_eq!(summary.would_send_bytes, 4096);
+                assert_eq!(summary.event_count, 12);
+                assert_eq!(summary.opening_prompt, "fix the thing");
+                assert_eq!(summary.redactions.get("generic_secret"), Some(&2));
+            }
+            other => panic!(
+                "expected Ready, got a different outcome: {}",
+                other.is_some()
+            ),
+        }
+    }
+
+    #[test]
+    fn a_too_large_result_decodes_the_raw_size_and_the_limit_and_nothing_else() {
+        let value = serde_json::json!({
+            "entry_id": "e2",
+            "state": "too_large",
+            "raw_session_bytes": 385_875_968u64,
+            "limit_bytes": 67_108_864u64,
+        });
+        match parse_preview_outcome(&value) {
+            Some(CardOutcome::TooLarge {
+                raw_session_bytes,
+                limit_bytes,
+            }) => {
+                assert_eq!(raw_session_bytes, 385_875_968);
+                assert_eq!(limit_bytes, 67_108_864);
+            }
+            other => panic!(
+                "expected TooLarge, got a different outcome: {}",
+                other.is_some()
+            ),
+        }
+    }
+
+    #[test]
+    fn a_queued_result_decodes_to_nothing_to_draw() {
+        let value = serde_json::json!({ "entry_id": "e3", "state": "queued" });
+        assert!(parse_preview_outcome(&value).is_none());
+    }
+
+    #[test]
+    fn a_running_result_decodes_to_nothing_to_draw() {
+        let value = serde_json::json!({ "entry_id": "e4", "state": "running" });
+        assert!(parse_preview_outcome(&value).is_none());
+    }
+
+    #[test]
+    fn a_failed_result_decodes_to_nothing_to_draw_rather_than_a_wrong_label() {
+        let value = serde_json::json!({
+            "entry_id": "e5",
+            "state": "failed",
+            "code": "internal",
+            "label": "preview-failed",
+        });
+        assert!(parse_preview_outcome(&value).is_none());
+    }
 }
