@@ -24,6 +24,11 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     let entryID: String
     let sessionHash: String
     let source: String
+    /// The opaque id `set_project_mode` and `approve`'s `project_id` filter
+    /// both accept. Never a path, and never `projectLabel` -- the daemon
+    /// refuses a label there (`project-key-unrecognized`), and a label is
+    /// not guaranteed unique across two projects in the first place.
+    let projectID: String
     let projectLabel: String
     let sizeBytes: Int
     let discoveredAt: Date
@@ -37,6 +42,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case entryID = "entry_id"
         case sessionHash = "session_hash"
         case source
+        case projectID = "project_id"
         case projectLabel = "project_label"
         case sizeBytes = "size_bytes"
         case discoveredAt = "discovered_at"

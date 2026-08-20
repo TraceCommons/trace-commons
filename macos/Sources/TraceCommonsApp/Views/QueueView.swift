@@ -2,12 +2,16 @@ import SwiftUI
 
 /// The queue: one per session waiting for a decision.
 ///
-/// The row's only forward action is "Look inside". Approve deliberately does
-/// NOT live here -- preview-then-approve only, because blind approval of a
-/// real transcript is the unrecoverable misclick. (The shared spec sketches
-/// a `Contribute` button on the row; this shell follows the stricter rule
-/// stated alongside it, "the tray's only forward action is Review", and puts
-/// the single Contribute button inside the preview sheet.)
+/// Every row also carries a `Submit` action, and every project group a
+/// `Submit all`: one-click submit
+/// (`docs/superpowers/specs/2026-08-20-one-click-submit-design.md`) means
+/// approval no longer requires opening the session first. This corrects the
+/// stricter rule this comment used to state -- preview-then-approve only --
+/// which was written when an approval with no prior preview silently
+/// uploaded bytes nobody was shown; the daemon now builds and pins the
+/// envelope itself when none exists, so a blind Submit sends exactly what a
+/// preview would have shown, never something unseen. `Look inside` stays,
+/// unchanged, for a contributor who wants to read before deciding.
 struct QueueView: View {
     @EnvironmentObject private var model: AppModel
     @State private var previewing: QueueEntry?
@@ -93,14 +97,22 @@ struct QueueContent: View {
                 .font(TC.Font_.sectionTitle)
                 .foregroundStyle(TC.inkPrimary)
 
-            VStack(spacing: TC.Space.md) {
-                ForEach(model.awaitingDecision) { entry in
-                    QueueRow(
-                        entry: entry,
-                        summary: model.summaries[entry.entryID],
-                        summaryError: model.summaryErrors[entry.entryID],
-                        onLookInside: { previewing = entry },
-                        onDismiss: { model.dismiss(entry) }
+            // Grouped by project so `Submit all` has something honest to
+            // point at -- a group is exactly what `submitProject` acts on,
+            // never a slice the UI made up. `waitingByProject`'s order is
+            // first-seen, which is also `awaitingDecision`'s order, so this
+            // reshuffles nothing a contributor has already scanned.
+            VStack(spacing: TC.Space.lg) {
+                ForEach(model.waitingByProject, id: \.id) { group in
+                    ProjectQueueGroup(
+                        group: group,
+                        entries: model.awaitingDecision.filter { $0.projectID == group.id },
+                        summaries: model.summaries,
+                        summaryErrors: model.summaryErrors,
+                        onLookInside: { previewing = $0 },
+                        onSubmit: { model.approve($0) },
+                        onDismiss: { model.dismiss($0) },
+                        onSubmitAll: { model.submitProject(id: group.id) }
                     )
                 }
             }
@@ -111,6 +123,54 @@ struct QueueContent: View {
             // disclaimer.
             ScrubbingCaveatNote()
                 .padding(.top, TC.Space.xxs)
+        }
+    }
+}
+
+/// One project's slice of the queue: its rows, and -- only when there is
+/// more than one of them -- the `Submit all` action that approves the whole
+/// group in the same gesture the design spec calls "the same gesture at the
+/// project level". A single-entry group offers no second way to do what its
+/// one row's own `Submit` already does.
+private struct ProjectQueueGroup: View {
+    let group: (id: String, label: String, count: Int, bytes: Int)
+    let entries: [QueueEntry]
+    let summaries: [String: PreviewSummary]
+    let summaryErrors: [String: String]
+    let onLookInside: (QueueEntry) -> Void
+    let onSubmit: (QueueEntry) -> Void
+    let onDismiss: (QueueEntry) -> Void
+    let onSubmitAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                Text(group.label)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(TC.inkSecondary)
+                Spacer(minLength: TC.Space.m)
+                if group.count > 1 {
+                    Button("Submit all (\(group.count))", action: onSubmitAll)
+                        .tcPrimaryAction()
+                        .help("""
+                        Submits every session waiting in \(group.label). Each is scrubbed \
+                        the same way a single Submit would be, and flagged sessions are \
+                        included, not held back.
+                        """)
+                }
+            }
+            VStack(spacing: TC.Space.md) {
+                ForEach(entries) { entry in
+                    QueueRow(
+                        entry: entry,
+                        summary: summaries[entry.entryID],
+                        summaryError: summaryErrors[entry.entryID],
+                        onLookInside: { onLookInside(entry) },
+                        onSubmit: { onSubmit(entry) },
+                        onDismiss: { onDismiss(entry) }
+                    )
+                }
+            }
         }
     }
 }
@@ -128,6 +188,7 @@ struct QueueRow: View {
     let summary: PreviewSummary?
     let summaryError: String?
     let onLookInside: () -> Void
+    let onSubmit: () -> Void
     let onDismiss: () -> Void
 
     private var redactionCount: Int {
@@ -304,25 +365,38 @@ struct QueueRow: View {
 
     // MARK: - Actions
 
-    /// Both actions at the trailing edge, adjacent, default action last --
-    /// the macOS convention, and one eye movement instead of the full width
-    /// of the window.
+    /// All three actions at the trailing edge, adjacent, default action
+    /// last -- the macOS convention, and one eye movement instead of the
+    /// full width of the window. `Submit` is the new default: one-click
+    /// submit means it is the action a contributor reaches for most, and it
+    /// sends exactly what `Look inside` would have shown -- the daemon pins
+    /// the same envelope either way.
     private var actions: some View {
         HStack(spacing: TC.Space.s) {
             Button("Not this one", action: onDismiss)
                 // Untinted on purpose. A bordered button inherits the
                 // app accent, and "Not this one" rendered in the same
-                // green as "Look inside" reads as a second approval.
+                // green as "Submit" reads as a second approval.
                 .tint(.primary)
                 .help("Skips this session only. This project will keep being offered.")
+            Button("Look inside", action: onLookInside)
+                // Untinted for the same reason "Not this one" is: reading
+                // before deciding is not the decision, and should not look
+                // like one.
+                .tint(.primary)
+                .help("Opens the redacted preview before deciding.")
             // No keyboard shortcut. Return used to be bound here as the
             // default action, which meant a two-row queue registered the
             // same shortcut twice and neither row could say which one a
             // keystroke would open. In this app Return is reserved for the
             // recovery surface -- see `UndoBar` -- and is bound to nothing
             // that moves a transcript.
-            Button("Look inside", action: onLookInside)
+            Button("Submit", action: onSubmit)
                 .tcPrimaryAction()
+                .help("""
+                Sends this session now. Scrubbing runs the same as it always does, and \
+                you'll get a moment to undo.
+                """)
         }
         .fixedSize()
     }
@@ -380,8 +454,11 @@ struct WeekBand: View {
     }
 }
 
-/// The recovery surface. Backed by `cancel`, which returns the entry to
-/// pending, so the undo is real.
+/// The submit toast, and -- when one is offered -- the recovery surface
+/// behind it. `undo.toastLine` is `SubmitToast.line`, verbatim: see the note
+/// on that type for why the wording is a contract nothing here may reword.
+/// `Undo` is backed by `cancel`, which returns each entry to pending, so the
+/// undo is real.
 ///
 /// It sits at the head of the queue, which is where the decision now ends:
 /// the preview sheet closes on a decision instead of loading the next session
@@ -394,6 +471,12 @@ struct WeekBand: View {
 /// from a real instant and says what it actually knows. It does not disappear
 /// on a timer, because a recovery path that removes itself while recovery is
 /// still possible is worse than no timer at all.
+///
+/// **When `undo.offerUndo` is false** -- "Nothing sent", or every attempted
+/// entry was skipped -- there is nothing to recover, but the sentence still
+/// needs to be seen: `SubmitToast.offerUndo` is `approved > 0` and only
+/// that, so this bar renders without the Undo control rather than not at
+/// all.
 struct UndoBar: View {
     let undo: AppModel.Undo
     let onUndo: () -> Void
@@ -404,35 +487,45 @@ struct UndoBar: View {
             HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
                 QueueGlyph(glyph: .clock, size: 12, color: TC.blueIcon)
                     .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
-                Text("Approved \(undo.projectLabel). Still on this machine.")
+                Text(undo.toastLine)
                     .font(TC.Font_.bodyDense)
                     .foregroundStyle(TC.inkPrimary)
-                Text(held)
-                    .font(TC.Font_.ledger)
-                    .monospacedDigit()
-                    .foregroundStyle(TC.inkSecondary)
+                if undo.offerUndo {
+                    Text(held)
+                        .font(TC.Font_.ledger)
+                        .monospacedDigit()
+                        .foregroundStyle(TC.inkSecondary)
+                }
                 Spacer(minLength: 0)
             }
-            Text("""
-            The watcher sends approved sessions on its next sweep. This app \
-            cannot see when that lands, so it does not pretend to count it \
-            down: undo works until the sweep starts, and says so plainly if \
-            it is already too late.
-            """)
-            .font(TC.Font_.footnote)
-            .foregroundStyle(TC.inkSecondary)
-            .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
-            .fixedSize(horizontal: false, vertical: true)
+            if undo.offerUndo {
+                Text("""
+                The watcher sends approved sessions on its next sweep. This app \
+                cannot see when that lands, so it does not pretend to count it \
+                down: undo works until the sweep starts, and says so plainly if \
+                it is already too late.
+                """)
+                .font(TC.Font_.footnote)
+                .foregroundStyle(TC.inkSecondary)
+                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+                .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: TC.Space.s) {
-                // The one Return binding in this app, and it is on the safe
-                // action: a keystroke made by a hand resting on the keyboard
-                // pulls a transcript BACK.
-                Button("Undo", action: onUndo)
-                    .tcPrimaryAction()
-                    .keyboardShortcut(.defaultAction)
-                Button("Let it send", action: onKeep)
+                if undo.offerUndo {
+                    // The one Return binding in this app, and it is on the
+                    // safe action: a keystroke made by a hand resting on the
+                    // keyboard pulls a transcript BACK.
+                    Button("Undo", action: onUndo)
+                        .tcPrimaryAction()
+                        .keyboardShortcut(.defaultAction)
+                }
+                Button(undo.offerUndo ? "Let it send" : "Dismiss", action: onKeep)
                     .tint(.primary)
-                    .help("Puts this notice away. It does not change the decision.")
+                    .help(
+                        undo.offerUndo
+                            ? "Puts this notice away. It does not change the decision."
+                            : "Puts this notice away."
+                    )
                 Spacer(minLength: 0)
             }
         }
