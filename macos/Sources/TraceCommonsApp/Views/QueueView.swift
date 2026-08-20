@@ -115,7 +115,8 @@ struct QueueContent: View {
                         onLookInside: { previewing = $0 },
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
-                        onSubmitAll: { model.submitProject(id: group.id) }
+                        onSubmitAll: { model.submitProject(id: group.id) },
+                        onAppear: { model.requestSummary(for: $0) }
                     )
                 }
             }
@@ -144,6 +145,10 @@ private struct ProjectQueueGroup: View {
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
+    /// Called when a row actually appears on screen -- `AppModel.requestSummary(for:)`,
+    /// which is where the concurrency limit and in-flight dedupe live. See
+    /// `rowList` for why this is what drives loading at all now.
+    let onAppear: (QueueEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -179,6 +184,17 @@ private struct ProjectQueueGroup: View {
     /// wraps it in). So the screenshot hook gets the eager, always-correct
     /// `VStack` -- same spacing, same default `.center` alignment `LazyVStack`
     /// also defaults to -- and everyone else gets the lazy one.
+    ///
+    /// This is also what makes rows the thing that requests its own summary
+    /// (`rows`'s `.onAppear`) rather than the model asking for all of them at
+    /// snapshot time: a `LazyVStack` row's `onAppear` fires exactly when
+    /// SwiftUI actually realizes it, so under the real `ScrollView` a
+    /// contributor with 500 sessions only ever asks for the handful near the
+    /// visible area. Under the screenshot hook's eager `VStack` every row
+    /// realizes immediately, so every row's `onAppear` fires immediately too
+    /// -- which is correct there: a screenshot needs every card populated,
+    /// and that path is a fixed-size dev tool, not the 500-session case this
+    /// guards against.
     @ViewBuilder
     private var rowList: some View {
         if DebugScreenshot.directory != nil {
@@ -198,6 +214,7 @@ private struct ProjectQueueGroup: View {
                 onSubmit: { onSubmit(entry) },
                 onDismiss: { onDismiss(entry) }
             )
+            .onAppear { onAppear(entry) }
         }
     }
 }
