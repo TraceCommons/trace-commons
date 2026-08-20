@@ -69,6 +69,12 @@ Prebuilt GitHub Releases binaries are a follow-up; not available yet.
     network call, naming the valid set.
   - With no `--scopes` and no terminal (e.g. CI), `login` falls back to the
     `debugging_evaluation` floor only.
+  - With `login --default`, the menu is skipped and its default answer (no)
+    is taken for every optional scope, leaving the same
+    `debugging_evaluation` floor. This is for agents and other scripted
+    callers, which usually *do* have a terminal on stdin and so would
+    otherwise sit at the prompt forever. To grant more than the floor
+    non-interactively, use `--scopes` instead; the two flags conflict.
 - The scopes actually written to `contributor.json` are only ever what the
   contributor chose; the envelopes this CLI produces carry whatever the
   server granted for that device-key claim (the intersection of the
