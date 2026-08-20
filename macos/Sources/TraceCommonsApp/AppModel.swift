@@ -476,12 +476,20 @@ final class AppModel: ObservableObject {
 
     /// Reconciles `pending` against a fresh list from the daemon (a
     /// `snapshot` event, `refreshQueue`, or any other refetch), and does the
-    /// two things a change in that list requires: cancel the scheduled
-    /// preview for anything that left it for good (approved, dismissed,
-    /// expired, superseded -- `dismiss` also cancels its own preview
-    /// server-side, but a cancel for an id the daemon already dropped is a
-    /// defined no-op, not an error), and request one for anything newly
-    /// waiting.
+    /// one thing a change in that list requires beyond updating `pending`
+    /// itself: cancel the scheduled preview for anything that left it for
+    /// good (approved, dismissed, expired, superseded -- `dismiss` also
+    /// cancels its own preview server-side, but a cancel for an id the
+    /// daemon already dropped is a defined no-op, not an error).
+    ///
+    /// Deliberately does **not** loop over the fresh list requesting a
+    /// preview for everything newly waiting -- that was this method's shape
+    /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
+    /// here would mean asking the daemon about all 500 entries the instant
+    /// a snapshot arrives, which defeats the point of realizing rows lazily
+    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
+    /// for whatever the viewport actually realizes, so this stays
+    /// proportional to what is on screen.
     private func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
         pending = entries
@@ -496,43 +504,47 @@ final class AppModel: ObservableObject {
                 cancelPreview(id)
             }
         }
-        requestMissingPreviews()
     }
 
-    /// One `preview_request` per card with no summary yet, exactly the
-    /// scheduler design's requirement 1: draw a pending card immediately
-    /// ("Reading it locally...", see `QueueRow`) and never block waiting for
-    /// the daemon's answer. This replaces the old `loadMissingSummaries`,
-    /// which called the blocking `preview` method once per queued entry with
-    /// nothing bounding how many ran at once -- see
-    /// `docs/superpowers/specs/2026-08-20-preview-scheduler-design.md` for
-    /// what that fan-out did to a machine with ~500 queued sessions.
+    /// One `preview_request` per card, requirement 1 of the scheduler
+    /// design: draw a pending card immediately ("Reading it locally...",
+    /// see `QueueRow`) and never block waiting for the daemon's answer.
     ///
-    /// `previewTracker` is what keeps this from resending for an entry still
-    /// `queued`/`running` every time this is called (on every
-    /// `queue_changed`, on every relaunch of this loop) -- the daemon itself
-    /// would answer a repeat for free, but there is no reason to make the
-    /// round trip.
-    private func requestMissingPreviews() {
+    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// as `requestSummary(for:)`, kept here under the scheduler's name
+    /// because what changed is not when a row asks, only what happens once
+    /// it does: this goes through the daemon's bounded preview scheduler
+    /// (two workers, dedup, a cache, an admission cap) instead of the
+    /// client-side `ConcurrencyLimiter` #357 added. Only one bound should
+    /// own this work -- the daemon is the one that can see the total across
+    /// all three shells (and, later, the approve and upload paths too), so
+    /// `ConcurrencyLimiter` is not used here; see its own doc for whether it
+    /// still has a reason to exist.
+    ///
+    /// `previewTracker` is #357's `requestingSummaries` in-flight set,
+    /// generalized to the scheduler's five states rather than a plain
+    /// "is a call running" flag -- it is what keeps a `LazyVStack` row
+    /// recycled during a fast scroll from resending `preview_request` while
+    /// the daemon still has the job `queued`/`running`.
+    func requestPreview(for entry: QueueEntry) {
         guard let client else { return }
-        for entry in awaitingDecision where summaries[entry.entryID] == nil
-            && summaryErrors[entry.entryID] == nil
-            && tooLarge[entry.entryID] == nil
-            && previewTracker.shouldRequest(entry.entryID)
-        {
-            let id = entry.entryID
-            previewTracker.markRequested(id)
-            Task.detached(priority: .utility) {
-                let outcome = Result { try client.requestPreview(entryID: id) }
-                await MainActor.run {
-                    switch outcome {
-                    case .success(let result):
-                        self.applyPreviewOutcome(result)
-                    case .failure(let error):
-                        self.previewTracker.apply(state: .failed, to: id)
-                        self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
-                            ?? "preview-request-failed"
-                    }
+        let id = entry.entryID
+        guard summaries[id] == nil,
+            summaryErrors[id] == nil,
+            tooLarge[id] == nil,
+            previewTracker.shouldRequest(id)
+        else { return }
+        previewTracker.markRequested(id)
+        Task.detached(priority: .utility) {
+            let outcome = Result { try client.requestPreview(entryID: id) }
+            await MainActor.run {
+                switch outcome {
+                case .success(let result):
+                    self.applyPreviewOutcome(result)
+                case .failure(let error):
+                    self.previewTracker.apply(state: .failed, to: id)
+                    self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
+                        ?? "preview-request-failed"
                 }
             }
         }

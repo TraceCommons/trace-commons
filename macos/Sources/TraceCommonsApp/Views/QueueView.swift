@@ -123,12 +123,13 @@ struct QueueContent: View {
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
-                        onVisibilityChange: { id, visible in
-                            if visible {
-                                visibleRowIDs.insert(id)
-                            } else {
-                                visibleRowIDs.remove(id)
-                            }
+                        onAppear: { entry in
+                            model.requestPreview(for: entry)
+                            visibleRowIDs.insert(entry.entryID)
+                            model.setPreviewVisible(visibleRowIDs)
+                        },
+                        onDisappear: { entry in
+                            visibleRowIDs.remove(entry.entryID)
                             model.setPreviewVisible(visibleRowIDs)
                         }
                     )
@@ -160,7 +161,15 @@ private struct ProjectQueueGroup: View {
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
-    let onVisibilityChange: (String, Bool) -> Void
+    /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
+    /// which is where the daemon-side scheduler dedupe lives. See `rowList`
+    /// for why this is what drives loading at all now.
+    let onAppear: (QueueEntry) -> Void
+    /// Called when a row leaves the screen. Updates visibility priority
+    /// only -- never cancels the scheduled preview; a card that scrolls
+    /// away keeps its place in the daemon's queue until it is dismissed or
+    /// leaves the pending list for good (`AppModel.applyPendingUpdate`).
+    let onDisappear: (QueueEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -179,21 +188,57 @@ private struct ProjectQueueGroup: View {
                         """)
                 }
             }
-            VStack(spacing: TC.Space.md) {
-                ForEach(entries) { entry in
-                    QueueRow(
-                        entry: entry,
-                        summary: summaries[entry.entryID],
-                        summaryError: summaryErrors[entry.entryID],
-                        tooLarge: tooLarge[entry.entryID],
-                        onLookInside: { onLookInside(entry) },
-                        onSubmit: { onSubmit(entry) },
-                        onDismiss: { onDismiss(entry) }
-                    )
-                    .onAppear { onVisibilityChange(entry.entryID, true) }
-                    .onDisappear { onVisibilityChange(entry.entryID, false) }
-                }
-            }
+            rowList
+        }
+    }
+
+    /// The rows themselves, split from `body` so a real queue -- a
+    /// contributor with 500 sessions waiting is the case this exists for --
+    /// only realizes the cards near the viewport instead of building and
+    /// measuring all 500 up front.
+    ///
+    /// `LazyVStack` is the fix, but it carries the same hazard `QueueContent`
+    /// already works around: laid out with no ancestor `ScrollView`, a lazy
+    /// stack can render empty under `ImageRenderer`
+    /// (`DebugScreenshot.scheduleIfRequested` renders `QueueContent` directly
+    /// at a fixed size, without the real `ScrollView` `QueueView` normally
+    /// wraps it in). So the screenshot hook gets the eager, always-correct
+    /// `VStack` -- same spacing, same default `.center` alignment `LazyVStack`
+    /// also defaults to -- and everyone else gets the lazy one.
+    ///
+    /// This is also what makes rows the thing that requests its own preview
+    /// (`rows`'s `.onAppear`, `AppModel.requestPreview(for:)`) rather than
+    /// the model asking for all of them at snapshot time: a `LazyVStack`
+    /// row's `onAppear` fires exactly when
+    /// SwiftUI actually realizes it, so under the real `ScrollView` a
+    /// contributor with 500 sessions only ever asks for the handful near the
+    /// visible area. Under the screenshot hook's eager `VStack` every row
+    /// realizes immediately, so every row's `onAppear` fires immediately too
+    /// -- which is correct there: a screenshot needs every card populated,
+    /// and that path is a fixed-size dev tool, not the 500-session case this
+    /// guards against.
+    @ViewBuilder
+    private var rowList: some View {
+        if DebugScreenshot.directory != nil {
+            VStack(spacing: TC.Space.md) { rows }
+        } else {
+            LazyVStack(spacing: TC.Space.md) { rows }
+        }
+    }
+
+    private var rows: some View {
+        ForEach(entries) { entry in
+            QueueRow(
+                entry: entry,
+                summary: summaries[entry.entryID],
+                summaryError: summaryErrors[entry.entryID],
+                tooLarge: tooLarge[entry.entryID],
+                onLookInside: { onLookInside(entry) },
+                onSubmit: { onSubmit(entry) },
+                onDismiss: { onDismiss(entry) }
+            )
+            .onAppear { onAppear(entry) }
+            .onDisappear { onDisappear(entry) }
         }
     }
 }
