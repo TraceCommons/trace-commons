@@ -755,7 +755,7 @@ file says `auto_upload`, because the daemon refuses to act on that.
   "hold_secs": 10,
   "hold_until": "2026-08-08T12:00:10Z",
   "flagged": 1,
-  "redactions": { "api_key": 2, "email": 1 },
+  "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
   "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ]
 }
 ```
@@ -770,19 +770,46 @@ This is the whole signal a one-click submit needs: a client that never calls
   entry this call built a preview for. An entry that was already previewed
   before this call -- and so was already pinned -- contributes nothing here;
   its own `preview` response already reported those counts once, and this
-  call does not rebuild it. Counts and category names only, exactly as in
-  `preview`: never the redacted text itself.
+  call does not rebuild it. **This means an already-previewed entry and a
+  freshly-built one with nothing to redact look identical in this
+  response**: both report `redactions: {}`, `flagged: 0`. A client that
+  calls `preview` before `approve` should render its toast from the
+  `preview` response's own counts, not assume `approve`'s zero means
+  nothing was found. Counts and category names only, exactly as in
+  `preview`: never the redacted text itself. Keys are real category names
+  the deterministic redactor and the (optional) remote privacy filter emit
+  -- e.g. `private_email`, `local_path`, `secret:openai_api_key`,
+  `secret:github_token`, or a `privacy_filter:<label>` from the remote pass
+  -- not the two placeholder names shown above; see
+  `PreviewSummary::redactions` for the full set.
 - **`flagged`** counts how many of the entries this call built a preview for
   came back with a non-empty `pii_labels_present` (the same field `preview`
-  reports). It is a count of entries, not a count of labels.
-- **`skipped`** lists, for every id `approve` was asked to act on, the ones
-  it did not approve: `entry_id` plus a fixed `reason_label` (`not-enrolled`,
-  `session-file-vanished`, `preview-failed`, `not-pinned`). Nothing here is
-  free text, a path, or trace content. **`approved` plus the length of
-  `skipped` always equals the number of entries `approve` was asked to act
-  on** -- for `entry_id` that is 1, for `all`/`project_id` it is however many
-  matched. An id absent from both would be a silent loss of an approval
-  decision; the response is built so that cannot happen.
+  reports). It is a count of entries, not a count of labels. Same
+  already-previewed caveat as `redactions` above.
+- **`skipped`** lists, for every id `approve` was asked to act on that it
+  did not approve, an `entry_id` plus a fixed `reason_label`:
+
+  | `reason_label` | Meaning | Retry |
+  |---|---|---|
+  | `not-enrolled` | No config was readable when the build ran | Retry after enrolling |
+  | `session-file-vanished` | The session file behind the entry is gone | Will not succeed for this entry |
+  | `preview-failed` | The redaction pipeline itself failed | May be transient |
+  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded | **Never** succeeds for this entry -- do not offer retry |
+  | `not-pinned` | The build succeeded but the pin did not stick (a concurrent queue write, or the entry left `pending` mid-build) | Transient -- retry is expected to work |
+  | `not-pending` | The entry was not `pending` when this call reached it (for example, already `approved` by an earlier `approve` call) | Refresh queue state rather than retry blindly |
+
+  Nothing here is free text, a path, or trace content. **`approved` plus
+  the length of `skipped` always equals the number of entries `approve` was
+  asked to act on** -- for `entry_id` that is 1, for `all`/`project_id` it
+  is however many matched at selection time. An id absent from both would
+  be a silent loss of an approval decision; the response is built so that
+  cannot happen. An `entry_id` naming no entry at all is refused before any
+  of this runs -- see below.
+- **An unrecognized `entry_id`** is refused the same way `preview` refuses
+  the same input: `bad_params` / `unknown-entry-id`, not a `skipped` entry.
+  This applies only to the single-`entry_id` form. `all` and `project_id`
+  cannot produce this case: their ids are read from the queue itself at
+  selection time, so every id they act on already names a real entry.
 - `approve` builds and pins an envelope for any entry that was not already
   previewed -- the same build `preview` runs, just triggered by `approve`
   instead. This is what makes `redactions` and `flagged` available even when
@@ -790,7 +817,8 @@ This is the whole signal a one-click submit needs: a client that never calls
   still produces a pinned envelope the uploader accepts, and still gets the
   counts to render its toast from. An entry that was already pinned by an
   earlier `preview` is approved without rebuilding, so it is counted in
-  `approved` but does not contribute to `redactions` or `flagged`.
+  `approved` but does not contribute to `redactions` or `flagged` (see the
+  caveat above).
 
 ### The approval hold (the undo window)
 

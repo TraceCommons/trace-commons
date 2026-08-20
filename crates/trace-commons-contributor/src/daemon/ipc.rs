@@ -1224,7 +1224,21 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                 .collect()
         } else {
             match parse_entry_id(&req.params) {
-                Ok(id) => vec![id],
+                Ok(id) => {
+                    // An id the caller never held is a client bug, not
+                    // something to fold into the skip accounting below --
+                    // refused up front, the same way `preview` refuses the
+                    // same input, rather than reported as a labelled skip
+                    // of a call that otherwise ran. `all` and `project_id`
+                    // cannot reach this branch: their ids are read from
+                    // the queue itself a few lines above, so every id they
+                    // produce already names a real entry at the moment of
+                    // selection.
+                    if queue.get(id).is_none() {
+                        return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID);
+                    }
+                    vec![id]
+                }
                 Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
             }
         }
@@ -1306,6 +1320,18 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         }
         match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
             Ok((summary, _body, _envelope)) => {
+                // `build_preview` does not size-check the raw contribution
+                // (only `submit`'s path does); `approved_envelope::save`
+                // does, on exactly this measurement. Checked here, before
+                // the pin is even attempted, so an oversized session gets
+                // its own label instead of the generic `not-pinned` the
+                // pin re-check below would otherwise give it -- this one
+                // is permanent, and retrying the same session can never
+                // succeed, which `not-pinned`'s other causes do not imply.
+                if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
+                    skipped.push((id, "envelope-too-large"));
+                    continue;
+                }
                 for (category, count) in &summary.redactions {
                     *redactions.entry(category.clone()).or_insert(0) += count;
                 }
@@ -1339,18 +1365,38 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         {
             // The build reported `Ok` (or this entry had a stale pin to
             // begin with) but nothing is pinned now: `pin_previewed_envelope`
-            // declined to write, or the entry left `Pending` while the
-            // build was running. Either way it is left `Pending`, same as
-            // any other unpinned entry -- but it must not vanish from the
-            // response. An entry counted in neither `approved` nor
-            // `skipped` is exactly the silent hole the pin re-check above
-            // this loop exists to close for the uploader; the caller
-            // deserves the same guarantee.
+            // declined to write because the queue write failed or the
+            // entry left `Pending` while the build was running, or (for
+            // `all`/`project_id`) the entry was removed from the queue
+            // entirely in that same window. All three are transient --
+            // unlike `envelope-too-large` above, retrying is expected to
+            // work once the race that caused this has passed. Either way
+            // the entry is left `Pending`, same as any other unpinned
+            // entry -- but it must not vanish from the response. An entry
+            // counted in neither `approved` nor `skipped` is exactly the
+            // silent hole the pin re-check above this loop exists to
+            // close for the uploader; the caller deserves the same
+            // guarantee.
             skipped.push((id, "not-pinned"));
             continue;
         }
         if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
             approved_ids.push(id);
+        } else {
+            // `Queue::approve` refuses anything not `Pending`, and this
+            // entry just passed the pin check above under the same held
+            // lock -- so it exists and nothing else can have touched it
+            // since. The only way it still lands here is that its state
+            // was already something other than `Pending` when this call
+            // started: `previewed_envelope_digest` is never cleared by
+            // `approve` or by the terminal states `cancel` moves an entry
+            // through, so an entry that was approved (or otherwise moved
+            // off `Pending`) earlier keeps looking pinned forever. The
+            // deterministic repro is approving the same `entry_id` twice
+            // in a row. Reported, not dropped, for the same reason as
+            // `not-pinned`: an id this call was asked to act on must show
+            // up somewhere in the response.
+            skipped.push((id, "not-pending"));
         }
     }
     let approved = approved_ids.len();
