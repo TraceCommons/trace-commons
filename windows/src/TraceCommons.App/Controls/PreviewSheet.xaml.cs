@@ -111,6 +111,14 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     /// Nothing in here is logged. The transcript is the ABI's one content
     /// exemption and it goes to the screen and nowhere else.
     /// </para>
+    /// <para>
+    /// The body handed to <see cref="TranscriptMarkers.Split"/> is
+    /// <see cref="TranscriptBudget"/>'s clamped slice, not the raw body: a
+    /// real Claude Code session can be tens of megabytes, and laying that
+    /// out as one <see cref="RichTextBlock"/> pins the UI thread and takes
+    /// gigabytes of glyph storage to do it. The marker scan only ever needs
+    /// to run over what is actually going on screen.
+    /// </para>
     /// </remarks>
     private void DrawTranscript()
     {
@@ -121,7 +129,23 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
 
         TranscriptBody.Blocks.Clear();
 
-        string body = ViewModel.Transcript;
+        TranscriptBudget.Clamped clamped = TranscriptBudget.Clamp(ViewModel.Transcript);
+        string body = clamped.Shown;
+
+        if (TranscriptClampNotice is not null)
+        {
+            if (clamped.IsClamped)
+            {
+                TranscriptClampNotice.Text = TranscriptBudget.Notice(clamped);
+                TranscriptClampNotice.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                TranscriptClampNotice.Text = string.Empty;
+                TranscriptClampNotice.Visibility = Visibility.Collapsed;
+            }
+        }
+
         var paragraph = new Paragraph();
 
         if (body.Length == 0)

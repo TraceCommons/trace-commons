@@ -323,6 +323,21 @@
                     <TextBlock Text="These are the exact bytes an approval covers. Marks like &lt;PRIVATE_SECRET_1&gt; show where scrubbing fired, legible as chips, not holes."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap" />
+                    <!--
+                        Only a very large body reaches TranscriptBudget's
+                        limit, so this stays collapsed for every session the
+                        pilot has seen so far. Filled and shown from
+                        DrawTranscript when and only when the body was
+                        clamped -- see TranscriptBudget.Clamp. Styled as a
+                        caption like the caveat below, because it is the
+                        same kind of sentence: true, load-bearing, and not
+                        the point of the screen.
+                    -->
+                    <TextBlock x:Name="TranscriptClampNotice"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
                     <Border Background="{ThemeResource TcSurfaceCardBrush}"
                             BorderBrush="{ThemeResource TcHairlineBrush}"
                             BorderThickness="1"
