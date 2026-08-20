@@ -1205,13 +1205,15 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             .clone();
         super::preview::input_fingerprint(c, near_ai.as_ref())
     });
-    let mut queue = shared.queue.lock().expect("queue lock");
-    let ids: Vec<Uuid> = if all {
-        queue.pending().iter().map(|e| e.entry_id).collect()
-    } else {
-        match parse_entry_id(&req.params) {
-            Ok(id) => vec![id],
-            Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    let ids: Vec<Uuid> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        if all {
+            queue.pending().iter().map(|e| e.entry_id).collect()
+        } else {
+            match parse_entry_id(&req.params) {
+                Ok(id) => vec![id],
+                Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+            }
         }
     };
     if all {
@@ -1224,9 +1226,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // but it is the only visibility there is for a call that
         // used to require a terminal.
         //
-        // The count is of entries eligible to be approved, taken
-        // under the same lock that then approves them, so it cannot
-        // drift from what happens next.
+        // Written before the envelope builds below, not merely before
+        // the approve loop: those builds persist artifacts of their
+        // own, and "the record could not be written, so nothing
+        // happened" has to stay true of everything this call does.
+        //
+        // The count is of entries eligible to be approved when the
+        // queue was read. It is an upper bound: an entry no artifact
+        // can be built for is skipped below, and `approve` can refuse
+        // one that moved. The record says the whole queue was
+        // bulk-approved at all, which is what it exists for.
         if let Err(_e) = audit::append(
             &shared.store,
             &AuditEntry {
@@ -1239,8 +1248,49 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
         }
     }
+    // Entries nobody previewed have no artifact behind them. Build one now:
+    // the uploader rebuilds at send time and compares against this pin, so
+    // an approval without it is refused and re-offered rather than sent --
+    // which is what "approve from the tray, without opening anything"
+    // would otherwise silently amount to.
+    //
+    // The build is async and must not run under the queue lock, so the
+    // entries are cloned out under a short lock of their own and the lock
+    // is retaken for the approve loop below.
+    let unpinned: Vec<(Uuid, super::queue::QueueEntry)> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        ids.iter()
+            .filter_map(|id| queue.all().iter().find(|e| e.entry_id == *id))
+            .filter(|e| e.previewed_envelope_digest.is_none())
+            .map(|e| (e.entry_id, e.clone()))
+            .collect()
+    };
+    // Fixed labels, one per entry that could not be given an artifact.
+    // Nothing here is approved: an approval the uploader will refuse is
+    // worse than a refusal the contributor can see.
+    let mut skipped: Vec<(Uuid, &'static str)> = Vec::new();
+    for (id, entry) in unpinned {
+        // An unenrolled build is deliberately never pinned -- it is a
+        // placeholder-identity artifact, not the one an upload would send
+        // -- so there is nothing for approve to do with it. Refuse rather
+        // than run the pipeline and approve something unpinnable.
+        if cfg.is_none() {
+            skipped.push((id, "not-enrolled"));
+            continue;
+        }
+        match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
+            Ok(_) => {}
+            Err((_code, label)) => skipped.push((id, label)),
+        }
+    }
+    let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
+    let mut queue = shared.queue.lock().expect("queue lock");
     let mut approved_ids = Vec::new();
-    for id in ids {
+    for id in &ids {
+        let id = *id;
+        if skipped_ids.contains(&id) {
+            continue;
+        }
         if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
             approved_ids.push(id);
         }

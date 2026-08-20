@@ -963,3 +963,72 @@ async fn preview_turns_refuses_an_unanchored_or_mis_anchored_request() {
         "{r}"
     );
 }
+
+/// Approve one entry over the socket and return the daemon's result value.
+async fn approve_one(c: &mut Client, entry_id: uuid::Uuid) -> serde_json::Value {
+    c.send(&format!(
+        r#"{{"id":1,"method":"approve","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    resp["result"].clone()
+}
+
+#[tokio::test]
+async fn approving_without_a_preview_still_pins_an_envelope() {
+    // The uploader rebuilds and compares against the pin; an approval with
+    // no pin fail-closes into a re-offer, so an unpinned approval is not a
+    // submission at all. One-click submit approves things nobody opened, so
+    // approve has to build the artifact preview used to.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    assert!(
+        Queue::load(&store)
+            .unwrap()
+            .get(entry_id)
+            .expect("entry")
+            .previewed_envelope_digest
+            .is_none(),
+        "fixture must start unpinned or this test proves nothing"
+    );
+
+    let mut c = connect_to(&store_dir).await;
+    let result = approve_one(&mut c, entry_id).await;
+    assert_eq!(result["approved"], 1, "{result}");
+
+    let queue = Queue::load(&store).unwrap();
+    let entry = queue.get(entry_id).expect("entry");
+    assert_eq!(entry.state, QueueState::Approved, "{:?}", entry.state);
+    assert!(
+        entry.previewed_envelope_digest.is_some(),
+        "approve must build and pin an envelope when no preview ran"
+    );
+}
+
+#[tokio::test]
+async fn an_unpreviewed_approval_pins_the_bytes_that_were_persisted() {
+    // A digest with no envelope behind it is the same fail-closed re-offer
+    // as no digest at all: the uploader loads the stored artifact and
+    // checks it against the pin.
+    let (_dir, store_dir, entry_id) = daemon_with_a_multi_event_entry().await;
+    let store = ConfigStore::open(store_dir.clone()).unwrap();
+    let mut c = connect_to(&store_dir).await;
+    approve_one(&mut c, entry_id).await;
+
+    let queue = Queue::load(&store).unwrap();
+    let pinned = queue
+        .get(entry_id)
+        .expect("entry")
+        .previewed_envelope_digest
+        .clone()
+        .expect("pinned");
+    let saved = trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id)
+        .expect("load")
+        .expect("an envelope must be on disk, not only a digest");
+    assert_eq!(
+        trace_commons_contributor::daemon::preview::envelope_digest(&saved).expect("digest"),
+        pinned,
+        "the pinned digest must name the bytes actually persisted"
+    );
+}
