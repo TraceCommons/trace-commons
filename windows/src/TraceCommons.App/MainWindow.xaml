@@ -511,8 +511,32 @@
                     visibility. A contributor with a large project (one real
                     user reached 500 queued sessions) would otherwise pay
                     for every card in it up front.
+
+                    The preview scheduler's visibility signal reads the
+                    INNER ItemsRepeater, not this outer ListView's own
+                    realization. Before this fix, "which project containers
+                    are realized here" was a fair stand in for "which
+                    sessions are on screen", because every row under a
+                    realized project was already in the visual tree
+                    regardless of scroll position. That stopped being true
+                    the moment the inner list started virtualizing on its
+                    own: a project with hundreds of sessions now realizes
+                    only the handful actually windowed into view, so
+                    treating "every entry under a realized project" as
+                    visible would report most of a large project as on
+                    screen, making preview_visible's build order priority
+                    close to meaningless for exactly the case this whole
+                    effort exists to fix. See OnSessionElementPrepared and
+                    OnSessionElementClearing on each ItemsRepeater below, and
+                    RecomputeVisiblePreviews in MainWindow.xaml.cs, which
+                    read ItemsRepeater's own ElementPrepared and
+                    ElementClearing events (the per row realization signal
+                    the WinUI docs give ItemsRepeater for exactly this
+                    purpose), instead of this ListView's own
+                    ContainerContentChanging.
                 -->
-                <ListView Grid.Row="2"
+                <ListView x:Name="QueueListView"
+                          Grid.Row="2"
                           ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
                           ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
                           SelectionMode="None"
@@ -583,7 +607,9 @@
                                     flight during that swap is not something
                                     a click handler should ever trust.
                                 -->
-                                <ItemsRepeater ItemsSource="{x:Bind Entries}">
+                                <ItemsRepeater ItemsSource="{x:Bind Entries}"
+                                               ElementPrepared="OnSessionElementPrepared"
+                                               ElementClearing="OnSessionElementClearing">
                                     <ItemsRepeater.Layout>
                                         <StackLayout Orientation="Vertical" Spacing="0" />
                                     </ItemsRepeater.Layout>
@@ -716,6 +742,51 @@
                                                        Visibility="{x:Bind HasAttempts}"
                                                        Style="{StaticResource TcCaptionSmallTextStyle}"
                                                        Foreground="{ThemeResource TcInkSecondaryBrush}" />
+
+                                            <!--
+                                                The card's own preview, requested through the
+                                                daemon's bounded scheduler (preview_request) rather
+                                                than driven in process here, see
+                                                docs/superpowers/specs/2026-08-20-preview-scheduler-design.md.
+                                                Exactly one of the three blocks below is on screen at
+                                                a time. Every one of these three bindings needs
+                                                Mode=OneWay: Preview changes after this row is already
+                                                drawn (MainViewModel.RequestPreviewAsync or the
+                                                preview_ready event fills it in later), and the
+                                                default x:Bind mode is OneTime, which would leave the
+                                                card showing "Loading preview..." forever.
+                                            -->
+                                            <TextBlock Text="Loading preview…"
+                                                       Visibility="{x:Bind IsPreviewPending, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}" />
+
+                                            <!--
+                                                Refused by the admission cap. raw_session_bytes is a
+                                                stat of the file, never an estimate, and TooLargeText
+                                                (QueueEntryViewModel) carries nothing else: this card
+                                                is a consent surface, and a would-send figure derived
+                                                from anything but the envelope that would actually be
+                                                sent is a false number in the one place this product
+                                                cannot put one.
+                                            -->
+                                            <TextBlock Text="{x:Bind TooLargeText, Mode=OneWay}"
+                                                       Visibility="{x:Bind IsTooLargeToPreview, Mode=OneWay}"
+                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                       TextWrapping="Wrap" />
+
+                                            <StackPanel Visibility="{x:Bind HasOpeningPrompt, Mode=OneWay}"
+                                                        Spacing="2">
+                                                <TextBlock Text="{x:Bind OpeningPromptText, Mode=OneWay}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxLines="2"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind ScrubbingReceiptText, Mode=OneWay}"
+                                                           Visibility="{x:Bind HasScrubbingReceipt, Mode=OneWay}"
+                                                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                           Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                                            </StackPanel>
 
                                             <!--
                                                 The row's three actions.

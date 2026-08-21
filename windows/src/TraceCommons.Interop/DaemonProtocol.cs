@@ -114,6 +114,28 @@ public static class DaemonProtocol
         public const string SetPublicProfile = "set_public_profile";
 
         public const string ClearPublicProfile = "clear_public_profile";
+
+        /// <summary>
+        /// Asks the daemon's bounded preview scheduler for a card's preview
+        /// and returns immediately -- never the pipeline itself. See
+        /// <c>docs/superpowers/specs/2026-08-20-preview-scheduler-design.md</c>
+        /// and <c>PreviewCardOutcome</c>, which decodes what comes back.
+        /// </summary>
+        public const string PreviewRequest = "preview_request";
+
+        /// <summary>
+        /// Replaces the daemon's idea of which entries are on screen,
+        /// wholesale. Decides preview build ORDER, never membership -- an
+        /// entry that scrolls away keeps its place in the queue until
+        /// <see cref="PreviewCancel"/> drops it.
+        /// </summary>
+        public const string PreviewVisible = "preview_visible";
+
+        /// <summary>
+        /// Drops a queued preview, or discards a running one's result.
+        /// <c>dropped: false</c> is a no-op, not an error.
+        /// </summary>
+        public const string PreviewCancel = "preview_cancel";
     }
 
     public static class Events
@@ -123,6 +145,15 @@ public static class DaemonProtocol
         public const string StatusChanged = "status_changed";
         public const string DigestDue = "digest_due";
         public const string ResyncRequired = "resync_required";
+
+        /// <summary>
+        /// A scheduled preview finished and was delivered. Carries the same
+        /// object <c>preview_request</c>'s result would -- see
+        /// <see cref="PreviewCardOutcome"/> -- and is published only for a
+        /// build that was actually queued or running; a cache hit answers
+        /// <c>preview_request</c> directly and publishes no event.
+        /// </summary>
+        public const string PreviewReady = "preview_ready";
 
         /// <summary>
         /// Synthesized by the ABI, not the daemon, when more than 256 events
@@ -417,6 +448,13 @@ public sealed class DaemonEvent
     /// an unknown number of sessions.
     /// </remarks>
     public int PendingCount => IntField("pending");
+
+    /// <summary>
+    /// The decoded payload of a <see cref="DaemonProtocol.Events.PreviewReady"/>
+    /// frame, or null for any other event or a payload that does not fit.
+    /// </summary>
+    public PreviewCardOutcome? PreviewOutcome =>
+        Data is { } data ? PreviewCardOutcome.Parse(data) : null;
 
     private int IntField(string name) =>
         Data is { } data

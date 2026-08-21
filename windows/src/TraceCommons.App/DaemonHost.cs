@@ -67,6 +67,14 @@ public sealed class DaemonHost : IAsyncDisposable
     /// </summary>
     public event Action<int>? Lagged;
 
+    /// <summary>
+    /// Raised on the UI thread when the daemon's preview scheduler finishes
+    /// and delivers one card's result -- the only way a card queued or
+    /// running when it was requested ever gets filled in, since a build that
+    /// was not answered from cache publishes no other signal.
+    /// </summary>
+    public event Action<PreviewCardOutcome>? PreviewReady;
+
     public DaemonHost(DispatcherQueue dispatcher, string? configDir = null)
     {
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
@@ -278,6 +286,14 @@ public sealed class DaemonHost : IAsyncDisposable
                 case DaemonProtocol.Events.ResyncRequired:
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    break;
+
+                case DaemonProtocol.Events.PreviewReady:
+                    if (evt.PreviewOutcome is { } outcome)
+                    {
+                        PreviewReady?.Invoke(outcome);
+                    }
+
                     break;
             }
         });

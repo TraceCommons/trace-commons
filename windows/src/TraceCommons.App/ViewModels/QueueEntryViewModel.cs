@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Globalization;
 using TraceCommons.Interop;
 
@@ -7,20 +8,102 @@ namespace TraceCommons.App.ViewModels;
 /// <summary>
 /// One queue row, formatted for display.
 ///
-/// A read-only projection of <see cref="QueueEntry"/>. It exposes only what a
-/// row shows, and it deliberately exposes NO transcript content: the body is
-/// reachable only through an explicit preview, which is the C ABI's single
-/// content exemption and should stay a deliberate act rather than something a
-/// list view can leak by binding to the wrong property.
+/// Mostly a read-only projection of <see cref="QueueEntry"/>: it exposes what
+/// a row shows, and it deliberately exposes NO raw transcript content -- the
+/// full body is reachable only through an explicit preview sheet, which is
+/// the C ABI's single content exemption and should stay a deliberate act
+/// rather than something a list view can leak by binding to the wrong
+/// property.
+///
+/// The one mutable, notifying piece is <see cref="Preview"/>: the card's own
+/// preview, requested through the daemon's bounded scheduler
+/// (<c>preview_request</c>) and filled in later by a <c>preview_ready</c>
+/// event. It carries an opening-prompt excerpt and a scrubbing receipt when
+/// ready, which the sheet's own <c>PreviewSummary</c> already carries in full
+/// -- this is the same content exemption, on a second, smaller surface, so it
+/// follows the same rule: display only, never a log line.
 /// </summary>
-public sealed class QueueEntryViewModel
+public sealed class QueueEntryViewModel : INotifyPropertyChanged
 {
     private readonly QueueEntry _entry;
+    private PreviewCardOutcome? _preview;
 
     public QueueEntryViewModel(QueueEntry entry)
     {
         _entry = entry ?? throw new ArgumentNullException(nameof(entry));
     }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>
+    /// What the daemon's preview scheduler has said about this card, or null
+    /// before <c>preview_request</c> has been made or answered -- which reads
+    /// the same as <see cref="IsPreviewPending"/>, so a fresh row and one
+    /// still queued or running look identical: both are honestly "not yet
+    /// known", and a card must not guess between them.
+    /// </summary>
+    public PreviewCardOutcome? Preview
+    {
+        get => _preview;
+        set
+        {
+            if (ReferenceEquals(_preview, value))
+            {
+                return;
+            }
+
+            _preview = value;
+            Raise(nameof(Preview));
+            Raise(nameof(IsPreviewPending));
+            Raise(nameof(HasOpeningPrompt));
+            Raise(nameof(OpeningPromptText));
+            Raise(nameof(IsTooLargeToPreview));
+            Raise(nameof(TooLargeText));
+            Raise(nameof(HasScrubbingReceipt));
+            Raise(nameof(ScrubbingReceiptText));
+        }
+    }
+
+    /// <summary>No answer yet: never requested, or queued, or running.</summary>
+    public bool IsPreviewPending => _preview is null || _preview.IsPending;
+
+    public bool HasOpeningPrompt =>
+        _preview is { IsReady: true, Summary.OpeningPrompt.Length: > 0 };
+
+    public string OpeningPromptText => _preview?.Summary?.OpeningPrompt ?? string.Empty;
+
+    public bool IsTooLargeToPreview => _preview?.IsTooLarge == true;
+
+    /// <summary>
+    /// "too large to preview (367.5 MB)" -- the fixed line plus a stat of the
+    /// file, and NOTHING resembling a would-send figure. See
+    /// <see cref="PreviewCardOutcome.TooLargeText"/> and the design spec's
+    /// "Rejected alternatives": a number derived from anything but the
+    /// envelope that would actually be sent is a false number on a consent
+    /// surface.
+    /// </summary>
+    public string TooLargeText
+    {
+        get
+        {
+            if (_preview is not { IsTooLarge: true } preview)
+            {
+                return string.Empty;
+            }
+
+            return string.Format(
+                CultureInfo.CurrentCulture,
+                "{0} ({1})",
+                PreviewCardOutcome.TooLargeText,
+                FormatBytes(preview.RawSessionBytes));
+        }
+    }
+
+    public bool HasScrubbingReceipt => _preview is { IsReady: true, Summary: not null };
+
+    public string ScrubbingReceiptText => _preview?.Summary?.RedactionReceipt ?? string.Empty;
+
+    private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     /// <summary>The daemon's identifier for this entry; used to open a preview.</summary>
     public string EntryId => _entry.EntryId;
