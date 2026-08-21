@@ -1848,6 +1848,12 @@ pub struct RedactionReport {
     pub pii_labels_present: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set when this pass DETECTED secret-shaped content. It says the
+    /// scrubber had work to do, not that anything survived: every span that
+    /// sets this flag is redacted by the same pass that set it. Treating it
+    /// as evidence of danger is what made every real coding session High
+    /// (issue #373). Survivors are reported by the post-redaction residual
+    /// scan instead - see [`residual_risk`].
     pub blocked_secret_detected: bool,
     /// Set when a classifier flagged an *object key* (not just a value) as
     /// PII-bearing. Keys are not rewritten in place (rewriting risks
@@ -1856,6 +1862,12 @@ pub struct RedactionReport {
     /// being silently dropped or merely counted.
     #[serde(default)]
     pub key_finding_detected: bool,
+    /// Set when a configured privacy-filter backend was unavailable, errored,
+    /// or otherwise left content unexamined, so this pass cannot speak for
+    /// the text it was supposed to cover. Absence of findings under a broken
+    /// filter is not evidence of cleanliness, so this forces High.
+    #[serde(default)]
+    pub coverage_incomplete: bool,
 }
 
 impl RedactionReport {
@@ -1891,6 +1903,7 @@ impl RedactionReport {
         }
         self.blocked_secret_detected |= other.blocked_secret_detected;
         self.key_finding_detected |= other.key_finding_detected;
+        self.coverage_incomplete |= other.coverage_incomplete;
     }
 }
 
@@ -3154,6 +3167,9 @@ impl DeterministicTraceRedactor {
                         let backend_label =
                             privacy_filter_backend_label(self.privacy_filter_backend);
                         report.increment(format!("privacy_filter:{backend_label}_failure"));
+                        // The configured filter did not examine this text, so
+                        // this pass cannot claim coverage of it. Fail closed.
+                        report.coverage_incomplete = true;
                         report.add_warning(format!(
                             "Privacy Filter {backend_label} backend failed; deterministic redaction fallback was used. error_hash={}",
                             canonical_hash(&error_text)
@@ -4190,6 +4206,7 @@ impl PostScrubAssessment {
             && self.residual_findings.pii_labels_present.is_empty()
             && !self.residual_findings.blocked_secret_detected
             && !self.residual_findings.key_finding_detected
+            && !self.residual_findings.coverage_incomplete
     }
 
     fn can_downgrade(&self) -> bool {
@@ -4201,15 +4218,26 @@ impl PostScrubAssessment {
 /// risk. Downgrade only when the assessment proves it is safe to do so;
 /// otherwise the prior risk is preserved (never lowered) via
 /// `max_residual_risk`, exactly as before this pass existed.
+///
+/// The forced-High set below is deliberately asymmetric between `findings`
+/// (what this pass detected and then redacted) and `residual_findings` (what
+/// the detection-only scan saw in the envelope *after* the pass finished).
+/// A secret in `findings` is gone; a secret in `residual_findings` is still
+/// there. Forcing High on `findings.blocked_secret_detected` was the
+/// server-side half of issue #373 and pinned every scrubbed envelope at
+/// High. `key_finding_detected` stays in the set on both sides, because keys
+/// are detected but never rewritten, and so a key finding is present in the
+/// envelope no matter which pass reported it.
 fn resolve_post_scrub_risk(
     prior_risk: ResidualPiiRisk,
     derived_risk: ResidualPiiRisk,
     assessment: &PostScrubAssessment,
 ) -> ResidualPiiRisk {
-    if assessment.findings.blocked_secret_detected
-        || assessment.findings.key_finding_detected
+    if assessment.findings.key_finding_detected
+        || assessment.findings.coverage_incomplete
         || assessment.residual_findings.blocked_secret_detected
         || assessment.residual_findings.key_finding_detected
+        || assessment.residual_findings.coverage_incomplete
     {
         return ResidualPiiRisk::High;
     }
@@ -4220,17 +4248,51 @@ fn resolve_post_scrub_risk(
     }
 }
 
+/// Classify what a redaction pass leaves behind.
+///
+/// "Residual" means what is still in the envelope after the pass, not what
+/// the pass had to work on. High is reserved for conditions redaction did
+/// not resolve:
+///
+/// 1. Secrets found and removed, nothing left over -> the scrubber working.
+///    Medium (the found-and-removed floor), never High. Before issue #373
+///    this returned High on `blocked_secret_detected`, which is set at
+///    DETECTION time immediately before the span is redacted, so every real
+///    coding session was High and Medium was unreachable.
+/// 2. Something survived -> High. Survivors are not visible in this report,
+///    which describes one pass's own findings; they are reported by
+///    [`residual_envelope_scan`], a detection-only pass over the finished
+///    envelope, and reach the classification through
+///    [`resolve_post_scrub_risk`]'s `residual_findings`. A residual scan that
+///    could not be run at all forces High at that call site.
+/// 3. A key finding -> High. `key_finding_detected` marks an object key
+///    flagged as PII-bearing, and keys are never rewritten (a rewrite can
+///    collide with a sibling key and silently drop data), so the finding is
+///    still present in the envelope. Redaction structurally cannot resolve
+///    it, and no consent flag or clean scan can talk it down.
+/// 4. Coverage gaps -> High. A configured filter that was unavailable,
+///    errored, or skipped content leaves text nothing examined; an empty
+///    report from a broken filter is not evidence of cleanliness.
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
-    if report.blocked_secret_detected || report.key_finding_detected {
+    // Case 3: not resolvable by redaction, so it is genuinely residual.
+    if report.key_finding_detected {
         return ResidualPiiRisk::High;
     }
 
-    // PII the pass actually found and removed raises the floor to
+    // Case 4: fail closed. The pass cannot vouch for what it never saw.
+    if report.coverage_incomplete {
+        return ResidualPiiRisk::High;
+    }
+
+    // Case 1: PII the pass actually found and removed raises the floor to
     // Medium regardless of what the consent flags claim. A contributor
     // who under-reports risk should not be able to land in accepted
     // storage with a Low classification just because the flags are
     // clean; the pass has direct evidence the flags are wrong.
-    if !report.counts.is_empty() || !report.pii_labels_present.is_empty() {
+    if report.blocked_secret_detected
+        || !report.counts.is_empty()
+        || !report.pii_labels_present.is_empty()
+    {
         return ResidualPiiRisk::Medium;
     }
 
@@ -6035,6 +6097,24 @@ mod tests {
             dump.contains("sidecar backend failed"),
             "expected backend-aware warning; got {dump}"
         );
+        // Case 4 (issue #373): the configured filter did not examine this
+        // text, so the pass must not be able to speak for it.
+        assert!(
+            report.coverage_incomplete,
+            "a filter fallback must mark the pass as not covering the text"
+        );
+        let consent = super::ConsentMetadata {
+            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![super::ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+        assert_eq!(
+            super::residual_risk(&consent, &report),
+            super::ResidualPiiRisk::High,
+            "a coverage gap must fail closed to High"
+        );
     }
 
     #[test]
@@ -6593,7 +6673,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "near-ai-privacy-filter")]
     fn sample_envelope_with_event_content(content: &str) -> super::TraceContributionEnvelope {
         use super::*;
         let now = Utc::now();
@@ -7630,6 +7709,7 @@ mod tests {
         assert!(!rep.blocked_secret_detected);
     }
 
+    #[test]
     fn successfully_redacted_secret_is_medium_not_high() {
         use super::*;
 
@@ -7657,6 +7737,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn unredactable_key_finding_still_forces_high() {
         use super::*;
 
@@ -7680,6 +7761,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn residual_secret_hit_still_forces_high() {
         use super::*;
 
@@ -7713,6 +7795,211 @@ mod tests {
         );
     }
 
+    /// Issue #373 case 4, at the classification rule itself: a pass whose
+    /// configured filter never examined the text has no standing to report
+    /// "clean", so an otherwise empty report must still be High.
+    #[test]
+    fn coverage_gap_alone_forces_high() {
+        use super::*;
+
+        let report = RedactionReport {
+            coverage_incomplete: true,
+            ..Default::default()
+        };
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+
+        // Same consent + empty findings, minus the coverage gap, is Low.
+        // That contrast is the point: the gap is doing the work.
+        assert_eq!(
+            residual_risk(&consent, &RedactionReport::default()),
+            ResidualPiiRisk::Low
+        );
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::High,
+            "an unexamined field must fail closed, not report clean"
+        );
+    }
+
+    /// A key finding is unresolvable by redaction, so nothing else in the
+    /// report or the consent flags may talk it down - not a clean set of
+    /// counts, not a fully-covered pass.
+    #[test]
+    fn key_finding_forces_high_regardless_of_everything_else() {
+        use super::*;
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            revocable: true,
+        };
+        let report = RedactionReport {
+            key_finding_detected: true,
+            ..Default::default()
+        };
+        assert_eq!(residual_risk(&consent, &report), ResidualPiiRisk::High);
+
+        // And through the post-scrub resolver, with every downgrade
+        // precondition satisfied and a clean residual scan.
+        let assessment = PostScrubAssessment {
+            complete_coverage: true,
+            useful_classifier_result: true,
+            findings: RedactionReport {
+                key_finding_detected: true,
+                ..Default::default()
+            },
+            residual_findings: RedactionReport::default(),
+        };
+        assert_eq!(
+            resolve_post_scrub_risk(ResidualPiiRisk::Low, ResidualPiiRisk::Low, &assessment),
+            ResidualPiiRisk::High,
+            "a key finding must survive an otherwise perfect reassessment"
+        );
+    }
+
+    /// Issue #373 case 1, end to end through the pass that builds the
+    /// envelope a contributor sends. A session that pasted an API key is the
+    /// ordinary case, not the dangerous one: the key is gone, the telemetry
+    /// records that it was found, and the tier is the found-and-removed
+    /// floor rather than terminal High.
+    #[tokio::test]
+    async fn originating_scrub_of_a_secret_lands_medium_not_high() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let started = Utc::now();
+        let turn = RawTraceCaptureTurn {
+            user_input: format!("this failed: export OPENAI_API_KEY={secret}"),
+            response: Some("rotate that key".to_string()),
+            tool_calls: Vec::new(),
+            started_at: started,
+            completed_at: Some(started + chrono::Duration::milliseconds(10)),
+            state: Some("Completed".to_string()),
+        };
+        let raw = RawTraceContribution::from_capture_turns(
+            &[turn],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+
+        let envelope = DeterministicTraceRedactor::bare()
+            .redact_trace(raw)
+            .await
+            .expect("deterministic redaction succeeds");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+        assert!(
+            !serialized.contains(secret),
+            "the secret must not survive the originating scrub"
+        );
+        assert!(
+            envelope
+                .privacy
+                .redaction_counts
+                .keys()
+                .any(|key| key == "secret" || key.starts_with("secret:")),
+            "the finding must still be recorded: {:?}",
+            envelope.privacy.redaction_counts
+        );
+        assert_eq!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "found-and-removed is the Medium floor, not High"
+        );
+    }
+
+    /// Issue #373 case 2, with a real survivor rather than a stubbed report.
+    /// `replay.tool_manifest_hashes` is redacted by KEY only - the typed
+    /// re-scrub traversal reinserts each value untouched - so a secret
+    /// parked in a value is still in the stored envelope after the pass.
+    /// That is exactly the "detect-then-redact bug, or a value the
+    /// string-leaf pass never visited" the residual scan exists to catch,
+    /// and ingest re-derives it itself rather than taking the client's word.
+    #[test]
+    fn a_secret_that_survives_the_rescrub_forces_high() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        env.replay.tool_manifest_hashes.insert(
+            "some_tool".to_string(),
+            format!("export OPENAI_API_KEY={secret}"),
+        );
+
+        let redactor = DeterministicTraceRedactor::bare();
+
+        // Sanity: the typed pass really does leave this field alone, so the
+        // test is exercising a survivor and not a redaction.
+        rescrub_trace_envelope_with(&redactor, &mut env);
+        let serialized = serde_json::to_string(&env).expect("envelope serializes");
+        assert!(
+            serialized.contains(secret),
+            "fixture is wrong: the survivor was redacted, so nothing residual remains"
+        );
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "a secret still present after the pass must be High"
+        );
+    }
+
+    /// Fail-closed for an older client. Such a client marks case 1 as High
+    /// (the pre-#373 rule), and the server has no way to tell that apart
+    /// from a genuine survivor, because nothing in the envelope records
+    /// which it was. The re-scrub must therefore leave it High: absence of a
+    /// recorded verdict is not evidence of a clean one, and the client's
+    /// number is a floor the server may raise and never silently lower.
+    #[test]
+    fn a_high_from_an_older_client_is_not_downgraded_by_a_clean_rescrub() {
+        use super::*;
+
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::High,
+            "an unexplained prior High must not be downgraded by a silent client"
+        );
+    }
+
+    /// The other side of that floor: a current client that reports Medium
+    /// for a scrubbed session keeps Medium through the server pass. Without
+    /// this the fix would not actually reach the corpus - the tier the
+    /// operator flag acts on is the one the server stores.
+    #[test]
+    fn a_medium_from_a_current_client_survives_the_server_rescrub() {
+        use super::*;
+
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        assert_eq!(
+            env.privacy.residual_pii_risk,
+            ResidualPiiRisk::Medium,
+            "a clean server pass must neither raise nor drop the reported tier"
+        );
+    }
+
+    #[test]
     fn scrub_pass_secret_alone_does_not_block_downgrade_to_medium() {
         use super::*;
 
@@ -7904,6 +8191,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn rescrub_of_successfully_redacted_secret_lands_medium() {
         use super::*;
 
