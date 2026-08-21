@@ -803,7 +803,7 @@ public sealed partial class MainWindow : Window
     /// because a fling can still produce several "final" events in quick
     /// succession as inertia settles in stages.
     /// </summary>
-    private void OnQueueScrollViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
+    private void OnQueueScrollViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
         if (e.IsIntermediate)
         {
