@@ -9,10 +9,36 @@ explicitly runs `submit`.
 
 ## Install
 
-Signed binaries are published per release, and Homebrew, winget, and the
-shell/PowerShell installers all work; https://tracecommons.ai/install/ and the
-[root README](../../README.md#contributor-cli) carry the per-platform
-commands. To build from source instead:
+Signed binaries are published per release. The shell installer covers macOS
+and Linux, the PowerShell installer covers Windows, and there is a Homebrew tap
+for macOS:
+
+```bash
+# macOS, Linux
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+sh install.sh
+
+# macOS, via the tap
+brew tap TraceCommons/tap
+brew trust tracecommons/tap
+brew install trace-commons-contributor
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+Neither installer will place a binary it cannot verify: the published checksum
+must match, and where the platform carries a signature — Developer ID on macOS,
+Authenticode on Windows — it must be valid *and* name our identity. There is no
+flag to skip either check. The Linux binary is unsigned, so the checksum is the
+only check available for it. https://tracecommons.ai/install/ and the
+[root README](../../README.md#contributor-cli) carry the rest — the per-release
+download table, checking a signature by hand, and the desktop app. A winget
+package is generated on each release but is not published in `winget-pkgs`
+yet, so `winget install` does not work today. To build from source instead:
 
 ```bash
 cargo build --release -p trace-commons-contributor

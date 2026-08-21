@@ -176,12 +176,39 @@ cargo test -p trace-commons-server --test trace_corpus_pg_store
 ### Contributor CLI
 
 Signed binaries are published per release, so contributors do not need this
-repository or a Rust toolchain. On macOS:
+repository or a Rust toolchain. https://tracecommons.ai/install/ is the fuller
+guide, including how to verify a download by hand; the short form follows.
+
+On macOS or Linux, the installer script works out which build you need,
+verifies it, and puts it in `~/.local/bin` — no `sudo`, nothing outside your
+home directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+sh install.sh
+```
+
+It refuses to install anything it cannot verify: the published checksum has to
+match, and on macOS the signature has to be valid *and* name our Developer ID.
+There is no flag to skip either check. `--dir <path>` (or `TC_INSTALL_DIR`)
+picks a different destination, and `TC_VERSION=<x.y.z>` pins a release instead
+of resolving the newest `contributor-v*` tag.
+
+On macOS, from the Homebrew tap instead:
 
 ```bash
 brew tap TraceCommons/tap
 brew trust tracecommons/tap          # Homebrew refuses untrusted third-party taps
 brew install trace-commons-contributor
+```
+
+On Windows, in PowerShell — same verification policy, installs to
+`%LOCALAPPDATA%\Programs\TraceCommons` and appends it to your user `PATH`, so
+reopen the terminal afterwards:
+
+```powershell
+irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1
 ```
 
 Otherwise take a binary from the [current CLI release][releases]: macOS on both
@@ -190,7 +217,14 @@ Authenticode and RFC3161-timestamped respectively — and the Linux x86_64 binar
 is not signed, so use the published checksum beside it. Follow that link rather
 than GitHub's "latest release": CLI releases are tagged `contributor-v*` and
 desktop-app releases `app-v*`, so "latest" is whichever stream was cut most
-recently and today resolves to `app-v0.2.1`, which carries no CLI binary.
+recently — today `contributor-v0.4.6` and `app-v0.4.6` were cut minutes apart, and
+an app tag carries no CLI binary.
+
+Confirm the install with:
+
+```bash
+trace-commons-contributor --version
+```
 
 The desktop app ships as a universal notarized DMG
 (`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows
@@ -207,7 +241,7 @@ cargo build --release --bin trace-commons-contributor
 ./target/release/trace-commons-contributor login
 ```
 
-[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.2.0
+[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.4.6
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 for the full quickstart, consent model, and subcommand reference. Consent is
