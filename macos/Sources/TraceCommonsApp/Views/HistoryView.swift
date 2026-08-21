@@ -61,6 +61,15 @@ struct HistoryView: View {
             .tcColumn()
         }
         .tcScreen()
+        // The shell that hosts this view never disappears when the sidebar
+        // switches sections -- see `MainWindowView.shell`, a single `Group`
+        // with a `switch` inside, not per-section views -- so `refreshAll()`
+        // firing from the shell's own `.onAppear` at launch never fires
+        // again on a tab switch. `AppModel.refreshHistory()` is a cheap
+        // daemon-side read of state it already holds, so paying for it every
+        // time a contributor opens this screen is the honest way to show
+        // what the daemon actually has rather than what it had at launch.
+        .onAppear { model.refreshHistory() }
     }
 
     /// Three states, three tones, three glyphs, three words. The counts are
