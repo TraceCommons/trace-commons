@@ -294,3 +294,127 @@ async fn a_second_cycle_does_not_re_upload_the_same_session() {
         "an unchanged session must not be sent twice"
     );
 }
+
+// --- "Sent, waiting to hear back" ---------------------------------------
+//
+// After the daily cap was raised on a real machine, fourteen approved traces
+// uploaded inside thirty seconds and the History screen kept showing the old
+// counts -- correctly, because nothing had asked the server for verdicts and
+// nothing had recorded the uploads locally either. `history_poll_secs` is
+// 1800 there and the last poll had been 24 minutes earlier, so the outcome of
+// a dozen uploads was up to half an hour from being visible. That is
+// indistinguishable from the upload having failed.
+
+/// `POST_UPLOAD_HISTORY_DELAY_SECS`, restated here so a change to it has to
+/// be a deliberate change to the contract these tests describe.
+const EXPECTED_DELAY_SECS: i64 = 90;
+
+fn now() -> chrono::DateTime<chrono::Utc> {
+    "2030-01-01T00:00:00Z".parse().unwrap()
+}
+
+#[tokio::test]
+async fn an_upload_makes_history_due_far_sooner_than_the_poll_interval_would() {
+    let h = Harness::new().await;
+    h.opt_in("myproj");
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+
+    h.run_cycle().await;
+    assert_eq!(h.received.lock().unwrap().len(), 1);
+
+    let due = h
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .history_refresh_due_at
+        .expect("an upload must schedule a read-back");
+    assert_eq!(due, now() + chrono::Duration::seconds(EXPECTED_DELAY_SECS));
+    // And that is emphatically sooner than the interval it replaces.
+    let interval = h.shared.settings.lock().unwrap().history_poll_secs as i64;
+    assert!(
+        EXPECTED_DELAY_SECS < interval,
+        "{EXPECTED_DELAY_SECS} < {interval}"
+    );
+}
+
+#[tokio::test]
+async fn a_tick_that_uploaded_nothing_schedules_no_read_back() {
+    // No opted-in project, so the watcher offers rather than uploads.
+    let h = Harness::new().await;
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+
+    h.run_cycle().await;
+    assert_eq!(h.received.lock().unwrap().len(), 0);
+    assert_eq!(h.shared.state.lock().unwrap().history_refresh_due_at, None);
+}
+
+#[tokio::test]
+async fn a_burst_schedules_one_read_back_rather_than_one_per_upload() {
+    let h = Harness::new().await;
+    h.opt_in("myproj");
+    for n in 1..=4 {
+        h.write_session("myproj", &format!("{n}{n}{n}{n}{n}{n}{n}{n}-{n}{n}{n}{n}-{n}{n}{n}{n}-{n}{n}{n}{n}-{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}"));
+    }
+
+    h.run_cycle().await;
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        4,
+        "all four should upload"
+    );
+
+    // One deadline for the whole burst, not four.
+    let due = h.shared.state.lock().unwrap().history_refresh_due_at;
+    assert_eq!(
+        due,
+        Some(now() + chrono::Duration::seconds(EXPECTED_DELAY_SECS))
+    );
+
+    // A later pass that uploads again keeps the EARLIEST deadline rather
+    // than pushing it back, so a burst spread over several passes still
+    // resolves to one read-back instead of receding forever.
+    h.write_session("myproj", "99999999-9999-9999-9999-999999999999");
+    let later = now() + chrono::Duration::seconds(30);
+    trace_commons_contributor::daemon::watcher::tick(&h.shared, later)
+        .await
+        .unwrap();
+    trace_commons_contributor::daemon::watcher::tick(&h.shared, later)
+        .await
+        .unwrap();
+    trace_commons_contributor::daemon::drain_approved_for_test(&h.shared, later)
+        .await
+        .unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 5);
+    assert_eq!(
+        h.shared.state.lock().unwrap().history_refresh_due_at,
+        due,
+        "a second burst must not push the read-back further out"
+    );
+}
+
+#[tokio::test]
+async fn an_upload_is_visible_as_sent_immediately_rather_than_at_the_next_poll() {
+    // No server was asked anything here: the row comes from the local
+    // receipt the upload just wrote. That is what "sent, waiting to hear
+    // back" means, and it is available the moment the upload lands.
+    let h = Harness::new().await;
+    h.opt_in("myproj");
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+
+    h.run_cycle().await;
+
+    let records =
+        trace_commons_contributor::daemon::history::HistoryCache::load(&h.shared.store).unwrap();
+    assert_eq!(records.len(), 1, "the upload should be in history at once");
+    let receipts = h.shared.store.load_receipts().unwrap();
+    assert_eq!(records[0].submission_id, receipts[0].submission_id);
+    assert_eq!(records[0].status, receipts[0].status);
+    assert_eq!(records[0].project_label, "myproj");
+    // Nothing has been read back from the server for this row, and it does
+    // not pretend otherwise.
+    assert_eq!(records[0].last_refreshed_at, None);
+    // And no local path rode along into the history file.
+    let body = serde_json::to_string(&records[0]).unwrap();
+    assert!(!body.contains(".jsonl"), "path leaked into history: {body}");
+}

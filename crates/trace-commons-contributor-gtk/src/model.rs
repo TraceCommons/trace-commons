@@ -29,6 +29,42 @@ pub struct Status {
     pub next_digest_at: Option<String>,
     #[serde(default)]
     pub health: Health,
+    /// The daily volume caps, and what they are holding back.
+    ///
+    /// Read independently of `health`: `daily-cap-reached` is last in the
+    /// daemon's precedence order, so any other condition takes the single
+    /// health slot and the cap disappears from view. That is exactly how a
+    /// spent budget came to be indistinguishable from a broken app.
+    #[serde(default)]
+    pub daily_budget: DailyBudget,
+}
+
+/// `status.daily_budget`. Counts and one timestamp; nothing identifying.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DailyBudget {
+    #[serde(default)]
+    pub bytes_today: u64,
+    #[serde(default)]
+    pub max_bytes_per_day: u64,
+    #[serde(default)]
+    pub bytes_remaining: u64,
+    #[serde(default)]
+    pub uploads_today: u32,
+    #[serde(default)]
+    pub max_uploads_per_day: u32,
+    #[serde(default)]
+    pub uploads_remaining: u32,
+    /// When the counters zero. The daemon derives this from its own day
+    /// bucket, so it may be stated rather than paraphrased as "tomorrow".
+    #[serde(default)]
+    pub resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether at least one approved trace cannot go out before the reset.
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub blocked_entries: u32,
+    #[serde(default)]
+    pub blocked_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -354,6 +390,19 @@ pub struct Counts {
     pub quarantined: u32,
     #[serde(default)]
     pub other: u32,
+}
+
+impl Counts {
+    /// Everything in every bucket.
+    ///
+    /// `submitted` is one bucket among four -- traces that have gone out
+    /// and have no verdict back yet -- and never a running total. Reading
+    /// it as one made "waiting to be scored" arithmetic
+    /// (`submitted - accepted - quarantined`) permanently negative, so it
+    /// saturated to zero and the screen said nothing was ever in flight.
+    pub fn total(&self) -> u32 {
+        self.submitted + self.accepted + self.quarantined + self.other
+    }
 }
 
 /// `get_settings`. The three booleans are configured-or-not facts; the

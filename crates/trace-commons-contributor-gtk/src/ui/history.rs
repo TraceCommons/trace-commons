@@ -201,10 +201,12 @@ fn render(
     // §5.3: three cards, never one column of mixed semantics. Each carries
     // its own glyph as well as its own colour, so the three states survive
     // greyscale.
-    let waiting = rollup
-        .all_time
-        .submitted
-        .saturating_sub(rollup.all_time.accepted + rollup.quarantined);
+    // `submitted` is the bucket for "sent, no verdict back yet" -- one of
+    // four buckets, not a running total. Subtracting the other buckets from
+    // it made this figure permanently negative, so it saturated to zero and
+    // the card said nothing was ever in flight even while a dozen traces
+    // were.
+    let waiting = rollup.all_time.submitted;
     let stats = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
     stats.set_homogeneous(true);
     for (glyph, label, count) in [
@@ -328,7 +330,7 @@ fn render(
     if !records.is_empty() {
         let header = style::section(copy::EVERYTHING_CONTRIBUTED);
         let count = gtk::Label::builder()
-            .label(format!("{}", rollup.all_time.submitted))
+            .label(format!("{}", rollup.all_time.total()))
             .xalign(1.0)
             .build();
         count.add_css_class("tc-ledger");

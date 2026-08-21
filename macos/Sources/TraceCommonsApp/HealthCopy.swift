@@ -1,4 +1,5 @@
 import Foundation
+import TCShellCore
 
 /// The health sentences, verbatim from the shared design's failure-state
 /// table. Two rules hold across every one of them: never name the mechanism
@@ -23,6 +24,30 @@ struct HealthCopy: Equatable {
     let severity: Severity
     /// Present only where there is a real action behind it.
     let actionTitle: String?
+
+    /// The banner for a spent daily budget, built from the numbers the
+    /// daemon actually reported.
+    ///
+    /// Separate from `forLabel` because the daemon reports this separately:
+    /// `daily-cap-reached` is last in the precedence order, so on the
+    /// machine this was written for the single health slot was held by
+    /// `queue-full` and the real reason nothing was uploading never reached
+    /// a screen. A shell that waits for the label to arrive will keep
+    /// missing it.
+    ///
+    /// `.waiting`, not an error: nothing is broken and nothing was lost.
+    static func forBudget(_ budget: DailyBudget) -> HealthCopy? {
+        guard budget.blocked else { return nil }
+        return HealthCopy(
+            title: DailyBudgetCopy.title,
+            detail: DailyBudgetCopy.detail(
+                blockedEntries: budget.blockedEntries,
+                resetsAt: budget.resetsAt
+            ),
+            severity: .waiting,
+            actionTitle: nil
+        )
+    }
 
     static func forLabel(_ label: String) -> HealthCopy {
         switch label {
@@ -83,10 +108,20 @@ struct HealthCopy: Equatable {
                 actionTitle: "Review"
             )
         case "daily-cap-reached":
+            // The fallback for a daemon that reported the label without a
+            // `daily_budget` object. `forBudget` is what normally renders
+            // this condition, and it can say how many are waiting and when
+            // the limit actually resets; this line must not promise a time
+            // it does not have. It said "The rest goes out tomorrow",
+            // which is false for most of the world -- the daemon rolls its
+            // counters at UTC midnight.
             return HealthCopy(
-                title: "Daily limit reached.",
-                detail: "The rest goes out tomorrow.",
-                severity: .informational,
+                title: DailyBudgetCopy.title,
+                detail: """
+                Approved traces are waiting. Nothing has been lost -- they go out when the \
+                limit resets.
+                """,
+                severity: .waiting,
                 actionTitle: nil
             )
         default:

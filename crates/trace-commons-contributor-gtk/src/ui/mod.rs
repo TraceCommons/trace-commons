@@ -795,20 +795,46 @@ impl App {
     }
 
     fn render_health(self: &Rc<Self>, status: &Status) {
-        match status.health.last_error_label.as_deref() {
-            Some(label) => {
-                self.health_label.set_text(copy::health_sentence(label));
-                match copy::health_action(label) {
-                    Some(action) => {
-                        self.health_button.set_label(action);
-                        self.health_button.set_visible(true);
-                    }
-                    None => self.health_button.set_visible(false),
-                }
-                self.health_banner.set_visible(true);
+        // Two independent conditions, and the banner shows both. The health
+        // slot carries one label at a time by design, and `daily-cap-reached`
+        // is last in its precedence order -- so a spent upload budget behind
+        // a full queue was reported by neither, and the window looked simply
+        // broken. The budget line is therefore drawn from
+        // `status.daily_budget` rather than waiting for the label.
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(label) = status.health.last_error_label.as_deref() {
+            // The label's own sentence, except when it IS the cap: the
+            // budget line below says the same thing with real numbers.
+            if label != "daily-cap-reached" || !status.daily_budget.blocked {
+                lines.push(copy::health_sentence(label).to_string());
             }
-            None => self.health_banner.set_visible(false),
         }
+        if status.daily_budget.blocked {
+            lines.push(copy::daily_cap_sentence(
+                status.daily_budget.blocked_entries,
+                status.daily_budget.resets_at,
+            ));
+        }
+        if lines.is_empty() {
+            self.health_banner.set_visible(false);
+            return;
+        }
+        self.health_label.set_text(&lines.join("\n\n"));
+        // The action belongs to the health label; a spent budget has none,
+        // because there is nothing for a contributor to do about it.
+        match status
+            .health
+            .last_error_label
+            .as_deref()
+            .and_then(copy::health_action)
+        {
+            Some(action) => {
+                self.health_button.set_label(action);
+                self.health_button.set_visible(true);
+            }
+            None => self.health_button.set_visible(false),
+        }
+        self.health_banner.set_visible(true);
     }
 
     /// The 4-hour digest. Posted only when there is pending work, and its

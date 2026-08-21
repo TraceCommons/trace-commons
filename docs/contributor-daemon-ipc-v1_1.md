@@ -420,13 +420,62 @@ history record, audit entry, notification text, or IPC response.
   "paused": false,
   "queue_depth": 0,
   "next_digest_at": null,
-  "health": { "last_error_label": null, "since": null }
+  "health": { "last_error_label": null, "since": null },
+  "daily_budget": {
+    "bytes_today": 204659969,
+    "max_bytes_per_day": 209715200,
+    "bytes_remaining": 5055231,
+    "uploads_today": 12,
+    "max_uploads_per_day": 50,
+    "uploads_remaining": 38,
+    "resets_at": "2026-08-22T00:00:00Z",
+    "blocked": true,
+    "blocked_entries": 14,
+    "blocked_bytes": 137283584
+  }
 }
 ```
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
+
+#### `daily_budget`
+
+Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
+daily volume caps and, crucially, how much already-approved work they are
+holding back.
+
+It is deliberately **not** routed through `health`. The daemon does set
+`daily-cap-reached` when a cap refuses an upload, but that label sits at the
+bottom of the precedence order, so any other condition — a full queue, in
+the case this field was added for — occupies the single
+`health.last_error_label` slot and the cap becomes invisible. A client that
+only reads `health` therefore cannot tell a spent budget from a broken
+daemon. Read `daily_budget` independently of `health`.
+
+| field | meaning |
+| --- | --- |
+| `bytes_today` / `uploads_today` | consumed so far in the current UTC day |
+| `max_bytes_per_day` / `max_uploads_per_day` | the caps in force |
+| `bytes_remaining` / `uploads_remaining` | what is left, saturating at zero |
+| `resets_at` | the next UTC midnight, when the counters zero. Derived from the daemon's own day bucket, so a client may state it |
+| `blocked` | whether at least one approved entry cannot be uploaded before `resets_at` |
+| `blocked_entries` / `blocked_bytes` | how many, and their combined on-disk size |
+
+`blocked_entries` counts every approved entry that will not go out today,
+not only the ones that individually overflow the budget: the upload pass
+stops at the first entry that does not fit rather than skipping past it, so
+a small entry queued behind a large one waits as well.
+
+`blocked` is false when the budget is spent but nothing is approved and
+waiting — there is no one to tell in that case.
+
+Counts and timestamps only. No entry id, hash, or path appears here.
+
+Approved entries are not listed by `list_pending`, which returns `pending`
+entries only, so this is the only place the condition is reported; there is
+no per-entry equivalent.
 
 ### `preview`
 
@@ -1147,6 +1196,23 @@ contributor who sees it grouped with failures reads it as rejection.
 `last_refreshed_at` is `null` when history has never been refreshed from the
 server; show staleness rather than presenting a stale cache as current.
 
+The `submitted` bucket means **uploaded, no verdict back yet**. It is a real
+and ordinary state, and it now appears promptly: an upload pass writes its
+receipts into the history cache immediately, without calling the server, so
+a trace that has just gone out is counted as `submitted` within seconds
+rather than at the next `history_poll_secs` boundary. Those rows carry
+`last_refreshed_at: null`, because nothing has been read back for them yet.
+
+The daemon then asks the server for verdicts about ninety seconds after an
+upload pass, rather than waiting out the full `history_poll_secs` interval
+(1800 by default). A burst of uploads produces one such read-back, not one
+per upload, and no two read-backs are ever less than two minutes apart. A
+verdict, a quarantine, or a withdrawal moves the row out of `submitted` on
+the next refresh; the count can go down as well as up.
+
+Render `submitted` in the contributor's words — sent, waiting to hear back —
+and never as an error.
+
 The answer additionally carries a `community` object when, and only when,
 this contributor has a standing on the public roster:
 
@@ -1536,6 +1602,12 @@ listed highest first:
 6. `ingest-unreachable`
 7. `queue-full`
 8. `daily-cap-reached`
+
+Because `daily-cap-reached` is last, it is the label most often masked by
+another condition. That is why the daily caps are also reported in full on
+`status.daily_budget`, outside the precedence order — see above. A client
+should render the budget condition from `daily_budget`, not by waiting for
+`daily-cap-reached` to reach the health slot.
 
 Rationale: states the contributor can act on outrank states they can only
 wait out. An application should not attempt to infer or reconstruct this

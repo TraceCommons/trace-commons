@@ -35,11 +35,14 @@ public enum PreviewTab
 /// </para>
 /// <para>
 /// The invariant this whole class serves is that <b>an approval covers exactly
-/// the bytes the contributor was shown</b>. It is enforced by
-/// <see cref="Gate"/>, which lives in the interop assembly so it can be tested
-/// on a machine that cannot build WinUI, and it is the only thing that arms
-/// <see cref="CanContribute"/>. The Linux shell ANDs the same three conditions
-/// in <c>sync_contribute</c>; the macOS sheet holds the same two flags.
+/// the bytes a preview pinned</b>. It is enforced by <see cref="Gate"/>, which
+/// lives in the interop assembly so it can be tested on a machine that cannot
+/// build WinUI, and it is the only thing that arms
+/// <see cref="CanContribute"/>. It used to enforce two more conditions -- a
+/// transcript shown and an acknowledgement ticked -- and <see cref="ReadGate"/>
+/// records why they went and what took their place. The Linux shell applies the
+/// same rule in <c>sync_contribute</c>; the macOS sheet applies it through
+/// <c>TCShellCore.ReadGate</c>.
 /// </para>
 /// <para>
 /// <b>One sheet, one session, one decision.</b> Both decisions close the
@@ -48,9 +51,9 @@ public enum PreviewTab
 /// deliberately stopped doing: that put Contribute under the same pixels for a
 /// second session, so one more click sent a transcript nobody had looked at,
 /// and it stranded the recovery bar behind a sheet where it could not be seen.
-/// A sheet that advanced would also have to reset the read gate under the
-/// contributor's cursor, which is a worse thing to get wrong than an extra
-/// click is to require.
+/// A sheet that advanced would also have to re-pin under the contributor's
+/// cursor, which is a worse thing to get wrong than an extra click is to
+/// require.
 /// </para>
 /// </summary>
 public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
@@ -299,38 +302,22 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         "A search only finds what is written the way you typed it. If it matters, try the "
         + "other spellings you would worry about — a hostname, an internal code name, an address.";
 
-    /// <summary>Whether the contributor has done the three things the gate asks.</summary>
+    /// <summary>Whether there is a pinned preview to contribute, and no
+    /// decision already in flight.</summary>
     public bool CanContribute => Gate.CanContribute && !_deciding;
 
     public bool CanDecide => !_deciding;
 
     public string ContributeHelp => Gate.Help;
 
-    public string GateOpenedLine => Gate.OpenedLine;
-
-    public bool GateTranscriptShown => Gate.TranscriptShown;
-
-    public bool GateAcknowledged
-    {
-        get => Gate.Acknowledged;
-        set => Gate.Acknowledged = value;
-    }
-
-    /// <summary>The footnote, shown only while Contribute is still off.</summary>
-    public bool ShowGateFootnote => !Gate.CanContribute;
+    /// <summary>
+    /// What the sheet says about redaction above Contribute. Always shown,
+    /// because it is a statement about the mechanism and not a report on
+    /// the state of anything.
+    /// </summary>
+    public string GateStatement => ReadGate.Statement;
 
     public void SelectTab(PreviewTab tab) => Tab = tab;
-
-    /// <summary>
-    /// Records that the redacted transcript has actually been on screen.
-    /// </summary>
-    /// <remarks>
-    /// Called by the transcript panel itself when it is realized, not by
-    /// whatever navigated to it. That distinction is the difference between
-    /// recording display and recording intent, and this gate is only worth
-    /// having if it records the first.
-    /// </remarks>
-    public void MarkTranscriptShown() => Gate.MarkTranscriptShown();
 
     /// <summary>
     /// Opens the preview and fills the sheet.
@@ -467,10 +454,10 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>
     /// The one irreversible click in the product.
     ///
-    /// It is behind the preview by design and behind <see cref="Gate"/> by
-    /// design, and it carries no keyboard accelerator: an approval one Return
-    /// away from a hand resting on the keyboard is the misclick this sheet was
-    /// built to make impossible.
+    /// It is behind the preview by design -- it cannot arm until one has
+    /// loaded and pinned -- and it carries no keyboard accelerator: an
+    /// approval one Return away from a hand resting on the keyboard is the
+    /// misclick this sheet was built to make impossible.
     /// </summary>
     public async Task ContributeAsync()
     {
@@ -590,10 +577,6 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         Raise(nameof(CanContribute));
         Raise(nameof(ContributeHelp));
-        Raise(nameof(GateOpenedLine));
-        Raise(nameof(GateTranscriptShown));
-        Raise(nameof(GateAcknowledged));
-        Raise(nameof(ShowGateFootnote));
     }
 
     private void RaiseSearchResults()
