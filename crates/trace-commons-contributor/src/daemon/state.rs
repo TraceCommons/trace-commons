@@ -15,11 +15,12 @@
 //! Paths appear in this file and never leave it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, DAEMON_STATE_FILE};
 
@@ -40,6 +41,34 @@ pub struct CwdCacheEntry {
     pub size_bytes: u64,
     pub modified_at: DateTime<Utc>,
     pub cwd: Option<String>,
+}
+
+/// What `save` last actually wrote, and where: the store directory it was
+/// written to, and a digest of the exact bytes.
+///
+/// The daemon saves state at the end of every sixty-second tick whether or
+/// not the tick moved anything, and on the corpus this was measured against
+/// that is a 1.24 MB serialize, write and `fsync` per minute -- around
+/// 1.8 GB of writes a day -- for bytes identical to the ones already on
+/// disk. Remembering the digest lets an unchanged save skip the write.
+///
+/// The comparison is over the serialized bytes rather than a "did anything
+/// change" flag on purpose. `observe()` rewrites the previous-size
+/// bookkeeping for every path on every poll, so a flag set by mutation would
+/// be true on every tick even though the map's contents never moved; and a
+/// hand-maintained flag would go stale the first time a field is added
+/// without a matching `mark_dirty`. Bytes cannot miss a field.
+///
+/// Excluded from `PartialEq` (and from serde) because it is a write-elision
+/// memo, not state: two `DaemonState`s holding the same data are equal
+/// whatever either has last written.
+#[derive(Debug, Clone, Default)]
+pub struct LastWritten(Option<(PathBuf, [u8; 32])>);
+
+impl PartialEq for LastWritten {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +131,10 @@ pub struct DaemonState {
     /// bound.
     #[serde(default)]
     pub community: Option<super::community::CommunityStanding>,
+    /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
+    /// process always writes once before it can skip anything.
+    #[serde(skip)]
+    last_written: LastWritten,
 }
 
 impl Default for DaemonState {
@@ -127,6 +160,7 @@ impl DaemonState {
             history_refresh_due_at: None,
             last_community_poll_at: None,
             community: None,
+            last_written: LastWritten::default(),
         }
     }
 
@@ -137,9 +171,31 @@ impl DaemonState {
         serde_json::from_slice(&body).context("parsing daemon state")
     }
 
-    pub fn save(&self, store: &ConfigStore) -> Result<()> {
-        let body = serde_json::to_vec_pretty(self).context("serializing daemon state")?;
-        store.write_daemon_file(DAEMON_STATE_FILE, &body)
+    /// Persist, unless the exact bytes are already on disk.
+    ///
+    /// Takes `&mut self` so it can record what it wrote. The skip is
+    /// conditioned on the destination file still existing as well as on the
+    /// digest matching, so a `ConfigStore::wipe` (or anything else removing
+    /// the file underneath a running daemon) is followed by a real write on
+    /// the next save rather than by a memo insisting the file is already
+    /// correct. That keeps the observable behaviour identical to the
+    /// unconditional write it replaces in every case except the one being
+    /// elided: bytes that are already there.
+    pub fn save(&mut self, store: &ConfigStore) -> Result<()> {
+        let body = serde_json::to_vec_pretty(&*self).context("serializing daemon state")?;
+        let digest: [u8; 32] = Sha256::digest(&body).into();
+        let already_on_disk = self
+            .last_written
+            .0
+            .as_ref()
+            .is_some_and(|(dir, seen)| dir == store.dir() && *seen == digest)
+            && store.daemon_path(DAEMON_STATE_FILE).exists();
+        if already_on_disk {
+            return Ok(());
+        }
+        store.write_daemon_file(DAEMON_STATE_FILE, &body)?;
+        self.last_written = LastWritten(Some((store.dir().to_path_buf(), digest)));
+        Ok(())
     }
 
     /// Reset the daily volume counters when the UTC day has rolled over.
@@ -289,6 +345,116 @@ mod tests {
         s.paused = true;
         s.save(&store).unwrap();
         assert!(DaemonState::load(&store).unwrap().paused);
+    }
+
+    /// Overwrite the state file with bytes `save` would never produce, so a
+    /// later write is detectable as the sentinel being gone.
+    ///
+    /// A write counter is what these tests actually need, and an identical
+    /// rewrite is invisible from the file's contents alone -- the bytes are
+    /// the same either way. Planting a sentinel makes "was this file
+    /// written?" observable without depending on mtime granularity or on a
+    /// unix-only inode.
+    fn plant_sentinel(store: &ConfigStore) {
+        std::fs::write(store.daemon_path(DAEMON_STATE_FILE), b"SENTINEL").unwrap();
+    }
+
+    fn sentinel_survived(store: &ConfigStore) -> bool {
+        std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap() == b"SENTINEL"
+    }
+
+    #[test]
+    fn a_save_of_unchanged_state_does_not_write() {
+        // The daemon saves at the end of every sixty-second tick whether or
+        // not the tick moved anything: a 1.24 MB serialize, write and fsync
+        // a minute on the measured corpus, for bytes already on disk.
+        let (_d, store) = temp_store();
+        let mut s = DaemonState::new();
+        s.observe(Path::new("/tmp/a.jsonl"), 42);
+        s.save(&store).unwrap();
+
+        plant_sentinel(&store);
+        s.save(&store).unwrap();
+        s.save(&store).unwrap();
+        assert!(
+            sentinel_survived(&store),
+            "two saves of unchanged state must not touch the file"
+        );
+    }
+
+    #[test]
+    fn a_save_after_a_real_change_writes() {
+        // The other half: the elision must not swallow a genuine change.
+        // `observe` of the SAME size for the same path is deliberately not a
+        // change -- that is what happens on every poll for every path -- but
+        // a new path, or a new size for a known one, is.
+        let (_d, store) = temp_store();
+        let mut s = DaemonState::new();
+        s.observe(Path::new("/tmp/a.jsonl"), 42);
+        s.save(&store).unwrap();
+
+        plant_sentinel(&store);
+        s.observe(Path::new("/tmp/a.jsonl"), 42);
+        s.save(&store).unwrap();
+        assert!(
+            sentinel_survived(&store),
+            "re-observing the same size is not a change"
+        );
+
+        s.observe(Path::new("/tmp/a.jsonl"), 99);
+        s.save(&store).unwrap();
+        assert!(!sentinel_survived(&store), "a moved size must be written");
+        assert_eq!(
+            DaemonState::load(&store)
+                .unwrap()
+                .previous_size(Path::new("/tmp/a.jsonl")),
+            Some(99),
+            "and the written bytes must be the new state"
+        );
+
+        plant_sentinel(&store);
+        s.observe(Path::new("/tmp/b.jsonl"), 7);
+        s.save(&store).unwrap();
+        assert!(!sentinel_survived(&store), "a new path must be written");
+    }
+
+    #[test]
+    fn a_save_writes_again_once_the_file_has_disappeared() {
+        // `ConfigStore::wipe` removes the state file underneath whatever is
+        // holding the state in memory. The memo must not then insist the
+        // file is already correct: nothing is there at all.
+        let (_d, store) = temp_store();
+        let mut s = DaemonState::new();
+        s.observe(Path::new("/tmp/a.jsonl"), 42);
+        s.save(&store).unwrap();
+        std::fs::remove_file(store.daemon_path(DAEMON_STATE_FILE)).unwrap();
+
+        s.save(&store).unwrap();
+        assert_eq!(
+            DaemonState::load(&store)
+                .unwrap()
+                .previous_size(Path::new("/tmp/a.jsonl")),
+            Some(42),
+            "an unchanged save must still write when the file is gone"
+        );
+    }
+
+    #[test]
+    fn a_save_to_a_different_store_always_writes() {
+        // The memo records where it wrote, not just what: the same state
+        // handed a second store has never been written there.
+        let (_a, first) = temp_store();
+        let (_b, second) = temp_store();
+        let mut s = DaemonState::new();
+        s.observe(Path::new("/tmp/a.jsonl"), 42);
+        s.save(&first).unwrap();
+        s.save(&second).unwrap();
+        assert_eq!(
+            DaemonState::load(&second)
+                .unwrap()
+                .previous_size(Path::new("/tmp/a.jsonl")),
+            Some(42)
+        );
     }
 
     #[test]
