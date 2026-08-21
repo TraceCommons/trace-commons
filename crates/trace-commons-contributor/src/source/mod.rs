@@ -2,7 +2,7 @@
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::daemon::settings::SourceDeclaration;
 
@@ -103,6 +103,89 @@ pub trait TraceSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
+
+    /// Which session, if any, a changed filesystem path belongs to.
+    ///
+    /// Event-driven watching learns that *a path* moved and has to turn
+    /// that into *a session* before anything can be scanned. The answer is
+    /// source-specific -- a Codex rollout is its own session, a Claude Code
+    /// transcript under `<uuid>/subagents/` belongs to the parent -- so it
+    /// belongs here, beside `discover`, rather than in the daemon where it
+    /// would have to re-derive each adapter's layout.
+    ///
+    /// Returns the session's stable address: the same `PathBuf` that
+    /// `SessionRef::path` carries, so the queue, the upload state and a
+    /// scoped scan all keep addressing a session by one path. `None` means
+    /// the path is not part of any session this source owns.
+    ///
+    /// **This is fed paths that came from the operating system**, so it is
+    /// an addressing surface, not a convenience. Every implementation must
+    /// refuse a path that is not really inside the declared root -- `..`
+    /// traversal and symlinks included -- and must be at least as strict as
+    /// the adapter's own discovery: a mapping laxer than discovery would be
+    /// a way to name a file the contributor never agreed to watch.
+    ///
+    /// The default answers `None`, which is the correct answer for a source
+    /// that cannot map paths at all: the reconciliation sweep still finds
+    /// its sessions, just on the slow path.
+    fn session_for_path(&self, _path: &Path) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// `path` if it is a real file genuinely inside `root`, otherwise `None`.
+///
+/// The one containment check every adapter's `session_for_path` runs
+/// before it applies its own layout rule. Three refusals, and all three
+/// have already happened to this codebase's discovery walks:
+///
+/// - **Not under the root at all**, including anything reachable only by
+///   `..`. Components are inspected rather than the string compared, so
+///   `<root>/proj/../../etc/x.jsonl` is refused even though it is spelled
+///   with the root as a prefix.
+/// - **A symlink anywhere in the chain below the root.** Every intermediate
+///   component must be a real directory and the leaf a real file, checked
+///   with `symlink_metadata`, which does not follow. This is the same rule
+///   `push_group_if_jsonl` and `group_members_for` already enforce with
+///   `DirEntry::file_type` and `symlink_metadata`: a symlink planted under
+///   a session root by any same-user process must not steer collection at
+///   files elsewhere on disk.
+/// - **Anything that is not a regular file**, so a directory event never
+///   becomes a session address.
+///
+/// The root itself is deliberately not required to be a real directory: it
+/// is what the contributor declared, and a declared root that happens to be
+/// a symlink is their choice, made once and explicitly. What must not
+/// happen is a path *below* it leaving it.
+pub(crate) fn real_file_within_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut walked = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    let mut any = false;
+    while let Some(component) = components.next() {
+        let name = match component {
+            Component::Normal(name) => name,
+            // `.` is inert; everything else -- `..`, a root, a Windows
+            // prefix -- means this path does not describe a location under
+            // `root` even though it was spelled with it as a prefix.
+            Component::CurDir => continue,
+            _ => return None,
+        };
+        walked.push(name);
+        let metadata = std::fs::symlink_metadata(&walked).ok()?;
+        let last = components.peek().is_none();
+        if last {
+            if !metadata.is_file() {
+                return None;
+            }
+        } else if !metadata.is_dir() {
+            return None;
+        }
+        any = true;
+    }
+    // An empty relative path means `path` IS the root; a root is not a
+    // session file.
+    any.then_some(walked)
 }
 
 /// Hash raw session bytes as "sha256:<hex>".

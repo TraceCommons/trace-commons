@@ -56,7 +56,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     SOURCE_CLAUDE_CODE, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
-    session_hash,
+    real_file_within_root, session_hash,
 };
 
 /// The most raw bytes one merged group may hash and load.
@@ -251,8 +251,11 @@ impl TraceSource for ClaudeCodeSource {
                 if session_stems.contains(&dir_name) {
                     continue;
                 }
-                let mut orphan_parent = project_dir.path().join(&dir_name);
-                orphan_parent.set_extension("jsonl");
+                let Some(orphan_parent) =
+                    session_file_for_session_dir(&project_dir.path().join(&dir_name))
+                else {
+                    continue;
+                };
                 let (members, excluded) = group_members_for(&orphan_parent);
                 skipped += members.len() + excluded;
             }
@@ -277,6 +280,39 @@ impl TraceSource for ClaudeCodeSource {
 
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_group(&r.path, self.group_budget)
+    }
+
+    /// A changed path under a Claude Code root, mapped to the session that
+    /// covers it.
+    ///
+    /// A delegated transcript maps to its PARENT, not to itself. That is
+    /// the same group address `discover` emits and the queue keys on: a
+    /// subagent transcript is not a session, and offering one as its own
+    /// address would put back the 911-cards-for-69-conversations bug from
+    /// the other direction. The rule itself is not restated here --
+    /// `parent_session_for_member` inverts `subagents_dir_for`, the one
+    /// `group_members_for` reads forwards.
+    ///
+    /// Everything else under the root is `None`, and the exclusions matter
+    /// as much as the mappings: the project directory itself, a `CLAUDE.md`,
+    /// and anything under the private `memory/` directory all fail to be a
+    /// session here for the same reasons `discover` never collects them.
+    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        // Containment first: real file, really under the declared root, no
+        // `..` and no symlink in the chain. Refusing a symlinked member is
+        // at least as strict as `group_members_for`, which excludes one.
+        let path = real_file_within_root(&self.root, path)?;
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            return None;
+        }
+        if let Some(parent) = parent_session_for_member(&path) {
+            // The parent must itself be a real session file under the root.
+            // A `subagents/` directory whose `<uuid>.jsonl` is missing is an
+            // orphan, and `discover` refuses to offer those too.
+            let parent = real_file_within_root(&self.root, &parent)?;
+            return is_top_level_session_path(&self.root, &parent).then_some(parent);
+        }
+        is_top_level_session_path(&self.root, &path).then_some(path)
     }
 }
 
@@ -350,6 +386,61 @@ fn push_group_if_jsonl(
     });
 }
 
+/// The directory name Claude Code writes delegated transcripts into.
+const SUBAGENTS_DIR_NAME: &str = "subagents";
+
+/// Where the delegated transcripts of the top-level session file `parent`
+/// live: `<project-dir>/<session-uuid>/subagents/`.
+///
+/// The single statement of the parent-to-member layout. `group_members_for`
+/// reads it forwards and `parent_session_for_member` inverts it; neither
+/// spells the layout out for itself, so the two cannot drift apart.
+fn subagents_dir_for(parent: &Path) -> Option<PathBuf> {
+    let (stem, dir) = (parent.file_stem()?, parent.parent()?);
+    Some(dir.join(stem).join(SUBAGENTS_DIR_NAME))
+}
+
+/// The top-level session file that owns the session directory
+/// `<project-dir>/<session-uuid>/`.
+///
+/// Appends the extension rather than `set_extension`, which would eat an
+/// existing suffix -- a directory named `a.b` must yield `a.b.jsonl` or
+/// nothing, never `a.jsonl`, which names a different session.
+fn session_file_for_session_dir(session_dir: &Path) -> Option<PathBuf> {
+    let mut file_name = session_dir.file_name()?.to_os_string();
+    file_name.push(".jsonl");
+    Some(session_dir.with_file_name(file_name))
+}
+
+/// The top-level session file a delegated transcript belongs to, or `None`
+/// if `member` is not laid out as one.
+///
+/// This is the group-address rule -- the reason `SessionRef::path` stays the
+/// parent and `group_modified_at` exists -- read backwards, and it is
+/// deliberately not an independent re-derivation of it. The candidate parent
+/// is proposed by inverting the layout and is then required to round-trip
+/// through `subagents_dir_for`, the same function `group_members_for` uses
+/// to find members in the first place. If the two ever disagreed, this would
+/// return `None` rather than invent an address the group rule would not
+/// recognise.
+///
+/// Purely lexical: it asks what a path is named, not what exists on disk.
+/// Callers check the filesystem.
+fn parent_session_for_member(member: &Path) -> Option<PathBuf> {
+    let subagents_dir = member.parent()?;
+    let session_dir = subagents_dir.parent()?;
+    let candidate = session_file_for_session_dir(session_dir)?;
+    (subagents_dir_for(&candidate)?.as_path() == subagents_dir).then_some(candidate)
+}
+
+/// Whether `path` is addressed as a top-level session file directly inside a
+/// project directory of `root`, which is the only shape `discover` emits a
+/// `SessionRef` for: `<root>/<project-dir>/<session-uuid>.jsonl`.
+fn is_top_level_session_path(root: &Path, path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        && path.parent().and_then(|p| p.parent()) == Some(root)
+}
+
 /// Every validated delegated transcript belonging to the top-level session
 /// file `parent`, sorted by raw file-name bytes, plus a count of the ones
 /// excluded.
@@ -369,13 +460,15 @@ fn push_group_if_jsonl(
 fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
     let mut members = Vec::new();
     let mut excluded = 0usize;
-    let (Some(stem), Some(dir)) = (parent.file_stem(), parent.parent()) else {
+    let Some(stem) = parent.file_stem() else {
         return (members, excluded);
     };
     // Known layout only: `<project-dir>/<session-uuid>/subagents/*.jsonl`.
     // Deliberately not a general recursive walk -- an unrelated nested
     // directory under a session-uuid dir must not be swept in.
-    let subagents_dir = dir.join(stem).join("subagents");
+    let Some(subagents_dir) = subagents_dir_for(parent) else {
+        return (members, excluded);
+    };
     // `read_dir` FOLLOWS a symlinked directory. A `subagents` symlink
     // planted by any process with write access under the transcript root
     // would otherwise steer discovery at arbitrary directories, and
@@ -1255,6 +1348,187 @@ mod tests {
         assert_eq!(
             found[0].group_member_count, 0,
             "memory files were attached to the session as group members"
+        );
+    }
+
+    /// A delegated transcript is not a session; its parent is.
+    ///
+    /// This is the group-address rule seen from the event side. If a
+    /// subagent transcript mapped to itself, event-driven scanning would
+    /// scope a scan to an address the queue has never heard of, and the 911
+    /// files describing 69 conversations would be back.
+    #[test]
+    fn a_subagent_transcript_maps_to_the_parent_session() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a"), ("agent-b.jsonl", "b")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let subagents = subagents_dir_for(&parent).unwrap();
+
+        for member in ["agent-a.jsonl", "agent-b.jsonl"] {
+            assert_eq!(
+                source.session_for_path(&subagents.join(member)),
+                Some(parent.clone()),
+                "{member} must address the conversation, not itself"
+            );
+        }
+
+        // And the address it produces is the one discovery emits, not
+        // merely something shaped like it.
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, parent);
+    }
+
+    #[test]
+    fn a_top_level_session_maps_to_itself() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        assert_eq!(source.session_for_path(&parent), Some(parent.clone()));
+    }
+
+    #[test]
+    fn nothing_that_is_not_a_session_maps_to_one() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let project_dir = parent.parent().unwrap().to_path_buf();
+
+        // The private auto-memory directory, by both of the mechanisms
+        // `private_auto_memory_is_never_collected` pins: a `.md` beside the
+        // transcripts, and a `.jsonl` inside `memory/` that no extension
+        // filter could exclude.
+        let memory = project_dir.join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(memory.join("some_note.md"), "private").unwrap();
+        std::fs::write(memory.join("not-a-transcript.jsonl"), "{}\n").unwrap();
+        std::fs::write(project_dir.join("CLAUDE.md"), "notes").unwrap();
+
+        // An orphan: a delegated transcript whose parent file is gone. The
+        // walk refuses to offer those, so no event may name one either.
+        let orphan_dir = project_dir
+            .join("44444444-4444-4444-4444-444444444444")
+            .join("subagents");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("agent-x.jsonl"), "{}\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("elsewhere.jsonl"), "{}\n").unwrap();
+
+        for path in [
+            memory.join("some_note.md"),
+            memory.join("not-a-transcript.jsonl"),
+            project_dir.join("CLAUDE.md"),
+            orphan_dir.join("agent-x.jsonl"),
+            // Directories are not sessions, at any level.
+            project_dir.clone(),
+            root.path().to_path_buf(),
+            subagents_dir_for(&parent).unwrap(),
+            // Outside the root entirely.
+            outside.path().join("elsewhere.jsonl"),
+            // Missing files are not sessions either.
+            project_dir.join("55555555-5555-5555-5555-555555555555.jsonl"),
+        ] {
+            assert_eq!(
+                source.session_for_path(&path),
+                None,
+                "{} must not address a session",
+                path.display()
+            );
+        }
+    }
+
+    /// The mapping is an addressing surface fed by the operating system, so
+    /// it must be at least as strict as
+    /// `discovery_refuses_symlinks_that_escape_the_transcript_root`.
+    ///
+    /// Both escapes that test plants are checked here, against a fixture
+    /// whose parent session file really exists -- so a `None` answer is the
+    /// symlink being refused and not merely an orphan being skipped -- plus
+    /// the traversal case, which has no discovery equivalent because
+    /// discovery only ever walks outwards from the root while this is
+    /// handed a path.
+    #[test]
+    #[cfg(unix)]
+    fn path_mapping_refuses_symlinks_and_traversal_out_of_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secrets.jsonl");
+        std::fs::write(&secret, "{}\n").unwrap();
+
+        let (root, parent) = group_fixture(&[("agent-real.jsonl", "real")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let project_dir = parent.parent().unwrap().to_path_buf();
+        let subagents = subagents_dir_for(&parent).unwrap();
+
+        // A symlinked member beside a real one, under a real parent.
+        let linked_member = subagents.join("agent-link.jsonl");
+        symlink(&secret, &linked_member).unwrap();
+
+        // A second session whose `subagents` directory is itself a symlink
+        // pointing out of the root.
+        let session_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let parent_b = project_dir.join(format!("{session_b}.jsonl"));
+        std::fs::write(&parent_b, record(session_b, "b")).unwrap();
+        std::fs::create_dir_all(project_dir.join(session_b)).unwrap();
+        symlink(
+            outside.path(),
+            project_dir.join(session_b).join(SUBAGENTS_DIR_NAME),
+        )
+        .unwrap();
+
+        for escape in [
+            linked_member,
+            project_dir
+                .join(session_b)
+                .join(SUBAGENTS_DIR_NAME)
+                .join("secrets.jsonl"),
+            // Spelled with the root as a prefix, but not under it.
+            project_dir.join("..").join("..").join("secrets.jsonl"),
+            root.path().join("..").join("secrets.jsonl"),
+        ] {
+            assert_eq!(
+                source.session_for_path(&escape),
+                None,
+                "{} must not address a session",
+                escape.display()
+            );
+        }
+
+        // The control: the real member beside the symlinked one still maps,
+        // so this test cannot pass by refusing everything.
+        assert_eq!(
+            source.session_for_path(&subagents.join("agent-real.jsonl")),
+            Some(parent.clone())
+        );
+    }
+
+    /// The inverse rule is checked against the forward one rather than
+    /// restated, so a path that does not round-trip is refused instead of
+    /// being given an address `group_members_for` would not recognise.
+    #[test]
+    fn the_parent_rule_round_trips_through_the_member_rule() {
+        let parent = PathBuf::from("/r/-proj/22222222-2222-2222-2222-222222222222.jsonl");
+        let subagents = subagents_dir_for(&parent).unwrap();
+        assert_eq!(
+            parent_session_for_member(&subagents.join("agent-a.jsonl")),
+            Some(parent)
+        );
+        // A file directly in the session directory, and one nested deeper
+        // than the known layout, are neither of them members.
+        assert_eq!(
+            parent_session_for_member(Path::new(
+                "/r/-proj/22222222-2222-2222-2222-222222222222/loose.jsonl"
+            )),
+            None
+        );
+        assert_eq!(
+            parent_session_for_member(&subagents.join("deeper").join("agent-a.jsonl")),
+            None
+        );
+        // A dotted session directory must not be truncated into a
+        // different session's address.
+        assert_eq!(
+            parent_session_for_member(Path::new("/r/-proj/a.b/subagents/agent-a.jsonl")),
+            Some(PathBuf::from("/r/-proj/a.b.jsonl"))
         );
     }
 
