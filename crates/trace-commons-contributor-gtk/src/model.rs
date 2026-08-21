@@ -368,6 +368,10 @@ pub struct Settings {
     #[serde(default)]
     pub approval_hold_secs: u64,
     #[serde(default)]
+    pub max_uploads_per_day: u64,
+    #[serde(default)]
+    pub max_bytes_per_day: u64,
+    #[serde(default)]
     pub local_notifications: bool,
     #[serde(default)]
     pub near_ai_configured: bool,

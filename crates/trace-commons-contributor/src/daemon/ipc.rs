@@ -3757,6 +3757,78 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    #[test]
+    fn set_settings_raises_the_daily_caps_persists_and_the_next_upload_pass_sees_it() {
+        // The scenario this exists for: a contributor whose byte budget was
+        // already spent, with approved traces waiting, raises the cap
+        // through `set_settings` -- no restart, no hand-edited file.
+        let s = shared();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.uploads_today =
+                super::super::settings::DaemonSettings::default().max_uploads_per_day;
+            state.bytes_today = 204_659_969;
+        }
+        assert!(
+            !super::super::uploader::cap_check(
+                &s.state.lock().unwrap(),
+                1,
+                &s.settings.lock().unwrap(),
+            ),
+            "sanity: the default budget is exhausted before the raise"
+        );
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"max_uploads_per_day": 200, "max_bytes_per_day": 2_147_483_648u64}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let body = r.result.unwrap();
+        assert_eq!(body["max_uploads_per_day"], 200);
+        assert_eq!(body["max_bytes_per_day"], 2_147_483_648u64);
+
+        // Live: the in-memory settings the next upload pass reads are
+        // already updated, with no restart.
+        assert!(
+            super::super::uploader::cap_check(
+                &s.state.lock().unwrap(),
+                1,
+                &s.settings.lock().unwrap(),
+            ),
+            "the raised cap must be visible to the very next cap check"
+        );
+
+        // Persisted: reloading from disk (what a restart does) must agree
+        // with the live value, or a restart would silently revert what the
+        // contributor just did.
+        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
+        assert_eq!(reloaded.max_uploads_per_day, 200);
+        assert_eq!(reloaded.max_bytes_per_day, 2_147_483_648);
+    }
+
+    #[test]
+    fn set_settings_rejects_a_daily_cap_above_the_ceiling() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"max_uploads_per_day": 1_000_001u64}),
+            ),
+        );
+        let err = r.error.expect("an out-of-range cap must be refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert_eq!(err.message, "settings-invalid-value");
+        // Unchanged: the default is untouched by the rejected write.
+        assert_eq!(
+            s.settings.lock().unwrap().max_uploads_per_day,
+            super::super::settings::DaemonSettings::default().max_uploads_per_day
+        );
+    }
+
     fn seed_entry_in_state(s: &DaemonShared, state: QueueState) -> Uuid {
         let entry_id = uuid::Uuid::new_v4();
         let mut queue = s.queue.lock().unwrap();
