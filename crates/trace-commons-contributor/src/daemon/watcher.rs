@@ -207,11 +207,22 @@ fn tick_over(
             // from a different one, so a grown session (a new delegated
             // transcript included) still reaches `replace_live_at_path` and
             // still supersedes.
-            let already_offered = {
+            //
+            // The same lock answers the other half of "can this load
+            // produce anything?": a session the queue holds no offer for at
+            // all, because the queue is at `max_queue_entries`. See
+            // `Queue::load_can_land` -- and note it answers `true`
+            // whenever a live entry sits at this path, so a grown session
+            // with a live card still reaches the load and still
+            // supersedes, full queue or not.
+            let (already_offered, can_land) = {
                 let queue = shared.queue.lock().expect("queue lock");
-                queue
-                    .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
-                    .map(|e| (e.entry_id, e.project_key.clone(), e.state))
+                (
+                    queue
+                        .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
+                        .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
+                    queue.load_can_land(&obs.path, max_queue_entries),
+                )
             };
             if let Some((entry_id, project_key, state)) = already_offered {
                 // The project key is taken from the entry rather than
@@ -244,6 +255,19 @@ fn tick_over(
                 continue;
             }
 
+            // A full queue with no live entry at this path: whatever the
+            // load produced, `replace_live_at_path` would refuse it
+            // `queue-full` and the work would be discarded. Refuse it here
+            // instead, before the read, the parse and the group hash, and
+            // raise the same health label the refusal below raises -- the
+            // contributor's queue is genuinely full and sessions are going
+            // unoffered, which is the same condition either way.
+            if !can_land {
+                let mut health = shared.health.lock().expect("health lock");
+                health.fail(health::LABEL_QUEUE_FULL, now);
+                continue;
+            }
+
             let cwd = resolve_cwd(shared, source.as_ref(), &session_ref, &obs);
             let project_key = project_key_for(cwd.as_deref());
             let mode = {
@@ -256,8 +280,10 @@ fn tick_over(
             }
 
             // Hashing reads the whole group, so it happens only here: for a
-            // session the queue has no unchanged offer for. Everything
-            // already offered at this exact observation was skipped above.
+            // session the queue has no unchanged offer for and could still
+            // hold the result of. Everything already offered at this exact
+            // observation, and everything a full queue could not have
+            // taken, was skipped above.
             let Ok(transcript) = source.load(&session_ref) else {
                 continue;
             };
@@ -608,6 +634,12 @@ mod tests {
             )
             .unwrap();
             path
+        }
+
+        /// Shrink the queue cap, so a test can reach "the queue is full"
+        /// with two sessions instead of five hundred.
+        fn set_max_queue_entries(&self, max: usize) {
+            self.shared.settings.lock().unwrap().max_queue_entries = max;
         }
 
         fn set_mode(&self, project: &str, mode: ProjectMode) {
@@ -1406,6 +1438,101 @@ mod tests {
         assert!(
             !{ f.shared.health.lock().unwrap().ok() },
             "queue-full must persist on dedup re-observation"
+        );
+    }
+    #[tokio::test]
+    async fn a_session_a_full_queue_cannot_hold_is_never_loaded() {
+        // The bug. With a corpus larger than `max_queue_entries` -- 3,152
+        // sessions against a cap of 500 on the machine that reported this
+        // -- every session the queue has no room for is eligible, has no
+        // unchanged offer to be skipped by, and so was read, parsed and
+        // hashed in full on every sixty-second poll, purely to be refused
+        // `queue-full` afterwards. 74.6% of one core, on an idle app.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1, "the queue is now at capacity");
+
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let c = loads();
+        for minute in 1..=3 {
+            f.tick_counted(at(&format!("2030-01-01T00:0{minute}:00Z")), &c);
+        }
+        assert_eq!(
+            count(&c),
+            0,
+            "a session the full queue cannot hold must not be read at all"
+        );
+        assert_eq!(f.queue_len(), 1, "and nothing lands, exactly as before");
+        assert!(
+            !{ f.shared.health.lock().unwrap().ok() },
+            "the contributor must still be told the queue is full"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grown_session_with_a_live_card_still_loads_and_supersedes_at_capacity() {
+        // The trap the capacity pre-check must not fall into. A naive "the
+        // queue is full, skip" would mean a conversation that grew could
+        // never supersede its own stale card once the queue filled up, and
+        // the contributor would be left looking at an offer describing
+        // content that has moved on. `replace_live_at_path` frees the slot
+        // it is about to reuse, so this load can land and must happen.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first_hash = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].session_hash.clone()
+        };
+        assert_eq!(f.queue_len(), 1, "the queue is at capacity");
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(
+            count(&c),
+            1,
+            "a grown session with a live card must still be re-read at capacity"
+        );
+
+        let queue = f.shared.queue.lock().unwrap();
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == first_hash)
+            .expect("the first offer is still on record");
+        assert_eq!(old.state, QueueState::Superseded, "{:?}", queue.all());
+        assert_eq!(queue.pending().len(), 1, "exactly one live offer");
+        assert_ne!(
+            queue.pending()[0].session_hash,
+            first_hash,
+            "and it describes the session as it now stands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_with_room_still_loads_and_offers_every_session() {
+        // The other side of the check: below the cap nothing changes, and a
+        // second session is read once and queued.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(10);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let c = loads();
+        let report = f.settle_counted(at("2030-01-01T00:01:00Z"), &c);
+        assert_eq!(report.queued, 1, "{report:?}");
+        assert_eq!(count(&c), 1, "the new session is read exactly once");
+        assert_eq!(f.queue_len(), 2);
+        assert!(
+            { f.shared.health.lock().unwrap().ok() },
+            "a queue with room must not report queue-full"
         );
     }
 }
