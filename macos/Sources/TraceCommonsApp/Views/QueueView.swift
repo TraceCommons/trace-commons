@@ -58,6 +58,9 @@ struct QueueContent: View {
             if let health = model.health {
                 HealthBanner(health: health)
             }
+            if let budget = model.budgetHealth {
+                HealthBanner(health: budget)
+            }
             if let undo = model.undo {
                 UndoBar(
                     undo: undo,

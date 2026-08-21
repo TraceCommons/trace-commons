@@ -137,6 +137,10 @@ struct MenuBarContent: View {
             Text(health.title)
             Text(health.detail.replacingOccurrences(of: "\n", with: " "))
         }
+        if let budget = model.budgetHealth {
+            Text(budget.title)
+            Text(budget.detail.replacingOccurrences(of: "\n", with: " "))
+        }
     }
 
     @ViewBuilder

@@ -163,6 +163,73 @@ pub fn join(
     records
 }
 
+/// Add a record for every receipt the cache does not already know about,
+/// carrying the receipt's own locally recorded status (`submitted`).
+///
+/// This exists because "uploaded, no verdict yet" is a real state that was
+/// invisible for up to a full `history_poll_secs` -- half an hour on the
+/// machine this was diagnosed on. The state itself needed nothing new to be
+/// persisted: `submit` already writes a receipt with status `submitted` the
+/// moment an upload lands, and [`join`] already reports exactly that for a
+/// receipt the server has said nothing about. The only thing missing was
+/// that nothing rebuilt the cache between the upload and the next poll, so
+/// the rollup's `submitted` bucket read zero while a dozen traces were
+/// genuinely in flight.
+///
+/// So this is deliberately the *cheap* half: no network call, purely local,
+/// and additive only.
+///
+/// - It never rewrites a record that is already cached. A verdict already
+///   read back, or a local `withdrawn` marker, must not be reverted to
+///   `submitted` by a pass that spoke to no server.
+/// - `last_refreshed_at` stays `None`, because nothing has been refreshed
+///   from the server for this row. Claiming otherwise would be the same
+///   dishonesty in the other direction.
+/// - Nothing here can make the count only go up: the next [`join`] rebuilds
+///   every record from receipts plus the server's read-back, so a verdict,
+///   a withdrawal, or a quarantine moves the row out of `submitted` on its
+///   own.
+///
+/// Superseded, refused, and stale-approval entries never reach this at all:
+/// no upload happened, so no receipt was written.
+///
+/// Returns whether anything was added.
+pub fn merge_new_receipts(
+    records: &mut Vec<HistoryRecord>,
+    receipts: &[Receipt],
+    labels: &BTreeMap<Uuid, String>,
+) -> bool {
+    let known: std::collections::BTreeSet<Uuid> = records.iter().map(|r| r.submission_id).collect();
+    let mut added = false;
+    for r in receipts {
+        if known.contains(&r.submission_id) {
+            continue;
+        }
+        records.push(HistoryRecord {
+            submission_id: r.submission_id,
+            submitted_at: r.submitted_at,
+            project_label: labels
+                .get(&r.submission_id)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string()),
+            source: r.source.clone(),
+            session_hash: r.session_hash.clone(),
+            status: r.status.clone(),
+            consent_scopes: Vec::new(),
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: Vec::new(),
+            last_refreshed_at: None,
+            withdrawn_at: None,
+        });
+        added = true;
+    }
+    if added {
+        records.sort_by_key(|r| std::cmp::Reverse(r.submitted_at));
+    }
+    added
+}
+
 /// Stamp a local-only withdrawal marker onto every record for
 /// `submission_id`: `status` becomes [`STATUS_WITHDRAWN`] and `withdrawn_at`
 /// is set to `at`. Returns whether any record matched.
@@ -314,6 +381,124 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert(id, "proj".to_string());
         m
+    }
+
+    #[test]
+    fn a_receipt_the_cache_has_never_seen_becomes_a_sent_and_waiting_row() {
+        // The state that read zero for half an hour after every upload.
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let mut records = Vec::new();
+        assert!(merge_new_receipts(&mut records, &receipts, &labels(id)));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].submission_id, id);
+        assert_eq!(records[0].status, STATUS_SUBMITTED);
+        assert_eq!(records[0].project_label, "proj");
+        // Nothing was refreshed from the server, and the row says so
+        // rather than claiming a read-back that never happened.
+        assert_eq!(records[0].last_refreshed_at, None);
+        assert_eq!(records[0].credit_points_pending, 0.0);
+        assert_eq!(records[0].credit_points_final, None);
+        // And it lands in the bucket a contributor reads as "sent, waiting
+        // to hear back".
+        let r = rollup(&records, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.submitted, 1);
+        assert_eq!(r.all_time.accepted, 0);
+    }
+
+    #[test]
+    fn merging_never_reverts_a_verdict_already_read_back() {
+        // A local pass that spoke to no server must not overwrite a status
+        // that came from one.
+        let id = Uuid::new_v4();
+        let mut records = vec![HistoryRecord {
+            submission_id: id,
+            status: STATUS_ACCEPTED.into(),
+            credit_points_final: Some(2.0),
+            ..record("accepted", "2026-08-08T10:00:00Z")
+        }];
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        assert!(!merge_new_receipts(&mut records, &receipts, &labels(id)));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, STATUS_ACCEPTED);
+        assert_eq!(records[0].credit_points_final, Some(2.0));
+    }
+
+    #[test]
+    fn merging_never_resurrects_a_withdrawn_row_as_sent() {
+        let id = Uuid::new_v4();
+        let mut records = vec![HistoryRecord {
+            submission_id: id,
+            ..record("submitted", "2026-08-08T10:00:00Z")
+        }];
+        assert!(mark_withdrawn(&mut records, id, at("2026-08-08T11:00:00Z")));
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        assert!(!merge_new_receipts(&mut records, &receipts, &labels(id)));
+        assert_eq!(records[0].status, STATUS_WITHDRAWN);
+        assert_eq!(records[0].withdrawn_at, Some(at("2026-08-08T11:00:00Z")));
+    }
+
+    #[test]
+    fn a_verdict_moves_the_row_out_of_sent_and_waiting() {
+        // The count must be able to come back down. A locally merged row is
+        // replaced wholesale by the next server read-back.
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let mut records = Vec::new();
+        merge_new_receipts(&mut records, &receipts, &labels(id));
+        assert_eq!(
+            rollup(&records, at("2026-08-08T12:00:00Z"))
+                .all_time
+                .submitted,
+            1
+        );
+
+        let refreshed = join(
+            &receipts,
+            &[update(id, STATUS_ACCEPTED, 1.5, Some(2.0))],
+            &labels(id),
+            at("2026-08-08T12:00:00Z"),
+        );
+        let r = rollup(&refreshed, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.submitted, 0);
+        assert_eq!(r.all_time.accepted, 1);
+    }
+
+    #[test]
+    fn merged_rows_stay_newest_first() {
+        let old = Uuid::new_v4();
+        let new = Uuid::new_v4();
+        let mut records = Vec::new();
+        merge_new_receipts(
+            &mut records,
+            &[
+                receipt(old, "sha256:aa", "submitted", "2026-08-08T10:00:00Z"),
+                receipt(new, "sha256:bb", "submitted", "2026-08-08T18:00:00Z"),
+            ],
+            &BTreeMap::new(),
+        );
+        assert_eq!(records[0].submission_id, new);
+        assert_eq!(records[1].submission_id, old);
     }
 
     #[test]
