@@ -1099,9 +1099,21 @@ mod tests {
         let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
             .await
             .unwrap();
+        // The pin moved once, deliberately, for issue #373: this fixture
+        // pastes an API key, and a scrubbed secret is now the Medium
+        // found-and-removed floor rather than terminal High. That changes
+        // `privacy.residual_pii_risk` and its warning string, which are
+        // inside the hashed bytes. Asserting the tier here keeps the pin
+        // honest -- if it moves again, this line says whether the risk
+        // rule moved with it.
+        assert_eq!(
+            summary.residual_risk, "medium",
+            "a fixture whose only finding is a successfully scrubbed secret \
+             must be Medium, not High"
+        );
         assert_eq!(
             summary.envelope_digest,
-            "sha256:54b0ddf7fd6d16af22ec3ac1621ec587561d29d63a5e30371bb619a4729f0aa2",
+            "sha256:0dcabcd492bfd9a6f6ca9c5c66ecd4299f6a3e9f3902627612cc4935deb4d745",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"
