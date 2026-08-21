@@ -62,6 +62,12 @@
   </provides>
 
   <releases>
+    <release version="0.4.6" date="2026-08-21">
+      <description>
+        <p>The app now costs almost nothing when it has nothing to do. It was re-reading and re-hashing every waiting session on every check, including the ones it had no room to offer you, which kept a processor core busy continuously and read gigabytes a minute to no purpose. It also no longer rewrites its records when nothing has changed.</p>
+        <p>Privacy risk is also labelled more honestly. A trace where the scrubber found a secret and removed it was being marked high risk, which described the scrubber working rather than anything left behind, and held those traces back from being accepted. High is now reserved for content redaction did not resolve. A privacy filter that could not examine the text is treated as high risk rather than as clean.</p>
+      </description>
+    </release>
     <release version="0.4.5" date="2026-08-21">
       <description>
         <p>The watcher no longer re-reads and re-hashes every waiting session on every poll, so the app stops working when there is nothing to do. The daily upload budget can be changed without editing a file, and the app says when uploads are waiting on it.</p>
