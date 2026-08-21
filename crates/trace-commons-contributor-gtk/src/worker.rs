@@ -16,7 +16,7 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DaemonEvent};
 use crate::model::PreviewSummary;
 
 pub enum Job {
@@ -39,7 +39,7 @@ pub enum Outcome {
 pub struct Worker {
     jobs: mpsc::Sender<(u64, Job)>,
     pub results: async_channel::Receiver<(u64, Outcome)>,
-    pub events: async_channel::Receiver<String>,
+    pub events: async_channel::Receiver<DaemonEvent>,
     hosts_the_loop: bool,
     next_id: std::cell::Cell<u64>,
 }
@@ -63,8 +63,8 @@ impl Worker {
 
             if let Ok(mut stream) = backend.events() {
                 std::thread::spawn(move || {
-                    while let Some(name) = stream.next() {
-                        if event_tx.send_blocking(name).is_err() {
+                    while let Some(event) = stream.next() {
+                        if event_tx.send_blocking(event).is_err() {
                             return;
                         }
                     }
