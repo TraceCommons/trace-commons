@@ -237,6 +237,18 @@ pub fn entry_id_for(session_hash: &str) -> Uuid {
 /// matches the description it was offered under.
 pub const REASON_CHANGED: &str = "session-changed-after-offer";
 
+/// The reason label `dismiss` records: the contributor looked at this
+/// session and said no.
+///
+/// Load-bearing, not decoration. `Refused` has two authors -- the
+/// contributor, via this label, and the pipeline, which records its own
+/// labels when it will not send some bytes (a residual secret, an
+/// unavailable privacy filter). Only the first is a decision about the
+/// *conversation*, and `Queue::dismissed_at_path` distinguishes them by
+/// this exact string. Changing it in one place and not the other would
+/// silently start re-offering declined sessions again.
+pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
+
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
 /// Factored out so `supersede` and any future re-offer path cannot drift:
@@ -344,6 +356,51 @@ impl Queue {
 
     pub fn all(&self) -> &[QueueEntry] {
         &self.entries
+    }
+
+    /// Has the contributor declined the session living at `path`?
+    ///
+    /// "Not this one" is a decision about the conversation, not about the
+    /// byte range it happened to have when the card was drawn. `dismiss`
+    /// records it on one entry, and an entry is identified by content hash
+    /// -- so the *hash* was declined, and the moment the contributor typed
+    /// the next message the session hashed to something else, the watcher
+    /// had nothing telling it a decision had been made, and it offered the
+    /// same conversation again. On a session still being worked in, that
+    /// is a card that comes back every poll for the rest of the day. In an
+    /// armed project it was worse than an annoyance: the re-offer landed
+    /// `Approved`, and the declined conversation uploaded unattended.
+    ///
+    /// The path is the daemon's one stable address for a conversation --
+    /// `replace_live_at_path`, `unchanged_offer_at_path` and `load_can_land`
+    /// all key on it, and for claude-code it deliberately stays the parent
+    /// file even as delegated transcripts come and go beside it. So the
+    /// decision is answered from the path too, and it is answered from the
+    /// queue rather than from a parallel map in `DaemonState`: the queue
+    /// file is where the dismissal is already durably recorded, which means
+    /// dismissals made before this existed are honoured with no migration,
+    /// and there is no second source of truth to drift.
+    ///
+    /// Only `REASON_DISMISSED` counts. `Refused` has a second author -- the
+    /// pipeline, refusing to send some bytes over a residual secret or an
+    /// unavailable privacy filter -- and that is a verdict on content, not
+    /// on the conversation, so those sessions must still be re-offered when
+    /// they grow.
+    ///
+    /// Permanent, by design. There is no un-dismiss, and nothing compacts
+    /// `Refused` (only `Superseded` is ever dropped, see
+    /// `MAX_SUPERSEDED_ENTRIES`), so the answer does not decay. The
+    /// contributor who wants a declined conversation after all still has
+    /// every other route to it; the daemon simply stops asking. That is the
+    /// fail-closed direction: the cost of honouring a "no" too well is a
+    /// trace that never uploads, and the cost of honouring it too poorly is
+    /// uploading something a contributor explicitly declined.
+    pub fn dismissed_at_path(&self, path: &Path) -> bool {
+        self.entries.iter().any(|e| {
+            e.path == path
+                && e.state == QueueState::Refused
+                && e.reason_label.as_deref() == Some(REASON_DISMISSED)
+        })
     }
 
     pub fn pending(&self) -> Vec<&QueueEntry> {
@@ -989,6 +1046,46 @@ mod tests {
             q.unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_dismissal_is_remembered_against_the_session_not_the_hash() {
+        let mut q = queue_of(vec![entry("sha256:aa", "2026-08-08T12:00:00Z")]);
+        assert!(!q.dismissed_at_path(&the_path()));
+        q.set_state(
+            entry_id_for("sha256:aa"),
+            QueueState::Refused,
+            Some(REASON_DISMISSED.into()),
+        );
+        assert!(
+            q.dismissed_at_path(&the_path()),
+            "the decision is about the conversation at this path"
+        );
+    }
+
+    #[test]
+    fn a_pipeline_refusal_is_not_a_dismissal() {
+        // `Refused` also carries the daemon's own verdicts on content -- a
+        // residual secret, an unavailable privacy filter. Those must not
+        // silence the offer for the whole session.
+        let mut q = queue_of(vec![entry("sha256:aa", "2026-08-08T12:00:00Z")]);
+        q.set_state(
+            entry_id_for("sha256:aa"),
+            QueueState::Refused,
+            Some("residual-secret".into()),
+        );
+        assert!(!q.dismissed_at_path(&the_path()));
+    }
+
+    #[test]
+    fn a_dismissal_says_nothing_about_another_session() {
+        let mut q = queue_of(vec![entry("sha256:aa", "2026-08-08T12:00:00Z")]);
+        q.set_state(
+            entry_id_for("sha256:aa"),
+            QueueState::Refused,
+            Some(REASON_DISMISSED.into()),
+        );
+        assert!(!q.dismissed_at_path(Path::new("/Users/z/.claude/projects/x/other.jsonl")));
     }
 
     #[test]

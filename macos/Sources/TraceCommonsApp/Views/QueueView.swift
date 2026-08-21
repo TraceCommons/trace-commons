@@ -472,7 +472,15 @@ struct QueueRow: View {
                 // app accent, and "Not this one" rendered in the same
                 // green as "Look inside" reads as a second approval.
                 .tint(.primary)
-                .help("Skips this session only. This project will keep being offered.")
+                // Says "for good" because it is: a dismissal is a decision
+                // about the conversation, not about the size it happened to
+                // be when this card was drawn, and there is no un-dismiss.
+                // The second sentence keeps the first from reading like an
+                // opt-out of the whole project.
+                .help("""
+                Skips this session for good, even if you keep working in it. \
+                This project will keep being offered.
+                """)
             Button("Submit", action: onSubmit)
                 // Untinted, and the same weight as "Not this one": a
                 // shortcut is not a recommendation. See the note above.

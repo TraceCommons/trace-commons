@@ -902,7 +902,7 @@
                                                 <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                         Content="Not this one"
                                                         Tag="{x:Bind}"
-                                                        ToolTipService.ToolTip="Skips this session only. This project will keep being offered."
+                                                        ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
                                                         Click="OnNotThisOne" />
                                                 <Button Style="{StaticResource TcPrimaryButtonStyle}"
                                                         Content="Submit"

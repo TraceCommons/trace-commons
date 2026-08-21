@@ -383,7 +383,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
-| `dismiss` | `entry_id` | `ok: true` | |
+| `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
@@ -650,6 +650,30 @@ cancels on every card leaving the list will hit it constantly.
 
 `dismiss` cancels an entry's scheduled preview implicitly. `approve` does
 not -- it needs the envelope it would be cancelling.
+
+### `dismiss` is permanent
+
+A queue entry is identified by the hash of its content, so a dismissal
+recorded on the entry alone was a decision about a byte range: the moment
+the contributor typed the next message into the same conversation it hashed
+to something else, and the watcher offered it again as a brand-new
+`pending` card. In a project set to `auto_upload` the re-offer arrived
+already `approved`, so a declined conversation uploaded unattended.
+
+`dismiss` therefore declines the **session**, addressed the way the daemon
+addresses every session -- by its path. Once dismissed, the watcher skips
+that session for good: no new `pending` card, no `approved` one, and no
+re-read (the skip sits in front of the load, so a declined conversation
+someone keeps working in costs nothing per poll). Arming a project does not
+override it -- `auto_upload` is a standing yes to sessions the contributor
+has not ruled on, not to one they have.
+
+There is no un-dismiss. The record is the dismissed entry itself, which
+lives in the queue file with reason `dismissed-by-contributor` and is never
+compacted, so dismissals made by older daemons are honoured with no
+migration. A `refused` entry carrying any *other* reason is the daemon's
+verdict on some bytes rather than the contributor's on the conversation,
+and does not suppress anything.
 
 **Too large.** A session over the admission cap is refused rather than
 previewed, and the refusal carries **no size estimate of any kind**:
