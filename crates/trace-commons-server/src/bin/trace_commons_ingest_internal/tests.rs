@@ -80009,10 +80009,13 @@ fn pii_backstop_tick_summary_defaults_and_tallies() {
     let mut summary = PiiBackstopDriverTickSummary::default();
     assert_eq!(summary.done, 0);
     assert_eq!(summary.failed, 0);
+    assert_eq!(summary.exhausted, 0);
     summary.done += 2;
     summary.failed += 1;
+    summary.exhausted += 1;
     assert_eq!(summary.done, 2);
     assert_eq!(summary.failed, 1);
+    assert_eq!(summary.exhausted, 1);
 }
 
 // =======================================================================
@@ -80147,6 +80150,20 @@ struct PiiBackstopDriverTestDb {
     /// invalidation bookkeeping may be observed in this case — that is
     /// exactly the atomicity the fix under test provides.
     fail_release_invalidation: std::sync::atomic::AtomicBool,
+    /// Every `update_trace_submission_status` call, as
+    /// `(tenant, submission, status, actor_ref, reason)`. The real Postgres
+    /// impl writes the audit row inside that same call, so recording its
+    /// actor/reason arguments is how a test asserts the audit shape of a
+    /// transition made through it.
+    status_transitions: std::sync::RwLock<
+        Vec<(
+            String,
+            Uuid,
+            StorageTraceCorpusStatus,
+            String,
+            Option<String>,
+        )>,
+    >,
 }
 
 impl PiiBackstopDriverTestDb {
@@ -80165,7 +80182,33 @@ impl PiiBackstopDriverTestDb {
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
             pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
+            status_transitions: std::sync::RwLock::new(Vec::new()),
         }
+    }
+
+    /// Pre-seed the PII-backstop attempt counter so a test can drive a
+    /// submission to the exhaustion threshold in a single tick.
+    fn seed_pii_attempts(&self, tenant_id: &str, submission_id: Uuid, attempts: i32) {
+        self.pii_backstop_attempts.write().unwrap().insert(
+            (tenant_id.to_string(), submission_id),
+            (attempts, String::new()),
+        );
+    }
+
+    /// The `(status, actor_ref, reason)` of every status transition recorded
+    /// for one submission, in call order.
+    fn status_transitions_of(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<(StorageTraceCorpusStatus, String, Option<String>)> {
+        self.status_transitions
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(t, s, _, _, _)| t == tenant_id && *s == submission_id)
+            .map(|(_, _, status, actor, reason)| (*status, actor.clone(), reason.clone()))
+            .collect()
     }
 
     /// Arrange for the next `release_pii_backstop_hold` call to fail as if the
@@ -80735,7 +80778,11 @@ async fn pii_backstop_driver_tick_releases_held_submission() {
     let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
         .await
         .expect("healthy tick succeeds");
-    assert_eq!((summary.done, summary.failed), (1, 0), "{summary:?}");
+    assert_eq!(
+        (summary.done, summary.failed, summary.exhausted),
+        (1, 0, 0),
+        "{summary:?}"
+    );
     assert_eq!(
         db.status_of("tenant-a", submission_id),
         Some(StorageTraceCorpusStatus::Accepted),
@@ -80796,7 +80843,11 @@ async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
     let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
         .await
         .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
-    assert_eq!((summary.done, summary.failed), (0, 1), "{summary:?}");
+    assert_eq!(
+        (summary.done, summary.failed, summary.exhausted),
+        (0, 1, 0),
+        "{summary:?}"
+    );
     assert_eq!(
         db.status_of("tenant-a", submission_id),
         Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
@@ -80805,6 +80856,152 @@ async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
     assert!(
         db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0) >= 1,
         "the failed attempt must be bumped"
+    );
+}
+
+// --- (b2) exhaustion is terminal: quarantine instead of an eternal hold --
+
+/// (b2) A failure BELOW the retry threshold keeps the pre-existing
+/// hold-and-retry behaviour exactly as it was: the attempt counter is bumped,
+/// the submission stays `AwaitingPiiBackstop`, it is tallied as `failed` (not
+/// `exhausted`), and no status transition is written at all.
+#[tokio::test]
+async fn pii_backstop_driver_tick_below_threshold_still_holds_and_retries() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    // max_attempts is 5; this failure takes the counter to 4, one short.
+    let config = backstop_driver_config();
+    db.seed_pii_attempts("tenant-a", submission_id, config.max_attempts - 2);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert_eq!(
+        (summary.done, summary.failed, summary.exhausted),
+        (0, 1, 0),
+        "a sub-threshold failure must tally as failed, not exhausted: {summary:?}"
+    );
+    assert_eq!(
+        db.pii_attempts_of("tenant-a", submission_id),
+        Some(config.max_attempts - 1),
+        "the attempt counter must be bumped one short of the threshold"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "a sub-threshold failure must leave the submission held for retry"
+    );
+    assert!(
+        db.status_transitions_of("tenant-a", submission_id)
+            .is_empty(),
+        "no status transition may be written below the retry threshold"
+    );
+
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        record.status,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "the on-disk record must stay held below the retry threshold"
+    );
+}
+
+/// (b2) The failure that takes the attempt counter TO `max_attempts` is
+/// terminal. Past this point the selection query would never return the row
+/// again, so the driver quarantines it — fail-closed and visible in a queue a
+/// human already reviews — under the label-only
+/// `pii_backstop_attempts_exhausted` reason, recorded through the same
+/// `update_trace_submission_status` call the Postgres backend writes its audit
+/// row from. Nothing is re-stored: the redaction never succeeded, so no
+/// `RescrubbedEnvelope` ref is written.
+#[tokio::test]
+async fn pii_backstop_driver_tick_quarantines_on_attempt_exhaustion() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    // One short of max_attempts, so THIS failure reaches the threshold.
+    let config = backstop_driver_config();
+    db.seed_pii_attempts("tenant-a", submission_id, config.max_attempts - 1);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert_eq!(
+        (summary.done, summary.failed, summary.exhausted),
+        (0, 0, 1),
+        "the terminal failure must tally as exhausted: {summary:?}"
+    );
+    assert_eq!(
+        db.pii_attempts_of("tenant-a", submission_id),
+        Some(config.max_attempts),
+        "the terminal failure must still bump the attempt counter"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Quarantined),
+        "an exhausted submission must be quarantined, not left held forever"
+    );
+
+    let transitions = db.status_transitions_of("tenant-a", submission_id);
+    assert_eq!(
+        transitions,
+        vec![(
+            StorageTraceCorpusStatus::Quarantined,
+            PII_BACKSTOP_DRIVER_ACTOR_REF.to_string(),
+            Some(PII_BACKSTOP_EXHAUSTED_REASON.to_string()),
+        )],
+        "exactly one quarantine transition, audited under the driver actor \
+         and the label-only exhaustion reason code"
+    );
+    assert_eq!(
+        PII_BACKSTOP_EXHAUSTED_REASON, "pii_backstop_attempts_exhausted",
+        "the audit reason must stay a short stable label, never error text"
+    );
+
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "no rescrubbed ref may be written when the redaction never succeeded"
+    );
+    assert!(
+        db.invalidated_kinds_of("tenant-a", submission_id)
+            .is_empty(),
+        "the pre-backstop SubmittedEnvelope ref must stay active: Quarantined \
+         is not a consumer-visible status"
+    );
+
+    let record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_eq!(
+        record.status,
+        TraceCorpusStatus::Quarantined,
+        "the on-disk record must be mirrored to Quarantined"
     );
 }
 
@@ -81009,8 +81206,8 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         tenant_id: &str,
         submission_id: Uuid,
         status: StorageTraceCorpusStatus,
-        _actor_ref: &str,
-        _reason: Option<&str>,
+        actor_ref: &str,
+        reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
         // The backstop release transition. Record the new status so the test
         // can assert the hold was cleared (Accepted/Quarantined) or left held.
@@ -81018,6 +81215,13 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
             .write()
             .unwrap()
             .insert((tenant_id.to_string(), submission_id), status);
+        self.status_transitions.write().unwrap().push((
+            tenant_id.to_string(),
+            submission_id,
+            status,
+            actor_ref.to_string(),
+            reason.map(str::to_string),
+        ));
         Ok(())
     }
     async fn claim_trace_review_lease(

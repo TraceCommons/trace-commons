@@ -1611,11 +1611,14 @@ struct PiiBackstopDriverConfig {
 /// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
 /// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
 /// counts submissions that stayed held on `AwaitingPiiBackstop` after an
-/// adapter/redaction error and had their attempt counter bumped.
+/// adapter/redaction error and had their attempt counter bumped;
+/// `exhausted` counts submissions whose bump reached `max_attempts` and were
+/// therefore quarantined instead of being left held forever.
 #[derive(Debug, Default, Clone, Copy)]
 struct PiiBackstopDriverTickSummary {
     done: usize,
     failed: usize,
+    exhausted: usize,
 }
 
 #[derive(Clone)]
@@ -9046,6 +9049,7 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     tracing::info!(
                         done = summary.done,
                         failed = summary.failed,
+                        exhausted = summary.exhausted,
                         "Trace Commons PII backstop driver tick completed"
                     );
                 }
@@ -39014,6 +39018,10 @@ async fn run_perplexity_score_driver_tick(
 const PII_BACKSTOP_DRIVER_ACTOR_REF: &str = "trace-commons-pii-backstop-driver";
 /// Snapshot/audit label for the re-redacted envelope the driver produces.
 const PII_BACKSTOP_REDACTION_LABEL: &str = "near-ai-pii-backstop-v1";
+/// Audit reason code recorded when a submission exhausts its PII-backstop
+/// retry budget and is quarantined instead of being held indefinitely.
+/// Label-only: never the adapter's error text and never envelope content.
+const PII_BACKSTOP_EXHAUSTED_REASON: &str = "pii_backstop_attempts_exhausted";
 
 /// Task 6: one pass of the in-process server-side NEAR AI PII-backstop driver.
 ///
@@ -39062,12 +39070,11 @@ async fn run_pii_backstop_driver_tick(
         match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
             Ok(()) => summary.done += 1,
             Err(error) => {
-                // Leave the submission held on `AwaitingPiiBackstop` and bump
-                // its attempt counter with a hash-only error label. A bump
+                // Bump the attempt counter with a hash-only error label. A bump
                 // failure is itself logged hash-only; the trace still stays
                 // held either way.
                 let error_label = safe_runtime_error_hash(&error);
-                if let Err(bump_error) = db
+                let attempts = match db
                     .bump_pii_backstop_attempt(
                         &item.tenant_id,
                         item.submission_id,
@@ -39076,12 +39083,50 @@ async fn run_pii_backstop_driver_tick(
                     )
                     .await
                 {
-                    tracing::warn!(
-                        error_hash = %safe_runtime_error_hash(&anyhow::Error::new(bump_error)),
-                        submission_id = %item.submission_id,
-                        "Trace Commons PII backstop attempt bump failed"
-                    );
+                    Ok(attempts) => Some(attempts),
+                    Err(bump_error) => {
+                        tracing::warn!(
+                            error_hash = %safe_runtime_error_hash(&anyhow::Error::new(bump_error)),
+                            submission_id = %item.submission_id,
+                            "Trace Commons PII backstop attempt bump failed"
+                        );
+                        None
+                    }
+                };
+
+                // Exhaustion is terminal. Once the failing attempt reaches
+                // `max_attempts` the selection query would stop returning the
+                // row, so leaving it on `AwaitingPiiBackstop` would strand it
+                // in a state nobody reviews and nothing alerts on. Quarantine
+                // instead: fail-closed AND visible in a queue a human already
+                // works. Attempts below the threshold keep the existing
+                // hold-and-retry behaviour untouched.
+                let exhausted = attempts.is_some_and(|attempts| attempts >= config.max_attempts);
+                if exhausted {
+                    match quarantine_exhausted_pii_backstop(state.as_ref(), db, item).await {
+                        Ok(()) => {
+                            tracing::warn!(
+                                error_hash = %error_label,
+                                submission_id = %item.submission_id,
+                                reason = PII_BACKSTOP_EXHAUSTED_REASON,
+                                "Trace Commons PII backstop retries exhausted; submission quarantined"
+                            );
+                            summary.exhausted += 1;
+                            continue;
+                        }
+                        Err(quarantine_error) => {
+                            // The quarantine transition failed; the submission
+                            // stays held. It is no longer re-enumerable, so log
+                            // it loudly as a failure for operator follow-up.
+                            tracing::error!(
+                                error_hash = %safe_runtime_error_hash(&quarantine_error),
+                                submission_id = %item.submission_id,
+                                "Trace Commons PII backstop exhaustion quarantine failed"
+                            );
+                        }
+                    }
                 }
+
                 tracing::warn!(
                     error_hash = %error_label,
                     submission_id = %item.submission_id,
@@ -39092,6 +39137,41 @@ async fn run_pii_backstop_driver_tick(
         }
     }
     Ok(summary)
+}
+
+/// Terminal disposition for a submission that has exhausted its PII-backstop
+/// retry budget: transition it from `AwaitingPiiBackstop` to `Quarantined`
+/// under the label-only `pii_backstop_attempts_exhausted` reason code.
+///
+/// The envelope was never successfully re-scrubbed, so nothing is re-stored
+/// and no `RescrubbedEnvelope` ref is written; the pre-backstop
+/// `SubmittedEnvelope` ref deliberately stays active because `Quarantined` is
+/// not a consumer-visible status (the object-ref read path gates on
+/// `Accepted`). The DB transition is authoritative and writes the audit row
+/// itself; the on-disk record is mirrored afterwards so the two agree.
+async fn quarantine_exhausted_pii_backstop(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    item: &GateWorkItem,
+) -> anyhow::Result<()> {
+    db.update_trace_submission_status(
+        &item.tenant_id,
+        item.submission_id,
+        storage_corpus_status(TraceCorpusStatus::Quarantined),
+        PII_BACKSTOP_DRIVER_ACTOR_REF,
+        Some(PII_BACKSTOP_EXHAUSTED_REASON),
+    )
+    .await
+    .context("failed to quarantine PII backstop submission after retry exhaustion")?;
+
+    if let Some(mut record) =
+        read_submission_record(&state.root, &item.tenant_id, item.submission_id)?
+    {
+        record.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(&state.root, &record)?;
+    }
+
+    Ok(())
 }
 
 /// Re-redact a single held submission through the NEAR AI prose PII filter and,
