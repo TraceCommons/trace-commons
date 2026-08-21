@@ -293,10 +293,12 @@
                 a client that rebuilt that order would eventually disagree
                 with the tray about what is wrong.
             -->
-            <Border Grid.Row="0"
-                    Grid.Column="1"
-                    Visibility="{x:Bind ViewModel.HasHealthBanner, Mode=OneWay}"
-                    Margin="22,16,22,0"
+            <StackPanel Grid.Row="0"
+                        Grid.Column="1"
+                        Margin="22,16,22,0"
+                        Spacing="8">
+
+            <Border Visibility="{x:Bind ViewModel.HasHealthBanner, Mode=OneWay}"
                     Padding="14,12"
                     Background="{ThemeResource TcSurfaceCardBrush}"
                     BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
@@ -347,6 +349,58 @@
                             Click="OnHealthAction" />
                 </Grid>
             </Border>
+
+            <!--
+                The daily budget banner.
+
+                A second banner rather than another health label, because the
+                daemon reports the two independently. status.health carries
+                exactly one label at a time and daily cap reached is last in
+                the daemon's precedence order, so a spent upload budget
+                sitting behind a full queue was announced by neither, and a
+                contributor watched fourteen approved traces stand still all
+                evening with this window blaming something else entirely.
+
+                No action button. There is nothing to press: the caps are not
+                settable from here, and the condition clears by itself when
+                the counters roll.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasBudgetBanner, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                    <!-- A clock, not the warning triangle. Nothing is wrong
+                         and nothing was lost; something is waiting. -->
+                    <Viewbox Grid.Column="0"
+                             Width="14" Height="14"
+                             VerticalAlignment="Top"
+                             Margin="0,2,0,0">
+                        <Canvas Width="16" Height="16">
+                            <Ellipse Canvas.Left="1.4" Canvas.Top="1.4"
+                                     Width="13.2" Height="13.2"
+                                     Stroke="{ThemeResource TcGoldTextBrush}"
+                                     StrokeThickness="1.4" />
+                            <Path Data="M8 4.4V8l2.6 1.8"
+                                  Stroke="{ThemeResource TcGoldTextBrush}"
+                                  StrokeThickness="1.4" />
+                        </Canvas>
+                    </Viewbox>
+
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock Text="{x:Bind ViewModel.BudgetTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.BudgetDetail, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            </StackPanel>
 
             <!--
                 The History pane.

@@ -148,16 +148,30 @@ public sealed class HistoryRollup
     public CommunityStanding? Community { get; set; }
 
     /// <summary>
-    /// How many traces are neither in the commons nor held: submitted, minus
-    /// what has landed either way.
+    /// How many traces are sent and waiting to hear back.
     /// </summary>
     /// <remarks>
-    /// Saturating, and deliberately so. The three figures come from one
-    /// cache but not from one instant, and a transient negative rendered as
-    /// "-1 waiting" would be this screen's first visibly wrong number.
+    /// <para>
+    /// This is the <c>submitted</c> bucket, straight through. It used to be
+    /// <c>submitted - (accepted + quarantined)</c>, which read
+    /// <c>submitted</c> as a running total when it is one bucket of four --
+    /// so the arithmetic was permanently negative, saturated to zero, and
+    /// the card said nothing was ever in flight even while a dozen traces
+    /// genuinely were.
+    /// </para>
+    /// <para>
+    /// Still floored at zero: the figure comes from a cache, and a negative
+    /// count rendered as "-1 waiting" would be this screen's first visibly
+    /// wrong number.
+    /// </para>
     /// </remarks>
-    public int WaitingToBeScored =>
-        Math.Max(0, AllTime.Submitted - (AllTime.Accepted + Quarantined));
+    public int WaitingToBeScored => Math.Max(0, AllTime.Submitted);
+
+    /// <summary>
+    /// Everything ever contributed, across all four buckets.
+    /// </summary>
+    public int TotalContributed =>
+        AllTime.Submitted + AllTime.Accepted + AllTime.Quarantined + AllTime.Other;
 }
 
 /// <summary>

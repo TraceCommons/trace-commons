@@ -527,6 +527,10 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
 
     let sources = crate::source::all_sources(claude_source, codex_source, None);
     let mut changed = false;
+    // Whether this pass put at least one trace on the wire. Drives both
+    // halves of "sent, waiting to hear back": the local history rows, and
+    // the nudged server read-back. See `note_uploads`.
+    let mut uploaded_this_pass = false;
     // A fail-closed precondition (`SubmitPreconditionFailure`) aborts the
     // pass. It is held here rather than propagated with `?` so the pass's
     // own mutations -- the entries already resolved, the health label the
@@ -615,6 +619,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             | uploader::UploadDecision::AlreadySubmitted { submission_id } => {
                 q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
                 q.set_submission_id(entry.entry_id, submission_id);
+                uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
                 let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
@@ -694,8 +699,76 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         drop(state);
         shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
+    if uploaded_this_pass {
+        note_uploads(shared, now)?;
+    }
+
+    // An exhausted budget is the one outcome of this pass that changes
+    // nothing in the queue -- every affected entry stays `Approved` -- so
+    // `changed` is false and the loop above publishes nothing. Without
+    // this, a client that only redraws on an event sat on a stale status
+    // while the very condition it needed to show had just been decided.
+    // Published unconditionally rather than on a transition, because this
+    // pass holds no memory of the previous one; it is one event per poll
+    // interval at worst, and `status` is idempotent.
+    if shared.daily_budget(now).blocked() {
+        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+
     if let Some(e) = aborted {
         return Err(e);
+    }
+    Ok(())
+}
+
+/// Record what a pass that actually uploaded now knows, without calling the
+/// server.
+///
+/// Two things, both about the same gap. A trace that has just gone out has
+/// no verdict yet, and until this existed nothing said so: `refresh_history`
+/// runs on `history_poll_secs` (1800 by default), so for up to half an hour
+/// after an upload the history cache still described the world as it was
+/// before the upload, and the rollup's `submitted` bucket read zero while
+/// traces were genuinely in flight. From outside, a submission that worked
+/// perfectly looked exactly like one that had vanished.
+///
+/// 1. The receipts written by the upload are merged into the history cache
+///    immediately, as `submitted`. Purely local -- see
+///    `history::merge_new_receipts` for why this cannot overstate anything.
+/// 2. A server read-back is scheduled for `POST_UPLOAD_HISTORY_DELAY_SECS`
+///    from now, so verdicts arrive in about a minute and a half rather than
+///    up to half an hour.
+///
+/// The schedule keeps the *earliest* pending deadline rather than pushing
+/// it back, so a long burst spread over several passes still resolves to a
+/// single read-back; and `refresh_history` will not honour it inside
+/// `MIN_HISTORY_POLL_SPACING_SECS` of the last one, so approving two
+/// hundred traces cannot turn into two hundred requests.
+fn note_uploads(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) -> Result<()> {
+    // A blocking file read with no `.await` of its own; see `run_blocking`.
+    let receipts = run_blocking(|| shared.store.load_receipts())?;
+    let labels = {
+        let q = shared.queue.lock().expect("queue lock");
+        let mut m = std::collections::BTreeMap::new();
+        for e in q.all() {
+            if let Some(id) = e.submission_id {
+                m.insert(id, e.project_label.clone());
+            }
+        }
+        m
+    };
+    let mut records = history::HistoryCache::load(&shared.store)?;
+    if history::merge_new_receipts(&mut records, &receipts, &labels) {
+        history::HistoryCache::save(&shared.store, &records)?;
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+
+    let due = now + chrono::Duration::seconds(POST_UPLOAD_HISTORY_DELAY_SECS);
+    let mut state = shared.state.lock().expect("state lock");
+    let earlier = state.history_refresh_due_at.is_some_and(|d| d <= due);
+    if !earlier {
+        state.history_refresh_due_at = Some(due);
+        state.save(&shared.store)?;
     }
     Ok(())
 }
@@ -728,8 +801,76 @@ fn find_session<'a>(
     None
 }
 
+/// How long after an upload the server is asked for verdicts.
+///
+/// Not zero. The submission has only just landed and the server has not
+/// scored it yet, so an immediate read-back would spend a request to learn
+/// `submitted` -- which the local receipt already said, and which
+/// `note_uploads` has already written into the cache. Ninety seconds is
+/// long enough for a verdict to plausibly exist and short enough that a
+/// contributor watching the window sees the outcome while still watching,
+/// against the 1800-second interval it replaces.
+const POST_UPLOAD_HISTORY_DELAY_SECS: i64 = 90;
+
+/// The closest together two history read-backs may ever be.
+///
+/// `history_poll_secs` is partly politeness to the server, and a
+/// burst-triggered refresh must not become a way around it. Uploads arrive
+/// in bursts -- an armed project, a cap being raised, a batch approval -- so
+/// without a floor a contributor approving two hundred traces could turn
+/// one poll interval into a stream of requests. Two minutes, so the ninety
+/// second nudge is honoured promptly in the ordinary case (the last
+/// read-back is minutes old) and simply slips to the floor in the pathological
+/// one.
+const MIN_HISTORY_POLL_SPACING_SECS: i64 = 120;
+
+/// Why -- or whether -- a history read-back happens on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryRefresh {
+    /// Not due; do nothing.
+    Wait,
+    /// The ordinary `history_poll_secs` interval has elapsed.
+    OnInterval,
+    /// A deadline set by an upload pass has come due.
+    AfterUpload,
+}
+
+/// The whole gating rule, as a pure function so its edges can be pinned
+/// without a server, a socket, or a clock.
+///
+/// A ripe upload deadline overrides the long interval, but never the floor:
+/// inside `MIN_HISTORY_POLL_SPACING_SECS` of the last read-back the answer
+/// is `Wait`, and the caller deliberately leaves the deadline in place so
+/// the refresh happens at the floor rather than being lost.
+pub(crate) fn history_refresh_decision(
+    now: chrono::DateTime<Utc>,
+    last_poll_at: Option<chrono::DateTime<Utc>>,
+    due_at: Option<chrono::DateTime<Utc>>,
+    interval: chrono::Duration,
+) -> HistoryRefresh {
+    let since_last = last_poll_at.map(|last| now.signed_duration_since(last));
+    if due_at.is_some_and(|due| now >= due) {
+        let floor = chrono::Duration::seconds(MIN_HISTORY_POLL_SPACING_SECS);
+        if since_last.is_some_and(|d| d < floor) {
+            return HistoryRefresh::Wait;
+        }
+        return HistoryRefresh::AfterUpload;
+    }
+    match since_last {
+        Some(d) if d < interval => HistoryRefresh::Wait,
+        _ => HistoryRefresh::OnInterval,
+    }
+}
+
 /// Refresh the cached contribution history from the server, on its own
 /// interval so history stays readable without every application polling.
+///
+/// Two things can make a refresh due: the ordinary `history_poll_secs`
+/// interval, and a `history_refresh_due_at` deadline set by `note_uploads`
+/// after a pass that actually uploaded. The nudge always yields to
+/// `MIN_HISTORY_POLL_SPACING_SECS`, and when it does it is *kept* rather
+/// than dropped, so a floored nudge fires at the floor instead of being
+/// lost back to the half-hour interval.
 async fn refresh_history(
     shared: &Arc<ipc::DaemonShared>,
     now: chrono::DateTime<Utc>,
@@ -738,12 +879,26 @@ async fn refresh_history(
         let s = shared.settings.lock().expect("settings lock");
         chrono::Duration::seconds(s.history_poll_secs as i64)
     };
-    {
+    let decision = {
         let state = shared.state.lock().expect("state lock");
-        if let Some(last) = state.last_history_poll_at {
-            if now.signed_duration_since(last) < interval {
-                return Ok(());
-            }
+        history_refresh_decision(
+            now,
+            state.last_history_poll_at,
+            state.history_refresh_due_at,
+            interval,
+        )
+    };
+    match decision {
+        HistoryRefresh::Wait => return Ok(()),
+        HistoryRefresh::OnInterval => {}
+        HistoryRefresh::AfterUpload => {
+            // One attempt per deadline. Cleared before the request rather
+            // than after it, so a burst is exactly one extra read-back even
+            // when the server is down; the ordinary interval carries the
+            // retry.
+            let mut state = shared.state.lock().expect("state lock");
+            state.history_refresh_due_at = None;
+            state.save(&shared.store)?;
         }
     }
     let Some(cfg) = shared.store.load_config()? else {
@@ -921,6 +1076,102 @@ mod tests {
 
     fn at(s: &str) -> chrono::DateTime<Utc> {
         s.parse().unwrap()
+    }
+
+    /// The default `history_poll_secs`: half an hour.
+    fn interval() -> chrono::Duration {
+        chrono::Duration::seconds(1800)
+    }
+
+    #[test]
+    fn history_waits_out_the_long_interval_when_nothing_was_uploaded() {
+        // A tick with no upload behind it must not produce a read-back.
+        assert_eq!(
+            history_refresh_decision(
+                at("2026-08-08T12:24:00Z"),
+                Some(at("2026-08-08T12:00:00Z")),
+                None,
+                interval(),
+            ),
+            HistoryRefresh::Wait
+        );
+    }
+
+    #[test]
+    fn an_upload_makes_history_due_far_sooner_than_the_interval_would() {
+        // 24 minutes after the last poll -- six minutes short of the
+        // interval, and exactly the gap measured on the machine this came
+        // from -- but a deadline set by an upload has come due.
+        let now = at("2026-08-08T12:24:00Z");
+        assert_eq!(
+            history_refresh_decision(
+                now,
+                Some(at("2026-08-08T12:00:00Z")),
+                Some(at("2026-08-08T12:23:00Z")),
+                interval(),
+            ),
+            HistoryRefresh::AfterUpload
+        );
+    }
+
+    #[test]
+    fn a_deadline_that_has_not_arrived_yet_does_not_trigger_a_read_back() {
+        assert_eq!(
+            history_refresh_decision(
+                at("2026-08-08T12:01:00Z"),
+                Some(at("2026-08-08T12:00:00Z")),
+                Some(at("2026-08-08T12:01:30Z")),
+                interval(),
+            ),
+            HistoryRefresh::Wait
+        );
+    }
+
+    #[test]
+    fn a_burst_cannot_poll_faster_than_the_floor() {
+        // Deadline ripe, but the last read-back was 60 seconds ago. The
+        // floor is 120, so this tick waits.
+        assert_eq!(
+            history_refresh_decision(
+                at("2026-08-08T12:01:00Z"),
+                Some(at("2026-08-08T12:00:00Z")),
+                Some(at("2026-08-08T12:00:30Z")),
+                interval(),
+            ),
+            HistoryRefresh::Wait
+        );
+        // ...and fires as soon as the floor is cleared, because the caller
+        // leaves the deadline set rather than dropping it.
+        assert_eq!(
+            history_refresh_decision(
+                at("2026-08-08T12:02:00Z"),
+                Some(at("2026-08-08T12:00:00Z")),
+                Some(at("2026-08-08T12:00:30Z")),
+                interval(),
+            ),
+            HistoryRefresh::AfterUpload
+        );
+    }
+
+    #[test]
+    fn the_interval_still_governs_when_no_upload_deadline_is_pending() {
+        assert_eq!(
+            history_refresh_decision(
+                at("2026-08-08T12:30:00Z"),
+                Some(at("2026-08-08T12:00:00Z")),
+                None,
+                interval(),
+            ),
+            HistoryRefresh::OnInterval
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_has_never_polled_history_polls_on_its_first_tick() {
+        assert_eq!(
+            history_refresh_decision(at("2026-08-08T12:00:00Z"), None, None, interval()),
+            HistoryRefresh::OnInterval
+        );
     }
 
     #[tokio::test]

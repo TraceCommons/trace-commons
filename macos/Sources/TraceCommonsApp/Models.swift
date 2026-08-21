@@ -92,6 +92,12 @@ struct DaemonStatus: Decodable, Equatable {
     let queueDepth: Int
     let nextDigestAt: Date?
     let health: DaemonHealth
+    /// The daily volume caps and what they are holding back.
+    ///
+    /// Decoded with a fallback rather than as an optional: a daemon that
+    /// predates the field reports an unspent budget blocking nothing, which
+    /// is the only safe reading of silence here.
+    let dailyBudget: DailyBudget
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -102,6 +108,43 @@ struct DaemonStatus: Decodable, Equatable {
         case queueDepth = "queue_depth"
         case nextDigestAt = "next_digest_at"
         case health
+        case dailyBudget = "daily_budget"
+    }
+
+    init(
+        schemaVersion: String,
+        loggedIn: Bool,
+        tenantID: String?,
+        consentScopes: [String],
+        paused: Bool,
+        queueDepth: Int,
+        nextDigestAt: Date?,
+        health: DaemonHealth,
+        dailyBudget: DailyBudget = .unknown
+    ) {
+        self.schemaVersion = schemaVersion
+        self.loggedIn = loggedIn
+        self.tenantID = tenantID
+        self.consentScopes = consentScopes
+        self.paused = paused
+        self.queueDepth = queueDepth
+        self.nextDigestAt = nextDigestAt
+        self.health = health
+        self.dailyBudget = dailyBudget
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
+        loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
+        tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
+        consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
+        nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
+        health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
+            ?? DaemonHealth(lastErrorLabel: nil, since: nil)
+        dailyBudget = try c.decodeIfPresent(DailyBudget.self, forKey: .dailyBudget) ?? .unknown
     }
 
     static let unknown = DaemonStatus(

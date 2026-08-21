@@ -68,6 +68,22 @@ pub struct DaemonState {
     /// When history was last refreshed from the server.
     #[serde(default)]
     pub last_history_poll_at: Option<DateTime<Utc>>,
+    /// When an out-of-band history read-back falls due, set by an upload
+    /// pass that actually sent something.
+    ///
+    /// A trace that has just been uploaded has no verdict yet, and waiting
+    /// out the full `history_poll_secs` meant up to half an hour in which a
+    /// successful submission and a broken one looked identical. This is the
+    /// deadline for the read-back that closes that window; it holds the
+    /// *earliest* pending one, so a burst of uploads is one refresh rather
+    /// than one per upload.
+    ///
+    /// Persisted with the rest of the counters so a daemon restarted inside
+    /// the window still performs the read-back rather than falling back to
+    /// the half-hour interval. `#[serde(default)]` so a state file written
+    /// before this field existed parses.
+    #[serde(default)]
+    pub history_refresh_due_at: Option<DateTime<Utc>>,
     /// When the public community roster was last fetched.
     #[serde(default)]
     pub last_community_poll_at: Option<DateTime<Utc>>,
@@ -108,6 +124,7 @@ impl DaemonState {
             paused: false,
             paused_until: None,
             last_history_poll_at: None,
+            history_refresh_due_at: None,
             last_community_poll_at: None,
             community: None,
         }

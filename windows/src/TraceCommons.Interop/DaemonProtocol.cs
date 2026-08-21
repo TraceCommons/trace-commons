@@ -343,6 +343,28 @@ public sealed class DaemonStatus
     public DaemonHealth? Health { get; set; }
 
     /// <summary>
+    /// The daily volume caps, and how much already-approved work they are
+    /// holding back.
+    /// </summary>
+    /// <remarks>
+    /// Read this independently of <see cref="Health"/>. The daemon does set
+    /// a <c>daily-cap-reached</c> label when a cap refuses an upload, but
+    /// that label is last in its precedence order, so any other condition
+    /// takes the single <c>last_error_label</c> slot and the cap becomes
+    /// invisible. A contributor watched fourteen approved traces sit still
+    /// for an evening while the window reported a full queue and nothing
+    /// else. Null from a daemon that predates the field.
+    /// </remarks>
+    [JsonPropertyName("daily_budget")]
+    public DailyBudget? DailyBudget { get; set; }
+
+    /// <summary>
+    /// Whether approved traces are waiting on the daily budget. False when
+    /// the daemon said nothing about it.
+    /// </summary>
+    public bool BudgetIsBlocking => DailyBudget?.Blocked == true;
+
+    /// <summary>
     /// Whether there is nothing to report.
     /// </summary>
     /// <remarks>
@@ -366,6 +388,73 @@ public sealed class DaemonHealth
 
     [JsonPropertyName("since")]
     public string? Since { get; set; }
+}
+
+/// <summary>
+/// <c>status.daily_budget</c>: today's volume caps and what they are holding.
+/// Counts and one timestamp; nothing identifying can appear here.
+/// </summary>
+public sealed class DailyBudget
+{
+    [JsonPropertyName("bytes_today")]
+    public long BytesToday { get; set; }
+
+    [JsonPropertyName("max_bytes_per_day")]
+    public long MaxBytesPerDay { get; set; }
+
+    [JsonPropertyName("bytes_remaining")]
+    public long BytesRemaining { get; set; }
+
+    [JsonPropertyName("uploads_today")]
+    public int UploadsToday { get; set; }
+
+    [JsonPropertyName("max_uploads_per_day")]
+    public int MaxUploadsPerDay { get; set; }
+
+    [JsonPropertyName("uploads_remaining")]
+    public int UploadsRemaining { get; set; }
+
+    /// <summary>
+    /// When the counters zero, as the daemon reported it. Derived from its
+    /// own UTC day bucket, so it is a fact and may be stated -- unlike
+    /// "tomorrow", which is wrong for most of the world.
+    /// </summary>
+    [JsonPropertyName("resets_at")]
+    public string? ResetsAt { get; set; }
+
+    /// <summary>
+    /// Whether at least one approved trace cannot go out before the reset.
+    /// False when the budget is spent but nothing is waiting on it: there is
+    /// no one to tell in that case.
+    /// </summary>
+    [JsonPropertyName("blocked")]
+    public bool Blocked { get; set; }
+
+    /// <summary>
+    /// How many approved traces will not go out today. Counts everything
+    /// behind the first entry that does not fit, not only the entries that
+    /// individually overflow: the upload pass stops rather than skipping
+    /// past, so a small trace queued behind a large one waits too.
+    /// </summary>
+    [JsonPropertyName("blocked_entries")]
+    public int BlockedEntries { get; set; }
+
+    [JsonPropertyName("blocked_bytes")]
+    public long BlockedBytes { get; set; }
+
+    /// <summary>
+    /// <see cref="ResetsAt"/> parsed, or null when the daemon sent nothing
+    /// usable. A copy path that cannot parse it must say less, not guess.
+    /// </summary>
+    public DateTimeOffset? ResetsAtUtc =>
+        DateTimeOffset.TryParse(
+            ResetsAt,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
 }
 
 /// <summary>

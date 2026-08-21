@@ -924,7 +924,15 @@ pub fn health_sentence(label: &str) -> &'static str {
         "claim-mint-failed" | "ingest-unreachable" => {
             "Can't reach Trace Commons right now. Your queue is safe; it'll retry on its own."
         }
-        "daily-cap-reached" => "Daily limit reached. The rest goes out tomorrow.",
+        // The banner for this condition is built by `daily_cap_sentence`,
+        // which can say how many traces are waiting and exactly when the
+        // limit resets. This line is the fallback for a daemon that
+        // reported the label without the budget object -- so it must not
+        // promise a time it does not have.
+        "daily-cap-reached" => {
+            "Today's upload limit is used up. Approved traces are waiting; nothing has been lost, \
+             and they go out when the limit resets."
+        }
         "queue-full" => {
             "Trace Commons has stopped queuing new sessions -- 500 are already waiting. Review or \
              clear some to start again."
@@ -933,6 +941,41 @@ pub fn health_sentence(label: &str) -> &'static str {
         // thing that holds for every blocking label rather than inventing a
         // mechanism name for it.
         _ => "Something is holding contributions up. Your queue is safe; nothing has been lost.",
+    }
+}
+
+/// The banner sentence for a spent daily budget.
+///
+/// Said separately from `health_sentence` because the daemon reports the
+/// budget separately from the health label: `daily-cap-reached` is last in
+/// the precedence order, so on the machine this was written for the slot
+/// was occupied by `queue-full` and the real reason nothing was uploading
+/// never reached a screen at all.
+///
+/// Everything in it is something the daemon actually knows. The reset time
+/// is `status.daily_budget.resets_at`, rendered in local time; when it is
+/// absent the sentence stops rather than guessing at "tomorrow". It is not
+/// phrased as an error, because nothing has gone wrong and nothing has been
+/// lost.
+pub fn daily_cap_sentence(
+    blocked_entries: u32,
+    resets_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let waiting = match blocked_entries {
+        0 => "Approved traces are waiting".to_string(),
+        1 => "1 approved trace is waiting".to_string(),
+        n => format!("{n} approved traces are waiting"),
+    };
+    match resets_at {
+        Some(t) => format!(
+            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
+             when the limit resets at {}.",
+            t.with_timezone(&chrono::Local).format("%H:%M")
+        ),
+        None => format!(
+            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
+             when the limit resets."
+        ),
     }
 }
 
@@ -1423,6 +1466,78 @@ pub fn submit_flagged_and_skipped_clause(flagged: u64, skipped: &[&str]) -> Opti
         (Some(f), None) => Some(format!("{f}.")),
         (None, Some(s)) => Some(format!("{s}.")),
         (Some(f), Some(s)) => Some(format!("{f}, {s}.")),
+    }
+}
+
+#[cfg(test)]
+mod daily_cap_tests {
+    use super::*;
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        s.parse().unwrap()
+    }
+
+    /// The reset instant rendered the way the banner renders it, so the
+    /// assertions below do not depend on the machine's timezone.
+    fn local_hhmm(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.with_timezone(&chrono::Local).format("%H:%M").to_string()
+    }
+
+    #[test]
+    fn the_sentence_states_how_many_are_waiting_and_when_the_limit_resets() {
+        let resets = at("2026-08-22T00:00:00Z");
+        let text = daily_cap_sentence(14, Some(resets));
+        assert_eq!(
+            text,
+            format!(
+                "Today's upload limit is used up. 14 approved traces are waiting. Nothing has \
+                 been lost -- they go out when the limit resets at {}.",
+                local_hhmm(resets)
+            )
+        );
+    }
+
+    #[test]
+    fn one_waiting_trace_is_not_described_in_the_plural() {
+        let text = daily_cap_sentence(1, Some(at("2026-08-22T00:00:00Z")));
+        assert!(text.contains("1 approved trace is waiting"), "{text}");
+        assert!(!text.contains("traces are waiting"), "{text}");
+    }
+
+    #[test]
+    fn with_no_reset_time_the_sentence_stops_rather_than_guessing() {
+        // Never "tomorrow": the daemon has not said when, so neither do we.
+        let text = daily_cap_sentence(3, None);
+        assert_eq!(
+            text,
+            "Today's upload limit is used up. 3 approved traces are waiting. Nothing has been \
+             lost -- they go out when the limit resets."
+        );
+        assert!(!text.contains("tomorrow"), "{text}");
+    }
+
+    #[test]
+    fn the_sentence_never_reads_as_a_failure() {
+        for text in [
+            daily_cap_sentence(14, Some(at("2026-08-22T00:00:00Z"))),
+            daily_cap_sentence(0, None),
+            health_sentence("daily-cap-reached").to_string(),
+        ] {
+            let lower = text.to_lowercase();
+            for word in ["error", "failed", "problem", "wrong"] {
+                assert!(!lower.contains(word), "{word} in: {text}");
+            }
+            assert!(lower.contains("nothing has been lost"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_fallback_line_promises_no_particular_time() {
+        // Used only when a daemon reports the label without the budget
+        // object, and it must not invent what the object would have said.
+        let text = health_sentence("daily-cap-reached");
+        assert!(!text.contains("tomorrow"), "{text}");
+        assert!(text.contains("resets"), "{text}");
     }
 }
 
