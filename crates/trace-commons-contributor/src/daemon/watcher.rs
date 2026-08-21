@@ -20,6 +20,26 @@
 //! observation (group size and group mtime) against what the queue entry was
 //! built from, and only loads when something moved.
 //!
+//! Two smaller per-poll costs were measured on the same corpus (81
+//! claude-code groups over 1,044 files, 3,069 codex sessions, 11.7 GB) with
+//! a release build, and only one of them was worth changing:
+//!
+//! - `source.discover()` walks both trees every tick. That is 4.9 ms for
+//!   claude-code and 9.0 ms for codex once the head-peek memos are warm --
+//!   14 ms of a sixty-second tick, 0.02% duty -- and 154 ms on the first
+//!   pass of a process, when those memos are cold. It stats rather than
+//!   reads, and the memos (capped at 8192 entries each) have room for
+//!   several times this corpus. Left as a full walk: incremental discovery
+//!   would have to keep its own view of which directories moved, and the
+//!   failure mode of getting that wrong -- a session never noticed, or a
+//!   subagent that lands under an already-seen session directory never
+//!   noticed -- costs far more than the 14 ms it would save.
+//! - `state.save()` at the end of the tick re-serialized and rewrote the
+//!   whole `DaemonState` unconditionally: 1.24 MB, ~0.85 ms to serialize
+//!   and ~6-10 ms to write and `fsync`, every sixty seconds, around 1.8 GB
+//!   of writes a day, for bytes identical to the ones already on disk. That
+//!   one is now elided when nothing moved; see `DaemonState::save`.
+//!
 //! The trajectory source is not watched: trajectory files have no
 //! conventional local store to poll, so they stay a deliberate `submit
 //! --trajectory` action.
@@ -443,7 +463,7 @@ fn tick_over(
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     {
-        let state = shared.state.lock().expect("state lock");
+        let mut state = shared.state.lock().expect("state lock");
         state.save(&shared.store)?;
     }
     Ok(report)
@@ -1392,6 +1412,105 @@ mod tests {
                 .is_some(),
             "the recorded observation must be the one the next poll compares against"
         );
+    }
+
+    /// Overwrite the daemon state file with bytes a save would never
+    /// produce, so a later write is detectable by the sentinel being gone.
+    /// The in-memory state stays authoritative -- the file is only read at
+    /// startup -- so this observes writes without disturbing the tick.
+    fn plant_state_sentinel(f: &WatcherFixture) {
+        std::fs::write(
+            f.shared.store.daemon_path(crate::config::DAEMON_STATE_FILE),
+            b"SENTINEL",
+        )
+        .unwrap();
+    }
+
+    fn state_sentinel_survived(f: &WatcherFixture) -> bool {
+        std::fs::read(f.shared.store.daemon_path(crate::config::DAEMON_STATE_FILE)).unwrap()
+            == b"SENTINEL"
+    }
+
+    #[tokio::test]
+    async fn a_tick_that_moved_nothing_does_not_rewrite_the_state_file() {
+        // The second remaining per-poll cost. Every tick re-serialized the
+        // whole `DaemonState` and wrote it with an fsync -- 1.24 MB a minute
+        // on the reported machine -- even when the pass changed nothing.
+        // `observe` runs for every path on every poll, which is why this is
+        // asserted against writes rather than against a dirty flag: the
+        // bookkeeping is touched either way, and what must not happen is
+        // the write.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+
+        plant_state_sentinel(&f);
+        for minute in 1..=3 {
+            tick(&f.shared, at(&format!("2030-01-01T00:0{minute}:00Z")))
+                .await
+                .unwrap();
+        }
+        assert!(
+            state_sentinel_survived(&f),
+            "three idle polls must not rewrite the state file"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tick_that_saw_something_new_does_rewrite_the_state_file() {
+        // The other half: eliding the write must not lose an observation.
+        // A session first sighted on this tick has to be on disk, or a
+        // restart would treat it as never seen and the size-stability check
+        // would start over.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        plant_state_sentinel(&f);
+
+        let second = "22222222-2222-2222-2222-222222222222";
+        let path = f.write_session("proj", second, 0);
+        tick(&f.shared, at("2030-01-01T00:01:00Z")).await.unwrap();
+        assert!(
+            !state_sentinel_survived(&f),
+            "a first sighting must be persisted"
+        );
+        let reloaded = crate::daemon::state::DaemonState::load(&f.shared.store).unwrap();
+        assert!(
+            reloaded.previous_size(&path).is_some(),
+            "the reloaded state must carry the new session's observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_idle_polls_still_knows_what_was_offered() {
+        // The risk the elision has to be measured against: state that was
+        // never written is state a restart cannot see. After idle polls
+        // skipped their writes, a daemon reloading from disk must still
+        // find the observations and must not re-offer the session it
+        // already has a card for.
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        for minute in 1..=3 {
+            tick(&f.shared, at(&format!("2030-01-01T00:0{minute}:00Z")))
+                .await
+                .unwrap();
+        }
+
+        let reloaded = crate::daemon::state::DaemonState::load(&f.shared.store).unwrap();
+        let live = f.shared.state.lock().unwrap();
+        assert_eq!(
+            reloaded.previous_size(&path),
+            live.previous_size(&path),
+            "the file must agree with memory about the last observation"
+        );
+        assert_eq!(
+            reloaded.last_observation, live.last_observation,
+            "no observation may be lost to a skipped write"
+        );
+        assert_eq!(reloaded.cwd_cache, live.cwd_cache);
+        assert_eq!(reloaded.prior_uploads, live.prior_uploads);
     }
 
     #[tokio::test]
