@@ -44,6 +44,9 @@
 //! conventional local store to poll, so they stay a deliberate `submit
 //! --trajectory` action.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
@@ -124,321 +127,477 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
 /// counts its own `load` calls: "this poll did not re-read anything" is a
 /// claim about how often `TraceSource::load` runs, and nothing observable
 /// from the queue alone can prove it.
+/// The pass itself, over an explicit source list.
+///
+/// Split out from `tick_blocking` only so tests can hand it a source that
+/// counts its own `load` calls: "this poll did not re-read anything" is a
+/// claim about how often `TraceSource::load` runs, and nothing observable
+/// from the queue alone can prove it.
+///
+/// This is the full-scan path: it asks every source what it has. The scoped
+/// path (`tick_over_paths`) visits a supplied set of sessions instead. Both
+/// run the *same* per-session body (`visit_session`) and the *same* epilogue
+/// (`finish_pass`); neither is duplicated, because a copy of either would
+/// drift, and what it would drift on is what the daemon decides to upload.
 fn tick_over(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
-    let mut report = TickReport::default();
-    let mut changed = false;
+    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let mut out = PassOutcome::default();
 
-    // The terms an auto-approval would be given under: the consent scopes,
-    // and a fingerprint of everything else outside the session file that
-    // determines the envelope. See `QueueEntry::approved_scopes` /
-    // `approved_inputs`.
-    //
-    // Read once per pass rather than once per eligible candidate. It was
-    // per-candidate, which meant re-reading and re-parsing the contributor
-    // config file once for every session in the corpus on every poll -- and
-    // a tick is a snapshot of the settings already (`max_queue_entries` and
-    // the source declarations are taken once, above), so there is nothing
-    // for a mid-pass re-read to be more correct about.
-    let cfg = shared.store.load_config().ok().flatten();
-    let consent_scopes = cfg
-        .as_ref()
-        .map(|c| c.consent_scopes.clone())
-        .unwrap_or_default();
-    let approval_inputs = cfg.as_ref().map(|c| {
-        let near_ai = shared
-            .settings
-            .lock()
-            .expect("settings lock")
-            .near_ai
-            .clone();
-        crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
-    });
-
-    for source in sources {
+    for source in &sources {
         let refs = match source.discover() {
             Ok(refs) => refs,
             Err(_) => continue,
         };
         for session_ref in refs {
-            report.observed += 1;
-            let Ok(meta) = std::fs::metadata(&session_ref.path) else {
-                continue;
-            };
-            let Ok(modified) = meta.modified() else {
-                continue;
-            };
-            // Size and mtime come from the `SessionRef`, not from a re-stat
-            // of `path`, because a ref can cover more than one file. A
-            // claude-code session's delegated transcripts live beside it
-            // under `<uuid>/subagents/`, and `path` deliberately stays the
-            // parent file so the queue and the upload state keep one stable
-            // address per conversation. Judging quiescence on the parent's
-            // own mtime would therefore make a subagent that is still being
-            // written completely invisible: the daemon would call the group
-            // finished mid-delegation, and would never re-offer a
-            // conversation that gained forty transcripts after the parent
-            // went quiet. `group_modified_at` is `None` for every
-            // single-file source, which is exactly the old behaviour.
-            let obs = Observation {
-                path: session_ref.path.clone(),
-                size_bytes: session_ref.size_bytes,
-                modified_at: session_ref
-                    .group_modified_at
-                    .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
-            };
-
-            let (previous_size, prior) = {
-                let state = shared.state.lock().expect("state lock");
-                (
-                    state.previous_size(&obs.path),
-                    state.prior_upload(&obs.path).cloned(),
-                )
-            };
-
-            let verdict = {
-                let settings = shared.settings.lock().expect("settings lock");
-                evaluate(&obs, previous_size, prior.as_ref(), now, &settings)
-            };
-
-            // Record the observation regardless, so the next poll can judge
-            // size stability.
-            {
-                let mut state = shared.state.lock().expect("state lock");
-                state.observe(&obs.path, obs.size_bytes);
-            }
-
-            if verdict != Eligibility::Eligible {
-                continue;
-            }
-
-            // Eligibility cannot tell "already offered and unchanged" from
-            // "never offered": it is decided from the observation, the
-            // previous poll's size and any prior *upload*, and a session
-            // sitting in the queue `Pending` has never uploaded, so it has
-            // no prior and comes back `Eligible` forever. Ask the queue
-            // before paying for a load. `unchanged_offer_at_path` compares
-            // the whole observation -- group size and group mtime -- and
-            // deliberately declines whenever a live offer here was built
-            // from a different one, so a grown session (a new delegated
-            // transcript included) still reaches `replace_live_at_path` and
-            // still supersedes.
-            //
-            // The same lock answers the other half of "can this load
-            // produce anything?": a session the queue holds no offer for at
-            // all, because the queue is at `max_queue_entries`. See
-            // `Queue::load_can_land` -- and note it answers `true`
-            // whenever a live entry sits at this path, so a grown session
-            // with a live card still reaches the load and still
-            // supersedes, full queue or not.
-            let (already_offered, can_land) = {
-                let queue = shared.queue.lock().expect("queue lock");
-                (
-                    queue
-                        .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
-                        .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
-                    queue.load_can_land(&obs.path, max_queue_entries),
-                )
-            };
-            if let Some((entry_id, project_key, state)) = already_offered {
-                // The project key is taken from the entry rather than
-                // re-derived, which also skips `resolve_cwd`: the entry's
-                // key came from this same unchanged content, and resolving
-                // it again is another per-poll lock and cache probe over
-                // the whole corpus for an answer that cannot have moved.
-                let mode = {
-                    let policy = shared.policy.lock().expect("policy lock");
-                    policy.resolve(&project_key)
-                };
-                if mode == ProjectMode::Ignore {
-                    report.ignored += 1;
-                    continue;
-                }
-                // The one thing the discarded dedup path did do: re-apply a
-                // project's standing opt-in to an entry that has since been
-                // put back to `Pending` (by a supersede, or by the
-                // consent-scope guard). `approve` only moves `Pending`, so
-                // it can never resurrect a dismissed, expired or uploaded
-                // entry. Preserved here so skipping the load costs nothing
-                // but the load.
-                if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
-                    let mut queue = shared.queue.lock().expect("queue lock");
-                    if queue.approve(entry_id, &consent_scopes, approval_inputs.as_deref(), None) {
-                        changed = true;
-                        report.auto_ready += 1;
-                    }
-                }
-                continue;
-            }
-
-            // A full queue with no live entry at this path: whatever the
-            // load produced, `replace_live_at_path` would refuse it
-            // `queue-full` and the work would be discarded. Refuse it here
-            // instead, before the read, the parse and the group hash, and
-            // raise the same health label the refusal below raises -- the
-            // contributor's queue is genuinely full and sessions are going
-            // unoffered, which is the same condition either way.
-            if !can_land {
-                let mut health = shared.health.lock().expect("health lock");
-                health.fail(health::LABEL_QUEUE_FULL, now);
-                continue;
-            }
-
-            let cwd = resolve_cwd(shared, source.as_ref(), &session_ref, &obs);
-            let project_key = project_key_for(cwd.as_deref());
-            let mode = {
-                let policy = shared.policy.lock().expect("policy lock");
-                policy.resolve(&project_key)
-            };
-            if mode == ProjectMode::Ignore {
-                report.ignored += 1;
-                continue;
-            }
-
-            // Hashing reads the whole group, so it happens only here: for a
-            // session the queue has no unchanged offer for and could still
-            // hold the result of. Everything already offered at this exact
-            // observation, and everything a full queue could not have
-            // taken, was skipped above.
-            let Ok(transcript) = source.load(&session_ref) else {
-                continue;
-            };
-
-            // Collision detection must see every project the daemon knows
-            // about -- both configured policy entries and projects already
-            // sitting in the queue -- so a collision is visible as soon as
-            // either colliding project has a queue entry. The end-of-tick
-            // relabel pass below is what makes this symmetric across the
-            // whole colliding set, since this per-entry snapshot alone can
-            // still miss a project discovered later in the same pass.
-            let known = {
-                let policy = shared.policy.lock().expect("policy lock");
-                let queue = shared.queue.lock().expect("queue lock");
-                known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
-            };
-
-            let armed = mode == ProjectMode::AutoUpload;
-
-            let entry = QueueEntry {
-                entry_id: entry_id_for(&transcript.session_hash),
-                session_hash: transcript.session_hash.clone(),
-                source: session_ref.source.to_string(),
-                project_key: project_key.clone(),
-                project_label: disambiguated_label(&project_key, &known),
-                path: obs.path.clone(),
-                size_bytes: obs.size_bytes,
-                discovered_at: now,
-                state: if armed {
-                    // Opted in, so it needs no decision; the uploader picks it
-                    // up on its next pass.
-                    QueueState::Approved
-                } else {
-                    QueueState::Pending
-                },
-                reason_label: None,
-                attempts: 0,
-                retry_after: None,
-                submission_id: None,
-                approved_scopes: armed.then(|| consent_scopes.clone()),
-                // `None` when the config could not be read, which the
-                // uploader treats as "unknown, re-ask": fail-closed.
-                approved_inputs: armed.then(|| approval_inputs.clone()).flatten(),
-                // An armed project's sessions are never previewed, so there
-                // is no shown artifact to pin to. The input fingerprint is
-                // the guard that applies to them.
-                previewed_envelope_digest: None,
-                // No post-approval hold on a standing opt-in: it is a
-                // decision taken in advance, separately audited, with no
-                // click to take back and no client counting down for it.
-                // See `Queue::approve`.
-                approved_at: None,
-                subagent_count: transcript.subagent_count,
-                subagents_dropped: transcript.subagents_dropped,
-                // The observation this entry is made of, so the next poll
-                // can recognize it without reading the group again. See
-                // `QueueEntry::observed_modified_at`.
-                observed_modified_at: Some(obs.modified_at),
-            };
-            let entry_id = entry.entry_id;
-
-            let mut queue = shared.queue.lock().expect("queue lock");
-            // Add the new offer and retire any earlier one for this same
-            // session in a single step. Without the retirement, a
-            // conversation that gains a delegated transcript accumulates a
-            // card per delegation -- `upsert` dedups on hash, and the hash
-            // is precisely what moved. Without the atomicity, a `queue-full`
-            // between the two would retire the old offer and never land the
-            // replacement, leaving the conversation with no live card at
-            // all. See `Queue::replace_live_at_path`.
-            match queue.replace_live_at_path(entry, max_queue_entries) {
-                Ok(outcome) => {
-                    if outcome.superseded > 0 {
-                        changed = true;
-                    }
-                    if outcome.inserted {
-                        changed = true;
-                        if armed {
-                            report.auto_ready += 1;
-                        } else {
-                            report.queued += 1;
-                        }
-                        // A new entry passed the capacity check: there is
-                        // space in the queue.
-                        let mut health = shared.health.lock().expect("health lock");
-                        health.resolve(health::LABEL_QUEUE_FULL);
-                    } else {
-                        // Dedup path: re-observing an already-queued session.
-                        // The insert deliberately never rewrites an existing
-                        // entry, which used to mean a standing opt-in simply
-                        // stopped applying to an entry that had been put
-                        // back to `Pending` since it was created -- by
-                        // `supersede`, or by the consent-scope guard. The
-                        // entry sat `Pending` until it aged out, in a
-                        // project the contributor had explicitly armed.
-                        // Re-apply the standing decision here, which is the
-                        // one place that knows both the entry and the mode
-                        // in force.
-                        //
-                        // `Queue::approve` only moves `Pending`, so this can
-                        // never resurrect a dismissed-and-refused, expired,
-                        // or already-uploaded entry.
-                        // `approval_inputs` is passed through as `Option`,
-                        // not flattened to `""`: the insert path above
-                        // records `None` for "the config could not be read",
-                        // and this path recording `Some("")` for the same
-                        // condition made two spellings of "unknown". Both
-                        // fail closed, but the uploader should only have one
-                        // shape to recognize. `None` for `approved_at`,
-                        // matching the fresh-entry path above: a standing
-                        // opt-in is not held.
-                        if armed
-                            && queue.approve(
-                                entry_id,
-                                &consent_scopes,
-                                approval_inputs.as_deref(),
-                                None,
-                            )
-                        {
-                            changed = true;
-                            report.auto_ready += 1;
-                        }
-                        // This path returns Ok without checking capacity, so
-                        // it does not prove space is available. Do not
-                        // retract queue-full.
-                    }
-                }
-                Err(_) => {
-                    let mut health = shared.health.lock().expect("health lock");
-                    health.fail(health::LABEL_QUEUE_FULL, now);
-                }
-            }
+            visit_session(shared, &ctx, source.as_ref(), &session_ref, &mut out);
         }
     }
 
+    finish_pass(shared, out.report, out.changed)
+}
+
+/// Maps a path something happened at to the session that owns it, without
+/// walking the corpus.
+///
+/// A path is not a session: a claude-code write under
+/// `<uuid>/subagents/<agent>.jsonl` belongs to the parent conversation, which
+/// is the group-address rule `discover` already implements and which must not
+/// be re-derived here. The lookup is therefore source-specific and belongs
+/// beside `discover` on `TraceSource`; until it lands there, the caller
+/// supplies it and this module stays agnostic about how it is answered.
+/// Returning `None` means "this path is not this source's, or names nothing".
+pub type SessionAt<'a> = &'a dyn Fn(&dyn TraceSource, &Path) -> Option<SessionRef>;
+
+/// One pass over an explicit set of session paths.
+///
+/// The sibling of `tick`: same paused check, same off-worker dispatch, same
+/// per-session work and same epilogue -- only the question "which sessions?"
+/// is answered differently. Nothing about *what* is decided changes; see
+/// `visit_session`.
+pub async fn tick_paths(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    paths: &[PathBuf],
+    session_at: SessionAt<'_>,
+) -> Result<TickReport> {
+    if shared.is_paused(now) {
+        return Ok(TickReport::default());
+    }
+    let (max_queue_entries, claude_source, codex_source) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (
+            s.max_queue_entries,
+            s.claude_source.clone(),
+            s.codex_source.clone(),
+        )
+    };
+    super::run_blocking(|| {
+        tick_over_paths(
+            shared,
+            now,
+            all_sources(claude_source, codex_source, None),
+            max_queue_entries,
+            paths,
+            session_at,
+        )
+    })
+}
+
+/// The scoped pass, over an explicit source list; `tick_over`'s sibling.
+///
+/// Visits exactly the sessions the supplied paths resolve to and never calls
+/// `discover`, which is the entire point: the full walk is what costs, and it
+/// costs whether or not anything moved.
+///
+/// Two paths that resolve to the same session (a conversation and one of its
+/// delegated transcripts, say, both written in the same burst) are visited
+/// once. A second visit in the same pass would record a second observation of
+/// a byte count that has not moved between them, which is precisely the
+/// signal `eligibility::evaluate` reads as "stable".
+fn tick_over_paths(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    sources: Vec<Box<dyn TraceSource>>,
+    max_queue_entries: usize,
+    paths: &[PathBuf],
+    session_at: SessionAt<'_>,
+) -> Result<TickReport> {
+    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let mut out = PassOutcome::default();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+
+    for path in paths {
+        for source in &sources {
+            let Some(session_ref) = session_at(source.as_ref(), path) else {
+                continue;
+            };
+            if !visited.insert(session_ref.path.clone()) {
+                break;
+            }
+            visit_session(shared, &ctx, source.as_ref(), &session_ref, &mut out);
+            break;
+        }
+    }
+
+    finish_pass(shared, out.report, out.changed)
+}
+
+/// What a pass reads once, up front, and hands to every session it visits.
+struct PassContext {
+    now: DateTime<Utc>,
+    max_queue_entries: usize,
+    consent_scopes: Vec<String>,
+    approval_inputs: Option<String>,
+}
+
+impl PassContext {
+    fn read(shared: &DaemonShared, now: DateTime<Utc>, max_queue_entries: usize) -> Self {
+        // The terms an auto-approval would be given under: the consent scopes,
+        // and a fingerprint of everything else outside the session file that
+        // determines the envelope. See `QueueEntry::approved_scopes` /
+        // `approved_inputs`.
+        //
+        // Read once per pass rather than once per eligible candidate. It was
+        // per-candidate, which meant re-reading and re-parsing the contributor
+        // config file once for every session in the corpus on every poll -- and
+        // a tick is a snapshot of the settings already (`max_queue_entries` and
+        // the source declarations are taken once, above), so there is nothing
+        // for a mid-pass re-read to be more correct about.
+        let cfg = shared.store.load_config().ok().flatten();
+        let consent_scopes = cfg
+            .as_ref()
+            .map(|c| c.consent_scopes.clone())
+            .unwrap_or_default();
+        let approval_inputs = cfg.as_ref().map(|c| {
+            let near_ai = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .near_ai
+                .clone();
+            crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
+        });
+        Self {
+            now,
+            max_queue_entries,
+            consent_scopes,
+            approval_inputs,
+        }
+    }
+}
+
+/// What a pass accumulates across the sessions it visits.
+#[derive(Default)]
+struct PassOutcome {
+    report: TickReport,
+    /// Whether anything the queue holds moved, and so whether the epilogue
+    /// has a save and a publish to do.
+    changed: bool,
+}
+
+/// Everything one session costs: observe, evaluate, ask the queue, and load
+/// and hash only if all three still warrant it.
+///
+/// The single implementation of the per-session body. Both entry points call
+/// it and neither has a copy; the locks it takes, and the order it takes them
+/// in, are the ones the poll path has always taken.
+fn visit_session(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    out: &mut PassOutcome,
+) {
+    out.report.observed += 1;
+    let Ok(meta) = std::fs::metadata(&session_ref.path) else {
+        return;
+    };
+    let Ok(modified) = meta.modified() else {
+        return;
+    };
+    // Size and mtime come from the `SessionRef`, not from a re-stat
+    // of `path`, because a ref can cover more than one file. A
+    // claude-code session's delegated transcripts live beside it
+    // under `<uuid>/subagents/`, and `path` deliberately stays the
+    // parent file so the queue and the upload state keep one stable
+    // address per conversation. Judging quiescence on the parent's
+    // own mtime would therefore make a subagent that is still being
+    // written completely invisible: the daemon would call the group
+    // finished mid-delegation, and would never re-offer a
+    // conversation that gained forty transcripts after the parent
+    // went quiet. `group_modified_at` is `None` for every
+    // single-file source, which is exactly the old behaviour.
+    let obs = Observation {
+        path: session_ref.path.clone(),
+        size_bytes: session_ref.size_bytes,
+        modified_at: session_ref
+            .group_modified_at
+            .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
+    };
+
+    let (previous_size, prior) = {
+        let state = shared.state.lock().expect("state lock");
+        (
+            state.previous_size(&obs.path),
+            state.prior_upload(&obs.path).cloned(),
+        )
+    };
+
+    let verdict = {
+        let settings = shared.settings.lock().expect("settings lock");
+        evaluate(&obs, previous_size, prior.as_ref(), ctx.now, &settings)
+    };
+
+    // Record the observation regardless, so the next poll can judge
+    // size stability.
+    {
+        let mut state = shared.state.lock().expect("state lock");
+        state.observe(&obs.path, obs.size_bytes);
+    }
+
+    if verdict != Eligibility::Eligible {
+        return;
+    }
+
+    // Eligibility cannot tell "already offered and unchanged" from
+    // "never offered": it is decided from the observation, the
+    // previous poll's size and any prior *upload*, and a session
+    // sitting in the queue `Pending` has never uploaded, so it has
+    // no prior and comes back `Eligible` forever. Ask the queue
+    // before paying for a load. `unchanged_offer_at_path` compares
+    // the whole observation -- group size and group mtime -- and
+    // deliberately declines whenever a live offer here was built
+    // from a different one, so a grown session (a new delegated
+    // transcript included) still reaches `replace_live_at_path` and
+    // still supersedes.
+    //
+    // The same lock answers the other half of "can this load
+    // produce anything?": a session the queue holds no offer for at
+    // all, because the queue is at `ctx.max_queue_entries`. See
+    // `Queue::load_can_land` -- and note it answers `true`
+    // whenever a live entry sits at this path, so a grown session
+    // with a live card still reaches the load and still
+    // supersedes, full queue or not.
+    let (already_offered, can_land) = {
+        let queue = shared.queue.lock().expect("queue lock");
+        (
+            queue
+                .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
+                .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
+            queue.load_can_land(&obs.path, ctx.max_queue_entries),
+        )
+    };
+    if let Some((entry_id, project_key, state)) = already_offered {
+        // The project key is taken from the entry rather than
+        // re-derived, which also skips `resolve_cwd`: the entry's
+        // key came from this same unchanged content, and resolving
+        // it again is another per-poll lock and cache probe over
+        // the whole corpus for an answer that cannot have moved.
+        let mode = {
+            let policy = shared.policy.lock().expect("policy lock");
+            policy.resolve(&project_key)
+        };
+        if mode == ProjectMode::Ignore {
+            out.report.ignored += 1;
+            return;
+        }
+        // The one thing the discarded dedup path did do: re-apply a
+        // project's standing opt-in to an entry that has since been
+        // put back to `Pending` (by a supersede, or by the
+        // consent-scope guard). `approve` only moves `Pending`, so
+        // it can never resurrect a dismissed, expired or uploaded
+        // entry. Preserved here so skipping the load costs nothing
+        // but the load.
+        if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
+            let mut queue = shared.queue.lock().expect("queue lock");
+            if queue.approve(
+                entry_id,
+                &ctx.consent_scopes,
+                ctx.approval_inputs.as_deref(),
+                None,
+            ) {
+                out.changed = true;
+                out.report.auto_ready += 1;
+            }
+        }
+        return;
+    }
+
+    // A full queue with no live entry at this path: whatever the
+    // load produced, `replace_live_at_path` would refuse it
+    // `queue-full` and the work would be discarded. Refuse it here
+    // instead, before the read, the parse and the group hash, and
+    // raise the same health label the refusal below raises -- the
+    // contributor's queue is genuinely full and sessions are going
+    // unoffered, which is the same condition either way.
+    if !can_land {
+        let mut health = shared.health.lock().expect("health lock");
+        health.fail(health::LABEL_QUEUE_FULL, ctx.now);
+        return;
+    }
+
+    let cwd = resolve_cwd(shared, source, session_ref, &obs);
+    let project_key = project_key_for(cwd.as_deref());
+    let mode = {
+        let policy = shared.policy.lock().expect("policy lock");
+        policy.resolve(&project_key)
+    };
+    if mode == ProjectMode::Ignore {
+        out.report.ignored += 1;
+        return;
+    }
+
+    // Hashing reads the whole group, so it happens only here: for a
+    // session the queue has no unchanged offer for and could still
+    // hold the result of. Everything already offered at this exact
+    // observation, and everything a full queue could not have
+    // taken, was skipped above.
+    let Ok(transcript) = source.load(session_ref) else {
+        return;
+    };
+
+    // Collision detection must see every project the daemon knows
+    // about -- both configured policy entries and projects already
+    // sitting in the queue -- so a collision is visible as soon as
+    // either colliding project has a queue entry. The end-of-tick
+    // relabel pass below is what makes this symmetric across the
+    // whole colliding set, since this per-entry snapshot alone can
+    // still miss a project discovered later in the same pass.
+    let known = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
+    };
+
+    let armed = mode == ProjectMode::AutoUpload;
+
+    let entry = QueueEntry {
+        entry_id: entry_id_for(&transcript.session_hash),
+        session_hash: transcript.session_hash.clone(),
+        source: session_ref.source.to_string(),
+        project_key: project_key.clone(),
+        project_label: disambiguated_label(&project_key, &known),
+        path: obs.path.clone(),
+        size_bytes: obs.size_bytes,
+        discovered_at: ctx.now,
+        state: if armed {
+            // Opted in, so it needs no decision; the uploader picks it
+            // up on its next pass.
+            QueueState::Approved
+        } else {
+            QueueState::Pending
+        },
+        reason_label: None,
+        attempts: 0,
+        retry_after: None,
+        submission_id: None,
+        approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
+        // `None` when the config could not be read, which the
+        // uploader treats as "unknown, re-ask": fail-closed.
+        approved_inputs: armed.then(|| ctx.approval_inputs.clone()).flatten(),
+        // An armed project's sessions are never previewed, so there
+        // is no shown artifact to pin to. The input fingerprint is
+        // the guard that applies to them.
+        previewed_envelope_digest: None,
+        // No post-approval hold on a standing opt-in: it is a
+        // decision taken in advance, separately audited, with no
+        // click to take back and no client counting down for it.
+        // See `Queue::approve`.
+        approved_at: None,
+        subagent_count: transcript.subagent_count,
+        subagents_dropped: transcript.subagents_dropped,
+        // The observation this entry is made of, so the next poll
+        // can recognize it without reading the group again. See
+        // `QueueEntry::observed_modified_at`.
+        observed_modified_at: Some(obs.modified_at),
+    };
+    let entry_id = entry.entry_id;
+
+    let mut queue = shared.queue.lock().expect("queue lock");
+    // Add the new offer and retire any earlier one for this same
+    // session in a single step. Without the retirement, a
+    // conversation that gains a delegated transcript accumulates a
+    // card per delegation -- `upsert` dedups on hash, and the hash
+    // is precisely what moved. Without the atomicity, a `queue-full`
+    // between the two would retire the old offer and never land the
+    // replacement, leaving the conversation with no live card at
+    // all. See `Queue::replace_live_at_path`.
+    match queue.replace_live_at_path(entry, ctx.max_queue_entries) {
+        Ok(outcome) => {
+            if outcome.superseded > 0 {
+                out.changed = true;
+            }
+            if outcome.inserted {
+                out.changed = true;
+                if armed {
+                    out.report.auto_ready += 1;
+                } else {
+                    out.report.queued += 1;
+                }
+                // A new entry passed the capacity check: there is
+                // space in the queue.
+                let mut health = shared.health.lock().expect("health lock");
+                health.resolve(health::LABEL_QUEUE_FULL);
+            } else {
+                // Dedup path: re-observing an already-queued session.
+                // The insert deliberately never rewrites an existing
+                // entry, which used to mean a standing opt-in simply
+                // stopped applying to an entry that had been put
+                // back to `Pending` since it was created -- by
+                // `supersede`, or by the consent-scope guard. The
+                // entry sat `Pending` until it aged out, in a
+                // project the contributor had explicitly armed.
+                // Re-apply the standing decision here, which is the
+                // one place that knows both the entry and the mode
+                // in force.
+                //
+                // `Queue::approve` only moves `Pending`, so this can
+                // never resurrect a dismissed-and-refused, expired,
+                // or already-uploaded entry.
+                // `ctx.approval_inputs` is passed through as `Option`,
+                // not flattened to `""`: the insert path above
+                // records `None` for "the config could not be read",
+                // and this path recording `Some("")` for the same
+                // condition made two spellings of "unknown". Both
+                // fail closed, but the uploader should only have one
+                // shape to recognize. `None` for `approved_at`,
+                // matching the fresh-entry path above: a standing
+                // opt-in is not held.
+                if armed
+                    && queue.approve(
+                        entry_id,
+                        &ctx.consent_scopes,
+                        ctx.approval_inputs.as_deref(),
+                        None,
+                    )
+                {
+                    out.changed = true;
+                    out.report.auto_ready += 1;
+                }
+                // This path returns Ok without checking capacity, so
+                // it does not prove space is available. Do not
+                // retract queue-full.
+            }
+        }
+        Err(_) => {
+            let mut health = shared.health.lock().expect("health lock");
+            health.fail(health::LABEL_QUEUE_FULL, ctx.now);
+        }
+    }
+}
+
+/// Everything a pass owes once it has visited its sessions: the relabel pass,
+/// the queue save and envelope sweep, the change publish, and the state save.
+///
+/// The single implementation of the epilogue, and it runs once per pass, not
+/// once per session -- `queue.save` and `state.save` each rewrite a whole
+/// file, and the publish is a wake-up for every subscribed shell.
+fn finish_pass(shared: &DaemonShared, report: TickReport, mut changed: bool) -> Result<TickReport> {
     // Relabel pass: `Queue::upsert` never rewrites an existing entry, so a
     // project that was unique when its entry was first queued would
     // otherwise keep a bare label forever even after a colliding project
@@ -538,6 +697,11 @@ mod tests {
     struct CountingSource {
         inner: Box<dyn TraceSource>,
         loads: Arc<AtomicUsize>,
+        /// The other half of the claim, for the scoped path: "this pass did
+        /// not walk the corpus" is a claim about `discover`, and a scoped
+        /// pass that quietly walked would be indistinguishable from one that
+        /// did not by anything the queue shows.
+        discovers: Arc<AtomicUsize>,
     }
 
     impl TraceSource for CountingSource {
@@ -545,6 +709,7 @@ mod tests {
             self.inner.name()
         }
         fn discover(&self) -> Result<Vec<SessionRef>> {
+            self.discovers.fetch_add(1, Ordering::SeqCst);
             self.inner.discover()
         }
         fn load(&self, r: &SessionRef) -> Result<crate::source::SessionTranscript> {
@@ -726,10 +891,99 @@ mod tests {
                     Box::new(CountingSource {
                         inner,
                         loads: loads.clone(),
+                        discovers: Arc::new(AtomicUsize::new(0)),
                     }) as Box<dyn TraceSource>
                 })
                 .collect();
             tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+        }
+
+        /// One *scoped* pass -- the same `tick_over_paths` `tick_paths` runs
+        /// -- over sources that count both their `load` and their `discover`
+        /// calls.
+        ///
+        /// The path-to-session lookup stands in for what the source layer
+        /// still owes this path (`TraceSource::session_at`). It is answered
+        /// from a second, uncounted set of adapters, so the counters the
+        /// tests assert on only ever see what the pass itself did.
+        fn tick_paths_counted(
+            &self,
+            now: DateTime<Utc>,
+            loads: &Arc<AtomicUsize>,
+            discovers: &Arc<AtomicUsize>,
+            paths: &[PathBuf],
+        ) -> TickReport {
+            let (max_queue_entries, claude_source, codex_source) = {
+                let s = self.shared.settings.lock().unwrap();
+                (
+                    s.max_queue_entries,
+                    s.claude_source.clone(),
+                    s.codex_source.clone(),
+                )
+            };
+            let sources = all_sources(claude_source.clone(), codex_source.clone(), None)
+                .into_iter()
+                .map(|inner| {
+                    Box::new(CountingSource {
+                        inner,
+                        loads: loads.clone(),
+                        discovers: discovers.clone(),
+                    }) as Box<dyn TraceSource>
+                })
+                .collect();
+            let known: Vec<(&'static str, SessionRef)> =
+                all_sources(claude_source, codex_source, None)
+                    .iter()
+                    .flat_map(|s| {
+                        let name = s.name();
+                        s.discover()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(move |r| (name, r))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+            let session_at = |source: &dyn TraceSource, path: &Path| {
+                known
+                    .iter()
+                    .find(|(name, r)| *name == source.name() && r.path == path)
+                    .map(|(_, r)| r.clone())
+            };
+            tick_over_paths(
+                &self.shared,
+                now,
+                sources,
+                max_queue_entries,
+                paths,
+                &session_at,
+            )
+            .unwrap()
+        }
+
+        /// `settle`, scoped: two scoped passes, since eligibility never fires
+        /// on a first sighting no matter which path made the observation.
+        fn settle_paths(
+            &self,
+            now: DateTime<Utc>,
+            loads: &Arc<AtomicUsize>,
+            discovers: &Arc<AtomicUsize>,
+            paths: &[PathBuf],
+        ) -> TickReport {
+            self.tick_paths_counted(now, loads, discovers, paths);
+            self.tick_paths_counted(now, loads, discovers, paths)
+        }
+
+        /// The queue-changed events a pass published, drained.
+        fn drain_changed(
+            rx: &mut tokio::sync::broadcast::Receiver<crate::daemon::ipc::Event>,
+        ) -> usize {
+            let mut n = 0;
+            while let Ok(ev) = rx.try_recv() {
+                if ev.event == EVENT_QUEUE_CHANGED {
+                    n += 1;
+                }
+            }
+            n
         }
 
         /// `settle`, counted.
@@ -1652,6 +1906,140 @@ mod tests {
         assert!(
             { f.shared.health.lock().unwrap().ok() },
             "a queue with room must not report queue-full"
+        );
+    }
+
+    // --- the scoped entry point -------------------------------------------
+    //
+    // Same body, same epilogue, different answer to "which sessions?". These
+    // four pin the difference: what it visits, that it decides the same
+    // thing, that the epilogue is a per-pass event and not a per-session one,
+    // and that an empty batch is genuinely free.
+
+    #[tokio::test]
+    async fn a_scoped_pass_visits_only_the_supplied_sessions_and_never_walks_the_corpus() {
+        let f = WatcherFixture::new();
+        let target = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("other", "33333333-3333-3333-3333-333333333333", 0);
+
+        let (l, d) = (loads(), loads());
+        let report = f.settle_paths(
+            at("2030-01-01T00:00:00Z"),
+            &l,
+            &d,
+            std::slice::from_ref(&target),
+        );
+
+        assert_eq!(count(&d), 0, "the scoped pass must not call discover");
+        assert_eq!(report.observed, 1, "one supplied path, one session visited");
+        assert_eq!(f.queue_len(), 1);
+        assert_eq!(
+            f.shared.queue.lock().unwrap().all()[0].path,
+            target,
+            "the queued entry is the supplied session, not a corpus neighbour"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scoped_pass_reaches_the_same_decision_as_the_full_scan() {
+        // Same session, same clock, same policy; only the route differs. The
+        // per-session body is shared, so this is really a test that the
+        // scoped path feeds it the same observation -- in particular the same
+        // `previous_size`, which is what eligibility turns on.
+        let name = "11111111-1111-1111-1111-111111111111";
+        let now = at("2030-01-01T00:00:00Z");
+
+        let scanned = WatcherFixture::new();
+        let scanned_path = scanned.write_session("proj", name, 0);
+        scanned.settle(now).await;
+
+        let scoped = WatcherFixture::new();
+        let scoped_path = scoped.write_session("proj", name, 0);
+        let (l, d) = (loads(), loads());
+        scoped.settle_paths(now, &l, &d, std::slice::from_ref(&scoped_path));
+
+        let decision = |f: &WatcherFixture| {
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .map(|e| {
+                    (
+                        e.session_hash.clone(),
+                        e.state,
+                        e.project_label.clone(),
+                        e.size_bytes,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(decision(&scanned).len(), 1);
+        assert_eq!(decision(&scoped), decision(&scanned));
+
+        // `observed_modified_at` is a real file mtime, and the two fixtures
+        // wrote their copies milliseconds apart, so it is compared against
+        // each fixture's own file rather than across them: what matters is
+        // that both routes recorded the observation they judged.
+        let recorded = |f: &WatcherFixture, path: &Path| {
+            let want = DateTime::<Utc>::from(std::fs::metadata(path).unwrap().modified().unwrap());
+            f.shared.queue.lock().unwrap().all()[0].observed_modified_at == Some(want)
+        };
+        assert!(recorded(&scanned, &scanned_path));
+        assert!(recorded(&scoped, &scoped_path));
+    }
+
+    #[tokio::test]
+    async fn a_scoped_pass_runs_the_epilogue_once_for_the_whole_batch() {
+        // `queue.save` and `state.save` each rewrite a whole file and the
+        // publish wakes every attached shell, so the epilogue belongs to the
+        // pass, not to the session. Three sessions landing together must
+        // still be one publish.
+        let f = WatcherFixture::new();
+        let a = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let b = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let c = f.write_session("other", "33333333-3333-3333-3333-333333333333", 0);
+
+        let mut rx = f.shared.events.subscribe();
+        let (l, d) = (loads(), loads());
+        let report = f.settle_paths(at("2030-01-01T00:00:00Z"), &l, &d, &[a, b, c]);
+
+        assert_eq!(report.queued, 3);
+        assert_eq!(f.queue_len(), 3);
+        assert_eq!(
+            WatcherFixture::drain_changed(&mut rx),
+            1,
+            "three sessions in one pass are one queue-changed publish"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_scoped_pass_does_nothing_and_publishes_nothing() {
+        // The debounce will hand this path an empty batch whenever every
+        // dirty session is still inside its window. That must cost nothing:
+        // no publish for the shells to redraw on, and no state rewrite.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        // Settle first: the elision compares against what this process last
+        // wrote, so a state file that has never been written is rewritten by
+        // any pass at all, scoped or not.
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let mut rx = f.shared.events.subscribe();
+        plant_state_sentinel(&f);
+        let (l, d) = (loads(), loads());
+        let report = f.tick_paths_counted(at("2030-01-01T00:00:00Z"), &l, &d, &[]);
+
+        assert_eq!(report, TickReport::default());
+        assert_eq!(f.queue_len(), 1, "the settled entry is untouched");
+        assert_eq!(count(&l), 0);
+        assert_eq!(count(&d), 0);
+        assert_eq!(WatcherFixture::drain_changed(&mut rx), 0);
+        assert!(
+            state_sentinel_survived(&f),
+            "an empty batch moved nothing and must not rewrite the state file"
         );
     }
 }
