@@ -2708,6 +2708,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )
@@ -2808,6 +2809,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )
@@ -2897,6 +2899,7 @@ mod tests {
                     approved_at: None,
                     subagent_count: 0,
                     subagents_dropped: 0,
+                    observed_modified_at: None,
                 },
                 500,
             )
@@ -3362,6 +3365,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )
@@ -3439,6 +3443,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )
@@ -3603,6 +3608,7 @@ mod tests {
             approved_at: None,
             subagent_count: 0,
             subagents_dropped: 0,
+            observed_modified_at: None,
         };
         let body = serde_json::to_string(&entry_value(&e)).unwrap();
         assert!(
@@ -3645,6 +3651,7 @@ mod tests {
                 approved_at: None,
                 subagent_count: 0,
                 subagents_dropped: 0,
+                observed_modified_at: None,
             };
         let mut queue = Queue::new();
         queue
@@ -3732,6 +3739,7 @@ mod tests {
             approved_at: None,
             subagent_count: 114,
             subagents_dropped: 2,
+            observed_modified_at: None,
         };
         let v = entry_value(&e);
         assert_eq!(v["subagent_count"], 114);
@@ -3782,6 +3790,7 @@ mod tests {
                     approved_at: None,
                     subagent_count: 0,
                     subagents_dropped: 0,
+                    observed_modified_at: None,
                 },
                 500,
             )
@@ -4125,6 +4134,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )
@@ -4168,6 +4178,7 @@ mod tests {
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     500,
                 )

@@ -10,6 +10,16 @@
 //! results are cached against the file's size and mtime. Without that cache a
 //! laptop would re-read every session file every minute.
 //!
+//! The same reasoning governs the expensive step, `TraceSource::load`, which
+//! reads, parses and hashes a whole session group. A session already sitting
+//! in the queue is `Eligible` on every poll -- eligibility is decided from
+//! prior *uploads*, and a `Pending` entry has never uploaded -- so the pass
+//! used to load all of them, every minute, and throw the result away when
+//! `replace_live_at_path` found the entry already tracked. It asks
+//! `Queue::unchanged_offer_at_path` first now, comparing the whole
+//! observation (group size and group mtime) against what the queue entry was
+//! built from, and only loads when something moved.
+//!
 //! The trajectory source is not watched: trajectory files have no
 //! conventional local store to poll, so they stay a deliberate `submit
 //! --trajectory` action.
@@ -72,9 +82,6 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 /// is a blocking filesystem or lock operation) and why `tick` runs it
 /// through `run_blocking`.
 fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
-    let mut report = TickReport::default();
-    let mut changed = false;
-
     let (max_queue_entries, claude_source, codex_source) = {
         let s = shared.settings.lock().expect("settings lock");
         (
@@ -83,8 +90,56 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
             s.codex_source.clone(),
         )
     };
+    tick_over(
+        shared,
+        now,
+        all_sources(claude_source, codex_source, None),
+        max_queue_entries,
+    )
+}
 
-    for source in all_sources(claude_source, codex_source, None) {
+/// The pass itself, over an explicit source list.
+///
+/// Split out from `tick_blocking` only so tests can hand it a source that
+/// counts its own `load` calls: "this poll did not re-read anything" is a
+/// claim about how often `TraceSource::load` runs, and nothing observable
+/// from the queue alone can prove it.
+fn tick_over(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    sources: Vec<Box<dyn TraceSource>>,
+    max_queue_entries: usize,
+) -> Result<TickReport> {
+    let mut report = TickReport::default();
+    let mut changed = false;
+
+    // The terms an auto-approval would be given under: the consent scopes,
+    // and a fingerprint of everything else outside the session file that
+    // determines the envelope. See `QueueEntry::approved_scopes` /
+    // `approved_inputs`.
+    //
+    // Read once per pass rather than once per eligible candidate. It was
+    // per-candidate, which meant re-reading and re-parsing the contributor
+    // config file once for every session in the corpus on every poll -- and
+    // a tick is a snapshot of the settings already (`max_queue_entries` and
+    // the source declarations are taken once, above), so there is nothing
+    // for a mid-pass re-read to be more correct about.
+    let cfg = shared.store.load_config().ok().flatten();
+    let consent_scopes = cfg
+        .as_ref()
+        .map(|c| c.consent_scopes.clone())
+        .unwrap_or_default();
+    let approval_inputs = cfg.as_ref().map(|c| {
+        let near_ai = shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .near_ai
+            .clone();
+        crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
+    });
+
+    for source in sources {
         let refs = match source.discover() {
             Ok(refs) => refs,
             Err(_) => continue,
@@ -141,6 +196,54 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 continue;
             }
 
+            // Eligibility cannot tell "already offered and unchanged" from
+            // "never offered": it is decided from the observation, the
+            // previous poll's size and any prior *upload*, and a session
+            // sitting in the queue `Pending` has never uploaded, so it has
+            // no prior and comes back `Eligible` forever. Ask the queue
+            // before paying for a load. `unchanged_offer_at_path` compares
+            // the whole observation -- group size and group mtime -- and
+            // deliberately declines whenever a live offer here was built
+            // from a different one, so a grown session (a new delegated
+            // transcript included) still reaches `replace_live_at_path` and
+            // still supersedes.
+            let already_offered = {
+                let queue = shared.queue.lock().expect("queue lock");
+                queue
+                    .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
+                    .map(|e| (e.entry_id, e.project_key.clone(), e.state))
+            };
+            if let Some((entry_id, project_key, state)) = already_offered {
+                // The project key is taken from the entry rather than
+                // re-derived, which also skips `resolve_cwd`: the entry's
+                // key came from this same unchanged content, and resolving
+                // it again is another per-poll lock and cache probe over
+                // the whole corpus for an answer that cannot have moved.
+                let mode = {
+                    let policy = shared.policy.lock().expect("policy lock");
+                    policy.resolve(&project_key)
+                };
+                if mode == ProjectMode::Ignore {
+                    report.ignored += 1;
+                    continue;
+                }
+                // The one thing the discarded dedup path did do: re-apply a
+                // project's standing opt-in to an entry that has since been
+                // put back to `Pending` (by a supersede, or by the
+                // consent-scope guard). `approve` only moves `Pending`, so
+                // it can never resurrect a dismissed, expired or uploaded
+                // entry. Preserved here so skipping the load costs nothing
+                // but the load.
+                if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
+                    let mut queue = shared.queue.lock().expect("queue lock");
+                    if queue.approve(entry_id, &consent_scopes, approval_inputs.as_deref(), None) {
+                        changed = true;
+                        report.auto_ready += 1;
+                    }
+                }
+                continue;
+            }
+
             let cwd = resolve_cwd(shared, source.as_ref(), &session_ref, &obs);
             let project_key = project_key_for(cwd.as_deref());
             let mode = {
@@ -152,8 +255,9 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 continue;
             }
 
-            // Hashing reads the whole file, so it happens here -- once a
-            // session is actually eligible -- and never on a routine poll.
+            // Hashing reads the whole group, so it happens only here: for a
+            // session the queue has no unchanged offer for. Everything
+            // already offered at this exact observation was skipped above.
             let Ok(transcript) = source.load(&session_ref) else {
                 continue;
             };
@@ -171,25 +275,6 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
             };
 
-            // The terms an auto-approval is given under, recorded on the
-            // entry so the uploader can refuse if any of them move before
-            // it sends: the consent scopes, and a fingerprint of everything
-            // else outside the session file that determines the envelope.
-            // See `QueueEntry::approved_scopes` / `approved_inputs`.
-            let cfg = shared.store.load_config().ok().flatten();
-            let consent_scopes = cfg
-                .as_ref()
-                .map(|c| c.consent_scopes.clone())
-                .unwrap_or_default();
-            let approval_inputs = cfg.as_ref().map(|c| {
-                let near_ai = shared
-                    .settings
-                    .lock()
-                    .expect("settings lock")
-                    .near_ai
-                    .clone();
-                crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
-            });
             let armed = mode == ProjectMode::AutoUpload;
 
             let entry = QueueEntry {
@@ -227,6 +312,10 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
                 approved_at: None,
                 subagent_count: transcript.subagent_count,
                 subagents_dropped: transcript.subagents_dropped,
+                // The observation this entry is made of, so the next poll
+                // can recognize it without reading the group again. See
+                // `QueueEntry::observed_modified_at`.
+                observed_modified_at: Some(obs.modified_at),
             };
             let entry_id = entry.entry_id;
 
@@ -389,7 +478,34 @@ mod tests {
     use crate::config::ConfigStore;
     use crate::daemon::policy::ProjectMode;
     use std::path::PathBuf;
-    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A real source with a counter around its `load`.
+    ///
+    /// "The poll did not re-read anything" is a claim about how many times
+    /// `TraceSource::load` ran, and nothing observable from the queue can
+    /// prove it -- a pass that loads every session and then discards the
+    /// result leaves a queue identical to one that loaded nothing. Wrapping
+    /// the genuine adapter rather than faking one keeps discovery, grouping
+    /// and hashing exactly as they are in production.
+    struct CountingSource {
+        inner: Box<dyn TraceSource>,
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl TraceSource for CountingSource {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            self.inner.discover()
+        }
+        fn load(&self, r: &SessionRef) -> Result<crate::source::SessionTranscript> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load(r)
+        }
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
@@ -540,6 +656,60 @@ mod tests {
             tick(&self.shared, now).await.unwrap();
             tick(&self.shared, now).await.unwrap()
         }
+
+        /// One pass -- the same `tick_over` `tick` runs -- over sources that
+        /// count their `load` calls.
+        fn tick_counted(&self, now: DateTime<Utc>, loads: &Arc<AtomicUsize>) -> TickReport {
+            let (max_queue_entries, claude_source, codex_source) = {
+                let s = self.shared.settings.lock().unwrap();
+                (
+                    s.max_queue_entries,
+                    s.claude_source.clone(),
+                    s.codex_source.clone(),
+                )
+            };
+            let sources = all_sources(claude_source, codex_source, None)
+                .into_iter()
+                .map(|inner| {
+                    Box::new(CountingSource {
+                        inner,
+                        loads: loads.clone(),
+                    }) as Box<dyn TraceSource>
+                })
+                .collect();
+            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+        }
+
+        /// `settle`, counted.
+        fn settle_counted(&self, now: DateTime<Utc>, loads: &Arc<AtomicUsize>) -> TickReport {
+            self.tick_counted(now, loads);
+            self.tick_counted(now, loads)
+        }
+
+        /// Append to an existing session file, i.e. the conversation
+        /// continued after it was offered.
+        fn append_to_session(&self, path: &std::path::Path, project: &str, name: &str) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for i in 0..40 {
+                writeln!(
+                    f,
+                    "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"later {i}\"}},\
+                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                     \"sessionId\":\"{name}\",\"uuid\":\"c{i}\"}}"
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    fn loads() -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(0))
+    }
+
+    fn count(c: &Arc<AtomicUsize>) -> usize {
+        c.load(Ordering::SeqCst)
     }
 
     #[tokio::test]
@@ -981,6 +1151,215 @@ mod tests {
             .filter(|e| e.state == QueueState::Superseded)
             .count();
         assert_eq!(superseded, 1, "{:?}", queue.all());
+    }
+
+    #[tokio::test]
+    async fn an_unqueued_eligible_session_is_loaded_exactly_once() {
+        // The baseline the skip is measured against: settling a fresh
+        // session costs one load -- nothing on the first sighting (still
+        // `Unstable`), one on the poll that actually offers it. Two would
+        // mean `resolve_cwd` is reading the file as well as `load`.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let c = loads();
+        let report = f.settle_counted(at("2030-01-01T00:00:00Z"), &c);
+        assert_eq!(report.queued, 1, "{report:?}");
+        assert_eq!(
+            count(&c),
+            1,
+            "settling one session must cost exactly one load"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_session_that_has_not_moved_is_never_loaded_again() {
+        // The bug. `eligibility::evaluate` only knows about prior *uploads*,
+        // so a session sitting `Pending` came back `Eligible` on every poll
+        // and the pass read, parsed and hashed the whole group again --
+        // 11 GB of transcripts a minute on the machine that reported this --
+        // only for `replace_live_at_path` to find it already tracked.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+
+        let c = loads();
+        for minute in 1..=5 {
+            f.tick_counted(at(&format!("2030-01-01T00:0{minute}:00Z")), &c);
+        }
+        assert_eq!(
+            count(&c),
+            0,
+            "five polls over an unchanged queued session must load nothing"
+        );
+        assert_eq!(f.queue_len(), 1, "and must not disturb the queue");
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+    }
+
+    #[tokio::test]
+    async fn a_corpus_of_queued_sessions_costs_nothing_on_a_later_poll() {
+        // The property that actually matters at scale: the reported machine
+        // had 498 entries in the queue and re-hashed the lot every sixty
+        // seconds. N queued sessions, zero loads on the next poll.
+        let f = WatcherFixture::new();
+        for i in 0..30u32 {
+            f.write_session(
+                "proj",
+                &format!("1111111{i:02}-1111-1111-1111-111111111111"),
+                0,
+            );
+        }
+        let first = loads();
+        let report = f.settle_counted(at("2030-01-01T00:00:00Z"), &first);
+        assert_eq!(report.queued, 30, "{report:?}");
+        assert_eq!(
+            count(&first),
+            30,
+            "each session is loaded once, when it is offered"
+        );
+
+        let later = loads();
+        f.tick_counted(at("2030-01-01T00:01:00Z"), &later);
+        assert_eq!(
+            count(&later),
+            0,
+            "a poll over 30 unchanged queued sessions must load nothing"
+        );
+        assert_eq!(f.queue_len(), 30);
+    }
+
+    #[tokio::test]
+    async fn a_queued_session_that_grew_is_loaded_again_and_supersedes() {
+        // The skip must not swallow the supersede path: the offer describes
+        // content, the content moved, so the old offer dies and a fresh one
+        // is made.
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first_hash = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].session_hash.clone()
+        };
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), 1, "a grown session must be re-read exactly once");
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == first_hash)
+            .unwrap();
+        assert_eq!(old.state, QueueState::Superseded);
+        assert_eq!(
+            old.reason_label.as_deref(),
+            Some(crate::daemon::queue::REASON_CHANGED)
+        );
+        assert_eq!(queue.pending().len(), 1, "exactly one live offer");
+        assert_ne!(queue.pending()[0].session_hash, first_hash);
+    }
+
+    #[tokio::test]
+    async fn a_new_subagent_reloads_even_though_the_parent_files_own_stat_is_unchanged() {
+        // The trap a naive pre-check falls into. A delegated transcript
+        // lands beside the session under `<uuid>/subagents/`; the parent
+        // file itself is untouched, so a check against the parent's own
+        // stat would call this "unchanged" and never re-offer the
+        // conversation. The observation compared is the group's, which is
+        // why `SessionRef::size_bytes` and `group_modified_at` exist.
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        let parent = f.write_session("proj", session, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first_hash = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].session_hash.clone()
+        };
+        let before = std::fs::metadata(&parent).unwrap();
+
+        f.write_subagent("proj", session, "agent-a");
+        let after = std::fs::metadata(&parent).unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the parent file must be untouched"
+        );
+        assert_eq!(
+            before.modified().unwrap(),
+            after.modified().unwrap(),
+            "the parent file's own mtime must be untouched -- that is the whole point"
+        );
+
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), 1, "the group grew, so it must be re-read");
+
+        let queue = f.shared.queue.lock().unwrap();
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == first_hash)
+            .unwrap();
+        assert_eq!(old.state, QueueState::Superseded);
+        assert_eq!(queue.pending().len(), 1);
+        assert_eq!(queue.pending()[0].subagent_count, 1);
+    }
+
+    #[tokio::test]
+    async fn a_standing_opt_in_still_reaches_an_entry_the_skip_path_finds() {
+        // The one thing the discarded per-poll work did do: re-apply a
+        // project's standing `auto_upload` to an entry that has since been
+        // put back to `Pending`. Skipping the load must not skip that, or
+        // arming a project would stop applying to entries already offered.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let c = loads();
+        let report = f.tick_counted(at("2030-01-01T00:01:00Z"), &c);
+        assert_eq!(count(&c), 0, "re-approving must not cost a re-read");
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(f.states(), vec![QueueState::Approved]);
+    }
+
+    #[tokio::test]
+    async fn an_ignored_project_with_a_queued_entry_is_still_reported_ignored() {
+        // The skip path reports the same way the load path did, from the
+        // entry's own project key rather than a re-resolved cwd.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.set_mode("proj", ProjectMode::Ignore);
+        let c = loads();
+        let report = f.tick_counted(at("2030-01-01T00:01:00Z"), &c);
+        assert_eq!(report.ignored, 1, "{report:?}");
+        assert_eq!(count(&c), 0);
+    }
+
+    #[tokio::test]
+    async fn a_queue_entry_records_the_observation_it_was_built_from() {
+        // The comparison data lives on the entry, so it cannot drift from
+        // the queue it describes.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let queue = f.shared.queue.lock().unwrap();
+        let e = &queue.all()[0];
+        let observed = e
+            .observed_modified_at
+            .expect("the entry must record its mtime");
+        assert!(
+            queue
+                .unchanged_offer_at_path(&e.path, e.size_bytes, observed)
+                .is_some(),
+            "the recorded observation must be the one the next poll compares against"
+        );
     }
 
     #[tokio::test]

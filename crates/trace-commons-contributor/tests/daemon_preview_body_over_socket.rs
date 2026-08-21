@@ -131,6 +131,7 @@ impl Harness {
                     approved_at: None,
                     subagent_count: 0,
                     subagents_dropped: 0,
+                    observed_modified_at: None,
                 },
                 100,
             )
