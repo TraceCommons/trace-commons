@@ -238,15 +238,25 @@ pub const TRANSCRIPT_COPY_ALL: &str = "Copy everything";
 pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval covers. Marks like \
      <PRIVATE_SECRET_1> show where scrubbing fired -- legible as chips, not holes.";
 
-/// The read gate's two halves and its footnote. The footnote concedes what
-/// the gate cannot check, because a gate that overstated what it verified
-/// would be worse than no gate.
-pub const GATE_OPENED: &str = "You have opened \"Exactly what would be sent\".";
-pub const GATE_ACKNOWLEDGED: &str = "I have looked at what would be sent, and I understand \
-     scrubbing is pattern-based and may have missed something.";
-pub const GATE_FOOTNOTE: &str = "Contribute stays off until both are done. Looking at the first \
-     screen is what this checks -- it cannot check that you read all of it, and it does not \
-     claim to.";
+/// What the sheet says about redaction at the moment of consent.
+///
+/// This replaced a read gate: `Contribute` used to stay disabled until the
+/// transcript tab had been on screen AND an acknowledgement checkbox had
+/// been ticked. The checkbox is gone -- it was friction on the only path
+/// that involves looking, while `Submit` on a queue row approves with no
+/// preview at all, so the gate taxed exactly the careful contributor and
+/// stopped nobody.
+///
+/// What the checkbox *said* is not gone. It is this sentence, printed on
+/// the sheet where the tick used to be asked for, and it keeps both halves
+/// of what the old gate was honest about: scrubbing is pattern-based and
+/// may have missed something, and nothing in this app can tell whether
+/// anyone read anything.
+///
+/// One line, one escaped literal, on purpose: `the_three_shells_print_the
+/// _same_statement` scans the macOS and Windows sources for this exact
+/// text, and a line break in any of the three would defeat it.
+pub const GATE_STATEMENT: &str = "\"Exactly what would be sent\" is the exact text that would leave this machine. Pattern-based scrubbing may have missed something in it, and nothing here checks that you looked.";
 
 pub const CLOSE: &str = "Close";
 
@@ -1546,6 +1556,51 @@ mod tests {
     use super::*;
 
     use crate::model::human_bytes;
+
+    /// The statement that replaced the read gate, character for character.
+    ///
+    /// Written out here rather than compared to itself: this is the copy
+    /// the product asserts about redaction at the instant of consent, and
+    /// the point of the assertion is that changing the sentence is a
+    /// decision somebody has to make twice.
+    const STATEMENT: &str = "\"Exactly what would be sent\" is the exact text that would leave \
+         this machine. Pattern-based scrubbing may have missed something in it, and nothing here \
+         checks that you looked.";
+
+    #[test]
+    fn the_consent_statement_is_exactly_what_was_agreed() {
+        assert_eq!(GATE_STATEMENT, STATEMENT);
+        // The two things the removed checkbox used to make a contributor
+        // say out loud. Neither may quietly drop out of the sentence.
+        assert!(GATE_STATEMENT.contains("Pattern-based scrubbing may have missed something"));
+        assert!(GATE_STATEMENT.contains("nothing here checks that you looked"));
+    }
+
+    /// The parity check, done against the other two shells' actual sources.
+    ///
+    /// Three shells print this sentence and the only thing that has ever
+    /// held three languages to one sentence in this repo is an assertion
+    /// that reads all three. The needle is derived from `GATE_STATEMENT`
+    /// by re-escaping its quotes, which is how the literal appears in Swift
+    /// and C# source too, so editing the sentence here without editing it
+    /// there fails rather than drifts.
+    #[test]
+    fn the_three_shells_print_the_same_statement() {
+        let needle = GATE_STATEMENT.replace('"', "\\\"");
+        for relative in [
+            "../../macos/Sources/TCShellCore/ReadGate.swift",
+            "../../windows/src/TraceCommons.Interop/ReadGate.cs",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+            assert!(
+                source.contains(&needle),
+                "{} does not print the consent statement verbatim",
+                path.display()
+            );
+        }
+    }
 
     #[test]
     fn too_large_caption_states_the_raw_size_and_never_a_would_send_figure() {

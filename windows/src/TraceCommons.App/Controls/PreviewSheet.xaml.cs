@@ -104,26 +104,14 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     /// tree.
     /// </summary>
     /// <remarks>
-    /// This is the ONLY thing that arms the first half of the read gate, and
-    /// it is deliberately here rather than in the tab click: a click records
-    /// intent, a realization records display, and the gate is only worth
-    /// having if it records the second. The body is drawn first and the gate
-    /// armed after, so the flag can never lead the pixels.
-    ///
-    /// <para>
-    /// Paging deliberately did NOT change this gate. Every byte being
-    /// reachable is not every byte being read, and a gate that waited for a
-    /// scroll to the end of 17.5 MB would be defeated by throwing the
-    /// scrollbar at the bottom: verifying nothing while reading, to everyone
-    /// downstream, as though it verified reading. The gate still claims only
-    /// that the first screenful was displayed.
-    /// </para>
+    /// It used to arm the first half of a read gate as well. That gate is
+    /// gone -- see <see cref="ReadGate"/> -- so this now does nothing but
+    /// build and draw the body.
     /// </remarks>
     private void OnTranscriptRealized(object sender, RoutedEventArgs e)
     {
         BuildTranscriptDocument();
         RefreshTranscript();
-        ViewModel.MarkTranscriptShown();
     }
 
     /// <summary>

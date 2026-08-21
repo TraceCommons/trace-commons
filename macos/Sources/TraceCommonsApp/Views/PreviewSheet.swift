@@ -19,8 +19,8 @@ import TCShellCore
 /// action -- send a transcript nobody had looked at, with the recovery bar
 /// stranded behind the sheet where it could not be seen.
 ///
-/// `Contribute` waits on the read gate below (`readGate`) and is bound to no
-/// keyboard shortcut at all.
+/// `Contribute` waits only on a loaded preview (see `TCShellCore.ReadGate`)
+/// and is bound to no keyboard shortcut at all.
 ///
 /// The layout follows `design-import/DESIGN-SPEC.md` §5.2 (`1b` preview
 /// sheet) and §5.10 (`4a` transcript renderer), which are the same shell:
@@ -60,28 +60,13 @@ struct PreviewSheet: View {
 
     // MARK: - The read gate
     //
-    // `Contribute` used to enable the instant metadata arrived, which meant
-    // the one irreversible control in the product could be clicked by
-    // somebody who had never opened "Exactly what would be sent". These two
-    // flags are what it now waits on.
-    //
-    // The gate is deliberately "first screen + explicit acknowledgement" and
-    // not "paged and scrolled to the end". Real traces on this pilot run to
-    // 169 KB; a scroll-to-the-bottom gate on that is a long drag, and a gate
-    // people defeat by throwing the scrollbar at the end verifies nothing
-    // while reading, to everyone downstream, as though it verified reading.
-    // This one claims only what it can establish: the redacted body was put
-    // in front of them, and they said out loud what scrubbing does not
-    // guarantee.
-    //
-    // Neither flag is persisted anywhere and neither is pre-set. They live
-    // and die with this sheet, which now handles exactly one session, so
-    // every entry starts the gate from zero.
+    // There is no longer a read gate. `Contribute` used to wait on the
+    // transcript tab having been on screen AND an acknowledgement checkbox
+    // ticked by hand; both are gone, and `TCShellCore.ReadGate` records why
+    // and holds the sentence that took their place. What survives here is
+    // the one condition that was never friction: a preview has to have
+    // loaded, because that is what an approval binds to.
 
-    /// True once the transcript tab has actually been on screen.
-    @State private var sawFirstScreen = false
-    /// True once the contributor ticks the acknowledgement themselves.
-    @State private var acknowledged = false
     /// Search first, always: it is the question a contributor can actually
     /// answer in five seconds.
     @State private var tab: Tab = .search
@@ -257,13 +242,12 @@ struct PreviewSheet: View {
                     WhatsInItTab(entry: entry, summary: summary)
                 case .transcript:
                     // Fail closed rather than cutting a fresh document on
-                    // every layout pass: the gate's first condition is set
-                    // by the tab appearing, so a tab with no body must not
-                    // appear. Unreachable in practice -- the document is
-                    // built in the same step that decodes the summary, and
-                    // this branch only renders once the summary exists.
+                    // every layout pass. Unreachable in practice -- the
+                    // document is built in the same step that decodes the
+                    // summary, and this branch only renders once the
+                    // summary exists.
                     if let document {
-                        TranscriptTab(document: document) { sawFirstScreen = true }
+                        TranscriptTab(document: document)
                     } else {
                         CenteredNotice(
                             title: "The transcript isn't ready.",
@@ -345,12 +329,12 @@ struct PreviewSheet: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             // §5.10 drops this line from the transcript tab's footer. It is
-            // kept on every tab here: the sentence is the one that makes the
-            // read gate mean anything, and the tab a person is standing on
-            // when they reach for Contribute is not a reason to stop saying
-            // it.
+            // kept on every tab here: it is the sentence everything else on
+            // this sheet is qualified by, and the tab a person is standing
+            // on when they reach for Contribute is not a reason to stop
+            // saying it.
             ScrubbingCaveatAtCommit()
-            readGate
+            gateStatement
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a
                 // second way to approve.
@@ -363,8 +347,8 @@ struct PreviewSheet: View {
                 Button("Close") { dismiss() }
                     .buttonStyle(SheetSecondaryButtonStyle())
                 // The ONLY approve control in the product. It is behind the
-                // preview by design, it is behind the read gate above by
-                // design, and it has NO keyboard shortcut: this used to be
+                // preview by design -- it cannot arm until one has loaded --
+                // and it has NO keyboard shortcut: this used to be
                 // `.defaultAction`, which put an irreversible send one
                 // Return away from a hand resting on the keyboard.
                 Button("Contribute") {
@@ -388,90 +372,30 @@ struct PreviewSheet: View {
         .background(TC.surface)
     }
 
-    // MARK: - The read gate
+    // MARK: - What arms Contribute
 
     private var canContribute: Bool {
-        summary != nil && sawFirstScreen && acknowledged
+        ReadGate.canContribute(hasPinnedPreview: summary != nil)
     }
 
     private var gateHelp: String {
-        canContribute
-            ? "Sends this session. Nothing else."
-            : "Open \"Exactly what would be sent\" and tick the acknowledgement first."
+        ReadGate.help(hasPinnedPreview: summary != nil)
     }
 
-    /// Two requirements, both visible, both in the state they are actually
-    /// in. Drawn in SwiftUI rather than built from `Toggle`: an NSView-backed
-    /// control cannot be rasterized by `ImageRenderer`, so a `Toggle` here
-    /// would show up as a yellow placeholder in every verification
-    /// screenshot of the most safety-relevant control in the product. The
-    /// same reason `ConsentScopesView` draws its permission boxes this way.
-    private var readGate: some View {
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
-            Button {
-                tab = .transcript
-            } label: {
-                gateLine(
-                    done: sawFirstScreen,
-                    text: sawFirstScreen
-                        ? "You have opened \"Exactly what would be sent\"."
-                        : "Open \"Exactly what would be sent\" and look at it."
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(summary == nil)
-            .accessibilityHint("Opens the redacted transcript this would send.")
-
-            Button {
-                guard sawFirstScreen else { return }
-                acknowledged.toggle()
-            } label: {
-                gateLine(
-                    done: acknowledged,
-                    text: """
-                    I have looked at what would be sent, and I understand \
-                    scrubbing is pattern-based and may have missed something.
-                    """
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(!sawFirstScreen)
-            .accessibilityAddTraits(acknowledged ? [.isSelected] : [])
-
-            if !canContribute {
-                Text("""
-                Contribute stays off until both are done. Looking at the first \
-                screen is what this checks — it cannot check that you read all \
-                of it, and it does not claim to.
-                """)
-                .font(TC.Font_.captionSmall)
-                .foregroundStyle(TC.inkTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func gateLine(done: Bool, text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            // The shape changes, not just the colour, so the state survives
-            // greyscale and colour-blindness.
-            TCReadGateCheckbox(checked: done)
-            Text(text)
-                .font(TC.Font_.caption)
-                .foregroundStyle(done ? TC.inkSecondary : TC.inkPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.leading)
-            Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
-        // `TCReadGateCheckbox` is drawn, and drawn shapes are hidden from
-        // VoiceOver -- so without this the row announces its sentence and
-        // nothing about whether the condition is met. That is the state the
-        // whole gate is about, on the one control that sends a trace, so the
-        // row is combined into a single element and given the answer as its
-        // value.
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(done ? "Done" : "Not done yet")
+    /// The sentence the acknowledgement checkbox used to carry, printed
+    /// where the tick used to be asked for.
+    ///
+    /// Plain text and no control: it is a statement the app makes, not a
+    /// question it asks. The words are `TCShellCore.ReadGate.statement`
+    /// rather than a literal here, because the Linux and Windows sheets
+    /// print the same sentence and a copy in a view is a copy that drifts.
+    private var gateStatement: some View {
+        Text(ReadGate.statement)
+            .font(TC.Font_.captionSmall)
+            .foregroundStyle(TC.inkTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func load() async {
@@ -888,18 +812,6 @@ struct WhatsInItTab: View {
 /// a chunk that is not laid out holds its place by an estimate.
 struct TranscriptTab: View {
     let document: TranscriptDocument
-    /// Called once the redacted body is actually on screen. This is what the
-    /// preview sheet's read gate is built on, and it is the honest limit of
-    /// what the gate can claim: the first screenful was displayed. Nothing
-    /// here reports what was read, and nothing here reports the content.
-    ///
-    /// Paging deliberately did NOT change this. Every byte being reachable
-    /// is not every byte being read, and a gate that waited for a scroll to
-    /// the end of 17.5 MB would be defeated by throwing the scrollbar at the
-    /// bottom -- verifying nothing while reading, to everyone downstream, as
-    /// though it verified reading.
-    var onFirstScreenShown: () -> Void = {}
-
     /// The chunks that are typeset right now, and the eviction that keeps
     /// that set under the ceiling. The policy lives in `TCShellCore` so it
     /// can be asserted against real byte counts without a running app.
@@ -951,7 +863,6 @@ struct TranscriptTab: View {
                 .onChange(of: geometry.size.width) { _, width in measure(width: width) }
             }
         }
-        .onAppear(perform: onFirstScreenShown)
     }
 
     /// Which chunks exist as views at all.

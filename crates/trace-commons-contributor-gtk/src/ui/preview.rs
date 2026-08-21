@@ -11,12 +11,16 @@
 //!
 //! `Contribute` exists here and nowhere else, it has no keyboard shortcut,
 //! and it is followed by an undo counted against the daemon's own deadline.
-//! It is also gated: the sheet will not arm it until the transcript tab has
-//! been opened *and* the acknowledgement below it has been ticked. The
-//! footnote under those two boxes says out loud what the gate can and
-//! cannot know -- it sees that the tab was opened, not that anything on it
-//! was read -- because a gate that implied otherwise would be the rubber
-//! stamp this sheet exists to prevent.
+//! It waits on one thing only: a real, pinned preview to approve against.
+//!
+//! It used to wait on two more -- the transcript tab having been on screen,
+//! and an acknowledgement checkbox ticked by hand. Both are gone. A queue
+//! row's `Submit` approves the same session with no preview opened at all,
+//! so the gate never stood between anybody and a blind approval; all it did
+//! was charge a click to the one contributor who chose to look. What the
+//! checkbox asserted survives as `copy::GATE_STATEMENT`, printed on the
+//! footer where the tick used to be asked for, because removing the
+//! friction must not quietly remove the claim.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -60,11 +64,6 @@ struct Sheet {
     pending: Vec<crate::model::QueueEntry>,
     index: RefCell<usize>,
 
-    /// The four tabs' pages. Which one is showing is the single source of
-    /// truth for the strip's selection and for the first half of the read
-    /// gate.
-    stack: gtk::Stack,
-
     /// The identity row of the sheet header: who ran this, with what, and
     /// when. The same three facts the queue row led with.
     identity_project: gtk::Label,
@@ -98,11 +97,6 @@ struct Sheet {
     copy_all: gtk::Button,
     permissions: gtk::Box,
 
-    /// The read gate. The first box is set by opening the transcript tab and
-    /// cannot be ticked by hand; the second is the contributor's own
-    /// statement. `Contribute` needs both, and a pinned preview besides.
-    gate_opened: gtk::CheckButton,
-    gate_acknowledged: gtk::CheckButton,
     /// Whether the preview now showing is bindable to an approval at all.
     /// An unenrolled build previews against a placeholder identity, so there
     /// is nothing for a `Contribute` to cover.
@@ -147,7 +141,7 @@ const TABS: [Tab; 4] = [
     },
 ];
 
-/// The stack child whose opening satisfies the first half of the read gate.
+/// The stack child that shows the redacted body itself.
 const TRANSCRIPT_TAB: &str = "would-be-sent";
 
 impl Sheet {
@@ -402,32 +396,17 @@ impl Sheet {
             tab_buttons.push(button);
         }
 
-        // The read gate, and the footnote that says what it can and cannot
-        // know. Both rows are 11px; the spec ranks the second one's label a
-        // step darker than the first, which this shell has no type class for
-        // yet -- see the report.
-        let gate_opened = gtk::CheckButton::new();
-        // System-set, not contributor-set: it says the transcript tab was
-        // opened, and a box a person could tick themselves would be saying
-        // something else. Left sensitive rather than disabled so it renders
-        // as a ticked statement instead of a greyed-out control.
-        gate_opened.set_can_target(false);
-        gate_opened.set_focusable(false);
-        let gate_acknowledged = gtk::CheckButton::new();
-        let gate = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(space::XS)
-            .build();
-        gate.append(&gate_row(&gate_opened, copy::GATE_OPENED));
-        gate.append(&gate_row(&gate_acknowledged, copy::GATE_ACKNOWLEDGED));
-        let footnote = gtk::Label::builder()
-            .label(copy::GATE_FOOTNOTE)
+        // What the acknowledgement checkbox used to make a contributor
+        // tick, said as a statement instead. It sits where the gate did --
+        // last thing above the buttons -- because that is where somebody is
+        // standing when they reach for `Contribute`.
+        let gate_statement = gtk::Label::builder()
+            .label(copy::GATE_STATEMENT)
             .xalign(0.0)
             .wrap(true)
             .build();
-        footnote.add_css_class("tc-caveat");
-        footnote.add_css_class("tc-tertiary");
-        gate.append(&footnote);
+        gate_statement.add_css_class("tc-caveat");
+        gate_statement.add_css_class("tc-tertiary");
 
         // The concession, on the footer rather than on a tab, so it is on
         // screen at the moment of the decision whichever tab is open. See
@@ -466,7 +445,7 @@ impl Sheet {
         actions.append(&close);
         actions.append(&contribute);
 
-        // A rule above the footer, so the gate and the actions sit on a
+        // A rule above the footer, so the statement and the actions sit on a
         // footer rather than floating under whichever tab happens to be
         // open.
         let footer_rule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -481,7 +460,7 @@ impl Sheet {
             .margin_end(space::L)
             .build();
         footer.append(&residual_risk);
-        footer.append(&gate);
+        footer.append(&gate_statement);
         footer.append(&actions);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -500,7 +479,6 @@ impl Sheet {
             title,
             pending,
             index: RefCell::new(index),
-            stack: stack.clone(),
             identity_project,
             identity_agent,
             identity_when,
@@ -515,8 +493,6 @@ impl Sheet {
             transcript: Rc::clone(&transcript),
             copy_all: copy_all.clone(),
             permissions,
-            gate_opened: gate_opened.clone(),
-            gate_acknowledged: gate_acknowledged.clone(),
             pinned: Cell::new(false),
             contribute: contribute.clone(),
             body: RefCell::new(None),
@@ -554,11 +530,9 @@ impl Sheet {
             }
         });
 
-        // The first half of the read gate. It is satisfied by the tab
-        // actually coming into view, so it holds however the tab was
-        // reached -- the strip, a programmatic open, or a future keyboard
-        // path -- rather than only when the strip was clicked.
-        let s = Rc::clone(&sheet);
+        // Keep the tab strip's own selection in step with the stack,
+        // however the stack was moved -- the strip, a programmatic open, or
+        // a future keyboard path.
         let buttons = tab_buttons.clone();
         stack.connect_visible_child_name_notify(move |stack| {
             let Some(name) = stack.visible_child_name() else {
@@ -570,14 +544,7 @@ impl Sheet {
                     button.set_active(true);
                 }
             }
-            if name == TRANSCRIPT_TAB {
-                s.gate_opened.set_active(true);
-            }
         });
-        let s = Rc::clone(&sheet);
-        gate_opened.connect_toggled(move |_| s.sync_contribute());
-        let s = Rc::clone(&sheet);
-        gate_acknowledged.connect_toggled(move |_| s.sync_contribute());
 
         sheet.load();
         window.present();
@@ -621,15 +588,10 @@ impl Sheet {
         ));
         self.identity_when
             .set_text(&human_when(entry.discovered_at));
-        // A new entry is a new decision, so the gate starts closed again --
-        // including the half that was satisfied by reading the *previous*
-        // trace's transcript. The exception is a sheet that is sitting on
-        // the transcript tab already: that tab is about to show the new
-        // trace, so the statement the box makes is true of this one too.
+        // A new entry is a new decision, and nothing about the previous
+        // one may carry into it: the pin is dropped here and only set again
+        // by a preview that actually came back for THIS entry.
         self.pinned.set(false);
-        self.gate_opened
-            .set_active(self.stack.visible_child_name().as_deref() == Some(TRANSCRIPT_TAB));
-        self.gate_acknowledged.set_active(false);
         self.sync_contribute();
         self.count_whats_in_it.set_text("");
         self.count_permissions.set_text("");
@@ -672,17 +634,17 @@ impl Sheet {
             .append(&super::queue::manifest_for(summary));
     }
 
-    /// Arm `Contribute` only when all three conditions hold at once: a
-    /// pinned preview to approve against, the transcript tab opened, and
-    /// the acknowledgement ticked.
+    /// Arm `Contribute` only against a real, pinned preview.
     ///
-    /// One function, called from every place any of the three can change,
-    /// so there is no path that sets the button sensitive while forgetting
-    /// one of them.
+    /// This used to AND two more conditions -- transcript tab shown,
+    /// acknowledgement ticked -- and the module doc records why they went.
+    /// What remains is not friction: an unenrolled or failed preview has no
+    /// envelope for an approval to bind to, so the button must stay off.
+    ///
+    /// Still one function, called from every place the pin can change, so
+    /// no path sets the button sensitive on its own.
     fn sync_contribute(&self) {
-        let ready =
-            self.pinned.get() && self.gate_opened.is_active() && self.gate_acknowledged.is_active();
-        self.contribute.set_sensitive(ready);
+        self.contribute.set_sensitive(self.pinned.get());
     }
 
     fn fill(self: &Rc<Self>, summary: &PreviewSummary, body: Option<String>) {
@@ -1394,28 +1356,6 @@ fn chunk_view(text: &str) -> gtk::TextView {
     buffer.set_text(text);
     highlight_redactions(&buffer, text);
     view
-}
-
-/// One row of the read gate: the box, then the sentence it is making.
-///
-/// The label is a separate widget rather than the check button's own, so it
-/// can wrap -- these are two full sentences, not control labels. The button
-/// carries the same words as its accessible name, so a screen reader reads
-/// the statement rather than an unnamed checkbox.
-fn gate_row(check: &gtk::CheckButton, text: &str) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
-    check.set_valign(gtk::Align::Start);
-    check.update_property(&[gtk::accessible::Property::Label(text)]);
-    let label = gtk::Label::builder()
-        .label(text)
-        .xalign(0.0)
-        .wrap(true)
-        .hexpand(true)
-        .build();
-    label.add_css_class("tc-caveat");
-    row.append(check);
-    row.append(&label);
-    row
 }
 
 /// A readable window around a search hit, and where inside it the hit is.
