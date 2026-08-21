@@ -237,7 +237,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
-            self.status = status
+            publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
         case .queueChanged:
@@ -316,6 +316,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Publishing
+
+    /// Assign to a `@Published` property only when the value actually
+    /// differs.
+    ///
+    /// Every refresher below re-fetches from the daemon and writes the
+    /// decoded answer straight back. A freshly decoded array is a *new*
+    /// value even when it is byte-identical to the one already held, so a
+    /// plain assignment fires `objectWillChange` regardless -- and one
+    /// `objectWillChange` invalidates every view observing this model,
+    /// which at 500 queue rows is a full view-graph rebuild on the main
+    /// thread. A single `queue_changed` event runs four refreshers and so
+    /// used to publish five or six of them back to back for a queue that
+    /// had not moved.
+    ///
+    /// Comparing first turns "the daemon answered" into "the answer
+    /// changed", which is the thing a view actually needs to redraw for.
+    /// Every model written through here is `Equatable`, and the compare is
+    /// over a few hundred small structs -- orders of magnitude cheaper than
+    /// the rebuild it avoids.
+    private func publishIfChanged<T: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<AppModel, T>,
+        _ value: T
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
+    }
+
     // MARK: - Refresh
 
     func refreshAll() {
@@ -337,11 +365,11 @@ final class AppModel: ObservableObject {
     /// once would show a contributor everything except the change they just
     /// made.
     func refreshAudit() {
-        perform("list_audit", work: { try $0.listAudit() }, onSuccess: { self.audit = $0 })
+        perform("list_audit", work: { try $0.listAudit() }) { self.publishIfChanged(\.audit, $0) }
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }, onSuccess: { self.status = $0 })
+        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
     }
 
     func refreshQueue() {
@@ -351,12 +379,16 @@ final class AppModel: ObservableObject {
     }
 
     func refreshHistory() {
-        perform("list_history", work: { try $0.listHistory() }, onSuccess: { self.history = $0 })
-        perform("history_rollup", work: { try $0.historyRollup() }, onSuccess: { self.rollup = $0 })
+        perform("list_history", work: { try $0.listHistory() }) {
+            self.publishIfChanged(\.history, $0)
+        }
+        perform("history_rollup", work: { try $0.historyRollup() }) {
+            self.publishIfChanged(\.rollup, $0)
+        }
     }
 
     func refreshProjects() {
-        perform("list_projects", work: { try $0.listProjects() }, onSuccess: { self.projects = $0 })
+        perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
     }
 
     /// Sets `project`'s mode via the daemon and refreshes `projects` from
@@ -384,7 +416,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSettings() {
-        perform("get_settings", work: { try $0.settings() }, onSuccess: { self.daemonSettings = $0 })
+        perform("get_settings", work: { try $0.settings() }) { self.publishIfChanged(\.daemonSettings, $0) }
     }
 
     // MARK: - Enrollment
@@ -431,9 +463,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshConsentOptions() {
-        perform("consent_options", work: { try $0.consentOptions() }, onSuccess: {
-            self.consentScopes = $0
-        })
+        perform("consent_options", work: { try $0.consentOptions() }) {
+            self.publishIfChanged(\.consentScopes, $0)
+        }
     }
 
     enum SetScopesOutcome: Equatable {
@@ -495,9 +527,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshOutcomeCounts() {
-        perform("queue_outcome_counts", work: { try $0.queueOutcomeCounts() }, onSuccess: {
-            self.outcomeCounts = $0
-        })
+        perform("queue_outcome_counts", work: { try $0.queueOutcomeCounts() }) {
+            self.publishIfChanged(\.outcomeCounts, $0)
+        }
     }
 
     // MARK: - Preview scheduling
@@ -520,7 +552,7 @@ final class AppModel: ObservableObject {
     /// proportional to what is on screen.
     private func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
-        pending = entries
+        publishIfChanged(\.pending, entries)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {
@@ -591,16 +623,22 @@ final class AppModel: ObservableObject {
         case .queued, .running:
             break
         case .ready:
-            if let summary = result.summary {
+            if let summary = result.summary, summaries[result.entryID] != summary {
                 summaries[result.entryID] = summary
             }
         case .tooLarge:
-            tooLarge[result.entryID] = PreviewTooLarge(
+            let refusal = PreviewTooLarge(
                 rawSessionBytes: result.rawSessionBytes ?? 0,
                 limitBytes: result.limitBytes ?? 0
             )
+            if tooLarge[result.entryID] != refusal {
+                tooLarge[result.entryID] = refusal
+            }
         case .failed:
-            summaryErrors[result.entryID] = result.label ?? "preview-failed"
+            let label = result.label ?? "preview-failed"
+            if summaryErrors[result.entryID] != label {
+                summaryErrors[result.entryID] = label
+            }
         }
     }
 
