@@ -46,6 +46,12 @@ struct QueueView: View {
 struct QueueContent: View {
     @EnvironmentObject private var model: AppModel
     @Binding var previewing: QueueEntry?
+    /// What this run of the view currently believes is on screen, purely so
+    /// each row's `onAppear`/`onDisappear` can report a delta rather than
+    /// the whole set every time. The daemon's actual idea of "visible" is
+    /// `AppModel`'s, behind `setPreviewVisible` -- this is not published and
+    /// nothing reads it directly.
+    @State private var visibleRowIDs: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -112,11 +118,20 @@ struct QueueContent: View {
                         entries: model.awaitingDecision.filter { $0.projectID == group.id },
                         summaries: model.summaries,
                         summaryErrors: model.summaryErrors,
+                        tooLarge: model.tooLarge,
                         onLookInside: { previewing = $0 },
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
-                        onAppear: { model.requestSummary(for: $0) }
+                        onAppear: { entry in
+                            model.requestPreview(for: entry)
+                            visibleRowIDs.insert(entry.entryID)
+                            model.setPreviewVisible(visibleRowIDs)
+                        },
+                        onDisappear: { entry in
+                            visibleRowIDs.remove(entry.entryID)
+                            model.setPreviewVisible(visibleRowIDs)
+                        }
                     )
                 }
             }
@@ -141,14 +156,20 @@ private struct ProjectQueueGroup: View {
     let entries: [QueueEntry]
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
+    let tooLarge: [String: PreviewTooLarge]
     let onLookInside: (QueueEntry) -> Void
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
-    /// Called when a row actually appears on screen -- `AppModel.requestSummary(for:)`,
-    /// which is where the concurrency limit and in-flight dedupe live. See
-    /// `rowList` for why this is what drives loading at all now.
+    /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
+    /// which is where the daemon-side scheduler dedupe lives. See `rowList`
+    /// for why this is what drives loading at all now.
     let onAppear: (QueueEntry) -> Void
+    /// Called when a row leaves the screen. Updates visibility priority
+    /// only -- never cancels the scheduled preview; a card that scrolls
+    /// away keeps its place in the daemon's queue until it is dismissed or
+    /// leaves the pending list for good (`AppModel.applyPendingUpdate`).
+    let onDisappear: (QueueEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -185,9 +206,10 @@ private struct ProjectQueueGroup: View {
     /// `VStack` -- same spacing, same default `.center` alignment `LazyVStack`
     /// also defaults to -- and everyone else gets the lazy one.
     ///
-    /// This is also what makes rows the thing that requests its own summary
-    /// (`rows`'s `.onAppear`) rather than the model asking for all of them at
-    /// snapshot time: a `LazyVStack` row's `onAppear` fires exactly when
+    /// This is also what makes rows the thing that requests its own preview
+    /// (`rows`'s `.onAppear`, `AppModel.requestPreview(for:)`) rather than
+    /// the model asking for all of them at snapshot time: a `LazyVStack`
+    /// row's `onAppear` fires exactly when
     /// SwiftUI actually realizes it, so under the real `ScrollView` a
     /// contributor with 500 sessions only ever asks for the handful near the
     /// visible area. Under the screenshot hook's eager `VStack` every row
@@ -210,11 +232,13 @@ private struct ProjectQueueGroup: View {
                 entry: entry,
                 summary: summaries[entry.entryID],
                 summaryError: summaryErrors[entry.entryID],
+                tooLarge: tooLarge[entry.entryID],
                 onLookInside: { onLookInside(entry) },
                 onSubmit: { onSubmit(entry) },
                 onDismiss: { onDismiss(entry) }
             )
             .onAppear { onAppear(entry) }
+            .onDisappear { onDisappear(entry) }
         }
     }
 }
@@ -231,6 +255,10 @@ struct QueueRow: View {
     let entry: QueueEntry
     let summary: PreviewSummary?
     let summaryError: String?
+    /// Set when the daemon's preview scheduler refused this session for
+    /// being over the admission cap. Renders as "too large to preview" plus
+    /// the raw stat -- never a would-send estimate; see `PreviewTooLarge`.
+    let tooLarge: PreviewTooLarge?
     let onLookInside: () -> Void
     let onSubmit: () -> Void
     let onDismiss: () -> Void
@@ -283,6 +311,15 @@ struct QueueRow: View {
                     .lineSpacing(TC.Font_.LineHeight.spacing(for: 13, TC.Font_.LineHeight.body))
                     .lineLimit(3)
                     .textSelection(.enabled)
+            } else if let tooLarge {
+                // Exactly `raw_session_bytes`, a `stat`, and nothing derived
+                // from it -- never a synthesized would-send figure. See the
+                // scheduler design's "Admission control by size": this card
+                // is a consent surface, and a plausible-looking wrong number
+                // here is worse than no number.
+                Text("Too large to preview (\(Format.bytes(tooLarge.rawSessionBytes))).")
+                    .font(TC.Font_.body)
+                    .foregroundStyle(.secondary)
             } else if let summaryError {
                 Text("Couldn't read this one yet (\(summaryError)). Nothing has been sent.")
                     .font(TC.Font_.body)
