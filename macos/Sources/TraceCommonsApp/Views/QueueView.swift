@@ -374,6 +374,7 @@ struct QueueRow: View {
                     }
                     caption
                 }
+                extent
             }
             Spacer(minLength: TC.Space.m)
             actions
@@ -401,6 +402,29 @@ struct QueueRow: View {
             .foregroundStyle(ScrubbingCaveat.tone(redactionCount: redactionCount).textColor)
             .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// What this one card actually covers, and -- the half the contract makes
+    /// mandatory -- whether any of it was left out to fit.
+    ///
+    /// Outside the `if let summary` above on purpose: both counts are
+    /// load-time facts carried on the entry itself, so this line is as true
+    /// while the card still reads "Reading it locally…" as it is after the
+    /// preview lands. A trimmed conversation must not be able to reach a
+    /// decision through a card that never got a preview.
+    ///
+    /// Absent entirely when there is nothing to report, so a session that
+    /// delegated nothing carries no line about subagents at all.
+    @ViewBuilder
+    private var extent: some View {
+        if let line = entry.subagentLine {
+            Text(line)
+                .font(TC.Font_.footnote)
+                .foregroundStyle(entry.wasTrimmed ? TC.goldText : TC.inkSecondary)
+                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(line)
+        }
     }
 
     /// The gold chip that replaces the removed-by-pattern figure when nothing

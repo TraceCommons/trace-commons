@@ -1035,7 +1035,12 @@ final class AppModel: ObservableObject {
             discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),
             state: .pending,
             reasonLabel: nil,
-            attempts: 0
+            attempts: 0,
+            // A single-file conversation: no delegated transcripts, none
+            // dropped, so the card's extent line is absent and the capture
+            // shows exactly what it showed before these fields existed.
+            subagentCount: 0,
+            subagentsDropped: 0
         )
         var offsets: [Int] = []
         if !needle.isEmpty {

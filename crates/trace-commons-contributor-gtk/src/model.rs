@@ -102,6 +102,22 @@ pub struct QueueEntry {
     pub state: String,
     #[serde(default)]
     pub reason_label: Option<String>,
+    /// How many delegated subagent transcripts this entry's session covers,
+    /// and how many were left out because the conversation exceeded the
+    /// source's raw byte budget.
+    ///
+    /// The contract calls a non-zero `subagents_dropped` something a client
+    /// **must** surface: the card stands for a whole conversation, and one
+    /// that was trimmed to fit has to say so rather than presenting as
+    /// complete. Rendered through [`crate::copy::subagent_line`].
+    ///
+    /// Both default to zero, which is what a daemon predating the fields
+    /// reports and what every source with no such structure (codex,
+    /// trajectory) sends.
+    #[serde(default)]
+    pub subagent_count: u32,
+    #[serde(default)]
+    pub subagents_dropped: u32,
 }
 
 impl QueueEntry {

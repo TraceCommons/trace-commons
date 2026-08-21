@@ -706,6 +706,25 @@ fn manifest_block(
         caption.add_css_class("tc-attention");
     }
     facts.append(&caption);
+
+    // What this one card actually covers, and -- the half the contract makes
+    // mandatory -- whether any of it was left out to fit. Absent entirely
+    // when there is nothing to report, so a conversation that delegated
+    // nothing carries no line about subagents at all. Independent of the
+    // preview: both counts are load-time facts on the entry itself, so this
+    // is as true while the card still reads "checking" as it is after.
+    if let Some(text) = copy::subagent_line(entry.subagent_count, entry.subagents_dropped) {
+        let extent = gtk::Label::builder()
+            .label(text)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        extent.add_css_class("tc-caveat");
+        if entry.subagents_dropped > 0 {
+            extent.add_css_class("tc-attention");
+        }
+        facts.append(&extent);
+    }
     block.append(&facts);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);

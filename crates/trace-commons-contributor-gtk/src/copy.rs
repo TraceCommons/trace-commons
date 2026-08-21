@@ -59,6 +59,55 @@ pub fn residual_risk_line(total_redactions: u32) -> String {
         ),
     }
 }
+/// What one card actually covers, when the answer is more than the
+/// conversation itself.
+///
+/// A Claude Code conversation is not one file: each delegated subagent's
+/// turns are written beside the session, and one probed machine had 114 of
+/// them under a single conversation. The card offers all of it as one
+/// decision, so its extent belongs in the description -- see
+/// `docs/contributor-daemon-ipc-v1_1.md`, which asks a client to say how
+/// many delegated transcripts an entry covers and **requires** it to
+/// surface a non-zero dropped count.
+///
+/// The second sentence is the one that has to be exactly right. A dropped
+/// transcript is a normal consequence of a very large conversation, not an
+/// error, and it is never the conversation itself -- the parent file is
+/// always kept, and only delegated transcripts, largest first, are left out
+/// to bring the group under the byte budget. So the line states what was
+/// left out, why, and what that does not mean, in that order, and it does
+/// it without a word that reads as a failure.
+///
+/// Returns `None` when there is nothing to say: an entry covering no
+/// delegated transcripts and dropping none renders no row at all rather
+/// than a line of zeroes.
+pub fn subagent_line(subagent_count: u32, subagents_dropped: u32) -> Option<String> {
+    let trimmed = "left out to keep this session within its size limit; the conversation itself \
+                   is complete.";
+    match (subagent_count, subagents_dropped) {
+        (0, 0) => None,
+        (n, 0) => Some(format!("Includes {n} {}.", transcripts(n))),
+        (0, 1) => Some(format!("1 delegated subagent transcript was {trimmed}")),
+        (0, d) => Some(format!("{d} delegated subagent transcripts were {trimmed}")),
+        (n, 1) => Some(format!(
+            "Includes {n} {}. The largest was {trimmed}",
+            transcripts(n)
+        )),
+        (n, d) => Some(format!(
+            "Includes {n} {}. The {d} largest were {trimmed}",
+            transcripts(n)
+        )),
+    }
+}
+
+fn transcripts(n: u32) -> &'static str {
+    if n == 1 {
+        "delegated subagent transcript"
+    } else {
+        "delegated subagent transcripts"
+    }
+}
+
 pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
 /// Says "for good" because it is. A dismissal is a decision about the
@@ -1736,6 +1785,75 @@ mod tests {
         // Singular and plural are both written out; "1 things" reads as a
         // bug, and it is one.
         assert!(residual_risk_line(1).contains("1 thing it"));
+    }
+
+    #[test]
+    fn a_card_covering_nothing_delegated_says_nothing_at_all() {
+        // Never a "0 dropped" row: a line that is always present is a line
+        // nobody reads, and the one case that matters would be lost in it.
+        assert_eq!(subagent_line(0, 0), None);
+    }
+
+    #[test]
+    fn a_dropped_transcript_is_always_stated() {
+        // The contract's one `must`. Every shape with a drop in it says so.
+        for (kept, dropped) in [(0, 1), (0, 7), (3, 1), (42, 3)] {
+            let line = subagent_line(kept, dropped).expect("a drop is never silent");
+            assert!(
+                line.contains(&dropped.to_string()) || (dropped == 1 && line.contains("largest")),
+                "the count of what was left out has to appear: {line}"
+            );
+            // And it says what was NOT lost. The parent conversation is
+            // never dropped, and a contributor reading this line is deciding
+            // whether to send it.
+            assert!(
+                line.contains("the conversation itself is complete"),
+                "a trimmed card must say what survived: {line}"
+            );
+            // Trimming is a size consequence, not a failure. No word here
+            // may read as an error.
+            for alarming in [
+                "error",
+                "failed",
+                "corrupt",
+                "incomplete",
+                "lost",
+                "missing",
+            ] {
+                assert!(
+                    !line.to_lowercase().contains(alarming),
+                    "{alarming} makes a normal trim read as a fault: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_extent_line_counts_in_words_a_person_can_read() {
+        assert_eq!(
+            subagent_line(1, 0).unwrap(),
+            "Includes 1 delegated subagent transcript."
+        );
+        assert_eq!(
+            subagent_line(42, 0).unwrap(),
+            "Includes 42 delegated subagent transcripts."
+        );
+        // "The 1 largest" is a bug; one dropped transcript is "the largest".
+        assert!(subagent_line(42, 1).unwrap().contains("The largest was"));
+        assert!(subagent_line(42, 3).unwrap().contains("The 3 largest were"));
+        // Everything dropped: there is no kept count to open with, so the
+        // sentence starts from what was left out rather than claiming to
+        // include nothing.
+        assert!(
+            subagent_line(0, 2)
+                .unwrap()
+                .starts_with("2 delegated subagent transcripts were left out")
+        );
+        assert!(
+            subagent_line(0, 1)
+                .unwrap()
+                .starts_with("1 delegated subagent transcript was left out")
+        );
     }
 
     #[test]

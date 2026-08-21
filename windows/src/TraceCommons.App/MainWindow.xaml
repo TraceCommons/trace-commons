@@ -798,6 +798,41 @@
                                                        Foreground="{ThemeResource TcInkSecondaryBrush}" />
 
                                             <!--
+                                                What the card covers beyond
+                                                the conversation itself: how
+                                                many delegated subagent
+                                                transcripts came with it, and
+                                                whether any were left out to
+                                                keep the session inside its
+                                                byte budget. The contract
+                                                makes the second one a MUST,
+                                                see
+                                                docs/contributor-daemon-ipc-v1_1.md:
+                                                a contributor consenting to a
+                                                trimmed conversation has to be
+                                                told it was trimmed.
+
+                                                Deliberately NOT bound
+                                                OneWay and deliberately not
+                                                inside the preview blocks
+                                                below: both counts arrive on
+                                                the queue entry and never
+                                                change afterwards, so this
+                                                line stands whether a preview
+                                                ever lands or not.
+
+                                                Absent entirely when there is
+                                                nothing to report; never a
+                                                row reading zero, which is a
+                                                row nobody reads.
+                                            -->
+                                            <TextBlock Text="{x:Bind SubagentText}"
+                                                       Visibility="{x:Bind HasSubagentText}"
+                                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                       TextWrapping="Wrap" />
+
+                                            <!--
                                                 The card's own preview, requested through the
                                                 daemon's bounded scheduler (preview_request) rather
                                                 than driven in process here, see
