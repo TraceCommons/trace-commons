@@ -771,26 +771,86 @@ jobs:
       # app would keep a SECOND queue the contributor CLI cannot see. The
       # manifest disables it; this proves the manifest worked, inside the
       # real container, on a real installed package.
+      #
+      # The probe is deliberately three-way. A missing file at the real path
+      # is not on its own evidence of virtualization: it is equally
+      # consistent with the container process never having started. So this
+      # step also watches the redirected location the write would land in if
+      # virtualization were on, and has the container process write its own
+      # transcript to RUNNER_TEMP, which is on the work volume and is never
+      # redirected. Those two extra observations turn one ambiguous symptom
+      # into a named cause, and a probe that appears at the redirected path
+      # now fails immediately instead of waiting out the deadline.
       - name: Confirm the state directory is not virtualized
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $pkg = Get-AppxPackage -Name Iqlusion.TraceCommons
+
+          # Exactly one registration, or PackageFamilyName below is empty or
+          # an array and Invoke-CommandInDesktopPackage silently does nothing.
+          $pkgs = @(Get-AppxPackage -Name Iqlusion.TraceCommons)
+          if ($pkgs.Count -ne 1) {
+            throw "expected exactly 1 registered Iqlusion.TraceCommons package, found $($pkgs.Count): $($pkgs.PackageFullName -join ', ')"
+          }
+          $pkg = $pkgs[0]
+          Write-Host "package family name: $($pkg.PackageFamilyName)"
+          Write-Host "package full name:   $($pkg.PackageFullName)"
+
           $dir = Join-Path $env:LOCALAPPDATA 'trace-commons'
           $probe = Join-Path $dir 'msix-virtualization-probe.txt'
-          if (Test-Path $probe) { Remove-Item $probe -Force }
-          $inner = "New-Item -ItemType Directory -Force -Path '$dir' | Out-Null; Set-Content -Path '$probe' -Value ok"
+          # Where the write lands instead when virtualization is on.
+          $shadow = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalCache\Local\trace-commons\msix-virtualization-probe.txt"
+          $log = Join-Path $env:RUNNER_TEMP 'msix-probe-inner.log'
+          foreach ($stale in @($probe, $shadow, $log)) {
+            if (Test-Path $stale) { Remove-Item $stale -Force }
+          }
+
+          # -EncodedCommand, not a quoted -Command string: the inner script
+          # has to survive Invoke-CommandInDesktopPackage's argument parsing
+          # intact, and base64 removes every nesting-quote failure mode.
+          $innerScript = @"
+          `$ErrorActionPreference = 'Continue'
+          try {
+            New-Item -ItemType Directory -Force -Path '$dir' | Out-Null
+            Set-Content -Path '$probe' -Value ok
+            "inner: wrote $probe" | Out-File -FilePath '$log' -Encoding ascii
+          } catch {
+            "inner: write failed: `$(`$_.Exception.Message)" | Out-File -FilePath '$log' -Encoding ascii
+          }
+          "@
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerScript))
+
           Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName `
             -AppId App `
             -Command "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -Args "-NoProfile -NonInteractive -Command `"$inner`""
-          $deadline = (Get-Date).AddSeconds(60)
-          while (-not (Test-Path $probe) -and (Get-Date) -lt $deadline) {
+            -Args "-NoProfile -NonInteractive -EncodedCommand $encoded"
+
+          # A liveness bound on the container process starting, not a
+          # tolerance for a bad verdict: a virtualized write is caught by the
+          # $shadow test and breaks out of this loop on the first poll.
+          $deadline = (Get-Date).AddSeconds(120)
+          while (-not (Test-Path $probe) -and -not (Test-Path $shadow) -and (Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 2
           }
-          if (-not (Test-Path $probe)) {
-            throw "the packaged app's write to $dir did not land at the real path. Write virtualization is still on, which means this app would keep a second queue the contributor CLI cannot see."
+
+          if (Test-Path $log) {
+            Write-Host "container process transcript:"
+            Get-Content $log | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "container process left no transcript at $log"
           }
+
+          if (Test-Path $shadow) {
+            throw "the packaged app's write to $dir was redirected to $shadow. Write virtualization is on, which means this app would keep a second queue the contributor CLI cannot see."
+          }
+          if (-not (Test-Path $probe)) {
+            if (Test-Path $log) {
+              throw "the packaged app ran but its write to $dir landed at neither the real path nor the virtualized path. See the transcript above."
+            }
+            throw "the packaged app's write to $dir did not land at the real path, and the container process left no transcript, so it may never have started. Cannot confirm write virtualization is off."
+          }
+
+          Write-Host "probe landed at the real path: $probe"
           Remove-Item $probe -Force
           Remove-AppxPackage -Package $pkg.PackageFullName
 
