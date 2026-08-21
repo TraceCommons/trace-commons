@@ -645,6 +645,51 @@ impl Queue {
             .copied()
     }
 
+    /// Can a load at `path` still produce something this queue would keep?
+    ///
+    /// The companion to `unchanged_offer_at_path`, for the other -- and much
+    /// larger -- population of sessions the poll pays for and throws away:
+    /// the ones that are eligible and are not in the queue at all, because
+    /// the queue is at `max_entries`. `unchanged_offer_at_path` answers
+    /// `None` for every one of them (there is no offer here to be
+    /// unchanged), so the pass went on to `source.load` -- read, parse and
+    /// hash the whole group -- only for `replace_live_at_path` to refuse it
+    /// `queue-full`. With a corpus larger than the cap, which is the normal
+    /// state for a real user, that is thousands of full group hashes every
+    /// poll, forever.
+    ///
+    /// Answering `false` means, and must only mean, that
+    /// `replace_live_at_path` would refuse whatever the load produced, so
+    /// skipping the load cannot change what the queue ends up containing.
+    /// Two rules keep that true, and both halves are load-bearing:
+    ///
+    /// - The occupancy counted is the same one `replace_live_at_path`
+    ///   counts against the cap: live entries, `Pending` or `Approved`.
+    ///   Below the cap there is room for a new offer, so the load must
+    ///   happen.
+    /// - A live entry at this same path forces `true` even at capacity,
+    ///   because `replace_live_at_path` *supersedes* it, and the cap is
+    ///   counted against the entries that would survive -- so the
+    ///   replacement lands in the slot the stale card vacates. Dropping
+    ///   this half would mean a grown session (a new delegated transcript
+    ///   included) could never supersede once the queue filled up, and the
+    ///   contributor's card would describe content that has moved on,
+    ///   permanently.
+    ///
+    /// Not covered, deliberately: an entry with this exact `session_hash`
+    /// living at some *other* path makes `replace_live_at_path` return `Ok`
+    /// without any capacity check. Reaching that needs the hash, which is
+    /// the load this exists to avoid, and the only thing that path does is
+    /// re-apply a standing opt-in -- which the next poll after the queue
+    /// drains below the cap will do anyway.
+    pub fn load_can_land(&self, path: &Path, max_entries: usize) -> bool {
+        let live = |e: &&QueueEntry| matches!(e.state, QueueState::Pending | QueueState::Approved);
+        if self.entries.iter().filter(live).count() < max_entries {
+            return true;
+        }
+        self.entries.iter().filter(live).any(|e| e.path == path)
+    }
+
     /// Add `entry` and, in the same step, retire every live entry at the same
     /// path whose hash is no longer `entry.session_hash`.
     ///
@@ -1554,5 +1599,56 @@ mod tests {
         let mut q = Queue::new();
         let err = q.cancel(entry_id_for("sha256:missing")).unwrap_err();
         assert!(err.to_string().contains("unknown-entry-id"));
+    }
+    #[test]
+    fn a_load_can_land_while_the_queue_is_below_the_cap() {
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(q.load_can_land(&PathBuf::from("/some/other/s.jsonl"), 2));
+    }
+
+    #[test]
+    fn a_load_for_an_unheld_path_cannot_land_once_the_queue_is_at_the_cap() {
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(!q.load_can_land(&PathBuf::from("/some/other/s.jsonl"), 1));
+    }
+
+    #[test]
+    fn a_load_for_a_path_with_a_live_entry_can_land_even_at_the_cap() {
+        // `replace_live_at_path` supersedes the entry sitting here, which
+        // frees the slot the replacement takes. Refusing this load would
+        // strand a grown session on a stale card forever.
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(q.load_can_land(&the_path(), 1));
+    }
+
+    #[test]
+    fn a_dead_entry_at_the_path_does_not_make_a_full_queue_loadable() {
+        // Only a live entry can be superseded, so only a live entry frees a
+        // slot. A superseded card here is just an occupant of history.
+        let mut q = queue_of(vec![
+            observed_entry("sha256:aa", 100, "2026-08-08T11:00:00Z"),
+            QueueEntry {
+                path: PathBuf::from("/Users/z/.claude/projects/x/other.jsonl"),
+                ..observed_entry("sha256:bb", 100, "2026-08-08T11:00:00Z")
+            },
+        ]);
+        let dead = entry_id_for("sha256:aa");
+        q.set_state(dead, QueueState::Superseded, None);
+        assert!(
+            !q.load_can_land(&the_path(), 1),
+            "one live entry elsewhere still fills a cap of one"
+        );
     }
 }

@@ -20,6 +20,26 @@
 //! observation (group size and group mtime) against what the queue entry was
 //! built from, and only loads when something moved.
 //!
+//! Two smaller per-poll costs were measured on the same corpus (81
+//! claude-code groups over 1,044 files, 3,069 codex sessions, 11.7 GB) with
+//! a release build, and only one of them was worth changing:
+//!
+//! - `source.discover()` walks both trees every tick. That is 4.9 ms for
+//!   claude-code and 9.0 ms for codex once the head-peek memos are warm --
+//!   14 ms of a sixty-second tick, 0.02% duty -- and 154 ms on the first
+//!   pass of a process, when those memos are cold. It stats rather than
+//!   reads, and the memos (capped at 8192 entries each) have room for
+//!   several times this corpus. Left as a full walk: incremental discovery
+//!   would have to keep its own view of which directories moved, and the
+//!   failure mode of getting that wrong -- a session never noticed, or a
+//!   subagent that lands under an already-seen session directory never
+//!   noticed -- costs far more than the 14 ms it would save.
+//! - `state.save()` at the end of the tick re-serialized and rewrote the
+//!   whole `DaemonState` unconditionally: 1.24 MB, ~0.85 ms to serialize
+//!   and ~6-10 ms to write and `fsync`, every sixty seconds, around 1.8 GB
+//!   of writes a day, for bytes identical to the ones already on disk. That
+//!   one is now elided when nothing moved; see `DaemonState::save`.
+//!
 //! The trajectory source is not watched: trajectory files have no
 //! conventional local store to poll, so they stay a deliberate `submit
 //! --trajectory` action.
@@ -207,11 +227,22 @@ fn tick_over(
             // from a different one, so a grown session (a new delegated
             // transcript included) still reaches `replace_live_at_path` and
             // still supersedes.
-            let already_offered = {
+            //
+            // The same lock answers the other half of "can this load
+            // produce anything?": a session the queue holds no offer for at
+            // all, because the queue is at `max_queue_entries`. See
+            // `Queue::load_can_land` -- and note it answers `true`
+            // whenever a live entry sits at this path, so a grown session
+            // with a live card still reaches the load and still
+            // supersedes, full queue or not.
+            let (already_offered, can_land) = {
                 let queue = shared.queue.lock().expect("queue lock");
-                queue
-                    .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
-                    .map(|e| (e.entry_id, e.project_key.clone(), e.state))
+                (
+                    queue
+                        .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
+                        .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
+                    queue.load_can_land(&obs.path, max_queue_entries),
+                )
             };
             if let Some((entry_id, project_key, state)) = already_offered {
                 // The project key is taken from the entry rather than
@@ -244,6 +275,19 @@ fn tick_over(
                 continue;
             }
 
+            // A full queue with no live entry at this path: whatever the
+            // load produced, `replace_live_at_path` would refuse it
+            // `queue-full` and the work would be discarded. Refuse it here
+            // instead, before the read, the parse and the group hash, and
+            // raise the same health label the refusal below raises -- the
+            // contributor's queue is genuinely full and sessions are going
+            // unoffered, which is the same condition either way.
+            if !can_land {
+                let mut health = shared.health.lock().expect("health lock");
+                health.fail(health::LABEL_QUEUE_FULL, now);
+                continue;
+            }
+
             let cwd = resolve_cwd(shared, source.as_ref(), &session_ref, &obs);
             let project_key = project_key_for(cwd.as_deref());
             let mode = {
@@ -256,8 +300,10 @@ fn tick_over(
             }
 
             // Hashing reads the whole group, so it happens only here: for a
-            // session the queue has no unchanged offer for. Everything
-            // already offered at this exact observation was skipped above.
+            // session the queue has no unchanged offer for and could still
+            // hold the result of. Everything already offered at this exact
+            // observation, and everything a full queue could not have
+            // taken, was skipped above.
             let Ok(transcript) = source.load(&session_ref) else {
                 continue;
             };
@@ -417,7 +463,7 @@ fn tick_over(
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     {
-        let state = shared.state.lock().expect("state lock");
+        let mut state = shared.state.lock().expect("state lock");
         state.save(&shared.store)?;
     }
     Ok(report)
@@ -608,6 +654,12 @@ mod tests {
             )
             .unwrap();
             path
+        }
+
+        /// Shrink the queue cap, so a test can reach "the queue is full"
+        /// with two sessions instead of five hundred.
+        fn set_max_queue_entries(&self, max: usize) {
+            self.shared.settings.lock().unwrap().max_queue_entries = max;
         }
 
         fn set_mode(&self, project: &str, mode: ProjectMode) {
@@ -1362,6 +1414,105 @@ mod tests {
         );
     }
 
+    /// Overwrite the daemon state file with bytes a save would never
+    /// produce, so a later write is detectable by the sentinel being gone.
+    /// The in-memory state stays authoritative -- the file is only read at
+    /// startup -- so this observes writes without disturbing the tick.
+    fn plant_state_sentinel(f: &WatcherFixture) {
+        std::fs::write(
+            f.shared.store.daemon_path(crate::config::DAEMON_STATE_FILE),
+            b"SENTINEL",
+        )
+        .unwrap();
+    }
+
+    fn state_sentinel_survived(f: &WatcherFixture) -> bool {
+        std::fs::read(f.shared.store.daemon_path(crate::config::DAEMON_STATE_FILE)).unwrap()
+            == b"SENTINEL"
+    }
+
+    #[tokio::test]
+    async fn a_tick_that_moved_nothing_does_not_rewrite_the_state_file() {
+        // The second remaining per-poll cost. Every tick re-serialized the
+        // whole `DaemonState` and wrote it with an fsync -- 1.24 MB a minute
+        // on the reported machine -- even when the pass changed nothing.
+        // `observe` runs for every path on every poll, which is why this is
+        // asserted against writes rather than against a dirty flag: the
+        // bookkeeping is touched either way, and what must not happen is
+        // the write.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+
+        plant_state_sentinel(&f);
+        for minute in 1..=3 {
+            tick(&f.shared, at(&format!("2030-01-01T00:0{minute}:00Z")))
+                .await
+                .unwrap();
+        }
+        assert!(
+            state_sentinel_survived(&f),
+            "three idle polls must not rewrite the state file"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tick_that_saw_something_new_does_rewrite_the_state_file() {
+        // The other half: eliding the write must not lose an observation.
+        // A session first sighted on this tick has to be on disk, or a
+        // restart would treat it as never seen and the size-stability check
+        // would start over.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        plant_state_sentinel(&f);
+
+        let second = "22222222-2222-2222-2222-222222222222";
+        let path = f.write_session("proj", second, 0);
+        tick(&f.shared, at("2030-01-01T00:01:00Z")).await.unwrap();
+        assert!(
+            !state_sentinel_survived(&f),
+            "a first sighting must be persisted"
+        );
+        let reloaded = crate::daemon::state::DaemonState::load(&f.shared.store).unwrap();
+        assert!(
+            reloaded.previous_size(&path).is_some(),
+            "the reloaded state must carry the new session's observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_idle_polls_still_knows_what_was_offered() {
+        // The risk the elision has to be measured against: state that was
+        // never written is state a restart cannot see. After idle polls
+        // skipped their writes, a daemon reloading from disk must still
+        // find the observations and must not re-offer the session it
+        // already has a card for.
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        for minute in 1..=3 {
+            tick(&f.shared, at(&format!("2030-01-01T00:0{minute}:00Z")))
+                .await
+                .unwrap();
+        }
+
+        let reloaded = crate::daemon::state::DaemonState::load(&f.shared.store).unwrap();
+        let live = f.shared.state.lock().unwrap();
+        assert_eq!(
+            reloaded.previous_size(&path),
+            live.previous_size(&path),
+            "the file must agree with memory about the last observation"
+        );
+        assert_eq!(
+            reloaded.last_observation, live.last_observation,
+            "no observation may be lost to a skipped write"
+        );
+        assert_eq!(reloaded.cwd_cache, live.cwd_cache);
+        assert_eq!(reloaded.prior_uploads, live.prior_uploads);
+    }
+
     #[tokio::test]
     async fn queue_full_is_retracted_when_a_new_entry_passes_capacity_check() {
         // When a genuinely new entry is inserted, it passed the capacity check,
@@ -1406,6 +1557,101 @@ mod tests {
         assert!(
             !{ f.shared.health.lock().unwrap().ok() },
             "queue-full must persist on dedup re-observation"
+        );
+    }
+    #[tokio::test]
+    async fn a_session_a_full_queue_cannot_hold_is_never_loaded() {
+        // The bug. With a corpus larger than `max_queue_entries` -- 3,152
+        // sessions against a cap of 500 on the machine that reported this
+        // -- every session the queue has no room for is eligible, has no
+        // unchanged offer to be skipped by, and so was read, parsed and
+        // hashed in full on every sixty-second poll, purely to be refused
+        // `queue-full` afterwards. 74.6% of one core, on an idle app.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1, "the queue is now at capacity");
+
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let c = loads();
+        for minute in 1..=3 {
+            f.tick_counted(at(&format!("2030-01-01T00:0{minute}:00Z")), &c);
+        }
+        assert_eq!(
+            count(&c),
+            0,
+            "a session the full queue cannot hold must not be read at all"
+        );
+        assert_eq!(f.queue_len(), 1, "and nothing lands, exactly as before");
+        assert!(
+            !{ f.shared.health.lock().unwrap().ok() },
+            "the contributor must still be told the queue is full"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grown_session_with_a_live_card_still_loads_and_supersedes_at_capacity() {
+        // The trap the capacity pre-check must not fall into. A naive "the
+        // queue is full, skip" would mean a conversation that grew could
+        // never supersede its own stale card once the queue filled up, and
+        // the contributor would be left looking at an offer describing
+        // content that has moved on. `replace_live_at_path` frees the slot
+        // it is about to reuse, so this load can land and must happen.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first_hash = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].session_hash.clone()
+        };
+        assert_eq!(f.queue_len(), 1, "the queue is at capacity");
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(
+            count(&c),
+            1,
+            "a grown session with a live card must still be re-read at capacity"
+        );
+
+        let queue = f.shared.queue.lock().unwrap();
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == first_hash)
+            .expect("the first offer is still on record");
+        assert_eq!(old.state, QueueState::Superseded, "{:?}", queue.all());
+        assert_eq!(queue.pending().len(), 1, "exactly one live offer");
+        assert_ne!(
+            queue.pending()[0].session_hash,
+            first_hash,
+            "and it describes the session as it now stands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_with_room_still_loads_and_offers_every_session() {
+        // The other side of the check: below the cap nothing changes, and a
+        // second session is read once and queued.
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(10);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.queue_len(), 1);
+
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let c = loads();
+        let report = f.settle_counted(at("2030-01-01T00:01:00Z"), &c);
+        assert_eq!(report.queued, 1, "{report:?}");
+        assert_eq!(count(&c), 1, "the new session is read exactly once");
+        assert_eq!(f.queue_len(), 2);
+        assert!(
+            { f.shared.health.lock().unwrap().ok() },
+            "a queue with room must not report queue-full"
         );
     }
 }
