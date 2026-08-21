@@ -239,6 +239,19 @@ final class AppModel: ObservableObject {
             // project discovered while the app was open stayed invisible in
             // both Settings and onboarding screen 5 until a relaunch.
             refreshProjects()
+            // An entry leaving the queue -- accepted, quarantined, or
+            // otherwise resolved -- is exactly the moment a new row appears
+            // in history and the rollup tallies move. `refreshHistory()` was
+            // reachable only from `refreshAll()` at launch, which is why the
+            // History screen kept showing the counts from the moment the app
+            // started no matter how many uploads finished after that: this
+            // is the daemon's own signal that one just did. Both calls are
+            // cheap daemon-side reads of state it already holds (no
+            // recomputation, no network fan-out), so firing them on every
+            // `queue_changed` costs the same as the queue/status/projects
+            // refreshes right above, which already do this on every event
+            // without a debounce.
+            refreshHistory()
         case .statusChanged:
             refreshStatus()
         case .digestDue(let count, _):
