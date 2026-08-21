@@ -283,20 +283,27 @@ Two of the three figures are weekly and the third is not. "In the commons" is
 would read as the commons shrinking every Monday, in exactly the place a
 contributor looks for evidence that their work went somewhere.
 
-## The read gate
+## What arms Contribute
 
-The preview sheet is the only surface that can approve anything, and the queue
-row has no `Contribute` button — approving from the row is approving without
-looking. Contribute is armed by `TraceCommons.Interop.ReadGate`, which requires
-three things at once: a pinned preview, the redacted transcript having actually
-been on screen, and an acknowledgement the contributor ticks themselves.
+The preview sheet is the only surface in this shell that can approve anything.
+Contribute is armed by `TraceCommons.Interop.ReadGate`, which now requires one
+thing: a pinned preview for the approval to bind to.
 
-The gate lives in the interop assembly rather than in a view model because it
-is the safety property of this shell, and there it is exercised by
-`tests/TraceCommons.Interop.Tests/PreviewTests.cs` on a machine that cannot
-build WinUI at all. The XAML wiring that feeds it — `x:Load` on the transcript
-panel, so realization means display rather than a collapsed element having
-raised `Loaded` — is the part only Windows can confirm.
+It used to require two more — the redacted transcript having been on screen,
+and an acknowledgement the contributor ticked themselves. Both came out as
+friction. The macOS and Linux queues offer a per-row `Submit` that approves
+with no preview opened at all, so the gate never stood between anybody and a
+blind approval; it only charged a click to the contributor who chose to look.
+
+What the checkbox asserted did not come out. `ReadGate.Statement` says it as
+plain text above the buttons, on every preview, and the macOS and Linux sheets
+print the same sentence character for character — asserted here in
+`tests/TraceCommons.Interop.Tests/PreviewTests.cs`, in the macOS
+`ReadGateTests`, and by a Rust test that reads all three sources.
+
+The rule lives in the interop assembly rather than in a view model because it
+is the safety property of this shell, and there it is exercised on a machine
+that cannot build WinUI at all.
 
 ## Withdrawal copy is contract, not UI text
 

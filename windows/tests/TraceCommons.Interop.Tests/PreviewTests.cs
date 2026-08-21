@@ -6,13 +6,21 @@ using Xunit;
 namespace TraceCommons.Interop.Tests;
 
 /// <summary>
-/// The consent invariant, in the one place it can be tested off Windows.
+/// What arms Contribute, and what the sheet says while it does, in the one
+/// place either can be tested off Windows.
 ///
 /// Everything the preview sheet decides -- whether Contribute may be pressed,
 /// what the summary says, where the redaction chips go, what an excerpt shows,
 /// how long an undo lasts -- lives in the interop assembly precisely so these
 /// exist. The XAML that draws them cannot be built on this machine; the rules
 /// it obeys can be.
+///
+/// These tests used to encode a two-step read gate: transcript shown, then an
+/// acknowledgement ticked, in that order. Both steps were removed as friction
+/// (see <see cref="ReadGate"/> for why), so the tests that asserted them are
+/// gone and the ones below assert the rule that replaced them, including the
+/// one that is easiest to break by accident -- a loaded preview arms
+/// Contribute on its own.
 /// </summary>
 public sealed class ReadGateTests
 {
@@ -22,56 +30,16 @@ public sealed class ReadGateTests
         var gate = new ReadGate();
 
         Assert.False(gate.CanContribute);
-        Assert.False(gate.TranscriptShown);
-        Assert.False(gate.Acknowledged);
-        Assert.Equal(ReadGate.OpenPrompt, gate.OpenedLine);
+        Assert.False(gate.HasPinnedPreview);
     }
 
     [Fact]
-    public void APinnedPreviewAloneDoesNotArmContribute()
+    public void APinnedPreviewIsTheOnlyThingContributeWaitsOn()
     {
-        // This is the misclick the gate exists to prevent: a loaded preview
-        // is not a read one.
+        // The friction change, stated as a value: no transcript tab, no
+        // acknowledgement, no second step.
         var gate = new ReadGate();
         gate.SetPinnedPreview(true);
-
-        Assert.False(gate.CanContribute);
-        Assert.Equal(ReadGate.BlockedHelp, gate.Help);
-    }
-
-    [Fact]
-    public void ShowingTheTranscriptAloneDoesNotArmContribute()
-    {
-        var gate = new ReadGate();
-        gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
-
-        Assert.False(gate.CanContribute);
-        Assert.Equal(ReadGate.Opened, gate.OpenedLine);
-    }
-
-    [Fact]
-    public void AcknowledgingBeforeTheTranscriptIsShownIsRefused()
-    {
-        // Order is part of the invariant: ticking a box about bytes nobody
-        // has seen acknowledges nothing. The UI disables the control, but the
-        // rule is enforced here so it holds whatever drives it.
-        var gate = new ReadGate();
-        gate.SetPinnedPreview(true);
-
-        gate.Acknowledged = true;
-
-        Assert.False(gate.Acknowledged);
-        Assert.False(gate.CanContribute);
-    }
-
-    [Fact]
-    public void AllThreeConditionsArmContribute()
-    {
-        var gate = new ReadGate();
-        gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
-        gate.Acknowledged = true;
 
         Assert.True(gate.CanContribute);
         Assert.Equal(ReadGate.ReadyHelp, gate.Help);
@@ -81,35 +49,31 @@ public sealed class ReadGateTests
     public void AnUnenrolledPreviewCanNeverBeContributed()
     {
         // Nothing was pinned, so there is no envelope for an approval to bind
-        // to. Reading it all the way through does not change that.
+        // to. This is the one condition that was never friction, and it is
+        // the one that stayed.
         var gate = new ReadGate();
-        gate.MarkTranscriptShown();
-        gate.Acknowledged = true;
 
         Assert.False(gate.CanContribute);
         Assert.Equal(ReadGate.UnenrolledHelp, gate.Help);
     }
 
     [Fact]
-    public void ResetClearsConsentSoTheNextSessionStartsFromZero()
+    public void ResetUnpinsSoTheNextSessionStartsFromZero()
     {
-        // The whole point: consent covers the bytes that were shown. A gate
-        // carried into the next session would let it inherit the first
-        // session's approval.
+        // The whole point: an approval covers the bytes THIS sheet pinned. A
+        // pin carried into the next session would let it be approved against
+        // the previous one's envelope.
         var gate = new ReadGate();
         gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
-        gate.Acknowledged = true;
 
         gate.Reset();
 
         Assert.False(gate.CanContribute);
-        Assert.False(gate.TranscriptShown);
-        Assert.False(gate.Acknowledged);
+        Assert.False(gate.HasPinnedPreview);
     }
 
     [Fact]
-    public void EveryConditionRaisesChanged()
+    public void EveryTransitionRaisesChanged()
     {
         // The sheet re-evaluates Contribute from this event alone, so a
         // silent transition would leave the button disagreeing with the gate.
@@ -118,12 +82,9 @@ public sealed class ReadGateTests
         gate.Changed += () => raised++;
 
         gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
-        gate.Acknowledged = true;
-        gate.Acknowledged = false;
         gate.Reset();
 
-        Assert.Equal(5, raised);
+        Assert.Equal(2, raised);
     }
 
     [Fact]
@@ -131,14 +92,48 @@ public sealed class ReadGateTests
     {
         var gate = new ReadGate();
         gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
         int raised = 0;
         gate.Changed += () => raised++;
 
         gate.SetPinnedPreview(true);
-        gate.MarkTranscriptShown();
+        gate.Reset();
+        gate.Reset();
 
-        Assert.Equal(0, raised);
+        Assert.Equal(1, raised);
+    }
+}
+
+/// <summary>
+/// The sentence that replaced the acknowledgement checkbox.
+///
+/// The same assertions the Linux shell holds in
+/// <c>crates/trace-commons-contributor-gtk/src/copy.rs</c> and the macOS shell
+/// in <c>macos/Tests/TCShellCoreTests/ReadGateTests.swift</c>. Three shells
+/// print this above one irreversible button; the only thing that holds three
+/// languages to one sentence is the same text asserted in each of them, plus
+/// the Rust test that reads all three sources.
+/// </summary>
+public sealed class ReadGateCopyTests
+{
+    private const string Statement =
+        "\"Exactly what would be sent\" is the exact text that would leave this machine. "
+        + "Pattern-based scrubbing may have missed something in it, and nothing here checks "
+        + "that you looked.";
+
+    [Fact]
+    public void TheConsentStatementIsExactlyWhatWasAgreed()
+    {
+        Assert.Equal(Statement, ReadGate.Statement);
+    }
+
+    [Fact]
+    public void TheStatementKeepsBothHalvesOfWhatTheCheckboxUsedToSay()
+    {
+        // The acknowledgement made a contributor assert these two things by
+        // hand. Neither may quietly drop out now that nobody is asked to tick
+        // anything.
+        Assert.Contains("Pattern-based scrubbing may have missed something", ReadGate.Statement);
+        Assert.Contains("nothing here checks that you looked", ReadGate.Statement);
     }
 }
 

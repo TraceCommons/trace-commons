@@ -450,8 +450,37 @@ impl DaemonShared {
         state.paused
     }
 
+    /// Today's volume budget, and how much approved work it is holding.
+    ///
+    /// Read-only: `budget_snapshot` rolls the day on a copy, so polling
+    /// `status` cannot move the daemon's own counters.
+    ///
+    /// Approved entries never appear on `list_pending` -- that method
+    /// returns `Pending` only -- so a shell has no row it could annotate.
+    /// A count and a byte total on `status` are the only place the
+    /// condition can be told, which is why it lands here rather than on a
+    /// queue entry.
+    pub fn daily_budget(&self, now: chrono::DateTime<Utc>) -> super::uploader::DailyBudget {
+        let approved: Vec<super::queue::QueueEntry> = {
+            let queue = self.queue.lock().expect("queue lock");
+            queue
+                .all()
+                .iter()
+                .filter(|e| e.state == super::queue::QueueState::Approved)
+                .cloned()
+                .collect()
+        };
+        let state = self.state.lock().expect("state lock");
+        let settings = self.settings.lock().expect("settings lock");
+        super::uploader::budget_snapshot(&approved, &state, &settings, now)
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
+        let now = Utc::now();
+        // Taken before the queue lock below, and released with it, because
+        // `daily_budget` takes the queue, state, and settings locks itself.
+        let budget = self.daily_budget(now);
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -460,12 +489,27 @@ impl DaemonShared {
             "logged_in": self.logged_in(),
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
-            "paused": self.is_paused(Utc::now()),
+            "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
             "next_digest_at": self.next_digest_at(),
             "health": {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
+            },
+            // Additive. The daily cap is enforced whatever else is wrong,
+            // and `health` can only carry one label at a time, so this is
+            // reported independently of it -- see `DailyBudget`.
+            "daily_budget": {
+                "bytes_today": budget.bytes_today,
+                "max_bytes_per_day": budget.max_bytes_per_day,
+                "bytes_remaining": budget.bytes_remaining,
+                "uploads_today": budget.uploads_today,
+                "max_uploads_per_day": budget.max_uploads_per_day,
+                "uploads_remaining": budget.uploads_remaining,
+                "resets_at": budget.resets_at,
+                "blocked": budget.blocked(),
+                "blocked_entries": budget.blocked_entries,
+                "blocked_bytes": budget.blocked_bytes,
             },
         })
     }
@@ -3536,6 +3580,160 @@ mod tests {
             assert!(!v[key].is_null(), "status missing {key}");
         }
         assert_eq!(v["logged_in"], false);
+    }
+
+    /// An approved queue entry of a given size, for budget assertions.
+    /// `n` only distinguishes it from its siblings -- the queue dedupes on
+    /// the session hash, so a fixture that reused one would silently
+    /// collapse fourteen entries into one.
+    fn approved_entry_n(n: usize, size_bytes: u64) -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: format!("sha256:{n:04x}"),
+            source: "claude-code".to_string(),
+            project_key: "/tmp/p".to_string(),
+            project_label: "p".to_string(),
+            path: std::path::PathBuf::from("/tmp/s.jsonl"),
+            size_bytes,
+            discovered_at: Utc::now(),
+            state: QueueState::Approved,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
+            approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
+        }
+    }
+
+    fn approved_entry(size_bytes: u64) -> super::super::queue::QueueEntry {
+        approved_entry_n(0, size_bytes)
+    }
+
+    #[test]
+    fn status_reports_the_daily_budget_with_the_real_numbers() {
+        // The condition that made a working app look broken: the byte
+        // budget all but spent, 14 approved entries waiting, and a health
+        // slot occupied by something else entirely -- so the cap was
+        // invisible. `daily_budget` is reported independently of `health`
+        // for exactly that reason, and this pins the numbers rather than
+        // the presence of a key.
+        let s = shared();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.day_bucket = Some(Utc::now().format("%Y-%m-%d").to_string());
+            state.bytes_today = 204_659_969;
+            state.uploads_today = 12;
+        }
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            for n in 0..14 {
+                q.upsert(approved_entry_n(n, 14_900_000), max).unwrap();
+            }
+        }
+        // Something else already holds the single health slot, exactly as
+        // `queue-full` did on the machine this came from.
+        s.health
+            .lock()
+            .unwrap()
+            .fail(crate::daemon::health::LABEL_QUEUE_FULL, Utc::now());
+
+        let r = handle_request(&s, &req("status", serde_json::json!({})));
+        let v = r.result.unwrap();
+        let b = &v["daily_budget"];
+        assert_eq!(v["health"]["last_error_label"], "queue-full");
+        assert_eq!(b["blocked"], true);
+        assert_eq!(b["blocked_entries"], 14);
+        assert_eq!(b["blocked_bytes"], 14_900_000u64 * 14);
+        assert_eq!(b["bytes_today"], 204_659_969u64);
+        assert_eq!(b["max_bytes_per_day"], 209_715_200u64);
+        assert_eq!(b["bytes_remaining"], 5_055_231u64);
+        assert_eq!(b["uploads_today"], 12);
+        assert_eq!(b["max_uploads_per_day"], 50);
+        assert_eq!(b["uploads_remaining"], 38);
+        assert!(!b["resets_at"].is_null());
+    }
+
+    #[test]
+    fn status_reports_an_unspent_budget_as_not_blocking_anything() {
+        let s = shared();
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            q.upsert(approved_entry(1_024), max).unwrap();
+        }
+        let v = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(v["daily_budget"]["blocked"], false);
+        assert_eq!(v["daily_budget"]["blocked_entries"], 0);
+        assert_eq!(v["daily_budget"]["bytes_today"], 0);
+        assert_eq!(v["daily_budget"]["bytes_remaining"], 209_715_200u64);
+    }
+
+    #[test]
+    fn polling_status_does_not_hand_back_a_fresh_budget() {
+        // `budget_snapshot` rolls the day on a copy. If it rolled the real
+        // one, a client polling `status` across midnight -- or a state file
+        // left from yesterday -- would silently reset the counters the cap
+        // is enforced against.
+        let s = shared();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.day_bucket = Some("2020-01-01".to_string());
+            state.bytes_today = 204_659_969;
+            state.uploads_today = 12;
+        }
+        let _ = handle_request(&s, &req("status", serde_json::json!({})));
+        let state = s.state.lock().unwrap();
+        assert_eq!(state.bytes_today, 204_659_969);
+        assert_eq!(state.uploads_today, 12);
+        assert_eq!(state.day_bucket.as_deref(), Some("2020-01-01"));
+    }
+
+    #[test]
+    fn a_stale_day_bucket_reports_todays_budget_as_untouched() {
+        // The counters on disk belong to a day that has passed, so what
+        // `status` reports is a full budget rather than yesterday's spend.
+        let s = shared();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.day_bucket = Some("2020-01-01".to_string());
+            state.bytes_today = 209_715_200;
+            state.uploads_today = 50;
+        }
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            q.upsert(approved_entry(14_900_000), max).unwrap();
+        }
+        let v = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(v["daily_budget"]["bytes_today"], 0);
+        assert_eq!(v["daily_budget"]["blocked"], false);
+    }
+
+    #[test]
+    fn the_daily_budget_carries_no_identifier_of_any_kind() {
+        // Counts and timestamps only: no entry id, no hash, no path.
+        let s = shared();
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            q.upsert(approved_entry(1_024), max).unwrap();
+        }
+        let v = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let body = serde_json::to_string(&v["daily_budget"]).unwrap();
+        assert!(!body.contains("sha256"), "{body}");
+        assert!(!body.contains('/'), "{body}");
     }
 
     #[test]

@@ -75,6 +75,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _undoNoticeLine = string.Empty;
     private MainPane _pane = MainPane.Queue;
     private HealthCopy? _health;
+    private HealthCopy? _budget;
     private HistoryRollup _rollup = new();
 
     /// <summary>
@@ -205,6 +206,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string HealthTitle => _health?.Title ?? string.Empty;
 
     public string HealthDetail => _health?.Detail ?? string.Empty;
+
+    // --- The daily-budget banner -------------------------------------------
+    //
+    // Rendered from status.daily_budget, independently of the health label.
+    //
+    // The daemon enforces a daily byte and upload cap, and it does set a
+    // daily-cap-reached health label when one refuses an upload. But that
+    // label is last in the precedence order, so any other condition takes
+    // the single last_error_label slot and the cap vanishes. A contributor
+    // watched fourteen approved traces sit still for an evening while this
+    // window reported a full queue and said nothing about the budget that
+    // was actually holding them.
+
+    /// <summary>Whether approved traces are waiting on the daily budget.</summary>
+    public bool HasBudgetBanner => _budget is not null;
+
+    public string BudgetTitle => _budget?.Title ?? string.Empty;
+
+    public string BudgetDetail => _budget?.Detail ?? string.Empty;
 
     /// <summary>
     /// Whether this condition has an action worth offering.
@@ -798,6 +818,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!status.IsError && status.ResultAs<DaemonStatus>() is { } parsedStatus)
             {
                 SetPaused(parsedStatus.Paused);
+                // Budget first: SetHealth suppresses the bare
+                // daily-cap-reached line when the budget banner is going to
+                // say the same thing with real numbers, so it has to see
+                // this pass's budget rather than the previous pass's.
+                SetBudget(parsedStatus.DailyBudget);
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
             }
 
@@ -921,7 +946,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     private void SetHealth(string? label)
     {
-        HealthCopy? next = HealthCopy.ForLabel(label);
+        HealthCopy? next = _budget is not null && label == "daily-cap-reached"
+            ? null
+            : HealthCopy.ForLabel(label);
         if (Equals(_health, next))
         {
             return;
@@ -933,6 +960,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(HealthDetail));
         Raise(nameof(HasHealthAction));
         Raise(nameof(HealthActionLabel));
+    }
+
+    /// <summary>
+    /// Takes status.daily_budget and re-renders the second banner.
+    /// </summary>
+    /// <remarks>
+    /// A second banner rather than another case in SetHealth, because the
+    /// two conditions are independent: the health slot carries one label and
+    /// daily-cap-reached is last in its precedence order, so a spent upload
+    /// budget behind a full queue was announced by neither. Compared by
+    /// value before raising, exactly as SetHealth is.
+    /// </remarks>
+    private void SetBudget(DailyBudget? budget)
+    {
+        HealthCopy? next = HealthCopy.ForBudget(budget);
+        if (Equals(_budget, next))
+        {
+            return;
+        }
+
+        _budget = next;
+        Raise(nameof(HasBudgetBanner));
+        Raise(nameof(BudgetTitle));
+        Raise(nameof(BudgetDetail));
     }
 
     private void SetPaused(bool paused)

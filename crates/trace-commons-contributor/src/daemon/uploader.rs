@@ -36,6 +36,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use super::health::{
@@ -95,6 +96,116 @@ pub fn cap_check(state: &DaemonState, size_bytes: u64, settings: &DaemonSettings
         return false;
     }
     state.bytes_today.saturating_add(size_bytes) <= settings.max_bytes_per_day
+}
+
+/// What today's volume budget looks like, and what it is currently holding
+/// back.
+///
+/// The daily cap was already enforced and already had a health label, but
+/// neither was legible from outside: `LABEL_DAILY_CAP_REACHED` sits at the
+/// bottom of the precedence order, so any other condition -- a full queue,
+/// in the case this was diagnosed from -- occupies the single
+/// `health.last_error_label` slot and the cap becomes invisible. From the
+/// contributor's side an exhausted budget was indistinguishable from a
+/// broken app: approvals simply stopped turning into uploads.
+///
+/// This is therefore reported on `status` as its own field rather than
+/// through the health slot, so it is visible no matter what else is wrong.
+/// Everything on it is a count or a timestamp; nothing here can carry a
+/// path, a hash, or a token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DailyBudget {
+    pub bytes_today: u64,
+    pub max_bytes_per_day: u64,
+    pub bytes_remaining: u64,
+    pub uploads_today: u32,
+    pub max_uploads_per_day: u32,
+    pub uploads_remaining: u32,
+    /// The next UTC midnight, which is exactly when `DaemonState::roll_day`
+    /// zeroes the counters above. Derived, not guessed: `roll_day` buckets
+    /// by `%Y-%m-%d` in UTC, so this is the real reset instant and a client
+    /// may state it.
+    pub resets_at: DateTime<Utc>,
+    /// Approved entries that this budget will not let out before the reset.
+    pub blocked_entries: u32,
+    /// Their combined on-disk size.
+    pub blocked_bytes: u64,
+}
+
+impl DailyBudget {
+    /// Whether anything is actually being held back. A spent budget with
+    /// nothing approved behind it is not a condition worth telling anyone
+    /// about.
+    pub fn blocked(&self) -> bool {
+        self.blocked_entries > 0
+    }
+}
+
+/// The next UTC midnight strictly after `now` -- when `roll_day` will next
+/// change the day bucket.
+fn next_utc_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
+    (now.date_naive() + chrono::Duration::days(1))
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc()
+}
+
+/// Measure today's budget against the entries waiting on it.
+///
+/// `approved` must be the approved entries in the order `drain_approved`
+/// walks them, because that order is what decides which of them go today.
+/// The walk here mirrors that loop exactly: each entry that fits is charged
+/// against a running copy of the counters, and the first one that does not
+/// fit stops the pass -- so it and every entry behind it are blocked, even
+/// the small ones. Counting only the entries that individually overflow
+/// would under-report, which is the same silence in a smaller font.
+///
+/// Does not mutate: the day roll is applied to a local copy, so calling
+/// this from a read-only `status` cannot move the daemon's own counters.
+pub fn budget_snapshot(
+    approved: &[QueueEntry],
+    state: &DaemonState,
+    settings: &DaemonSettings,
+    now: DateTime<Utc>,
+) -> DailyBudget {
+    let mut rolled = state.clone();
+    rolled.roll_day(now);
+
+    let mut simulated = rolled.clone();
+    let mut blocked_entries: u32 = 0;
+    let mut blocked_bytes: u64 = 0;
+    let mut stopped = false;
+    for entry in approved {
+        if stopped {
+            blocked_entries = blocked_entries.saturating_add(1);
+            blocked_bytes = blocked_bytes.saturating_add(entry.size_bytes);
+            continue;
+        }
+        if cap_check(&simulated, entry.size_bytes, settings) {
+            simulated.uploads_today = simulated.uploads_today.saturating_add(1);
+            simulated.bytes_today = simulated.bytes_today.saturating_add(entry.size_bytes);
+        } else {
+            stopped = true;
+            blocked_entries = blocked_entries.saturating_add(1);
+            blocked_bytes = blocked_bytes.saturating_add(entry.size_bytes);
+        }
+    }
+
+    DailyBudget {
+        bytes_today: rolled.bytes_today,
+        max_bytes_per_day: settings.max_bytes_per_day,
+        bytes_remaining: settings
+            .max_bytes_per_day
+            .saturating_sub(rolled.bytes_today),
+        uploads_today: rolled.uploads_today,
+        max_uploads_per_day: settings.max_uploads_per_day,
+        uploads_remaining: settings
+            .max_uploads_per_day
+            .saturating_sub(rolled.uploads_today),
+        resets_at: next_utc_midnight(now),
+        blocked_entries,
+        blocked_bytes,
+    }
 }
 
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
@@ -377,6 +488,177 @@ mod tests {
     #[test]
     fn cap_check_allows_a_normal_upload() {
         assert!(cap_check(&DaemonState::new(), 1024, &settings()));
+    }
+
+    /// An approved entry of a given size, with nothing else that matters
+    /// to a budget calculation.
+    fn sized(size_bytes: u64) -> QueueEntry {
+        QueueEntry {
+            entry_id: Uuid::new_v4(),
+            session_hash: "sha256:00".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/testuser/code/myproj".into(),
+            project_label: "myproj".into(),
+            path: PathBuf::from("/tmp/a.jsonl"),
+            size_bytes,
+            discovered_at: at("2026-08-08T12:00:00Z"),
+            state: QueueState::Approved,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
+            approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
+        }
+    }
+
+    /// The state observed on the machine this was diagnosed from: the byte
+    /// budget all but spent, 14 approved entries waiting behind it.
+    fn nearly_spent() -> DaemonState {
+        let mut st = DaemonState::new();
+        st.day_bucket = Some("2026-08-08".to_string());
+        st.uploads_today = 12;
+        st.bytes_today = 204_659_969;
+        st
+    }
+
+    #[test]
+    fn an_entry_that_fails_the_byte_check_is_reported_as_budget_blocked() {
+        // 14.9 MB against 5,055,231 bytes of remaining budget.
+        let approved = vec![sized(14_900_000)];
+        let b = budget_snapshot(
+            &approved,
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T20:00:00Z"),
+        );
+        assert!(b.blocked());
+        assert_eq!(b.blocked_entries, 1);
+        assert_eq!(b.blocked_bytes, 14_900_000);
+        // The numbers, not just the flag.
+        assert_eq!(b.bytes_today, 204_659_969);
+        assert_eq!(b.max_bytes_per_day, 209_715_200);
+        assert_eq!(b.bytes_remaining, 5_055_231);
+        assert_eq!(b.uploads_today, 12);
+        assert_eq!(b.uploads_remaining, 38);
+    }
+
+    #[test]
+    fn an_entry_that_passes_the_byte_check_is_not_reported_as_blocked() {
+        let approved = vec![sized(1_000_000)];
+        let b = budget_snapshot(
+            &approved,
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T20:00:00Z"),
+        );
+        assert!(!b.blocked());
+        assert_eq!(b.blocked_entries, 0);
+        assert_eq!(b.blocked_bytes, 0);
+    }
+
+    #[test]
+    fn a_small_entry_queued_behind_a_blocked_one_is_blocked_too() {
+        // `drain_approved` breaks on the first cap failure rather than
+        // skipping past it, so a 1 KB entry behind a 14.9 MB one does not
+        // go today either. Counting only the entries that individually
+        // overflow would under-report the wait.
+        let approved = vec![sized(14_900_000), sized(1_024)];
+        let b = budget_snapshot(
+            &approved,
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T20:00:00Z"),
+        );
+        assert_eq!(b.blocked_entries, 2);
+        assert_eq!(b.blocked_bytes, 14_901_024);
+    }
+
+    #[test]
+    fn entries_ahead_of_the_first_blocked_one_are_charged_against_the_budget() {
+        // Two 3 MB entries fit in 5,055,231 bytes only one at a time; the
+        // first is charged, so the second is what stops the pass.
+        let approved = vec![sized(3_000_000), sized(3_000_000), sized(1_024)];
+        let b = budget_snapshot(
+            &approved,
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T20:00:00Z"),
+        );
+        assert_eq!(b.blocked_entries, 2);
+        assert_eq!(b.blocked_bytes, 3_001_024);
+    }
+
+    #[test]
+    fn the_upload_count_cap_blocks_just_as_the_byte_cap_does() {
+        let mut st = DaemonState::new();
+        st.day_bucket = Some("2026-08-08".to_string());
+        st.uploads_today = 50;
+        let b = budget_snapshot(&[sized(1)], &st, &settings(), at("2026-08-08T20:00:00Z"));
+        assert!(b.blocked());
+        assert_eq!(b.uploads_remaining, 0);
+        // The byte budget is untouched, and says so.
+        assert_eq!(b.bytes_remaining, 209_715_200);
+    }
+
+    #[test]
+    fn the_condition_clears_when_the_day_rolls() {
+        // Same spent counters, but `now` is the next UTC day: `roll_day`
+        // zeroes them, so nothing is blocked any more.
+        let approved = vec![sized(14_900_000)];
+        let b = budget_snapshot(
+            &approved,
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-09T00:00:01Z"),
+        );
+        assert!(!b.blocked());
+        assert_eq!(b.bytes_today, 0);
+        assert_eq!(b.uploads_today, 0);
+        assert_eq!(b.bytes_remaining, 209_715_200);
+    }
+
+    #[test]
+    fn measuring_the_budget_does_not_move_the_daemons_own_counters() {
+        // `status` polls this; a snapshot that rolled the real day would
+        // hand a contributor a fresh budget for free.
+        let state = nearly_spent();
+        let before = state.clone();
+        let _ = budget_snapshot(&[sized(1)], &state, &settings(), at("2026-08-09T00:00:01Z"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn the_reset_time_is_the_next_utc_midnight() {
+        let b = budget_snapshot(
+            &[],
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T23:59:59Z"),
+        );
+        assert_eq!(b.resets_at, at("2026-08-09T00:00:00Z"));
+        let b = budget_snapshot(
+            &[],
+            &nearly_spent(),
+            &settings(),
+            at("2026-08-08T00:00:00Z"),
+        );
+        assert_eq!(b.resets_at, at("2026-08-09T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_spent_budget_with_nothing_waiting_is_not_a_condition() {
+        // Nothing to tell anyone about, so `blocked` stays false even
+        // though the budget really is gone.
+        let mut st = nearly_spent();
+        st.bytes_today = 209_715_200;
+        let b = budget_snapshot(&[], &st, &settings(), at("2026-08-08T20:00:00Z"));
+        assert!(!b.blocked());
+        assert_eq!(b.bytes_remaining, 0);
     }
 
     #[test]
