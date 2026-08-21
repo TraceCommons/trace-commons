@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::{
     SOURCE_CODEX, SessionEvent, SessionEventKind, SessionHasher, SessionRef, SessionTranscript,
-    TraceSource,
+    TraceSource, real_file_within_root,
 };
 
 pub struct CodexSource {
@@ -51,6 +51,30 @@ impl TraceSource for CodexSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+
+    /// A changed rollout file is its own session.
+    ///
+    /// Codex rollouts are peer files with no parent/child convention -- the
+    /// same fact `SessionRef::group_member_count` records as zero -- so the
+    /// mapping is the identity for anything `discover` would have collected
+    /// and `None` for everything else. `is_rollout_file_name` is the one
+    /// naming rule, shared with `collect_rollout_files`, so a file the walk
+    /// would pass over cannot be addressed here.
+    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        let path = real_file_within_root(&self.root, path)?;
+        // Stricter than the walk in one respect, deliberately:
+        // `collect_rollout_files` reaches a symlinked *file* whose name
+        // matches, because `DirEntry::file_type` only stops it descending
+        // into symlinked directories. Refusing one here costs nothing --
+        // the reconciliation sweep still finds it -- while keeping this
+        // addressing surface uniform with the Claude Code one.
+        is_rollout_file_name(path.file_name()?.to_str()?).then_some(path)
+    }
+}
+
+/// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
+fn is_rollout_file_name(file_name: &str) -> bool {
+    file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
 fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &mut usize) {
@@ -81,7 +105,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
-        if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+        if !is_rollout_file_name(file_name) {
             continue;
         }
         let metadata = match entry.metadata() {
@@ -557,6 +581,97 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex")
+    }
+
+    /// A rollout is its own session, and nothing else in the tree is one.
+    #[test]
+    fn a_rollout_maps_to_itself_and_nothing_else_maps_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+        // A stray file the walk passes over, and a directory.
+        std::fs::write(day.join("notes.txt"), "x").unwrap();
+        std::fs::write(day.join("not-a-rollout.jsonl"), "{}\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("rollout-2026-08-20T10-00-00-xyz.jsonl");
+        std::fs::write(&elsewhere, "{}\n").unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        assert_eq!(source.session_for_path(&rollout), Some(rollout.clone()));
+        // The address matches what discovery emits for the same file.
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, rollout);
+
+        for path in [
+            day.join("notes.txt"),
+            day.join("not-a-rollout.jsonl"),
+            day.clone(),
+            root.path().to_path_buf(),
+            day.join("rollout-never-written.jsonl"),
+            elsewhere,
+        ] {
+            assert_eq!(
+                source.session_for_path(&path),
+                None,
+                "{} must not address a session",
+                path.display()
+            );
+        }
+    }
+
+    /// The mapping is fed paths from the operating system, so a symlink or
+    /// a `..` must not become a way to name a file outside the declared
+    /// root. `collect_rollout_files` already refuses to descend a symlinked
+    /// directory; this refuses the symlinked file too.
+    #[test]
+    #[cfg(unix)]
+    fn path_mapping_refuses_symlinks_and_traversal_out_of_the_codex_root() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside
+            .path()
+            .join("rollout-2026-08-20T10-00-00-secret.jsonl");
+        std::fs::write(&secret, "{}\n").unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let real = day.join("rollout-2026-08-20T10-00-00-real.jsonl");
+        std::fs::write(&real, "{}\n").unwrap();
+
+        let linked_file = day.join("rollout-2026-08-20T10-00-01-link.jsonl");
+        symlink(&secret, &linked_file).unwrap();
+        let linked_dir = root.path().join("linked");
+        symlink(outside.path(), &linked_dir).unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        for escape in [
+            linked_file,
+            linked_dir.join("rollout-2026-08-20T10-00-00-secret.jsonl"),
+            day.join("..").join("..").join("..").join("..").join(
+                secret
+                    .file_name()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default(),
+            ),
+        ] {
+            assert_eq!(
+                source.session_for_path(&escape),
+                None,
+                "{} must not address a session",
+                escape.display()
+            );
+        }
+        assert_eq!(
+            source.session_for_path(&real),
+            Some(real.clone()),
+            "the real rollout must still map, or this test proves nothing"
+        );
     }
 
     /// A rollout past the budget is declined by name, not truncated.
