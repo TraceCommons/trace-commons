@@ -195,7 +195,8 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * settings_json accepts exactly the fields tc_call(handle, "set_settings",
  * ...) does: quiescence_secs, digest_interval_secs, approval_hold_secs,
- * local_notifications, claude_root, codex_root -- one shared validation, so there is one
+ * local_notifications, claude_root, codex_root, max_uploads_per_day,
+ * max_bytes_per_day -- one shared validation, so there is one
  * definition of "a valid settings object" for both entry points. An
  * unrecognized top-level key, or a recognized key holding the wrong JSON
  * type, is rejected with a fixed error label rather than silently ignored

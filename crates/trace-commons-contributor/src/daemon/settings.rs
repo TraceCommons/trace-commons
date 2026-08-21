@@ -37,6 +37,24 @@ const DEFAULT_GROWTH_MIN_NEW_BYTES: u64 = 65_536;
 const DEFAULT_MAX_REUPLOADS: u32 = 3;
 const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
 const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
+/// The upper bound `set_settings` (and the C ABI's pre-start override) will
+/// accept for `max_uploads_per_day`. The cap exists to bound a runaway
+/// client -- an app that decides to upload everything should not be able
+/// to -- so it must stay a validated ceiling, not an open field. 20x the
+/// default comfortably covers a contributor running several agents across
+/// a very active day (a real machine needed 200/day, four times the
+/// default) while still being a real bound: a client that hit this would
+/// still be stopped well short of "everything, all day".
+const MAX_UPLOADS_PER_DAY_CEILING: u32 = 1_000;
+/// The upper bound for `max_bytes_per_day`, in bytes. Sized from real
+/// corpus data, not a guess: a machine with 81 Claude sessions (0.9 GB
+/// total, largest 93.6 MB) and 3,069 Codex sessions (10.8 GB total) still
+/// only produces a few GB of *accepted* envelopes on its most active day,
+/// since a single accepted envelope commonly runs several MB. 5 GiB is
+/// comfortably above that (and above the 2 GiB a contributor had already
+/// raised their own machine to by hand) while remaining a real ceiling on
+/// a client that decided to send everything at once.
+const MAX_BYTES_PER_DAY_CEILING: u64 = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_QUEUE_ENTRIES: usize = 500;
 const DEFAULT_HISTORY_POLL_SECS: u64 = 1800;
 /// How often the public community roster is fetched. The server serves a
@@ -261,7 +279,14 @@ pub const ERR_SETTINGS_NOT_OBJECT: &str = "settings-not-object";
 /// recognize.
 pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// A recognized key held a value of the wrong JSON type (or, for
-/// `claude_root`/`codex_root`, a JSON type other than string/null).
+/// `claude_root`/`codex_root`, a JSON type other than string/null), or --
+/// for `max_uploads_per_day`/`max_bytes_per_day` -- a value of the right
+/// type but out of the accepted range (zero, or above the validated
+/// ceiling; see `MAX_UPLOADS_PER_DAY_CEILING` and
+/// `MAX_BYTES_PER_DAY_CEILING`). One fixed label covers both failure
+/// shapes deliberately: the point of the label is that it never carries
+/// the caller's value, and "wrong type" vs. "right type, wrong range" is
+/// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
 
 /// Whether the contributor has said which session folders to watch.
@@ -316,6 +341,15 @@ pub fn roots_declared(settings: &DaemonSettings) -> bool {
 /// `set_settings` does, to catch an empty or accidental call) check that
 /// themselves; `tc_daemon_start_with_settings` does not, since "nothing to
 /// override" is its documented no-op case.
+///
+/// `max_uploads_per_day` and `max_bytes_per_day` are validated against a
+/// fixed ceiling (`MAX_UPLOADS_PER_DAY_CEILING`, `MAX_BYTES_PER_DAY_CEILING`)
+/// rather than accepted as an open field: the cap exists to bound a runaway
+/// client, and an unbounded setter would give that protection up entirely.
+/// A value below the current default is accepted with no floor beyond
+/// non-zero -- throttling one's own uploads is not a safety concern -- but
+/// zero and anything above the ceiling are refused with the same
+/// `ERR_SETTINGS_INVALID_VALUE` label the other typed fields use.
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -335,6 +369,23 @@ pub fn apply_settings_object(
             }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Both caps take a validated ceiling, not an open field: the
+            // cap exists to bound a runaway client, and a freely settable
+            // value would give up exactly the protection it was added for.
+            // A value below the default IS allowed -- a contributor
+            // throttling their own uploads is a legitimate thing to want
+            // and is not a safety concern -- but zero is refused rather
+            // than accepted as "no uploads": that state already exists and
+            // is spelled `pause`, which (unlike a cap of zero) is visibly
+            // temporary and does not fight the health-label machinery that
+            // treats a reached cap as a `CapReached`/health-label
+            // condition on every single upload attempt.
+            "max_uploads_per_day" => {
+                settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
+            }
+            "max_bytes_per_day" => {
+                settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
             }
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
@@ -359,6 +410,26 @@ pub fn apply_settings_object(
         changed = true;
     }
     Ok(changed)
+}
+
+/// `max_uploads_per_day`: a non-zero `u32` at most `MAX_UPLOADS_PER_DAY_CEILING`.
+/// Zero is refused -- see the call site's doc for why a cap of zero is not
+/// this method's way to stop uploads.
+fn parse_max_uploads_per_day(value: &serde_json::Value) -> std::result::Result<u32, &'static str> {
+    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    if n == 0 || n > MAX_UPLOADS_PER_DAY_CEILING as u64 {
+        return Err(ERR_SETTINGS_INVALID_VALUE);
+    }
+    Ok(n as u32)
+}
+
+/// `max_bytes_per_day`: a non-zero `u64` at most `MAX_BYTES_PER_DAY_CEILING`.
+fn parse_max_bytes_per_day(value: &serde_json::Value) -> std::result::Result<u64, &'static str> {
+    let n = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    if n == 0 || n > MAX_BYTES_PER_DAY_CEILING {
+        return Err(ERR_SETTINGS_INVALID_VALUE);
+    }
+    Ok(n)
 }
 
 /// `null` clears the override (falls back to the conventional per-user
@@ -591,5 +662,158 @@ mod tests {
             let meta = std::fs::metadata(store.daemon_path(DAEMON_SETTINGS_FILE)).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    // --- Runtime-settable daily caps (issue #371) --------------------------
+
+    #[test]
+    fn a_valid_cap_change_is_accepted_persisted_and_observed_by_the_next_cap_check() {
+        use crate::daemon::state::DaemonState;
+        use crate::daemon::uploader::cap_check;
+
+        let (_d, store) = temp_store();
+        let mut s = DaemonSettings::default();
+        assert_eq!(s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY);
+        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
+
+        // A state that has already exhausted the *default* budget: the
+        // real-world trigger for this feature was exactly this shape --
+        // approved traces waiting with nothing left in the old budget.
+        let mut st = DaemonState::new();
+        st.uploads_today = DEFAULT_MAX_UPLOADS_PER_DAY;
+        st.bytes_today = DEFAULT_MAX_BYTES_PER_DAY;
+        assert!(
+            !cap_check(&st, 1, &s),
+            "sanity: the default budget really is exhausted"
+        );
+
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({
+                    "max_uploads_per_day": 200,
+                    "max_bytes_per_day": 2_147_483_648u64,
+                }),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.max_uploads_per_day, 200);
+        assert_eq!(s.max_bytes_per_day, 2_147_483_648);
+
+        // Persisted: a restart must not revert what was just raised.
+        s.save(&store).unwrap();
+        let reloaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(reloaded.max_uploads_per_day, 200);
+        assert_eq!(reloaded.max_bytes_per_day, 2_147_483_648);
+
+        // Observed: the same state, held against the *reloaded* settings
+        // (standing in for the live `Mutex<DaemonSettings>` a running
+        // uploader reads each tick), now has room again.
+        assert!(
+            cap_check(&st, 1, &reloaded),
+            "raising the cap must be visible to the very next cap check, \
+             with no restart required"
+        );
+    }
+
+    #[test]
+    fn max_uploads_per_day_above_the_ceiling_is_rejected() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING + 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY,
+            "a rejected value changes nothing"
+        );
+        // The ceiling itself is accepted -- it is a ceiling, not an
+        // exclusive bound.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.max_uploads_per_day, MAX_UPLOADS_PER_DAY_CEILING);
+    }
+
+    #[test]
+    fn max_bytes_per_day_above_the_ceiling_is_rejected() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING + 1}),
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.max_bytes_per_day, MAX_BYTES_PER_DAY_CEILING);
+    }
+
+    #[test]
+    fn a_daily_cap_of_zero_is_rejected_not_treated_as_pause() {
+        // Zero would silently overlap with `pause`, which is a different,
+        // visibly-temporary state. It is refused like any other
+        // out-of-range value.
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"max_uploads_per_day": 0})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": 0})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+    }
+
+    #[test]
+    fn a_cap_below_the_default_is_allowed_as_self_throttling() {
+        // A contributor throttling their own uploads is legitimate and is
+        // not the safety concern the ceiling exists for.
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 1, "max_bytes_per_day": 1}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.max_uploads_per_day, 1);
+        assert_eq!(s.max_bytes_per_day, 1);
+    }
+
+    #[test]
+    fn an_unknown_key_alongside_a_valid_cap_is_still_rejected_outright() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
+            ),
+            Err(ERR_SETTINGS_UNKNOWN_FIELD)
+        );
+    }
+
+    #[test]
+    fn wrong_type_for_a_cap_is_rejected_and_changes_nothing() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": "lots"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
     }
 }

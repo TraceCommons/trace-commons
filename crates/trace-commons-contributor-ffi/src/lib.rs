@@ -587,7 +587,7 @@ unsafe fn apply_pre_start_settings(
 /// `settings_json` accepts exactly the fields `tc_call(handle,
 /// "set_settings", ...)` does -- `quiescence_secs`, `digest_interval_secs`,
 /// `approval_hold_secs`, `local_notifications`, `claude_root`,
-/// `codex_root` -- validated by the
+/// `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` -- validated by the
 /// same function (`daemon::settings::apply_settings_object`), so there is
 /// one definition of "a valid settings object", not two that can drift. An
 /// unrecognized top-level key, or a recognized key holding the wrong JSON

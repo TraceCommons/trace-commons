@@ -21,6 +21,10 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
+- `set_settings` now accepts `max_uploads_per_day` and `max_bytes_per_day`,
+  each validated against a fixed ceiling rather than left open (see
+  [`set_settings`](#set_settings)). Before this, the only way to raise either
+  cap was to stop the daemon and hand-edit `daemon-settings.json`.
 - `project_id` — an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
@@ -392,7 +396,7 @@ history record, audit entry, notification text, or IPC response.
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -1120,7 +1124,8 @@ path.
 
 Takes a JSON object of settings to change. Every top-level key must be one
 of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
-`local_notifications`, `claude_root`, `codex_root` -- a key this method does
+`local_notifications`, `claude_root`, `codex_root`, `max_uploads_per_day`,
+`max_bytes_per_day` -- a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than
@@ -1151,6 +1156,24 @@ daemon and the first tick fires immediately on start. That is what the C
 ABI's `tc_daemon_start_with_settings` is for: it applies the same object
 this method validates, but before starting the daemon, so the first tick
 already observes the override. See `include/trace_commons.h`.
+
+`max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
+validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
+accepted as an open field. The cap exists to bound a runaway client -- an
+app that decided to upload everything should not be able to -- so making it
+freely settable to any value would give up exactly the protection it was
+added for. A value below the built-in default (50 uploads; 200 MiB) is
+accepted with no floor beyond non-zero: a contributor throttling their own
+uploads is legitimate and is not what the ceiling guards against. Zero is
+refused (`bad_params` / `settings-invalid-value`) rather than treated as
+"stop uploading" -- that state already exists and is spelled `pause`, which
+is visibly temporary in a way a cap of zero would not be. A value above
+either ceiling is refused the same way. Like the other numeric knobs, the
+new setting is read at each upload pass, so a change reaches an
+already-running daemon -- including one that reached its old cap with
+approved traces still waiting -- without a restart, and it is written to
+the persisted settings file in the same call, so the raised value survives
+one.
 
 ### `history_rollup`
 

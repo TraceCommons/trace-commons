@@ -637,6 +637,30 @@ pub const KNOBS_NOTE: &str = "These govern the background watcher, not this wind
      effect as soon as they are changed. The same values are readable and settable from the \
      command line.";
 
+// --- Settings: daily upload budget ----------------------------------------
+//
+// A separate section from the three timing knobs above on purpose: those
+// govern *when* the daemon interrupts or waits, and these bound how much it
+// is willing to send in a day -- the cap that exists to stop a runaway
+// client, not a convenience setting. Kept as its own card so lowering it
+// (a contributor's own throttle) and raising it (unsticking a budget that
+// was already spent) read as one topic, distinct from the pacing knobs.
+
+pub const BUDGET_HEADING: &str = "Daily upload budget";
+pub const KNOB_MAX_UPLOADS_TITLE: &str = "Uploads allowed per day";
+pub const KNOB_MAX_UPLOADS_UNIT: &str = "uploads/day";
+pub const KNOB_MAX_BYTES_TITLE: &str = "Data allowed per day";
+pub const KNOB_MAX_BYTES_UNIT: &str = "MB/day";
+
+/// Under both budget knobs. Says why they cannot be turned off entirely and
+/// what turning them down really means, since a cap of zero is refused
+/// rather than silently accepted as "stop uploading" -- see `KNOB_NOT_CHANGED`
+/// for what a contributor sees if they try.
+pub const BUDGET_NOTE: &str = "These bound how much can be sent in a day, not whether anything \
+     can. Lowering either is a throttle you control; there is no way to raise them past a fixed \
+     ceiling, because the whole point of a daily budget is that nothing on this machine can \
+     spend past it. Changes take effect immediately, with nothing queued waiting for a restart.";
+
 /// A refused write. States the data consequence -- nothing changed -- since
 /// a knob that silently snapped back would otherwise look like a value that
 /// had been accepted.
