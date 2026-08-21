@@ -33,9 +33,40 @@ final class DaemonClient {
 
     /// The socket `preview`: summary only. The redacted body is in-process
     /// only, via `openPreview` below.
+    ///
+    /// Kept for reference and for anything that still wants a blocking
+    /// preview -- the queue's own cards no longer call this. It starts a
+    /// full read-parse-redact-serialize pass on the connection's time with
+    /// nothing bounding how many run at once, which is exactly the fan-out
+    /// `requestPreview` below replaces; see the scheduler design doc.
     func previewSummary(entryID: String) throws -> PreviewSummary {
         let raw = try rawResult("preview", params: ["entry_id": entryID])
         return try DaemonDecoding.decoder().decode(PreviewSummary.self, from: raw)
+    }
+
+    /// The daemon's bounded preview scheduler: `preview_request`. Returns
+    /// immediately, always -- `queued`/`running` mean a `preview_ready`
+    /// event will follow; `ready` and `too_large` are answered here with no
+    /// event to come. See `docs/contributor-daemon-ipc-v1_1.md`, "Scheduled
+    /// previews".
+    func requestPreview(entryID: String) throws -> PreviewRequestResult {
+        let raw = try rawResult("preview_request", params: ["entry_id": entryID])
+        return try DaemonDecoding.decoder().decode(PreviewRequestResult.self, from: raw)
+    }
+
+    /// Replaces the daemon's on-screen set wholesale, deciding preview
+    /// *order* -- never membership. Intended to be sent once a scroll
+    /// settles, not on every frame; see `AppModel`'s debounce.
+    func setVisiblePreviews(entryIDs: [String]) throws {
+        _ = try rawResult("preview_visible", params: ["entry_ids": entryIDs])
+    }
+
+    /// Drops a queued preview, or discards a running one's result. A
+    /// `dropped: false` response is a defined no-op (already finished,
+    /// never requested, already cancelled), not an error -- callers here
+    /// discard it rather than throw on it.
+    func cancelPreview(entryID: String) throws {
+        _ = try rawResult("preview_cancel", params: ["entry_id": entryID])
     }
 
     func listHistory(limit: Int = 200) throws -> [HistoryRecord] {
@@ -382,6 +413,12 @@ enum DaemonEventParser {
             return .resyncRequired
         case "lagged":
             return .lagged(skipped: payload["skipped"] as? Int ?? 0)
+        case "preview_ready":
+            guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                  let result = try? DaemonDecoding.decoder()
+                      .decode(PreviewRequestResult.self, from: payloadData)
+            else { return .unknown(name) }
+            return .previewReady(result)
         default:
             return .unknown(name)
         }

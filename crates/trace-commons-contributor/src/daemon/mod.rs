@@ -33,6 +33,7 @@ pub mod ipc;
 pub mod notify;
 pub mod policy;
 pub mod preview;
+pub mod preview_scheduler;
 pub mod profile;
 pub mod queue;
 pub mod settings;
@@ -150,6 +151,11 @@ pub struct EmbeddedDaemon {
     lock_path: std::path::PathBuf,
     lock: std::fs::File,
     server: tokio::task::JoinHandle<Result<()>>,
+    /// The bounded preview pool. Started here rather than inside
+    /// `DaemonShared` because each worker holds an `Arc<DaemonShared>`
+    /// through its runner, and a pool the shared state owned would keep
+    /// that state alive for the life of the process.
+    preview_workers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl EmbeddedDaemon {
@@ -162,6 +168,14 @@ impl EmbeddedDaemon {
     /// request) calling this.
     pub fn close(self) {
         self.server.abort();
+        // Ask the pool to stop first, so a worker between jobs exits on its
+        // own; abort then covers the one that is mid-build, which cannot be
+        // interrupted at a finer grain than the task (see
+        // `preview_scheduler::PreviewScheduler::cancel`).
+        self.shared.previews.stop();
+        for worker in self.preview_workers {
+            worker.abort();
+        }
         let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
         drop(self.lock);
         let _ = std::fs::remove_file(&self.lock_path);
@@ -253,22 +267,32 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
             .await
             .context(StartFailure::IpcBindFailed)?;
 
+        // The preview pool. Two workers, started before the socket is
+        // served, so the first `preview_request` a shell sends never finds
+        // an empty pool.
+        let preview_runner: Arc<dyn preview_scheduler::PreviewJobRunner> = Arc::new(
+            preview_scheduler::DaemonPreviewRunner::new(Arc::clone(&shared)),
+        );
+        let preview_workers =
+            preview_scheduler::spawn_workers(Arc::clone(&shared.previews), preview_runner);
+
         let serve_shared = Arc::clone(&shared);
         #[cfg(unix)]
         let server = tokio::spawn(async move { ipc::serve(listener, serve_shared).await });
         #[cfg(windows)]
         let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
 
-        Ok::<_, anyhow::Error>((shared, server))
+        Ok::<_, anyhow::Error>((shared, server, preview_workers))
     }
     .await;
 
     match started {
-        Ok((shared, server)) => Ok(EmbeddedDaemon {
+        Ok((shared, server, preview_workers)) => Ok(EmbeddedDaemon {
             shared,
             lock_path,
             lock,
             server,
+            preview_workers,
         }),
         Err(e) => {
             // Release before unlinking, so the lock is genuinely available to

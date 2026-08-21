@@ -78,6 +78,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var pending: [QueueEntry] = []
     @Published private(set) var summaries: [String: PreviewSummary] = [:]
     @Published private(set) var summaryErrors: [String: String] = [:]
+    /// A session the daemon's preview scheduler refused to parse for being
+    /// over the admission cap. Carries only what `PreviewTooLarge` carries
+    /// -- a raw stat and the cap -- never a would-send estimate.
+    @Published private(set) var tooLarge: [String: PreviewTooLarge] = [:]
     @Published private(set) var history: [HistoryRecord] = []
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
@@ -92,6 +96,18 @@ final class AppModel: ObservableObject {
     private var client: DaemonClient?
     private var subscription: TCSubscription?
     private var undoTask: Task<Void, Never>?
+
+    /// Client-side bookkeeping for the daemon's bounded preview scheduler --
+    /// see `PreviewRequestTracker`'s doc. Not published: nothing renders off
+    /// it directly, `summaries`/`tooLarge`/`summaryErrors` are what views
+    /// read.
+    private var previewTracker = PreviewRequestTracker()
+    /// Coalesces `preview_visible` sends against a scroll settling -- see
+    /// `PreviewVisibilityCoalescer`'s doc. `visibleDebounce` is the real
+    /// timer; the coalescer holds only the pure bookkeeping of what to send
+    /// once it fires.
+    private var visibilityCoalescer = PreviewVisibilityCoalescer()
+    private var visibleDebounce: Task<Void, Never>?
 
     // MARK: - Derived state the shell renders
 
@@ -205,9 +221,10 @@ final class AppModel: ObservableObject {
     private func handle(event: DaemonEvent) {
         switch event {
         case .snapshot(let pending, let status):
-            self.pending = pending
+            applyPendingUpdate(pending)
             self.status = status
-            loadMissingSummaries()
+        case .previewReady(let result):
+            applyPreviewOutcome(result)
         case .queueChanged:
             refreshQueue()
             // `queue_depth` lives on `status`, and the daemon does not
@@ -301,8 +318,7 @@ final class AppModel: ObservableObject {
 
     func refreshQueue() {
         perform("list_pending", work: { try $0.listPending() }) { entries in
-            self.pending = entries
-            self.loadMissingSummaries()
+            self.applyPendingUpdate(entries)
         }
     }
 
@@ -456,26 +472,145 @@ final class AppModel: ObservableObject {
         })
     }
 
-    /// Row summaries carry the redacted opening prompt, the would-send size
-    /// and the redaction receipt -- all three come from the preview pass, so
-    /// each row loads its own once.
-    private func loadMissingSummaries() {
+    // MARK: - Preview scheduling
+
+    /// Reconciles `pending` against a fresh list from the daemon (a
+    /// `snapshot` event, `refreshQueue`, or any other refetch), and does the
+    /// one thing a change in that list requires beyond updating `pending`
+    /// itself: cancel the scheduled preview for anything that left it for
+    /// good (approved, dismissed, expired, superseded -- `dismiss` also
+    /// cancels its own preview server-side, but a cancel for an id the
+    /// daemon already dropped is a defined no-op, not an error).
+    ///
+    /// Deliberately does **not** loop over the fresh list requesting a
+    /// preview for everything newly waiting -- that was this method's shape
+    /// before #353/#357 made the queue's row list a `LazyVStack`. Doing so
+    /// here would mean asking the daemon about all 500 entries the instant
+    /// a snapshot arrives, which defeats the point of realizing rows lazily
+    /// in the first place: `QueueRow.onAppear` drives `requestPreview(for:)`
+    /// for whatever the viewport actually realizes, so this stays
+    /// proportional to what is on screen.
+    private func applyPendingUpdate(_ entries: [QueueEntry]) {
+        let previousIDs = Set(pending.map(\.entryID))
+        pending = entries
+        let currentIDs = Set(entries.map(\.entryID))
+        let vanished = previousIDs.subtracting(currentIDs)
+        if !vanished.isEmpty {
+            previewTracker.forget(vanished)
+            for id in vanished {
+                summaries[id] = nil
+                summaryErrors[id] = nil
+                tooLarge[id] = nil
+                cancelPreview(id)
+            }
+        }
+    }
+
+    /// One `preview_request` per card, requirement 1 of the scheduler
+    /// design: draw a pending card immediately ("Reading it locally...",
+    /// see `QueueRow`) and never block waiting for the daemon's answer.
+    ///
+    /// Called from `QueueRow.onAppear` -- the same trigger #357 introduced
+    /// as `requestSummary(for:)`, kept here under the scheduler's name
+    /// because what changed is not when a row asks, only what happens once
+    /// it does: this goes through the daemon's bounded preview scheduler
+    /// (two workers, dedup, a cache, an admission cap) instead of the
+    /// client-side `ConcurrencyLimiter` #357 added. Only one bound should
+    /// own this work -- the daemon is the one that can see the total across
+    /// all three shells (and, later, the approve and upload paths too), so
+    /// `ConcurrencyLimiter` is not used here; see its own doc for whether it
+    /// still has a reason to exist.
+    ///
+    /// `previewTracker` is #357's `requestingSummaries` in-flight set,
+    /// generalized to the scheduler's five states rather than a plain
+    /// "is a call running" flag -- it is what keeps a `LazyVStack` row
+    /// recycled during a fast scroll from resending `preview_request` while
+    /// the daemon still has the job `queued`/`running`.
+    func requestPreview(for entry: QueueEntry) {
         guard let client else { return }
-        for entry in awaitingDecision where summaries[entry.entryID] == nil
-            && summaryErrors[entry.entryID] == nil
-        {
-            let id = entry.entryID
-            Task.detached(priority: .utility) {
-                let outcome = Result { try client.previewSummary(entryID: id) }
-                await MainActor.run {
-                    switch outcome {
-                    case .success(let summary): self.summaries[id] = summary
-                    case .failure(let error):
-                        self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
-                            ?? "preview-failed"
-                    }
+        let id = entry.entryID
+        guard summaries[id] == nil,
+            summaryErrors[id] == nil,
+            tooLarge[id] == nil,
+            previewTracker.shouldRequest(id)
+        else { return }
+        previewTracker.markRequested(id)
+        Task.detached(priority: .utility) {
+            let outcome = Result { try client.requestPreview(entryID: id) }
+            await MainActor.run {
+                switch outcome {
+                case .success(let result):
+                    self.applyPreviewOutcome(result)
+                case .failure(let error):
+                    self.previewTracker.apply(state: .failed, to: id)
+                    self.summaryErrors[id] = (error as? DaemonClient.Failure)?.message
+                        ?? "preview-request-failed"
                 }
             }
+        }
+    }
+
+    /// Applies one preview outcome, wherever it arrived from: the immediate
+    /// response to `preview_request` (a cache hit, a refusal, or "it's
+    /// queued/running now") or the later `preview_ready` event (requirement
+    /// 2 of the scheduler design). `queued`/`running` leave every dictionary
+    /// alone -- the card keeps reading "Reading it locally..." -- and only
+    /// update `previewTracker` so a redundant request is not sent while one
+    /// is already in flight.
+    private func applyPreviewOutcome(_ result: PreviewRequestResult) {
+        previewTracker.apply(state: result.state, to: result.entryID)
+        switch result.state {
+        case .queued, .running:
+            break
+        case .ready:
+            if let summary = result.summary {
+                summaries[result.entryID] = summary
+            }
+        case .tooLarge:
+            tooLarge[result.entryID] = PreviewTooLarge(
+                rawSessionBytes: result.rawSessionBytes ?? 0,
+                limitBytes: result.limitBytes ?? 0
+            )
+        case .failed:
+            summaryErrors[result.entryID] = result.label ?? "preview-failed"
+        }
+    }
+
+    /// Drops a scheduled preview -- requirement 4: sent when a card is
+    /// dismissed or leaves the list for good (`applyPendingUpdate` above),
+    /// never on every scroll. Fire-and-forget: a `dropped: false` reply is a
+    /// defined no-op by contract, and there is nothing actionable to do with
+    /// a failure here either way.
+    private func cancelPreview(_ entryID: String) {
+        guard let client else { return }
+        Task.detached(priority: .utility) {
+            _ = try? client.cancelPreview(entryID: entryID)
+        }
+    }
+
+    /// Called by a row's `onAppear`/`onDisappear` with what is currently on
+    /// screen. Requirement 3: `preview_visible` decides preview *order*, is
+    /// cheap and idempotent, but is meant to be sent once a scroll settles,
+    /// not once per frame -- so this only records the change with
+    /// `visibilityCoalescer` and (re)starts a debounce timer, cancelling
+    /// whatever timer was already waiting. A fast scroll through many rows
+    /// therefore produces one send, of whatever was on screen when it
+    /// stopped, not one send per row that crossed the viewport.
+    func setPreviewVisible(_ entryIDs: Set<String>) {
+        visibilityCoalescer.setVisible(entryIDs)
+        visibleDebounce?.cancel()
+        visibleDebounce = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            self?.flushVisiblePreviews()
+        }
+    }
+
+    private func flushVisiblePreviews() {
+        guard let client, let ids = visibilityCoalescer.takePendingSend() else { return }
+        let idList = Array(ids)
+        Task.detached(priority: .utility) {
+            _ = try? client.setVisiblePreviews(entryIDs: idList)
         }
     }
 
