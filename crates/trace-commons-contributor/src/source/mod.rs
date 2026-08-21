@@ -131,6 +131,43 @@ pub trait TraceSource: Send + Sync {
     fn session_for_path(&self, _path: &Path) -> Option<PathBuf> {
         None
     }
+
+    /// The full `SessionRef` for the session a changed path belongs to.
+    ///
+    /// `session_for_path` answers *which* session; this answers *what it
+    /// looks like right now* -- size, group mtime, cwd -- which is what a
+    /// scoped scan needs before it can judge eligibility. Resolving the
+    /// address and describing the session are separate steps on purpose:
+    /// the address rule is shared with the daemon's bookkeeping, while this
+    /// is the part that touches the disk.
+    ///
+    /// The ref MUST be identical to the one `discover` produces for the
+    /// same session. A scoped scan and a full sweep that disagreed about a
+    /// session's size or group mtime would reach different eligibility
+    /// decisions for the same bytes, which is the drift event-driven
+    /// watching exists to avoid rather than introduce. Implementations
+    /// therefore share one ref-construction function with `discover` rather
+    /// than building a second one.
+    ///
+    /// `Ok(None)` covers both "not a session" and "was a session, is now
+    /// gone": these paths come from filesystem events, so a session
+    /// deleted between the event and this lookup is an ordinary race and
+    /// not a failure. Errors are reserved for I/O failures that are not
+    /// "it is gone".
+    ///
+    /// The default resolves the address and then finds it in `discover`,
+    /// which is correct for any source and costs a full scan -- so a source
+    /// that maps paths should override it, and one that does not
+    /// (`session_for_path` returning `None`) never reaches the scan at all.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        Ok(self
+            .discover()?
+            .into_iter()
+            .find(|candidate| candidate.path == address))
+    }
 }
 
 /// `path` if it is a real file genuinely inside `root`, otherwise `None`.

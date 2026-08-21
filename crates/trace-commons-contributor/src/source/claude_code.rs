@@ -198,21 +198,7 @@ impl TraceSource for ClaudeCodeSource {
             if !is_dir {
                 continue;
             }
-            // Claude Code encodes the session's cwd as a directory name by
-            // replacing every '/' with '-' (e.g. `/Users/testuser/code/myproj`
-            // becomes `-Users-testuser-code-myproj`). As a best-effort
-            // placeholder for discovery listings, take the segment after the
-            // final '-' as the project basename. This is unreliable for
-            // hyphenated project names (a project literally named "my-proj"
-            // would only capture "proj" here) -- `load()` overrides this with
-            // the true cwd basename read from the session file itself, so
-            // this is only ever seen before a session has been loaded.
-            let encoded_dir_name = project_dir.file_name();
-            let discovery_project = encoded_dir_name
-                .to_str()
-                .and_then(|name| name.rsplit('-').next())
-                .filter(|segment| !segment.is_empty())
-                .map(|segment| segment.to_string());
+            let discovery_project = discovery_project_label(&project_dir.file_name());
             let Ok(entries) = std::fs::read_dir(project_dir.path()) else {
                 continue;
             };
@@ -261,12 +247,11 @@ impl TraceSource for ClaudeCodeSource {
             }
 
             for entry in &file_entries {
-                push_group_if_jsonl(
-                    entry,
-                    discovery_project.clone(),
-                    &mut sessions,
-                    &mut skipped,
-                );
+                if let Some(session) =
+                    group_session_ref(entry.path(), discovery_project.clone(), &mut skipped)
+                {
+                    sessions.push(session);
+                }
             }
         }
         if skipped > 0 {
@@ -314,43 +299,106 @@ impl TraceSource for ClaudeCodeSource {
         }
         is_top_level_session_path(&self.root, &path).then_some(path)
     }
+
+    /// The group ref for whichever session a changed path belongs to.
+    ///
+    /// Two steps, neither of them new: `session_for_path` resolves the
+    /// address -- a member resolving to its parent -- and
+    /// `group_session_ref` describes it, which is the very function
+    /// `discover` builds its refs with. The scoped path and the full sweep
+    /// therefore cannot disagree about a session's size or group mtime.
+    ///
+    /// The cost is the point: this `lstat`s the members of ONE session's
+    /// `subagents/` directory, which is what `group_modified_at` is, rather
+    /// than every member of every session in the corpus.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        let discovery_project = address
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(discovery_project_label);
+        // A session deleted between the event and this lookup is an
+        // ordinary race, not a failure: `group_session_ref` returns `None`
+        // for a file that is no longer there, and that is `Ok(None)` here.
+        // The skip counter it keeps is a discovery-warning statistic and
+        // has nothing to say about a single lookup.
+        let mut ignored_skips = 0usize;
+        Ok(group_session_ref(
+            address,
+            discovery_project,
+            &mut ignored_skips,
+        ))
+    }
 }
 
-/// Builds one `SessionRef` for the top-level session file `entry`, covering
-/// that file *and* every validated transcript under its
-/// `<session-uuid>/subagents/` directory. `size_bytes` and
-/// `group_modified_at` describe the whole group so the daemon's eligibility
-/// check can see a member appear or grow; `path` stays the parent file,
-/// which is the one stable address the queue and the upload state key on.
-fn push_group_if_jsonl(
-    entry: &std::fs::DirEntry,
+/// The best-effort project label for a session, from the name of the
+/// project directory holding it.
+///
+/// Claude Code encodes the session's cwd as a directory name by replacing
+/// every '/' with '-' (e.g. `/Users/testuser/code/myproj` becomes
+/// `-Users-testuser-code-myproj`). As a placeholder for discovery listings,
+/// take the segment after the final '-' as the project basename. This is
+/// unreliable for hyphenated project names (a project literally named
+/// "my-proj" would only capture "proj" here) -- `load()` overrides it with
+/// the true cwd basename read from the session file itself, so it is only
+/// ever seen before a session has been loaded.
+///
+/// Shared by `discover` and `session_at` so a scoped lookup labels a
+/// session exactly as a full sweep would.
+fn discovery_project_label(project_dir_name: &std::ffi::OsStr) -> Option<String> {
+    project_dir_name
+        .to_str()
+        .and_then(|name| name.rsplit('-').next())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+}
+
+/// The one way a Claude Code `SessionRef` is built, used by `discover` for
+/// every session it walks to and by `session_at` for the single session an
+/// event named.
+///
+/// It covers the top-level session file at `path` *and* every validated
+/// transcript under its `<session-uuid>/subagents/` directory.
+/// `size_bytes` and `group_modified_at` describe the whole group so the
+/// daemon's eligibility check can see a member appear or grow; `path` stays
+/// the parent file, which is the one stable address the queue and the
+/// upload state key on.
+///
+/// Shared rather than reimplemented because a scoped scan and a full sweep
+/// that described the same session differently would reach different
+/// eligibility decisions for the same bytes.
+///
+/// `None` for anything that is not a session file, including one that has
+/// been deleted. `skipped` counts the entries that were unreadable rather
+/// than uninteresting, which is what discovery warns on.
+fn group_session_ref(
+    path: PathBuf,
     discovery_project: Option<String>,
-    sessions: &mut Vec<SessionRef>,
     skipped: &mut usize,
-) {
-    let path = entry.path();
+) -> Option<SessionRef> {
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-        return;
+        return None;
     }
-    // Refuse symlinks. `entry.metadata()` and the later `std::fs::read` both
-    // follow them, so a symlinked `.jsonl` is a path out of the transcript
-    // root and into any file the user can read. `DirEntry::file_type` does
-    // not follow, so it is the check that can tell the difference.
-    match entry.file_type() {
-        Ok(ft) if ft.is_file() => {}
-        Ok(_) => return,
-        Err(_) => {
-            *skipped += 1;
-            return;
-        }
-    }
-    let metadata = match entry.metadata() {
+    // Refuse symlinks. A later `std::fs::read` follows them, so a symlinked
+    // `.jsonl` is a path out of the transcript root and into any file the
+    // user can read. `symlink_metadata` does not follow, so it is the check
+    // that can tell the difference -- and it is the same stat that supplies
+    // the size and mtime below, since for a real file the two agree.
+    let metadata = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
+        // A vanished session is not an unreadable entry: the file being
+        // gone is an answer, and on the event path it is a routine race.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(_) => {
             *skipped += 1;
-            return;
+            return None;
         }
     };
+    if !metadata.is_file() {
+        return None;
+    }
     let parent_modified = metadata
         .modified()
         .ok()
@@ -372,7 +420,7 @@ fn push_group_if_jsonl(
     // it changes `size_bytes` without changing the answer, and keying on the
     // group total would re-read the parent every time a member landed.
     let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
-    sessions.push(SessionRef {
+    Some(SessionRef {
         source: SOURCE_CLAUDE_CODE,
         path,
         project: discovery_project,
@@ -383,7 +431,7 @@ fn push_group_if_jsonl(
         size_bytes,
         group_modified_at,
         group_member_count: members.len() as u32,
-    });
+    })
 }
 
 /// The directory name Claude Code writes delegated transcripts into.
@@ -1498,6 +1546,155 @@ mod tests {
         assert_eq!(
             source.session_for_path(&subagents.join("agent-real.jsonl")),
             Some(parent.clone())
+        );
+    }
+
+    /// Every field of a `SessionRef`, as one comparable string.
+    ///
+    /// `SessionRef` is not `PartialEq`, and hand-listing its fields in an
+    /// assertion would quietly stop covering the next one somebody adds --
+    /// which is exactly the field a scoped scan and a full sweep would then
+    /// be free to disagree about. `Debug` covers all of them, now and later.
+    fn every_field(r: &SessionRef) -> String {
+        format!("{r:?}")
+    }
+
+    /// The property the whole extraction exists for: a scoped lookup and a
+    /// full sweep describe the same session identically.
+    ///
+    /// If they diverged on `size_bytes` or `group_modified_at`, the two
+    /// paths would reach different eligibility decisions for the same
+    /// bytes -- the drift event-driven watching is meant to avoid rather
+    /// than introduce.
+    #[test]
+    fn session_at_describes_a_session_exactly_as_discover_does() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a"), ("agent-b.jsonl", "b")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        let scoped = source.session_at(&parent).unwrap().expect("a session");
+
+        assert_eq!(every_field(&scoped), every_field(&discovered[0]));
+        // Named individually too, so a failure says which fact moved.
+        assert_eq!(scoped.path, parent);
+        assert_eq!(scoped.source, SOURCE_CLAUDE_CODE);
+        assert_eq!(scoped.group_member_count, 2);
+        assert_eq!(scoped.size_bytes, discovered[0].size_bytes);
+        assert_eq!(scoped.group_modified_at, discovered[0].group_modified_at);
+        assert_eq!(scoped.cwd, discovered[0].cwd);
+        assert_eq!(scoped.project, discovered[0].project);
+    }
+
+    /// A member event returns the PARENT's ref, and the group mtime it
+    /// carries is the member's.
+    ///
+    /// This is the reason `session_at` exists rather than a bare address:
+    /// the thing that moved is the member, and the fact eligibility is
+    /// judged on is a group mtime that must have noticed it.
+    #[test]
+    fn session_at_on_a_member_returns_the_parent_ref_dated_by_that_member() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let member = subagents_dir_for(&parent).unwrap().join("agent-a.jsonl");
+
+        // Stamp the member an hour ahead of the parent, so "the group mtime
+        // is the member's" cannot pass by the two happening to be equal at
+        // filesystem timestamp resolution.
+        let ahead = std::fs::metadata(&parent).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&member)
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+
+        let scoped = source.session_at(&member).unwrap().expect("a session");
+        assert_eq!(scoped.path, parent, "a member addresses its parent");
+        assert_eq!(scoped.group_member_count, 1);
+        assert_eq!(
+            scoped.group_modified_at,
+            Some(chrono::DateTime::<chrono::Utc>::from(ahead)),
+            "the group mtime must reflect the member that moved"
+        );
+        assert_ne!(
+            scoped.group_modified_at, scoped.started_at,
+            "the parent's own mtime is not the group's"
+        );
+        // And still identical to what a full sweep would produce.
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(every_field(&scoped), every_field(&discovered[0]));
+    }
+
+    /// These paths come from filesystem events, so a session deleted
+    /// between the event and the lookup is an ordinary race. It is
+    /// `Ok(None)`, never an error.
+    #[test]
+    fn a_session_that_vanished_between_the_event_and_the_lookup_is_ok_none() {
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let member = subagents_dir_for(&parent).unwrap().join("agent-a.jsonl");
+
+        assert!(source.session_at(&parent).unwrap().is_some());
+
+        // The member is gone: nothing to scan, and the parent is still
+        // addressable in its own right.
+        std::fs::remove_file(&member).unwrap();
+        assert!(
+            source.session_at(&member).unwrap().is_none(),
+            "a deleted member must be Ok(None)"
+        );
+        assert!(source.session_at(&parent).unwrap().is_some());
+
+        // The whole conversation is gone.
+        std::fs::remove_file(&parent).unwrap();
+        assert!(
+            source.session_at(&parent).unwrap().is_none(),
+            "a deleted session must be Ok(None), not an error"
+        );
+        assert!(source.discover().unwrap().is_empty());
+    }
+
+    /// `session_at` inherits every refusal `session_for_path` makes,
+    /// because it is built on it rather than beside it. Same escapes as
+    /// `path_mapping_refuses_symlinks_and_traversal_out_of_the_root`.
+    #[test]
+    #[cfg(unix)]
+    fn session_at_refuses_everything_the_mapping_refuses() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secrets.jsonl");
+        std::fs::write(&secret, "{}\n").unwrap();
+
+        let (root, parent) = group_fixture(&[("agent-real.jsonl", "real")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let project_dir = parent.parent().unwrap().to_path_buf();
+        let subagents = subagents_dir_for(&parent).unwrap();
+        let linked_member = subagents.join("agent-link.jsonl");
+        symlink(&secret, &linked_member).unwrap();
+
+        for escape in [
+            secret.clone(),
+            linked_member,
+            project_dir.join("..").join("..").join("secrets.jsonl"),
+            project_dir.join("CLAUDE.md"),
+            project_dir.clone(),
+        ] {
+            assert!(
+                source.session_at(&escape).unwrap().is_none(),
+                "{} must not resolve to a session",
+                escape.display()
+            );
+        }
+        assert!(
+            source
+                .session_at(&subagents.join("agent-real.jsonl"))
+                .unwrap()
+                .is_some(),
+            "the real member must still resolve, or this proves nothing"
         );
     }
 
