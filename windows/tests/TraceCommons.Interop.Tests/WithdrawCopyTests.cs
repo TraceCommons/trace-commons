@@ -477,22 +477,47 @@ public sealed class HistoryCopyTests
     }
 
     [Fact]
+    public void TheWaitingFigureIsTheSubmittedBucketAndNotATotalMinusTheRest()
+    {
+        // `submitted` is one bucket of four -- sent, no verdict back yet --
+        // and never a running total. Reading it as one made this figure
+        // `submitted - (accepted + quarantined)`, which was permanently
+        // negative and saturated to zero, so the card reported that nothing
+        // was ever in flight while a dozen traces genuinely were.
+        var rollup = new HistoryRollup
+        {
+            AllTime = new HistoryCounts { Submitted = 14, Accepted = 100, Quarantined = 48 },
+            Quarantined = 48,
+        };
+
+        Assert.Equal(14, rollup.WaitingToBeScored);
+        Assert.Equal(162, rollup.TotalContributed);
+    }
+
+    [Fact]
     public void TheRollupsWaitingFigureNeverGoesNegative()
     {
-        // The three figures come from one cache but not from one instant, so
-        // a transient overshoot is possible. "-1 waiting" would be this
+        // The figure comes from a cache, and "-1 waiting" would be this
         // screen's first visibly wrong number.
         var rollup = new HistoryRollup
         {
-            AllTime = new HistoryCounts { Submitted = 2, Accepted = 3 },
-            Quarantined = 4,
+            AllTime = new HistoryCounts { Submitted = -1 },
         };
 
         Assert.Equal(0, rollup.WaitingToBeScored);
+    }
 
-        rollup.AllTime = new HistoryCounts { Submitted = 10, Accepted = 3 };
-        rollup.Quarantined = 2;
-        Assert.Equal(5, rollup.WaitingToBeScored);
+    [Fact]
+    public void NothingInFlightReportsNothingWaiting()
+    {
+        var rollup = new HistoryRollup
+        {
+            AllTime = new HistoryCounts { Submitted = 0, Accepted = 7, Quarantined = 2 },
+            Quarantined = 2,
+        };
+
+        Assert.Equal(0, rollup.WaitingToBeScored);
+        Assert.Equal(9, rollup.TotalContributed);
     }
 
     [Fact]
@@ -511,7 +536,9 @@ public sealed class HistoryCopyTests
         Assert.NotNull(rollup);
         Assert.Null(rollup!.Community);
         Assert.Null(rollup.LastRefreshedAt);
-        Assert.Equal(1, rollup.WaitingToBeScored);
+        // Three sent and not yet ruled on; five contributed in total.
+        Assert.Equal(3, rollup.WaitingToBeScored);
+        Assert.Equal(5, rollup.TotalContributed);
     }
 
     [Fact]

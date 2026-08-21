@@ -127,7 +127,22 @@ final class AppModel: ObservableObject {
 
     var health: HealthCopy? {
         guard let label = status.health.lastErrorLabel else { return nil }
+        // The budget banner says the same thing with real numbers, so the
+        // bare label is suppressed when it is going to be drawn.
+        if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
         return HealthCopy.forLabel(label)
+    }
+
+    /// The spent-budget banner, when there is one.
+    ///
+    /// Deliberately independent of `health`. The daemon's health slot holds
+    /// one label at a time and `daily-cap-reached` is last in its
+    /// precedence order, so a full queue -- or any other condition -- hid
+    /// the cap completely. Rendering both means the contributor sees the
+    /// reason their approvals are not moving even while something else is
+    /// also wrong.
+    var budgetHealth: HealthCopy? {
+        HealthCopy.forBudget(status.dailyBudget)
     }
 
     /// What is waiting, per project, with sizes and the id `submitProject`
