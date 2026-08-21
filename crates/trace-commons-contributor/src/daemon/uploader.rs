@@ -501,6 +501,7 @@ mod tests {
             project_label: "myproj".into(),
             path: PathBuf::from("/tmp/a.jsonl"),
             size_bytes,
+            observed_modified_at: None,
             discovered_at: at("2026-08-08T12:00:00Z"),
             state: QueueState::Approved,
             reason_label: None,

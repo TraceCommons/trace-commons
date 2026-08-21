@@ -3595,6 +3595,7 @@ mod tests {
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
             size_bytes,
+            observed_modified_at: None,
             discovered_at: Utc::now(),
             state: QueueState::Approved,
             reason_label: None,
