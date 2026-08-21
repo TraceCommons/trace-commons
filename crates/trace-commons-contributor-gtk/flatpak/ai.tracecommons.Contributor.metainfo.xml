@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.4.4" date="2026-08-21">
+      <description>
+        <p>The history screen now updates when a submission lands, instead of showing the counts it had at launch.</p>
+      </description>
+    </release>
     <release version="0.4.3" date="2026-08-21">
       <description>
         <p>The queue no longer builds a preview for every waiting session at once, so opening the app does not pin the machine. Large sessions render without freezing, and queue rows are created as they scroll into view.</p>
