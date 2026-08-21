@@ -217,7 +217,7 @@ Authenticode and RFC3161-timestamped respectively — and the Linux x86_64 binar
 is not signed, so use the published checksum beside it. Follow that link rather
 than GitHub's "latest release": CLI releases are tagged `contributor-v*` and
 desktop-app releases `app-v*`, so "latest" is whichever stream was cut most
-recently — today `contributor-v0.4.4` and `app-v0.4.4` were cut hours apart, and
+recently — today `contributor-v0.4.6` and `app-v0.4.6` were cut minutes apart, and
 an app tag carries no CLI binary.
 
 Confirm the install with:
@@ -241,7 +241,7 @@ cargo build --release --bin trace-commons-contributor
 ./target/release/trace-commons-contributor login
 ```
 
-[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.4.4
+[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.4.6
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 for the full quickstart, consent model, and subcommand reference. Consent is
