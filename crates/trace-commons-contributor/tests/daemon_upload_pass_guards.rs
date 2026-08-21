@@ -882,20 +882,27 @@ async fn an_approval_whose_previewed_bytes_are_gone_is_not_uploaded() {
 #[tokio::test]
 async fn an_entry_approved_after_a_real_preview_still_uploads() {
     // The guard must not break the ordinary path: preview, approve, send.
+    //
+    // "Preview" here is the surface that actually pins -- `open_preview`,
+    // behind the preview sheet's "exactly what would be sent" view -- not
+    // the socket's card-summary `"preview"` method. That method (see
+    // `daemon::ipc::handle_preview`) deliberately skips both the envelope
+    // digest and the pin: it answers a queue card, which the app loads for
+    // every entry at once, and a card is not the surface a contributor
+    // approves from. Pinning stays with `open_preview` and with
+    // `handle_approve`'s own on-demand rebuild, exercised elsewhere in this
+    // file (`approving_without_a_preview_still_pins_an_envelope`).
     let h = Harness::new().await;
     h.write_session("otherproj", "6c6c6c6c-6c6c-6c6c-6c6c-6c6c6c6c6c6c");
     h.discover().await;
     let entry_id = h.only_entry().entry_id;
 
-    let resp = ipc::handle_local(
-        &h.shared,
-        "preview",
-        serde_json::json!({ "entry_id": entry_id.to_string() }),
-    );
-    assert!(resp.error.is_none(), "{:?}", resp.error);
+    ipc::open_preview(&h.shared, entry_id)
+        .await
+        .expect("preview");
     assert!(
         h.only_entry().previewed_envelope_digest.is_some(),
-        "a preview must pin the entry to the artifact it showed"
+        "opening the full preview must pin the entry to the artifact it showed"
     );
 
     let resp = ipc::handle_local(
@@ -911,6 +918,71 @@ async fn an_entry_approved_after_a_real_preview_still_uploads() {
         h.received.lock().unwrap().len(),
         1,
         "an approval of exactly what was previewed must go through"
+    );
+    assert_eq!(h.only_entry().state, QueueState::Uploaded);
+}
+
+#[tokio::test]
+async fn the_card_summary_never_pins_but_approve_still_pins_and_uploads() {
+    // The queue-card surface (`"preview"` over the socket, and its Swift
+    // caller `previewSummary`) is answered for every row shown at once, and
+    // does the least work of any preview surface on purpose -- see
+    // `daemon::preview::build_preview_card`. It must never pin an entry:
+    // there is no digest behind a card build for a pin to name. Approving
+    // straight from a card that was never opened as a full preview must
+    // still work, by the same on-demand build-and-pin `handle_approve`
+    // always had for an entry nobody previewed at all.
+    let h = Harness::new().await;
+    h.write_session("otherproj", "6d6d6d6d-6d6d-6d6d-6d6d-6d6d6d6d6d6d");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+
+    let resp = ipc::handle_local(
+        &h.shared,
+        "preview",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert!(
+        resp.result
+            .as_ref()
+            .and_then(|r| r.get("would_send_bytes"))
+            .and_then(|v| v.as_u64())
+            .is_some_and(|n| n > 0),
+        "the card summary must still report a real size: {:?}",
+        resp.result
+    );
+    assert!(
+        resp.result
+            .as_ref()
+            .and_then(|r| r.get("envelope_digest"))
+            .is_none(),
+        "the card response must carry no envelope digest, or it is pinning \
+         after all: {:?}",
+        resp.result
+    );
+    assert!(
+        h.only_entry().previewed_envelope_digest.is_none(),
+        "a card summary must not pin the entry it describes"
+    );
+
+    let resp = ipc::handle_local(
+        &h.shared,
+        "approve",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert!(
+        h.only_entry().previewed_envelope_digest.is_some(),
+        "approve must build and pin an envelope for a card-only entry"
+    );
+
+    h.upload_pass().await.unwrap();
+
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        1,
+        "an entry approved from a card-only load must still upload"
     );
     assert_eq!(h.only_entry().state, QueueState::Uploaded);
 }

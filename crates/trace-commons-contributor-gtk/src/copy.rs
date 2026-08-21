@@ -109,6 +109,33 @@ pub const QUEUE_EMPTY_BODY: &str = "When a session finishes and goes quiet, it s
      Nothing is sent unless you say so.";
 pub const CHECKING: &str = "Checking what would be sent…";
 
+/// The manifest strip's "Would send" field when the daemon's admission
+/// control refused to preview a session at all -- see
+/// `docs/superpowers/specs/2026-08-20-preview-scheduler-design.md`. Never
+/// paired with a would-send figure of any kind: the preview card is a
+/// consent surface, and a plausible-looking estimate for bytes that were
+/// never built is worse than none.
+pub const TOO_LARGE_TO_PREVIEW: &str = "too large to preview";
+
+/// What the "Removed by pattern" field says instead of a count when
+/// nothing was parsed at all.
+pub const NOT_PREVIEWED: &str = "not previewed";
+
+/// The caption under a too-large card, naming the one real number involved
+/// -- `raw_session_bytes`, a `stat` of the file, never an estimate of what
+/// would be sent.
+pub fn too_large_caption(raw_session_bytes: u64) -> String {
+    format!(
+        "{} on disk -- too large to build a preview for automatically. \
+         It can still be approved and sent; nothing here decides that.",
+        crate::model::human_bytes(raw_session_bytes)
+    )
+}
+
+/// The row's opening-prompt line for a too-large card, standing in for the
+/// redacted opening prompt a preview never ran to produce.
+pub const TOO_LARGE_OPENING_LINE: &str = "(too large to preview automatically)";
+
 /// The standing concession, under the column rather than on every card.
 /// Distinct on purpose from [`residual_risk_line`], which says what
 /// scrubbing did to *one* session: this one says what scrubbing *is*.
@@ -1402,6 +1429,33 @@ pub fn submit_flagged_and_skipped_clause(flagged: u64, skipped: &[&str]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::model::human_bytes;
+
+    #[test]
+    fn too_large_caption_states_the_raw_size_and_never_a_would_send_figure() {
+        // The 367.5 MB Codex outlier the preview-scheduler design is
+        // grounded in: the caption has to name that number and must not
+        // contain any other byte figure a reader could mistake for a
+        // would-send estimate.
+        let line = too_large_caption(385_305_395);
+        assert!(
+            line.contains(&human_bytes(385_305_395)),
+            "caption must state the real raw size: {line}"
+        );
+        assert!(
+            !line.contains("would send"),
+            "the too-large caption must never claim a would-send figure: {line}"
+        );
+    }
+
+    #[test]
+    fn too_large_caption_changes_with_the_size_it_is_given() {
+        // Not a constant string with a number spliced in by accident of one
+        // test case -- two different sizes must produce two different
+        // captions.
+        assert_ne!(too_large_caption(1_000_000), too_large_caption(400_000_000));
+    }
 
     #[test]
     fn the_evidence_line_counts_one_session_without_a_plural() {

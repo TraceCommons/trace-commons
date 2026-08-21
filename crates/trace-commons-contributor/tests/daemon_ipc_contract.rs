@@ -19,10 +19,13 @@ use tokio::net::UnixStream;
 
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::daemon::ipc::{
-    DaemonShared, ERR_BAD_PARAMS, ERR_UNKNOWN_METHOD, EVENT_SNAPSHOT, IPC_SCHEMA, METHODS, bind,
-    serve,
+    DaemonShared, ERR_BAD_PARAMS, ERR_UNKNOWN_METHOD, EVENT_PREVIEW_READY, EVENT_SNAPSHOT,
+    IPC_SCHEMA, METHODS, bind, serve,
 };
 use trace_commons_contributor::daemon::policy::project_id_for;
+use trace_commons_contributor::daemon::preview_scheduler::{
+    self, MAX_PREVIEW_SESSION_BYTES, STATE_QUEUED, STATE_READY,
+};
 use trace_commons_contributor::daemon::queue::{Queue, QueueEntry, QueueState, entry_id_for};
 use trace_commons_contributor::daemon::settings::DaemonSettings;
 use trace_commons_contributor::identity::DeviceIdentity;
@@ -814,6 +817,13 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
     queue.save(&store).unwrap();
 
     let shared = Arc::new(DaemonShared::load(store).unwrap());
+    // The preview pool, exactly as `daemon::start_embedded` starts it.
+    // Without it a `preview_request` here would queue and never complete,
+    // and this fixture would be testing a daemon that does not exist.
+    let runner: Arc<dyn preview_scheduler::PreviewJobRunner> = Arc::new(
+        preview_scheduler::DaemonPreviewRunner::new(Arc::clone(&shared)),
+    );
+    preview_scheduler::spawn_workers(Arc::clone(&shared.previews), runner);
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
         let _ = serve(listener, shared).await;
@@ -912,6 +922,13 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
     queue.save(&store).unwrap();
 
     let shared = Arc::new(DaemonShared::load(store).unwrap());
+    // The preview pool, exactly as `daemon::start_embedded` starts it.
+    // Without it a `preview_request` here would queue and never complete,
+    // and this fixture would be testing a daemon that does not exist.
+    let runner: Arc<dyn preview_scheduler::PreviewJobRunner> = Arc::new(
+        preview_scheduler::DaemonPreviewRunner::new(Arc::clone(&shared)),
+    );
+    preview_scheduler::spawn_workers(Arc::clone(&shared.previews), runner);
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
         let _ = serve(listener, shared).await;
@@ -2224,5 +2241,167 @@ async fn cancelling_a_project_is_recorded_in_the_local_audit_log() {
         audit::load(&daemon.store()).unwrap().len(),
         2,
         "a cancel that matched nothing must not append a record"
+    );
+}
+
+/// The scheduled preview path end to end over the socket: the request
+/// returns without building anything, the event carries the real summary,
+/// and the second request is answered from cache.
+#[tokio::test]
+async fn preview_request_returns_promptly_and_the_event_carries_the_real_summary() {
+    let (_dir, store_dir, entry_id) = daemon_with_a_redactable_entry().await;
+    let mut c = connect_to(&store_dir).await;
+
+    c.send(r#"{"id":1,"method":"subscribe"}"#).await;
+    assert_eq!(c.recv_json().await["id"], 1);
+    let snapshot = c.recv_json().await;
+    assert_eq!(snapshot["event"], EVENT_SNAPSHOT);
+
+    c.send(&format!(
+        r#"{{"id":2,"method":"preview_request","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+
+    // The response and the event arrive on the same connection, and which
+    // lands first is a race the contract does not fix. Read frames until
+    // both have been seen.
+    let mut request_state: Option<String> = None;
+    let mut ready: Option<serde_json::Value> = None;
+    while request_state.is_none() || ready.is_none() {
+        let frame = c.recv_json().await;
+        if frame["id"] == 2 {
+            assert!(frame["error"].is_null(), "{frame}");
+            request_state = Some(frame["result"]["state"].as_str().unwrap().to_string());
+        } else if frame["event"] == EVENT_PREVIEW_READY {
+            ready = Some(frame);
+        }
+    }
+    assert_eq!(
+        request_state.unwrap(),
+        STATE_QUEUED,
+        "the first request must queue, never build on the connection's time"
+    );
+
+    let ready = ready.unwrap();
+    assert!(ready["id"].is_null(), "push frames carry no id: {ready}");
+    let data = &ready["data"];
+    assert_eq!(data["entry_id"], entry_id.to_string());
+    assert_eq!(data["state"], STATE_READY);
+    let summary = &data["summary"];
+    let would_send = summary["would_send_bytes"].as_u64().expect("a real size");
+    assert!(would_send > 0, "the summary is the real build, not a stub");
+    assert_eq!(summary["enrolled"], true);
+    // No digest, and that is the contract rather than an omission. A card
+    // build never produces one: the digest costs a second full
+    // serialization plus a `serde_json::Value` tree of the whole redacted
+    // envelope, and a card would discard both. Asserted as absent so a
+    // future change cannot quietly put the cost back.
+    assert!(
+        summary["envelope_digest"].is_null(),
+        "a card summary carries no digest: {summary}"
+    );
+    let fingerprint = summary["input_fingerprint"]
+        .as_str()
+        .expect("the configuration fingerprint still rides along");
+    assert!(
+        fingerprint.starts_with("sha256:"),
+        "the fingerprint is a hash of the config, not of the envelope: {fingerprint}"
+    );
+    let redactions: u64 = summary["redactions"]
+        .as_object()
+        .expect("redaction counts")
+        .values()
+        .filter_map(|v| v.as_u64())
+        .sum();
+    assert!(redactions > 0, "the fixture plants an address to redact");
+    assert!(
+        !ready.to_string().contains("fixture-user@example.com"),
+        "the event must never carry unredacted trace content"
+    );
+
+    // Second request: answered from the cache, with the same build.
+    c.send(&format!(
+        r#"{{"id":3,"method":"preview_request","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let again = c.recv_json().await;
+    assert_eq!(again["id"], 3);
+    assert_eq!(again["result"]["state"], STATE_READY);
+    // The whole summary, not one field: a cache hit replays the same build,
+    // and comparing the object proves it for every field at once rather
+    // than for whichever one this test happened to name.
+    assert_eq!(
+        &again["result"]["summary"], summary,
+        "a cache hit replays the same build"
+    );
+    assert_eq!(again["result"]["summary"]["would_send_bytes"], would_send);
+
+    // And no second `preview_ready` follows a cache hit: there was no job.
+    c.send(r#"{"id":4,"method":"status"}"#).await;
+    let next = c.recv_json().await;
+    assert_eq!(
+        next["id"], 4,
+        "a cache hit publishes no event, so status answers next: {next}"
+    );
+}
+
+/// `preview_visible` and `preview_cancel` are cheap, idempotent, and never
+/// error on a no-op -- a shell calls them on every scroll.
+#[tokio::test]
+async fn preview_visible_and_cancel_are_safe_to_call_repeatedly() {
+    let (_dir, store_dir, entry_id) = daemon_with_a_redactable_entry().await;
+    let mut c = connect_to(&store_dir).await;
+
+    c.send(&format!(
+        r#"{{"id":1,"method":"preview_visible","params":{{"entry_ids":["{entry_id}"]}}}}"#
+    ))
+    .await;
+    let resp = c.recv_json().await;
+    assert!(resp["error"].is_null(), "{resp}");
+    assert_eq!(resp["result"]["visible"], 1);
+
+    c.send(r#"{"id":2,"method":"preview_visible","params":{"entry_ids":[]}}"#)
+        .await;
+    assert_eq!(c.recv_json().await["result"]["visible"], 0);
+
+    c.send(r#"{"id":3,"method":"preview_visible","params":{"entry_ids":["not-a-uuid"]}}"#)
+        .await;
+    let bad = c.recv_json().await;
+    assert_eq!(bad["error"]["code"], ERR_BAD_PARAMS);
+    assert_eq!(bad["error"]["message"], "entry-ids-invalid");
+
+    // Nothing scheduled: a cancel is a no-op, not an error.
+    c.send(&format!(
+        r#"{{"id":4,"method":"preview_cancel","params":{{"entry_id":"{entry_id}"}}}}"#
+    ))
+    .await;
+    let cancelled = c.recv_json().await;
+    assert!(cancelled["error"].is_null(), "{cancelled}");
+    assert_eq!(cancelled["result"]["dropped"], false);
+    assert_eq!(cancelled["result"]["entry_id"], entry_id.to_string());
+}
+
+/// The admission cap is the daemon's, not a test constant: a shell reading
+/// `too_large` must be able to trust that no would-send number accompanies
+/// it.
+#[test]
+fn the_admission_cap_admits_the_measured_claude_corpus_and_refuses_the_codex_tail() {
+    // Asked of a real scheduler built the way the daemon builds it, so this
+    // tracks the shipped policy rather than restating a constant.
+    let sched = trace_commons_contributor::daemon::preview_scheduler::PreviewScheduler::default();
+    assert_eq!(sched.admission_cap(), MAX_PREVIEW_SESSION_BYTES);
+    // The corpus behind the incident: Claude sessions topped out at
+    // 29.8 MB, Codex rollouts at 367.5 MB against a 3.5 MB mean.
+    assert!(
+        sched.admits(29_800_000),
+        "the largest measured Claude session must still be previewable"
+    );
+    assert!(
+        sched.admits(3_500_000),
+        "the mean Codex rollout must be previewable"
+    );
+    assert!(
+        !sched.admits(367_500_000),
+        "the largest measured Codex rollout must not be parsed to draw a card"
     );
 }

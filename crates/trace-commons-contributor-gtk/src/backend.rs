@@ -224,9 +224,10 @@ impl Backend {
     }
 
     /// A blocking iterator over daemon events, for the thread that keeps the
-    /// window live. Returns event names only; the shell re-reads state
-    /// rather than trusting event payloads, exactly as `resync_required`
-    /// requires it to be able to do anyway.
+    /// window live. Returns event names only, with one narrow exception --
+    /// see [`DaemonEvent`] -- and never a payload the shell would have to
+    /// trust as current state; the shell re-reads state itself, exactly as
+    /// `resync_required` requires it to be able to do anyway.
     pub fn events(&self) -> Result<Box<dyn EventStream>> {
         match self {
             Backend::Attached { store } => Ok(Box::new(SocketEvents::open(store)?)),
@@ -237,9 +238,40 @@ impl Backend {
     }
 }
 
+/// One daemon event, as this shell's event pump sees it.
+///
+/// `entry_id` is populated for exactly one event, `preview_ready`, and is
+/// `None` for every other. This is a deliberate, narrow exception to "names
+/// only", not a reopening of the rule: an entry id is an identifier, not
+/// state. Reading it only tells the shell *which* card to re-ask the daemon
+/// about -- `App::handle_preview_ready` still calls `preview_request` and
+/// still trusts nothing but that fresh answer. The alternative -- forgetting
+/// which entry resolved and re-checking every card still outstanding on
+/// every `preview_ready` -- is what turned filling a 500-card queue into
+/// tens of thousands of redundant requests; see
+/// `docs/superpowers/specs/2026-08-20-preview-scheduler-design.md`.
+pub struct DaemonEvent {
+    pub name: String,
+    pub entry_id: Option<String>,
+}
+
+/// `preview_ready`'s `data` is always `PreviewOutcome::to_value`, which
+/// always carries `entry_id` -- see `daemon::preview_scheduler`. Every other
+/// event's `data` is left untouched: this reads the one field this shell
+/// ever trusts off an event payload, and only for the one event it is
+/// documented to carry it.
+fn preview_ready_entry_id(name: &str, data: &serde_json::Value) -> Option<String> {
+    if name != trace_commons_contributor::daemon::ipc::EVENT_PREVIEW_READY {
+        return None;
+    }
+    data.get("entry_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 pub trait EventStream: Send {
     /// Blocks until the next event, or returns `None` when the stream ends.
-    fn next(&mut self) -> Option<String>;
+    fn next(&mut self) -> Option<DaemonEvent>;
 }
 
 struct BroadcastEvents {
@@ -247,14 +279,18 @@ struct BroadcastEvents {
 }
 
 impl EventStream for BroadcastEvents {
-    fn next(&mut self) -> Option<String> {
+    fn next(&mut self) -> Option<DaemonEvent> {
         match self.rx.blocking_recv() {
-            Ok(event) => Some(event.event),
+            Ok(event) => Some(DaemonEvent {
+                entry_id: preview_ready_entry_id(&event.event, &event.data),
+                name: event.event,
+            }),
             // Lagged: the shell's answer to a missed event is the same as
             // its answer to `resync_required` -- re-read everything.
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                Some("resync_required".to_string())
-            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Some(DaemonEvent {
+                name: "resync_required".to_string(),
+                entry_id: None,
+            }),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
         }
     }
@@ -283,7 +319,7 @@ impl SocketEvents {
 }
 
 impl EventStream for SocketEvents {
-    fn next(&mut self) -> Option<String> {
+    fn next(&mut self) -> Option<DaemonEvent> {
         use std::io::BufRead;
         loop {
             let mut line = String::new();
@@ -297,7 +333,14 @@ impl EventStream for SocketEvents {
             // Events carry no `id`; that is how the contract says to tell
             // them from the `subscribe` response sharing this connection.
             if let Some(name) = value.get("event").and_then(|v| v.as_str()) {
-                return Some(name.to_string());
+                let entry_id = preview_ready_entry_id(
+                    name,
+                    value.get("data").unwrap_or(&serde_json::Value::Null),
+                );
+                return Some(DaemonEvent {
+                    name: name.to_string(),
+                    entry_id,
+                });
             }
         }
     }

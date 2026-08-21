@@ -1,4 +1,5 @@
 import Foundation
+import TCShellCore
 
 // Typed shapes for `trace_commons.daemon.v1_1`, as specified in
 // docs/contributor-daemon-ipc-v1_1.md. Nothing here carries a filesystem
@@ -118,7 +119,7 @@ struct DaemonStatus: Decodable, Equatable {
 // MARK: - Preview
 
 /// The socket `preview` result: summary only, never the trace body.
-struct PreviewSummary: Decodable, Equatable {
+struct PreviewSummary: Decodable, Equatable, Sendable {
     let wouldSendBytes: Int
     let rawSessionBytes: Int
     let eventCount: Int
@@ -148,6 +149,22 @@ struct PreviewSummary: Decodable, Equatable {
             .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
         return "scrubbed: " + parts.joined(separator: ", ")
     }
+}
+
+/// The wire shape `preview_request`'s immediate response and the
+/// `preview_ready` event both carry, specialized to this app's own
+/// `PreviewSummary` -- see `PreviewRequestResult`'s doc in `TCShellCore` for
+/// why the generic lives there instead of a second copy of this decoder.
+typealias PreviewRequestResult = TCShellCore.PreviewRequestResult<PreviewSummary>
+
+/// A session refused by the daemon's preview scheduler's admission control,
+/// before anything was parsed. `rawSessionBytes` is a `stat`; there is no
+/// would-send figure, on purpose -- see the design spec's "Admission
+/// control by size". A card renders exactly these two numbers and nothing
+/// derived from them.
+struct PreviewTooLarge: Equatable {
+    let rawSessionBytes: Int
+    let limitBytes: Int
 }
 
 // MARK: - Audit
@@ -366,6 +383,11 @@ enum DaemonEvent: Equatable {
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.
     case lagged(skipped: Int)
+    /// A previously `queued`/`running` scheduled preview finished. Never
+    /// published for a `preview_request` that was itself answered from
+    /// cache -- see the contract's note that a cache hit "no event
+    /// follows".
+    case previewReady(PreviewRequestResult)
     case unknown(String)
 }
 

@@ -48,6 +48,18 @@ old behaviour, because no application has shipped against `v1` yet. See
   `token_counts`, `latency_ms`, `cost_usd` and `failure_modes`, showing a
   contributor less than the artifact under a tab titled "exactly what would
   be sent". See ["`preview_turns`"](#preview_turns).
+- `preview_request`, `preview_visible`, `preview_cancel`, and the
+  `preview_ready` event — the **bounded** preview path. `preview` builds on
+  the connection's time, which meant a shell drawing a list of N cards
+  started N full read-parse-redact-serialize passes at once; on one
+  contributor's machine (about 500 queued sessions, 11.7 GB across 4,097
+  files, the largest 367.5 MB) that reached 1.7 cores sustained, 1.34 GB
+  resident, and a load average of 649 inside three minutes. The daemon now
+  owns a two-worker preview pool with deduplication, visible-first
+  priority, cancellation, a size admission cap, and a result cache.
+  `preview` itself is **unchanged** in request shape, response shape, and
+  behaviour -- the CLI and the C ABI still use it. See
+  ["Scheduled previews"](#scheduled-previews).
 - `history_rollup` now carries an optional `community` object: this
   contributor's own line on the public roster, polled from the server's
   public snapshot on the daemon's own interval. Both desktop clients already
@@ -363,6 +375,9 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
+| `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
+| `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
+| `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
 | `dismiss` | `entry_id` | `ok: true` | |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
@@ -519,6 +534,84 @@ preview a local file; that requirement was incidental and is gone.
 `would_send_bytes`, `redactions`, `pii_labels_present` and `opening_prompt`
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
+
+### Scheduled previews
+
+`preview` is synchronous: the connection is held for the whole
+read-parse-redact-serialize pass. That is correct for a caller that wants
+one preview and is willing to wait for it, and it is what the CLI and the C
+ABI still use. It is wrong for a shell drawing a list, because the natural
+implementation -- one request per card -- starts one full pipeline pass per
+queued entry, and nothing bounded how many ran at once. See the "New in this
+revision" note for what that measured out to on a real machine.
+
+`preview_request` is the same preview, scheduled. The daemon runs at most
+**two** at a time, deduplicates, serves repeats from a cache, builds
+on-screen entries first, and refuses sessions too large to be worth parsing
+for a card.
+
+**`preview_request`** — params `{entry_id}`. Returns immediately, always,
+with an object whose `state` is one of:
+
+| `state` | Also carries | Meaning |
+|---|---|---|
+| `queued` | — | accepted; a `preview_ready` event will follow |
+| `running` | — | already building from an earlier request; a `preview_ready` event will follow |
+| `ready` | `summary` | answered from cache; **no event follows**, because no work was done |
+| `too_large` | `raw_session_bytes`, `limit_bytes` | refused by admission control; nothing was parsed |
+| `failed` | `code`, `label` | the pipeline refused; same fixed labels `preview` uses |
+
+`summary` carries exactly the fields `preview` returns -- `would_send_bytes`,
+`raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
+`pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
+`input_fingerprint`, `enrolled` -- with one deliberate omission: it does
+**not** carry `entry`. The summary is cached and a queue entry's state
+changes underneath it, so embedding one would let a cached preview assert a
+stale state. Clients already hold entries from `list_pending` and
+`snapshot`.
+
+Calling this repeatedly for the same entry is free and is the intended
+usage: a cached result comes straight back, and an entry already queued or
+building is not enqueued twice.
+
+**`preview_visible`** — params `{entry_ids: [...]}`. Replaces the daemon's
+idea of what is on screen, wholesale. Send it after each scroll settles; it
+takes one lock and moves no work. Visibility decides the **order** previews
+are built in, never whether they are built: an entry that scrolls away keeps
+its place in the queue. An unparseable id is `bad_params` /
+`entry-ids-invalid`; an empty array is valid and means nothing is on screen.
+
+**`preview_cancel`** — params `{entry_id}`. Returns `{entry_id, dropped}`.
+`dropped: false` means there was nothing to drop -- already finished, never
+requested, already cancelled -- and is not an error, because a client that
+cancels on every card leaving the list will hit it constantly.
+
+> **What cancel cannot do.** A preview that has already started cannot be
+> interrupted. The pipeline has no cancellation point in it, and its
+> expensive stretch is a single parse the daemon does not get control back
+> from. Cancelling a running entry costs exactly the CPU that job had left
+> to spend; what it buys is that no `preview_ready` event is published and
+> nothing is cached. The bound on that waste is two jobs, which is why the
+> two-worker bound rather than cancellation is what protects the machine. Do
+> not build a client on the assumption that cancelling is immediate.
+
+`dismiss` cancels an entry's scheduled preview implicitly. `approve` does
+not -- it needs the envelope it would be cancelling.
+
+**Too large.** A session over the admission cap is refused rather than
+previewed, and the refusal carries **no size estimate of any kind**:
+`raw_session_bytes` is a `stat` of the file, `limit_bytes` is the cap, and
+there is no `would_send_bytes` and no `summary`. A would-send number is a
+claim about an envelope that was never built, and the preview card is a
+consent surface. Render "too large to preview" and the raw size; do not
+synthesize a would-send figure from the raw bytes. This is a *preview*
+policy only -- it does not decide whether such a session can be contributed,
+and `approve` still builds and pins one.
+
+**Caching and staleness.** A result is cached against the session file's
+path, size, and mtime, the entry's whole-group size, and a fingerprint of
+the local configuration. Any of those changing rebuilds. The cache lives in
+the daemon process and does not survive a daemon restart.
 
 ### `preview_body`
 
@@ -1352,6 +1445,7 @@ read as that flow already existing.
 | `status_changed` | pause/resume, a lapsed timed pause, or health changed | `{}` |
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
+| `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call

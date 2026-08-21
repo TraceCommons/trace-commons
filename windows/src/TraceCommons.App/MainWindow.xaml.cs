@@ -4,7 +4,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
@@ -41,6 +44,48 @@ public sealed partial class MainWindow : Window
     private IReadOnlyList<ProjectSetting> _trayProjects = Array.Empty<ProjectSetting>();
     private HistoryRollup _trayRollup = new();
 
+    /// <summary>
+    /// Which queue entry each currently realized SESSION row shows, keyed by
+    /// the realized element itself.
+    ///
+    /// Reads the INNER ItemsRepeater's own ElementPrepared / ElementClearing,
+    /// not the outer ListView's per-project realization -- see the doc
+    /// comment on the queue ListView in MainWindow.xaml for why that
+    /// distinction matters now. Before the inner list virtualized
+    /// (ItemsControl, replaced by #354), "every entry under a realized
+    /// project" WAS every entry actually on screen, because ItemsControl
+    /// realized a project's rows in full the moment the project scrolled
+    /// into view. Now a project with hundreds of sessions windows its own
+    /// rows independently, and tracking at the outer, per-project level
+    /// would report most of a large project as visible -- safe (visibility
+    /// only ever affects build order, never membership), but close to
+    /// useless as a priority signal for exactly the case this effort exists
+    /// to fix. Tracking each ItemsRepeater's own realized elements instead
+    /// keeps the reported set to what is actually windowed into view, plus
+    /// only WinUI's own small look ahead buffer around it.
+    /// </summary>
+    private readonly Dictionary<UIElement, string> _visibleEntryIdsByElement = new();
+
+    /// <summary>
+    /// The queue ListView's own scroll surface, found once its template is
+    /// realized. WinUI does not expose a ListView's ScrollViewer directly;
+    /// <see cref="FindDescendant{T}"/> is the standard visual-tree walk for
+    /// it. The inner ItemsRepeater has no ScrollViewer of its own -- it
+    /// virtualizes against whichever ancestor ScrollViewer's effective
+    /// viewport reaches it, which is this one -- so this remains the right
+    /// surface to watch for a scroll settling even though the per-row
+    /// realization signal below now comes from the inner control.
+    /// </summary>
+    private ScrollViewer? _queueScrollViewer;
+
+    /// <summary>
+    /// Coalesces every visibility-worthy signal -- a row realizing or being
+    /// recycled away, a scroll settling -- into one recompute a short
+    /// interval after the last one, so a burst of either produces exactly
+    /// one <c>preview_visible</c> call rather than one per signal.
+    /// </summary>
+    private readonly DispatcherQueueTimer _visibilityDebounceTimer;
+
     private bool _quitConfirmed;
 
     /// <summary>
@@ -73,6 +118,10 @@ public sealed partial class MainWindow : Window
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
 
+        // Found once the template is realized, not here: the ScrollViewer
+        // inside a ListView's default template does not exist before Loaded.
+        QueueListView.Loaded += OnQueueListViewLoaded;
+
         // The tray reflects daemon state and never drives it: it re-reads
         // status on the same events the queue does rather than being told
         // what to show by the view model, so the two cannot drift.
@@ -89,6 +138,11 @@ public sealed partial class MainWindow : Window
         AppWindow.Closing += OnAppWindowClosing;
         Closed += OnClosed;
         Activated += OnFirstActivated;
+
+        _visibilityDebounceTimer = _host.Dispatcher.CreateTimer();
+        _visibilityDebounceTimer.Interval = TimeSpan.FromMilliseconds(200);
+        _visibilityDebounceTimer.IsRepeating = false;
+        _visibilityDebounceTimer.Tick += (_, _) => RecomputeVisiblePreviews();
     }
 
     /// <summary>
@@ -719,6 +773,141 @@ public sealed partial class MainWindow : Window
         sender is FrameworkElement element
             ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
             : null;
+
+    /// <summary>
+    /// Finds the ScrollViewer once <see cref="QueueListView"/>'s template is
+    /// realized, so its <c>ViewChanged</c> can be watched for a scroll
+    /// settling. Runs at most once: a second Loaded (a theme change, a
+    /// re-parent) would otherwise double-subscribe the handler.
+    /// </summary>
+    private void OnQueueListViewLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_queueScrollViewer is not null)
+        {
+            return;
+        }
+
+        _queueScrollViewer = FindDescendant<ScrollViewer>(QueueListView);
+        if (_queueScrollViewer is not null)
+        {
+            _queueScrollViewer.ViewChanged += OnQueueScrollViewChanged;
+        }
+    }
+
+    /// <summary>
+    /// One signal a settle may have happened. <c>IsIntermediate</c> is true
+    /// for every frame of an active scroll or manipulation and false for the
+    /// final event once it stops, which is the scroll-settled signal the
+    /// design spec asks <c>preview_visible</c> to follow -- but this still
+    /// routes through the debounce timer rather than recomputing inline,
+    /// because a fling can still produce several "final" events in quick
+    /// succession as inertia settles in stages.
+    /// </summary>
+    private void OnQueueScrollViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (e.IsIntermediate)
+        {
+            return;
+        }
+
+        ScheduleVisibilityRecompute();
+    }
+
+    /// <summary>
+    /// Records that a session row has been realized (freshly created, or
+    /// recycled and rebound to a different entry) by ITS OWN project's
+    /// ItemsRepeater.
+    /// </summary>
+    /// <remarks>
+    /// This fires once per project's ItemsRepeater instance, for whichever
+    /// rows that instance currently has windowed into view -- not once for
+    /// every entry in that project, which is exactly the distinction that
+    /// makes this the right signal now that the inner list virtualizes
+    /// (see the doc comment on the queue ListView in MainWindow.xaml).
+    /// <paramref name="args"/>'s index is read against the SAME
+    /// ItemsRepeater's own <c>ItemsSourceView</c> rather than the element's
+    /// <c>DataContext</c>, so this does not depend on whatever WinUI does or
+    /// does not set on a compiled x:Bind template's root element.
+    /// </remarks>
+    private void OnSessionElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (sender.ItemsSourceView?.GetAt(args.Index) is QueueEntryViewModel entry)
+        {
+            _visibleEntryIdsByElement[args.Element] = entry.EntryId;
+        }
+
+        ScheduleVisibilityRecompute();
+    }
+
+    /// <summary>
+    /// The mirror of <see cref="OnSessionElementPrepared"/>: a row is being
+    /// recycled away, whether because it scrolled out of its own project's
+    /// window or because its project's ItemsRepeater is being torn down
+    /// with the rest of the outer container. Removing by element identity
+    /// keeps <see cref="_visibleEntryIdsByElement"/> correct regardless of
+    /// which reason applies.
+    /// </summary>
+    private void OnSessionElementClearing(ItemsRepeater sender, ItemsRepeaterElementClearingEventArgs args)
+    {
+        _visibleEntryIdsByElement.Remove(args.Element);
+        ScheduleVisibilityRecompute();
+    }
+
+    private void ScheduleVisibilityRecompute()
+    {
+        _visibilityDebounceTimer.Stop();
+        _visibilityDebounceTimer.Start();
+    }
+
+    /// <summary>
+    /// Tells the view model which entries are on screen right now, from
+    /// whichever session rows are currently realized across every project's
+    /// ItemsRepeater.
+    /// </summary>
+    /// <remarks>
+    /// Still not a pixel-precise viewport test: a realized row carries
+    /// WinUI's own small look-ahead buffer above and below the actual
+    /// visible area, so the reported set can be a little wider than what a
+    /// contributor's eye actually sees. That remains the safe direction --
+    /// the design spec is explicit that visibility decides preview build
+    /// ORDER and never membership -- but it is now a SMALL superset bounded
+    /// by that look-ahead buffer, typically low tens of rows, rather than
+    /// one that could include an entire large project's queue. That bound
+    /// is the point of reading the inner ItemsRepeater's realization
+    /// instead of the outer ListView's: see the doc comment on
+    /// <see cref="_visibleEntryIdsByElement"/>.
+    /// </remarks>
+    private void RecomputeVisiblePreviews()
+    {
+        _ = ViewModel.SetVisiblePreviewsAsync(new List<string>(_visibleEntryIdsByElement.Values));
+    }
+
+    /// <summary>
+    /// Walks the visual tree for the first descendant of type
+    /// <typeparamref name="T"/>. WinUI does not expose a ListView's own
+    /// ScrollViewer as a named property; this is the standard way to reach
+    /// it once the control's template has been applied.
+    /// </summary>
+    private static T? FindDescendant<T>(DependencyObject root)
+        where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(root, i);
+            if (child is T typed)
+            {
+                return typed;
+            }
+
+            if (FindDescendant<T>(child) is T found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
 
     private async void OnSheetDecided(QueueEntryViewModel entry, PreviewDecision decision)
     {
