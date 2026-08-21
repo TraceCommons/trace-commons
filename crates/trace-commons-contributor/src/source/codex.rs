@@ -70,6 +70,21 @@ impl TraceSource for CodexSource {
         // addressing surface uniform with the Claude Code one.
         is_rollout_file_name(path.file_name()?.to_str()?).then_some(path)
     }
+
+    /// The ref for whichever rollout a changed path names.
+    ///
+    /// `session_for_path` resolves the address and `rollout_session_ref`
+    /// describes it -- the same function `collect_rollout_files` builds
+    /// every discovered ref with, so a scoped scan and a full sweep cannot
+    /// disagree about a rollout's size or cwd. A rollout deleted between
+    /// the event and this lookup is `Ok(None)`.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        let mut ignored_skips = 0usize;
+        Ok(rollout_session_ref(address, &mut ignored_skips))
+    }
 }
 
 /// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
@@ -108,45 +123,63 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
         if !is_rollout_file_name(file_name) {
             continue;
         }
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                *skipped += 1;
-                continue;
-            }
-        };
-        let started_at = metadata
-            .modified()
-            .ok()
-            .map(chrono::DateTime::<chrono::Utc>::from);
-        let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
-        // Derive the label from the cwd we just peeked, the same way
-        // `load_session` does further down. Leaving this `None` meant every
-        // Codex row in the picker rendered as `-`, so a contributor choosing
-        // what to submit could not tell one session from another - while the
-        // submitted envelope carried the correct project all along, because
-        // load_session computes it. `--project` filtering was unaffected too,
-        // since that matches on `cwd`. Only the thing a human reads was wrong.
-        let project = cwd
-            .as_deref()
-            .map(Path::new)
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-        sessions.push(SessionRef {
-            source: SOURCE_CODEX,
-            path,
-            project,
-            cwd,
-            started_at,
-            size_bytes: metadata.len(),
-            // Codex rollouts are peer files: `collect_rollout_files` recurses
-            // arbitrarily deep, but every match is its own session and no
-            // record links one to another. There is no group to describe.
-            group_modified_at: None,
-            group_member_count: 0,
-        });
+        if let Some(session) = rollout_session_ref(path, skipped) {
+            sessions.push(session);
+        }
     }
+}
+
+/// The one way a Codex `SessionRef` is built, used by `collect_rollout_files`
+/// for every rollout it walks to and by `session_at` for the single rollout
+/// an event named.
+///
+/// Shared rather than reimplemented because a scoped scan and a full sweep
+/// that described the same session differently would reach different
+/// eligibility decisions for the same bytes.
+///
+/// `None` for a file that is no longer there, which on the event path is an
+/// ordinary race rather than a failure. `skipped` counts the entries that
+/// were unreadable rather than merely gone.
+fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef> {
+    let metadata = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            *skipped += 1;
+            return None;
+        }
+    };
+    let started_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
+    // Derive the label from the cwd we just peeked, the same way
+    // `load_session` does further down. Leaving this `None` meant every
+    // Codex row in the picker rendered as `-`, so a contributor choosing
+    // what to submit could not tell one session from another - while the
+    // submitted envelope carried the correct project all along, because
+    // load_session computes it. `--project` filtering was unaffected too,
+    // since that matches on `cwd`. Only the thing a human reads was wrong.
+    let project = cwd
+        .as_deref()
+        .map(Path::new)
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+    Some(SessionRef {
+        source: SOURCE_CODEX,
+        path,
+        project,
+        cwd,
+        started_at,
+        size_bytes: metadata.len(),
+        // Codex rollouts are peer files: `collect_rollout_files` recurses
+        // arbitrarily deep, but every match is its own session and no
+        // record links one to another. There is no group to describe.
+        group_modified_at: None,
+        group_member_count: 0,
+    })
 }
 
 /// Cheap discovery-time peek at a session file's true working directory:
@@ -621,6 +654,66 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// A scoped lookup and a full sweep must describe a rollout
+    /// identically, or the two paths judge the same bytes differently.
+    /// `Debug` rather than a hand-listed field set, so a field added later
+    /// is covered too.
+    #[test]
+    fn session_at_describes_a_rollout_exactly_as_discover_does() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(
+            &rollout,
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "type": "session_meta", "payload": { "cwd": "/Users/z/code/proj" }
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        let scoped = source.session_at(&rollout).unwrap().expect("a session");
+
+        assert_eq!(format!("{scoped:?}"), format!("{:?}", discovered[0]));
+        assert_eq!(scoped.path, rollout);
+        assert_eq!(scoped.cwd.as_deref(), Some("/Users/z/code/proj"));
+        assert_eq!(scoped.project.as_deref(), Some("proj"));
+        assert_eq!(scoped.group_member_count, 0);
+    }
+
+    /// A rollout deleted between the event and the lookup, and anything
+    /// outside the root: `Ok(None)`, never an error.
+    #[test]
+    fn a_vanished_or_foreign_rollout_is_ok_none() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("rollout-2026-08-20T10-00-00-xyz.jsonl");
+        std::fs::write(&elsewhere, "{}\n").unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        assert!(source.session_at(&rollout).unwrap().is_some());
+        assert!(source.session_at(&elsewhere).unwrap().is_none());
+        assert!(source.session_at(&day.join("notes.txt")).unwrap().is_none());
+
+        std::fs::remove_file(&rollout).unwrap();
+        assert!(
+            source.session_at(&rollout).unwrap().is_none(),
+            "a deleted rollout must be Ok(None), not an error"
+        );
     }
 
     /// The mapping is fed paths from the operating system, so a symlink or

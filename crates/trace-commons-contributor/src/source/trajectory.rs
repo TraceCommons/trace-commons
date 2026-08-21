@@ -313,6 +313,20 @@ impl TraceSource for TrajectorySource {
         (path.parent() == Some(self.path.as_path()) && is_trajectory_file(&path)).then_some(path)
     }
 
+    /// The ref for whichever trajectory file a changed path names.
+    ///
+    /// `session_for_path` resolves the address and `session_ref_for`
+    /// describes it -- the same function `discover` uses -- so a scoped
+    /// scan and a full sweep cannot disagree. `session_ref_for` already
+    /// answers `None` for a file it cannot stat, which is what a file
+    /// deleted between the event and this lookup looks like.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        Ok(session_ref_for(address))
+    }
+
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         let bytes = std::fs::read(&r.path).map_err(|_| anyhow!("unreadable_trajectory_file"))?;
         let hash = session_hash(&bytes);
@@ -400,6 +414,44 @@ mod tests {
         let source = TrajectorySource::new(declared.clone());
         assert_eq!(source.session_for_path(&declared), Some(declared));
         assert_eq!(source.session_for_path(&sibling), None);
+    }
+
+    #[test]
+    fn session_at_describes_a_trajectory_exactly_as_discover_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.jsonl");
+        std::fs::write(&file, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        let scoped = source.session_at(&file).unwrap().expect("a session");
+
+        // `Debug` rather than a hand-listed field set, so a field added
+        // later is covered too.
+        assert_eq!(format!("{scoped:?}"), format!("{:?}", discovered[0]));
+        assert_eq!(scoped.path, file);
+        assert_eq!(scoped.source, SOURCE_TRAJECTORY);
+    }
+
+    #[test]
+    fn a_vanished_or_foreign_trajectory_is_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.jsonl");
+        std::fs::write(&file, SAMPLE).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("run.jsonl");
+        std::fs::write(&elsewhere, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        assert!(source.session_at(&file).unwrap().is_some());
+        assert!(source.session_at(&elsewhere).unwrap().is_none());
+
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            source.session_at(&file).unwrap().is_none(),
+            "a deleted trajectory must be Ok(None), not an error"
+        );
     }
 
     #[test]
