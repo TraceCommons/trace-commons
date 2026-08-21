@@ -62,7 +62,9 @@ pub struct QueueView {
     disclosure: gtk::Box,
     week: gtk::Box,
     empty: adw::StatusPage,
-    scroller: gtk::ScrolledWindow,
+    /// Exposed so `App` can debounce a scroll settle against this same
+    /// viewport -- see `App::schedule_visible_preview_update`.
+    pub scroller: gtk::ScrolledWindow,
 }
 
 impl Default for QueueView {
@@ -301,6 +303,17 @@ pub fn wire(app: &Rc<App>) {
         // back.
         app_for_send.dismiss_undo();
     });
+
+    // Debounced rather than sent per pixel: a drag through 500 cards would
+    // otherwise fire `preview_visible` continuously. Visibility only ever
+    // reorders scheduled work -- see item 3 of "What each shell must do" in
+    // the preview-scheduler design -- so a settle a quarter-second after the
+    // last movement is early enough to matter and late enough to be one
+    // call, not hundreds.
+    let app_for_scroll = Rc::clone(app);
+    view.scroller
+        .vadjustment()
+        .connect_value_changed(move |_| app_for_scroll.schedule_visible_preview_update());
 }
 
 pub fn render(app: &Rc<App>) {
@@ -308,6 +321,9 @@ pub fn render(app: &Rc<App>) {
     clear(&view.list);
     clear(&view.disclosure);
     clear(&view.week);
+    // Rebuilt below alongside `view.list`: every row is redrawn from
+    // scratch each render, so the old widgets in here are already gone.
+    app.card_widgets.borrow_mut().clear();
 
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
@@ -349,7 +365,14 @@ pub fn render(app: &Rc<App>) {
             ));
         }
         for (index, entry) in members {
-            view.list.append(&row(app, entry, *index));
+            let widget = row(app, entry, *index);
+            // Kept so a scroll settle can ask each widget its own bounds
+            // against the scroller -- see
+            // `App::schedule_visible_preview_update`.
+            app.card_widgets
+                .borrow_mut()
+                .insert(entry.entry_id.clone(), widget.clone());
+            view.list.append(&widget);
         }
     }
 
@@ -401,6 +424,12 @@ pub fn render(app: &Rc<App>) {
 
     render_week(app);
     render_undo(app);
+
+    // The set of cards just changed -- new rows, or none at all yet
+    // measured -- so re-derive what is actually on screen once GTK has had
+    // a chance to allocate them, rather than trusting whatever was visible
+    // before this render.
+    app.schedule_visible_preview_update();
 }
 
 /// The week band: three figures, and the same three tones they carry
@@ -481,6 +510,30 @@ pub fn render_undo(app: &Rc<App>) {
     view.undo_bar.set_visible(true);
 }
 
+/// What this shell currently knows about one card's scheduled preview --
+/// built from `App::previews` and `App::previews_too_large`, which
+/// `App::handle_preview_request_result` fills in as `preview_request` and
+/// `preview_ready` resolve each entry. The two maps are mutually exclusive
+/// by construction (an entry is inserted into exactly one, once, and never
+/// moves), so this is a rendering convenience over them rather than a third
+/// source of truth.
+enum CardPreview<'a> {
+    /// Requested but not yet answered, or not requested at all -- the same
+    /// "checking" state the fan-out this replaces used while a preview
+    /// pipeline pass was in flight.
+    Checking,
+    Ready(&'a PreviewSummary),
+    /// Refused by the daemon's admission control before anything was
+    /// parsed. Carries only `raw_session_bytes`, a `stat` -- never a
+    /// would-send estimate, and never `limit_bytes` either: the design
+    /// calls for showing the raw size alone, not a comparison to a cap the
+    /// contributor has no reason to know about. See
+    /// `copy::TOO_LARGE_TO_PREVIEW`.
+    TooLarge {
+        raw_session_bytes: u64,
+    },
+}
+
 /// One session, as a declaration form.
 ///
 /// Every card is built the same way and in the same order -- who and when,
@@ -491,7 +544,22 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     let card = style::card(gtk::Orientation::Vertical, space::S);
 
     let preview = app.previews.borrow().get(&entry.entry_id).cloned();
-    let redactions: Option<u32> = preview.as_ref().map(|p| p.redactions.values().sum());
+    let too_large = app
+        .previews_too_large
+        .borrow()
+        .get(&entry.entry_id)
+        .copied();
+    let state = match (&preview, too_large) {
+        (Some(p), _) => CardPreview::Ready(p),
+        (None, Some((raw_session_bytes, _limit_bytes))) => {
+            CardPreview::TooLarge { raw_session_bytes }
+        }
+        (None, None) => CardPreview::Checking,
+    };
+    let redactions: Option<u32> = match &state {
+        CardPreview::Ready(p) => Some(p.redactions.values().sum()),
+        CardPreview::TooLarge { .. } | CardPreview::Checking => None,
+    };
 
     // The one card-level state worth taking the gold rule: scrubbing that
     // matched nothing at all. Everything else is left to the block below,
@@ -524,12 +592,11 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     // The redacted opening prompt: what actually identifies a session to the
     // person who ran it. A timestamp does not.
     let summary = gtk::Label::builder()
-        .label(
-            preview
-                .as_ref()
-                .map(|p| first_line(&p.opening_prompt))
-                .unwrap_or_else(|| copy::CHECKING.to_string()),
-        )
+        .label(match &state {
+            CardPreview::Ready(p) => first_line(&p.opening_prompt),
+            CardPreview::TooLarge { .. } => copy::TOO_LARGE_OPENING_LINE.to_string(),
+            CardPreview::Checking => copy::CHECKING.to_string(),
+        })
         .xalign(0.0)
         .wrap(true)
         .lines(2)
@@ -538,7 +605,7 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     summary.add_css_class("tc-body");
     card.append(&summary);
 
-    card.append(&manifest_block(app, entry, index, preview.as_ref()));
+    card.append(&manifest_block(app, entry, index, state));
 
     card.upcast()
 }
@@ -553,7 +620,7 @@ fn manifest_block(
     app: &Rc<App>,
     entry: &QueueEntry,
     index: usize,
-    preview: Option<&PreviewSummary>,
+    state: CardPreview<'_>,
 ) -> gtk::Box {
     let block = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -570,33 +637,46 @@ fn manifest_block(
         .hexpand(true)
         .build();
 
-    let redactions: Option<u32> = preview.map(|p| p.redactions.values().sum());
+    let redactions: Option<u32> = match &state {
+        CardPreview::Ready(p) => Some(p.redactions.values().sum()),
+        CardPreview::TooLarge { .. } | CardPreview::Checking => None,
+    };
     let pairs = gtk::Box::new(gtk::Orientation::Horizontal, METRIC_GAP);
     pairs.set_valign(gtk::Align::Start);
     pairs.append(&style::manifest_field(
         copy::WOULD_SEND,
         // An em dash rather than a collapsed field: the rhythm is the whole
-        // point, and a strip that appears as previews land destroys it.
-        &preview
-            .map(|p| human_bytes(p.would_send_bytes))
-            .unwrap_or_else(|| "-".to_string()),
+        // point, and a strip that appears as previews land destroys it. The
+        // too-large case gets its own words rather than a number, because
+        // there never was a would-send figure to show -- see
+        // `copy::TOO_LARGE_TO_PREVIEW`.
+        &match &state {
+            CardPreview::Ready(p) => human_bytes(p.would_send_bytes),
+            CardPreview::TooLarge { .. } => copy::TOO_LARGE_TO_PREVIEW.to_string(),
+            CardPreview::Checking => "-".to_string(),
+        },
         Tone::Neutral,
     ));
-    match (preview, redactions) {
+    match (&state, redactions) {
         // Scrubbing found nothing. That is the case worth weighing, so it
         // gets the chip rather than a figure reading "nothing" -- which is
         // the same word a reassuring answer would use.
-        (Some(_), Some(0)) => {
+        (CardPreview::Ready(_), Some(0)) => {
             let chip = style::tag(copy::NOTHING_MATCHED, Tone::Attention);
             chip.set_valign(gtk::Align::Start);
             pairs.append(&chip);
         }
-        (Some(p), _) => pairs.append(&style::manifest_field(
+        (CardPreview::Ready(p), _) => pairs.append(&style::manifest_field(
             copy::REMOVED_BY_PATTERN,
             &removed_by_pattern(p),
             Tone::Neutral,
         )),
-        (None, _) => pairs.append(&style::manifest_field(
+        (CardPreview::TooLarge { .. }, _) => pairs.append(&style::manifest_field(
+            copy::REMOVED_BY_PATTERN,
+            copy::NOT_PREVIEWED,
+            Tone::Neutral,
+        )),
+        (CardPreview::Checking, _) => pairs.append(&style::manifest_field(
             copy::REMOVED_BY_PATTERN,
             "checking",
             Tone::Neutral,
@@ -607,11 +687,16 @@ fn manifest_block(
     // Never hidden behind a disclosure: conceding that scrubbing is
     // imperfect is what makes the rest credible. What changes here is that
     // the sentence describes this session rather than repeating a constant
-    // -- see `copy::residual_risk_line`.
+    // -- see `copy::residual_risk_line`. The too-large caption states the
+    // one real number involved, `raw_session_bytes`, and never a would-send
+    // estimate -- see `copy::too_large_caption`.
     let caption = gtk::Label::builder()
-        .label(match redactions {
-            Some(total) => copy::residual_risk_line(total),
-            None => copy::CHECKING.to_string(),
+        .label(match &state {
+            CardPreview::Ready(_) => copy::residual_risk_line(redactions.unwrap_or(0)),
+            CardPreview::TooLarge {
+                raw_session_bytes, ..
+            } => copy::too_large_caption(*raw_session_bytes),
+            CardPreview::Checking => copy::CHECKING.to_string(),
         })
         .xalign(0.0)
         .wrap(true)
