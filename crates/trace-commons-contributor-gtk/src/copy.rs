@@ -61,8 +61,14 @@ pub fn residual_risk_line(total_redactions: u32) -> String {
 }
 pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
-pub const NOT_THIS_ONE_TOOLTIP: &str =
-    "Skips this session only. This project will keep being offered.";
+/// Says "for good" because it is. A dismissal is a decision about the
+/// conversation, not about the size it happened to be when the card was
+/// drawn, and there is no un-dismiss -- so the tooltip has to say so before
+/// the click, not leave the contributor to infer it from a card that never
+/// comes back. The second sentence is the reassurance that keeps the first
+/// from reading like an opt-out of the whole project.
+pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this session for good, even if you keep working in \
+     it. This project will keep being offered.";
 
 /// The one-click send on a queue row. See
 /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click

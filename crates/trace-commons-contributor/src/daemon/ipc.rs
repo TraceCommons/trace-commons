@@ -890,7 +890,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             queue.set_state(
                 id,
                 QueueState::Refused,
-                Some("dismissed-by-contributor".to_string()),
+                Some(super::queue::REASON_DISMISSED.to_string()),
             );
             if let Err(_e) = queue.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");

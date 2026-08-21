@@ -446,7 +446,7 @@
                         Style="{StaticResource TcSecondaryButtonStyle}"
                         Content="Not this one"
                         IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
-                        ToolTipService.ToolTip="Skips this session only. This project will keep being offered."
+                        ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
                         Click="OnNotThisOne" />
                 <Button Grid.Column="2"
                         Style="{StaticResource TcSecondaryButtonStyle}"

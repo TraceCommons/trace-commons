@@ -66,6 +66,9 @@ pub struct TickReport {
     /// opted in.
     pub auto_ready: usize,
     pub ignored: usize,
+    /// Sessions skipped because the contributor dismissed them. Distinct
+    /// from `ignored`, which is a standing decision about a whole project.
+    pub dismissed: usize,
 }
 
 /// One pass over the session roots.
@@ -383,15 +386,30 @@ fn visit_session(
     // whenever a live entry sits at this path, so a grown session
     // with a live card still reaches the load and still
     // supersedes, full queue or not.
-    let (already_offered, can_land) = {
+    //
+    // The same lock also answers the question that outranks both: has the
+    // contributor already said no to this conversation? See
+    // `Queue::dismissed_at_path`. It is checked here, in front of the
+    // load, rather than after it, because a declined session someone keeps
+    // working in would otherwise be read, parsed and group-hashed on every
+    // poll for the rest of its life for a result nothing may act on.
+    let (dismissed, already_offered, can_land) = {
         let queue = shared.queue.lock().expect("queue lock");
         (
+            queue.dismissed_at_path(&obs.path),
             queue
                 .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
                 .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
             queue.load_can_land(&obs.path, ctx.max_queue_entries),
         )
     };
+    // Ahead of every other verdict, including the standing opt-in below: a
+    // project's `auto_upload` is a standing yes to sessions the contributor
+    // has not ruled on, never an override of one they have declined.
+    if dismissed {
+        out.report.dismissed += 1;
+        return;
+    }
     if let Some((entry_id, project_key, state)) = already_offered {
         // The project key is taken from the entry rather than
         // re-derived, which also skips `resolve_cwd`: the entry's
@@ -1532,6 +1550,141 @@ mod tests {
             "a poll over 30 unchanged queued sessions must load nothing"
         );
         assert_eq!(f.queue_len(), 30);
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_session_is_not_re_offered_after_it_grows() {
+        // "Not this one" is a decision about the conversation, not about the
+        // byte range it happened to have when the card was drawn. The
+        // dismissal used to be recorded against the content hash alone: the
+        // next few keystrokes in the same session produced a new hash, the
+        // watcher had nothing telling it the contributor had already said
+        // no, and `replace_live_at_path` pushed a fresh `Pending` card for
+        // the very session that had just been declined.
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+
+        let r = crate::daemon::ipc::handle_request(
+            &f.shared,
+            &serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "method": "dismiss",
+                "params": { "entry_id": entry_id.to_string() },
+            }))
+            .unwrap(),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        assert!(
+            f.shared.queue.lock().unwrap().pending().is_empty(),
+            "the dismissal must take the card off the pending list at once"
+        );
+
+        f.append_to_session(&path, "proj", name);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            !queue
+                .all()
+                .iter()
+                .any(|e| matches!(e.state, QueueState::Pending | QueueState::Approved)),
+            "a declined session must not come back the moment it grows: {:?}",
+            queue.all()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_session_is_not_re_offered_by_a_standing_opt_in() {
+        // The same decision, in an armed project. Arming a project is a
+        // standing "yes" to sessions the contributor has not ruled on; it is
+        // not an override of one they have explicitly declined. So the
+        // re-offer must not come back as `Approved` either -- that one needs
+        // no second click and the uploader would send it unattended.
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            queue.set_state(
+                entry_id,
+                QueueState::Refused,
+                Some(crate::daemon::queue::REASON_DISMISSED.to_string()),
+            );
+        }
+
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.append_to_session(&path, "proj", name);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            !queue
+                .all()
+                .iter()
+                .any(|e| matches!(e.state, QueueState::Pending | QueueState::Approved)),
+            "{:?}",
+            queue.all()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_session_costs_no_further_reads() {
+        // The skip belongs in front of `source.load`, not after it. A
+        // conversation the contributor declined and then kept working in
+        // would otherwise be read, parsed and group-hashed on every poll
+        // for the rest of its life, for a result the queue throws away.
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            queue.set_state(
+                entry_id,
+                QueueState::Refused,
+                Some(crate::daemon::queue::REASON_DISMISSED.to_string()),
+            );
+        }
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), 0, "a declined session must not be re-read");
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_refusal_is_not_a_dismissal_and_still_re_offers() {
+        // `Refused` is also what the pipeline records when it will not send
+        // a trace -- a residual secret, an unavailable privacy filter. That
+        // is the daemon's verdict on some bytes, not the contributor's on
+        // the conversation, so a grown session must still be offered again.
+        // Only the dismissal label suppresses the re-offer.
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            queue.set_state(
+                entry_id,
+                QueueState::Refused,
+                Some("residual-secret".to_string()),
+            );
+        }
+
+        f.append_to_session(&path, "proj", name);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(queue.pending().len(), 1, "{:?}", queue.all());
     }
 
     #[tokio::test]
