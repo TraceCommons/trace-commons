@@ -227,6 +227,14 @@ pub const NOTHING_MATCHED_BODY: &str = "A search only finds what is written the 
      If it matters, try the other spellings you would worry about -- a hostname, an internal \
      code name, an address.";
 
+/// The button that puts the whole redacted body on the clipboard.
+///
+/// The transcript is laid out a chunk at a time, so a selection cannot span
+/// the body the way it could when the tab was one clamped text view. This is
+/// the replacement, and it is a better trade than it sounds: copying is a
+/// string copy rather than a layout, so it is bounded work at any size.
+pub const TRANSCRIPT_COPY_ALL: &str = "Copy everything";
+
 pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval covers. Marks like \
      <PRIVATE_SECRET_1> show where scrubbing fired -- legible as chips, not holes.";
 

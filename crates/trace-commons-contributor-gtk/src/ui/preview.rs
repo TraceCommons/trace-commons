@@ -28,6 +28,7 @@ use super::App;
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{ApproveResult, PreviewSummary, human_bytes, human_when};
+use crate::transcript_paging::{self, ResidentChunks, TranscriptDocument};
 
 /// Open the preview sheet on the `index`-th pending entry.
 pub fn open(app: &Rc<App>, index: usize) {
@@ -87,11 +88,14 @@ struct Sheet {
     recent_row: gtk::Box,
 
     whats_in_it: gtk::Box,
-    body_view: gtk::TextView,
-    /// The transcript-budget clamp notice, above the transcript card. Empty
-    /// and hidden whenever the body fit inside the budget; see
-    /// `transcript_budget`.
-    body_notice: gtk::Label,
+    /// The transcript tab's body, chunked and evicting. See
+    /// `crate::transcript_paging` for why it is not one text view.
+    transcript: Rc<TranscriptPane>,
+    /// Puts the whole redacted body on the clipboard. Selection is per
+    /// chunk now, so this is how a person takes all of it at once; copying
+    /// is a string copy rather than a layout, so it is bounded work however
+    /// large the body is.
+    copy_all: gtk::Button,
     permissions: gtk::Box,
 
     /// The read gate. The first box is set by opening the transcript tab and
@@ -287,30 +291,12 @@ impl Sheet {
 
         // 3. Exactly what would be sent.
         //
-        // Flat monospaced text, deliberately not chat bubbles: what is on
-        // this tab is the literal bytes an approval covers, and anything
-        // that dressed them up as a conversation would be showing a
-        // rendering of the payload rather than the payload.
-        let body_view = gtk::TextView::builder()
-            .editable(false)
-            .cursor_visible(false)
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .monospace(true)
-            .build();
-        body_view.add_css_class("tc-transcript");
-        // The spec sets the transcript at 11px / 1.7. GTK 4 CSS has no
-        // line-height, so the leading is set here in pixels instead: an
-        // 11px monospaced line lands around 15px on its own metrics, and
-        // 1.7 asks for about 19. `pixels_inside_wrap` carries the same
-        // leading across a wrapped line, which is most of them -- a
-        // transcript is one very long paragraph per turn.
-        body_view.set_pixels_above_lines(2);
-        body_view.set_pixels_below_lines(2);
-        body_view.set_pixels_inside_wrap(4);
-        let body_scroller = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .child(&body_view)
-            .build();
+        // The body is chunked and only the chunks near the viewport are laid
+        // out; see `TranscriptPane` and `crate::transcript_paging`. What used
+        // to be here was a single text view clamped to 64 KB with a notice
+        // saying the rest was not displayed. Every byte is reachable now, so
+        // that sentence is gone with the clamp it described.
+        let transcript = TranscriptPane::new();
         // The caption states the framing before the bytes arrive, and it
         // names a marker so the first chip a person meets is one they have
         // already been told about.
@@ -318,16 +304,18 @@ impl Sheet {
             .label(copy::TRANSCRIPT_CAPTION)
             .xalign(0.0)
             .wrap(true)
+            .hexpand(true)
             .build();
         body_caption.add_css_class("tc-meta");
-        // Set only when the body exceeded `transcript_budget::LIMIT_BYTES`;
-        // see `fill`. Hidden by default so the common, unclamped case shows
-        // nothing.
-        let body_notice = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        body_notice.add_css_class("tc-meta");
-        body_notice.set_visible(false);
+        let copy_all = gtk::Button::with_label(copy::TRANSCRIPT_COPY_ALL);
+        copy_all.add_css_class("flat");
+        copy_all.set_valign(gtk::Align::Start);
+        copy_all.set_sensitive(false);
+        let body_head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        body_head.append(&body_caption);
+        body_head.append(&copy_all);
         let body_panel = style::card(gtk::Orientation::Vertical, 0);
-        body_panel.append(&body_scroller);
+        body_panel.append(&transcript.scroller);
         let body_page = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(space::M)
@@ -336,8 +324,7 @@ impl Sheet {
             .margin_start(space::L)
             .margin_end(space::L)
             .build();
-        body_page.append(&body_caption);
-        body_page.append(&body_notice);
+        body_page.append(&body_head);
         body_page.append(&body_panel);
         stack.add_titled(&body_page, Some(TRANSCRIPT_TAB), copy::TAB_WOULD_BE_SENT);
 
@@ -525,8 +512,8 @@ impl Sheet {
             search_summary,
             recent_row,
             whats_in_it,
-            body_view,
-            body_notice,
+            transcript: Rc::clone(&transcript),
+            copy_all: copy_all.clone(),
             permissions,
             gate_opened: gate_opened.clone(),
             gate_acknowledged: gate_acknowledged.clone(),
@@ -556,6 +543,16 @@ impl Sheet {
         contribute.connect_clicked(move |_| s.approve_current());
         let window_for_close = window.clone();
         close.connect_clicked(move |_| window_for_close.close());
+        // Selection is per chunk now -- a chunk that is not laid out has
+        // nothing to select -- so whole-body selection is traded for
+        // whole-body copying. Copying is a string copy rather than a
+        // layout, so it stays bounded work at any size.
+        let s = Rc::clone(&sheet);
+        copy_all.connect_clicked(move |button| {
+            if let Some(text) = s.transcript.whole_text() {
+                button.clipboard().set_text(&text);
+            }
+        });
 
         // The first half of the read gate. It is satisfied by the tab
         // actually coming into view, so it holds however the tab was
@@ -639,11 +636,9 @@ impl Sheet {
         self.search_summary.set_text("");
         self.clear_results();
         self.set_manifest(None);
-        self.body_notice.set_visible(false);
-        self.body_notice.set_text("");
-        self.body_view
-            .buffer()
-            .set_text("Working out exactly what would be sent…");
+        self.copy_all.set_sensitive(false);
+        self.transcript
+            .show_sentence("Working out exactly what would be sent…");
 
         let sheet = Rc::clone(self);
         let entry_id = entry.entry_id.clone();
@@ -707,25 +702,17 @@ impl Sheet {
         *self.body.borrow_mut() = body.clone();
         match &body {
             Some(text) => {
-                // The full body can be many megabytes; laying all of it out
+                // The full body can be many megabytes. Laying all of it out
                 // in one `TextBuffer` and tagging redactions across the
-                // whole thing is the bug this exists to fix. See
-                // `crate::transcript_budget`.
-                let clamped = crate::transcript_budget::clamp(text);
-                let buffer = self.body_view.buffer();
-                buffer.set_text(&clamped.shown);
-                highlight_redactions(&buffer, &clamped.shown);
-
-                let notice = crate::transcript_budget::notice(&clamped);
-                self.body_notice.set_visible(!notice.is_empty());
-                self.body_notice.set_text(&notice);
+                // whole thing is the bug this exists to fix; the pane cuts
+                // it into chunks and keeps only the ones near the viewport.
+                // See `crate::transcript_paging`.
+                self.transcript.show_body(text.clone());
+                self.copy_all.set_sensitive(true);
             }
             None => {
-                self.body_notice.set_visible(false);
-                self.body_notice.set_text("");
-                self.body_view
-                    .buffer()
-                    .set_text(copy::BODY_NOT_AVAILABLE_HERE);
+                self.copy_all.set_sensitive(false);
+                self.transcript.show_sentence(copy::BODY_NOT_AVAILABLE_HERE);
             }
         }
 
@@ -836,9 +823,8 @@ impl Sheet {
             }
             _ => "Something went wrong working out what would be sent. Nothing has been sent.",
         };
-        self.body_notice.set_visible(false);
-        self.body_notice.set_text("");
-        self.body_view.buffer().set_text(sentence);
+        self.copy_all.set_sensitive(false);
+        self.transcript.show_sentence(sentence);
         self.search_summary.set_text(sentence);
     }
 
@@ -1099,32 +1085,315 @@ fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
             ],
         )
         .expect("creating a text tag");
+    // One forward pass, carrying the character offset with it. The version
+    // this replaced re-counted the characters before every marker
+    // (`text[..start].chars().count()`), which is quadratic in the buffer:
+    // measured at 0.77 ms over 64 KB, 166 ms over 1 MB and 2.92 s over
+    // 4 MB. `text` is one chunk here, so the pass is bounded either way,
+    // but there is no reason to leave the quadratic in.
     let mut byte = 0usize;
-    while byte < text.len() {
-        let rest = &text[byte..];
-        let opener = rest.find('<').into_iter().chain(rest.find('[')).min();
-        let Some(offset) = opener else { break };
-        let start = byte + offset;
-        let closer = if text[start..].starts_with('<') {
-            '>'
-        } else {
-            ']'
-        };
-        let Some(end_offset) = text[start..].find(closer) else {
-            break;
-        };
-        let end = start + end_offset + closer.len_utf8();
-        let marker = &text[start..end];
-        let is_redaction = marker.starts_with("<PRIVATE_") || marker.starts_with("[REDACTED");
-        if is_redaction {
-            let start_chars = text[..start].chars().count() as i32;
-            let end_chars = text[..end].chars().count() as i32;
-            let a = buffer.iter_at_offset(start_chars);
-            let b = buffer.iter_at_offset(end_chars);
-            buffer.apply_tag(&tag, &a, &b);
-        }
-        byte = end;
+    let mut chars = 0i32;
+    for span in transcript_paging::marker_spans(text) {
+        chars += text[byte..span.start].chars().count() as i32;
+        let width = text[span.clone()].chars().count() as i32;
+        let a = buffer.iter_at_offset(chars);
+        let b = buffer.iter_at_offset(chars + width);
+        buffer.apply_tag(&tag, &a, &b);
+        chars += width;
+        byte = span.end;
     }
+}
+
+/// The transcript tab's body: a column of one slot per chunk, of which only
+/// the slots near the viewport hold text.
+///
+/// This is the GTK half of `crate::transcript_paging`. The model there
+/// decides *which* chunks are resident and asserts the ceiling; this decides
+/// what a resident chunk and an absent one look like on screen.
+///
+/// A slot that is not resident is an empty `GtkBox` with a height request,
+/// so it still holds its place in the scroll: without that the scrollbar
+/// would describe the window rather than the body. The height is estimated
+/// from the chunk's bytes and newlines until the chunk has been laid out
+/// once, and is the measured height afterwards, so revisiting a chunk does
+/// not move the text around it.
+struct TranscriptPane {
+    scroller: gtk::ScrolledWindow,
+    column: gtk::Box,
+    state: RefCell<PaneState>,
+    /// Set while `sync` is mutating widgets. Adding or removing a chunk
+    /// changes the adjustment, which re-enters this handler; without the
+    /// guard that is an unbounded recursion into a `RefCell` already
+    /// borrowed.
+    syncing: Cell<bool>,
+}
+
+#[derive(Default)]
+struct PaneState {
+    document: Option<TranscriptDocument>,
+    /// One per chunk, in order, and the children of `column`.
+    slots: Vec<gtk::Box>,
+    /// What each slot stands at while it is not resident, in pixels.
+    heights: Vec<i32>,
+    resident: ResidentChunks<gtk::TextView>,
+    /// Characters across the pane at the current width, for the row
+    /// estimate. Zero until the pane has a width.
+    columns: usize,
+}
+
+/// Advance of one character at the transcript's 11 px monospace, in pixels.
+/// Measured through Pango on this crate's own font description: 6.630 px.
+/// Only the row *estimate* depends on it, and that estimate is replaced by
+/// the measured height as soon as a chunk has been laid out once.
+const TRANSCRIPT_ADVANCE_PX: f64 = 6.63;
+
+/// Height of one display row: a 13 px line box at 11 px monospace, plus the
+/// 2+2 px the view sets above and below a line (and the 4 px it carries
+/// across a wrap, which comes to the same 17 px either way).
+const TRANSCRIPT_ROW_PX: i32 = 17;
+
+impl TranscriptPane {
+    fn new() -> Rc<Self> {
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
+            .build();
+        column.add_css_class("tc-transcript");
+        let scroller = gtk::ScrolledWindow::builder()
+            // The chunk views wrap at the pane's width, so the pane must
+            // have one: an automatic horizontal policy would let the column
+            // be as wide as its widest line instead.
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&column)
+            .build();
+
+        let pane = Rc::new(Self {
+            scroller: scroller.clone(),
+            column,
+            state: RefCell::new(PaneState::default()),
+            syncing: Cell::new(false),
+        });
+
+        // Both signals matter: `value-changed` is the scroll itself, and
+        // `changed` is a resize or a height that settled after a chunk was
+        // laid out.
+        // Weak, not strong: the pane owns the scroller, the scroller owns
+        // the adjustment, and a strong handle in the handler would close
+        // that loop and keep the document -- which is the whole body --
+        // alive for the life of the process.
+        let adjustment = scroller.vadjustment();
+        let p = Rc::downgrade(&pane);
+        adjustment.connect_value_changed(move |_| {
+            if let Some(pane) = p.upgrade() {
+                pane.sync();
+            }
+        });
+        let p = Rc::downgrade(&pane);
+        adjustment.connect_changed(move |_| {
+            if let Some(pane) = p.upgrade() {
+                pane.sync();
+            }
+        });
+        pane
+    }
+
+    /// Replaces whatever the pane is showing with a sentence -- no body
+    /// available, a failure, or the wait before a preview arrives.
+    fn show_sentence(&self, sentence: &str) {
+        self.reset();
+        let label = gtk::Label::builder()
+            .label(sentence)
+            .xalign(0.0)
+            .wrap(true)
+            .margin_top(space::M)
+            .margin_bottom(space::M)
+            .margin_start(space::M)
+            .margin_end(space::M)
+            .build();
+        label.add_css_class("tc-body");
+        self.column.append(&label);
+    }
+
+    /// Shows a body: cut it into chunks, give every chunk a slot, and lay
+    /// out the ones at the top.
+    fn show_body(self: &Rc<Self>, text: String) {
+        self.reset();
+        let document = TranscriptDocument::new(text);
+        let columns = self.columns();
+        let mut slots = Vec::with_capacity(document.chunk_count());
+        let mut heights = Vec::with_capacity(document.chunk_count());
+        for chunk in document.chunks() {
+            let height = (chunk.rows(columns) as i32).saturating_mul(TRANSCRIPT_ROW_PX);
+            let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            slot.set_size_request(-1, height);
+            self.column.append(&slot);
+            slots.push(slot);
+            heights.push(height);
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.document = Some(document);
+            state.slots = slots;
+            state.heights = heights;
+            state.columns = columns;
+        }
+        self.scroller.vadjustment().set_value(0.0);
+        self.sync();
+    }
+
+    /// Drops every slot and everything laid out in one.
+    fn reset(&self) {
+        let mut state = self.state.borrow_mut();
+        state.resident.clear(|_, _| {});
+        state.document = None;
+        state.slots.clear();
+        state.heights.clear();
+        drop(state);
+        while let Some(child) = self.column.first_child() {
+            self.column.remove(&child);
+        }
+    }
+
+    /// The whole body, for "Copy everything".
+    fn whole_text(&self) -> Option<String> {
+        self.state
+            .borrow()
+            .document
+            .as_ref()
+            .map(|d| d.whole_text().to_string())
+    }
+
+    fn columns(&self) -> usize {
+        let width = self.scroller.width();
+        if width <= 0 {
+            // No allocation yet. 100 columns is the shape of the pane the
+            // sheet opens at; the estimate is replaced by a measurement as
+            // soon as the chunk is laid out.
+            return 100;
+        }
+        ((width as f64 / TRANSCRIPT_ADVANCE_PX).floor() as usize).max(1)
+    }
+
+    /// Brings the resident set in line with where the viewport is.
+    fn sync(self: &Rc<Self>) {
+        if self.syncing.get() {
+            return;
+        }
+        self.syncing.set(true);
+        self.sync_inner();
+        self.syncing.set(false);
+    }
+
+    fn sync_inner(&self) {
+        let adjustment = self.scroller.vadjustment();
+        let top = adjustment.value();
+        let bottom = top + adjustment.page_size().max(1.0);
+        let columns = self.columns();
+
+        let mut state = self.state.borrow_mut();
+        let PaneState {
+            document,
+            slots,
+            heights,
+            resident,
+            columns: known_columns,
+        } = &mut *state;
+        let Some(document) = document.as_ref() else {
+            return;
+        };
+        if document.chunk_count() == 0 {
+            return;
+        }
+
+        // A resize changes how many rows a chunk takes, so the stand-ins
+        // for chunks that have never been laid out have to be re-estimated.
+        // A slot that has been laid out keeps its measured height.
+        if columns != *known_columns {
+            *known_columns = columns;
+            for (i, chunk) in document.chunks().iter().enumerate() {
+                if resident.contains(i) {
+                    continue;
+                }
+                let height = (chunk.rows(columns) as i32).saturating_mul(TRANSCRIPT_ROW_PX);
+                heights[i] = height;
+                slots[i].set_size_request(-1, height);
+            }
+        }
+
+        // Which chunks the viewport is over, from where the slots actually
+        // are rather than from a model of where they ought to be. A slot
+        // that is laid out has a real height, and it replaces the estimate
+        // it was standing at, so letting the chunk go later does not move
+        // everything below it.
+        let mut standing = Vec::with_capacity(slots.len());
+        for (i, slot) in slots.iter().enumerate() {
+            let allocated = slot.height();
+            if allocated > 0 && resident.contains(i) {
+                heights[i] = allocated;
+            }
+            standing.push(if allocated > 0 {
+                allocated as f64
+            } else {
+                heights[i] as f64
+            });
+        }
+        let visible = transcript_paging::visible_range(&standing, top, bottom);
+
+        resident.update(
+            document,
+            visible,
+            transcript_paging::RETAINED_LIMIT_BYTES,
+            |index| {
+                let view = chunk_view(document.text_of(index));
+                slots[index].set_size_request(-1, -1);
+                slots[index].append(&view);
+                view
+            },
+            |index, view| {
+                // Freeze the slot at the height the chunk actually took, so
+                // letting it go does not move everything below it.
+                let measured = slots[index].height();
+                if measured > 0 {
+                    heights[index] = measured;
+                }
+                slots[index].remove(&view);
+                slots[index].set_size_request(-1, heights[index]);
+            },
+        );
+    }
+}
+
+/// One chunk, laid out: a text view over that chunk's bytes with its
+/// redaction markers chipped.
+///
+/// The tab is flat monospaced text, deliberately not chat bubbles: what is
+/// on it is the literal bytes an approval covers, and anything that dressed
+/// them up as a conversation would be showing a rendering of the payload
+/// rather than the payload.
+///
+/// The spec sets the transcript at 11px / 1.7. GTK 4 CSS has no
+/// line-height, so the leading is set here in pixels instead: an 11px
+/// monospaced line lands around 15px on its own metrics, and 1.7 asks for
+/// about 19. `pixels_inside_wrap` carries the same leading across a wrapped
+/// line, which is most of them -- a transcript is one very long paragraph
+/// per turn.
+fn chunk_view(text: &str) -> gtk::TextView {
+    let view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .monospace(true)
+        .vexpand(false)
+        .build();
+    view.add_css_class("tc-transcript");
+    view.set_pixels_above_lines(2);
+    view.set_pixels_below_lines(2);
+    view.set_pixels_inside_wrap(4);
+    let buffer = view.buffer();
+    buffer.set_text(text);
+    highlight_redactions(&buffer, text);
+    view
 }
 
 /// One row of the read gate: the box, then the sentence it is making.
