@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace TraceCommons.Interop;
@@ -28,8 +29,14 @@ public static class TranscriptMarkers
     /// Kept identical to the macOS sheet's pattern -- three shells disagreeing
     /// about what a redaction looks like is three different pictures of the
     /// same bytes.
+    ///
+    /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
+    /// Without that, one unclosed bracket anywhere in a body would let a
+    /// "marker" run to the end of the file, and the chunker -- which uses
+    /// this same pattern to avoid cutting through a marker -- would then
+    /// refuse to cut anywhere inside it.
     /// </summary>
-    private const string Pattern = @"<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]]*\]";
+    private const string Pattern = @"<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
 
     /// <summary>
     /// A bound on how long the scan may run.
@@ -96,5 +103,54 @@ public static class TranscriptMarkers
         }
 
         return runs;
+    }
+
+    /// <summary>
+    /// Marker spans in <paramref name="text"/> as UTF-8 byte offsets from
+    /// its start, in order.
+    /// </summary>
+    /// <remarks>
+    /// The chunker works in UTF-8 bytes because the budget is defined in
+    /// them, while <see cref="Regex"/> works in UTF-16 units. This is the
+    /// one place that conversion happens, and it is here rather than in the
+    /// chunker so that the chunker and the chipping cannot drift apart about
+    /// what a marker is: a chunker protecting a different set of markers
+    /// than the view highlights would split exactly the ones the view cares
+    /// about.
+    /// </remarks>
+    public static IReadOnlyList<(int Start, int End)> ByteSpans(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var spans = new List<(int, int)>();
+        if (text.Length == 0)
+        {
+            return spans;
+        }
+
+        try
+        {
+            int cursor = 0;
+            int bytesBefore = 0;
+            foreach (Match match in Markers.Matches(text))
+            {
+                bytesBefore += Encoding.UTF8.GetByteCount(
+                    text.AsSpan(cursor, match.Index - cursor));
+                int length = Encoding.UTF8.GetByteCount(
+                    text.AsSpan(match.Index, match.Length));
+                spans.Add((bytesBefore, bytesBefore + length));
+                bytesBefore += length;
+                cursor = match.Index + match.Length;
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Same trade as Split: report no markers rather than half of
+            // them. A chunk boundary that lands inside a marker is a
+            // rendering blemish; a scan that never returns is a hung window.
+            spans.Clear();
+        }
+
+        return spans;
     }
 }

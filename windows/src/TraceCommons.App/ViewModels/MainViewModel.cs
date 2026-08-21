@@ -78,6 +78,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HistoryRollup _rollup = new();
 
     /// <summary>
+    /// Decides when an on-screen set is worth telling the daemon about --
+    /// see <see cref="SetVisiblePreviewsAsync"/> -- and dedupes so a settle
+    /// that reports the same set already sent produces no call at all.
+    /// </summary>
+    private readonly PreviewVisibilityTracker _visibilityTracker = new();
+
+    /// <summary>
+    /// The current rows, keyed by entry id, so a <c>preview_ready</c> event
+    /// can find the card it belongs to without a linear scan of
+    /// <see cref="Pending"/>. Rebuilt alongside <see cref="Pending"/> by
+    /// <see cref="ReplacePending"/>.
+    /// </summary>
+    private Dictionary<string, QueueEntryViewModel> _rowsByEntryId = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The entry ids <see cref="Pending"/> carried before the most recent
+    /// <see cref="ReplacePending"/>, so it can tell which ones dropped out of
+    /// the queue for good -- dismissed, submitted, expired, or superseded --
+    /// and cancel their scheduled previews.
+    /// </summary>
+    private IReadOnlyList<string> _previousEntryIds = Array.Empty<string>();
+
+    /// <summary>
     /// <paramref name="updater"/> is optional so the view model stays
     /// constructible without package identity. An unpackaged developer build
     /// then simply never shows the banner, rather than throwing at launch.
@@ -89,6 +112,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _host.QueueChanged += OnQueueChanged;
         _host.StatusChanged += OnStatusChanged;
         _host.Lagged += OnLagged;
+        _host.PreviewReady += OnPreviewReady;
 
         // One tick per second, only while an undo is live. It moves the
         // remaining count and retires the bar when the daemon's hold runs
@@ -943,11 +967,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Pending.Clear();
 
         var rowsByEntryId = new Dictionary<string, QueueEntryViewModel>(StringComparer.Ordinal);
+        var currentIds = new List<string>(entries.Count);
         foreach (QueueEntry entry in entries)
         {
             var row = new QueueEntryViewModel(entry);
             Pending.Add(row);
             rowsByEntryId[entry.EntryId] = row;
+            currentIds.Add(entry.EntryId);
         }
 
         // The grouping rule itself -- bucket key, group order, whether
@@ -971,6 +997,90 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         Raise(nameof(IsEmpty));
+
+        // Every row above is drawn already, with no preview yet -- Preview
+        // is null on a freshly built QueueEntryViewModel, which reads as
+        // pending. What follows only SCHEDULES the work; nothing here blocks
+        // the draw on a daemon round trip.
+        //
+        // An id present before this call and absent now left the queue for
+        // good -- dismissed, submitted, expired, or superseded, all alike
+        // from here -- and its scheduled preview is cancelled. This is the
+        // queue's own membership diff, not a scroll signal: visibility
+        // (SetVisiblePreviewsAsync) is a completely separate axis that only
+        // ever affects build ORDER for ids still in this set.
+        IReadOnlyList<string> removed = PreviewCancellation.EntriesRemoved(_previousEntryIds, currentIds);
+        _previousEntryIds = currentIds;
+        _rowsByEntryId = rowsByEntryId;
+
+        foreach (string entryId in removed)
+        {
+            _ = _host.CallAsync(DaemonProtocol.Methods.PreviewCancel, SubmitParams.ForEntry(entryId));
+        }
+
+        // Every row just built asks for its own preview, once each, and none
+        // of these calls is awaited here: preview_request is documented as
+        // free to repeat -- a cache hit answers inline, a still-building one
+        // is a no-op re-enqueue -- so asking again on every refresh is the
+        // intended usage, not waste.
+        foreach (QueueEntryViewModel row in rowsByEntryId.Values)
+        {
+            _ = RequestPreviewAsync(row);
+        }
+    }
+
+    /// <summary>
+    /// Asks the daemon's bounded scheduler for one card's preview. Answered
+    /// either inline (a cache hit) or later by <see cref="OnPreviewReady"/>;
+    /// either way this never blocks the card that is already on screen.
+    /// </summary>
+    private async Task RequestPreviewAsync(QueueEntryViewModel row)
+    {
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.PreviewRequest, SubmitParams.ForEntry(row.EntryId))
+            .ConfigureAwait(true);
+
+        if (response.IsError || response.Result is not { } result)
+        {
+            return;
+        }
+
+        if (PreviewCardOutcome.Parse(result) is { } outcome && outcome.EntryId == row.EntryId)
+        {
+            row.Preview = outcome;
+        }
+    }
+
+    /// <summary>
+    /// Fills in the card a scheduled build finished for, if it is still one
+    /// of today's rows. A response for a row that has since been rebuilt (a
+    /// refresh replaced every <see cref="QueueEntryViewModel"/> wholesale) or
+    /// dropped from the queue simply finds nothing in
+    /// <see cref="_rowsByEntryId"/> and is discarded -- there is no card left
+    /// for it to fill.
+    /// </summary>
+    private void OnPreviewReady(PreviewCardOutcome outcome)
+    {
+        if (_rowsByEntryId.TryGetValue(outcome.EntryId, out QueueEntryViewModel? row))
+        {
+            row.Preview = outcome;
+        }
+    }
+
+    /// <summary>
+    /// Tells the daemon which entries are on screen right now, debounced by
+    /// <see cref="_visibilityTracker"/> so a settle that reports an unchanged
+    /// set produces no call at all. The caller -- <c>MainWindow</c> -- owns
+    /// figuring out what "on screen" means against its own nested,
+    /// virtualizing containers; this only owns not spamming the daemon with
+    /// the answer.
+    /// </summary>
+    public Task SetVisiblePreviewsAsync(IReadOnlyList<string> visibleEntryIds)
+    {
+        string? paramsJson = _visibilityTracker.OnSettled(visibleEntryIds);
+        return paramsJson is null
+            ? Task.CompletedTask
+            : _host.CallAsync(DaemonProtocol.Methods.PreviewVisible, paramsJson);
     }
 
     private async void OnQueueChanged()

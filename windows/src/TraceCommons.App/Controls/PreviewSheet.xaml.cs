@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Globalization;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -7,6 +7,8 @@ using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 
 namespace TraceCommons.App.Controls;
 
@@ -30,6 +32,34 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
 
         Loaded += OnFirstLoaded;
     }
+
+    /// <summary>
+    /// Effective pixels of horizontal padding inside the transcript card,
+    /// taken off the viewport width before working out how many characters
+    /// fit across it. Matches the Border's Padding in the markup.
+    /// </summary>
+    private const double TranscriptBodyPadding = 24.0;
+
+    /// <summary>The body, cut into chunks. Built once when the tab is realized.</summary>
+    private TranscriptDocument? _document;
+
+    /// <summary>The chunks typeset right now, and the eviction that bounds them.</summary>
+    private TranscriptResidentChunks<RichTextBlock> _resident = new();
+
+    /// <summary>Where each chunk sits vertically, for the two spacers.</summary>
+    private TranscriptRowIndex? _rows;
+
+    /// <summary>The chunk range currently in the panel's children.</summary>
+    private ChunkRange _shown = ChunkRange.Empty;
+
+    private int _columns;
+
+    /// <summary>
+    /// Set while the children and the spacers are being changed. Changing
+    /// them changes the scroll extent, which raises ViewChanged, which would
+    /// re-enter this and rebuild the window it is halfway through building.
+    /// </summary>
+    private bool _updatingTranscript;
 
     public PreviewSheetViewModel ViewModel { get; }
 
@@ -79,15 +109,214 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     /// intent, a realization records display, and the gate is only worth
     /// having if it records the second. The body is drawn first and the gate
     /// armed after, so the flag can never lead the pixels.
+    ///
+    /// <para>
+    /// Paging deliberately did NOT change this gate. Every byte being
+    /// reachable is not every byte being read, and a gate that waited for a
+    /// scroll to the end of 17.5 MB would be defeated by throwing the
+    /// scrollbar at the bottom: verifying nothing while reading, to everyone
+    /// downstream, as though it verified reading. The gate still claims only
+    /// that the first screenful was displayed.
+    /// </para>
     /// </remarks>
     private void OnTranscriptRealized(object sender, RoutedEventArgs e)
     {
-        DrawTranscript();
+        BuildTranscriptDocument();
+        RefreshTranscript();
         ViewModel.MarkTranscriptShown();
     }
 
     /// <summary>
-    /// Draws the redacted body with its redaction markers picked out.
+    /// Cuts the body into chunks, once, when the tab is first realized.
+    /// </summary>
+    /// <remarks>
+    /// A scan rather than a layout, and cheap enough not to need a
+    /// background thread: 17.5 MB chunks in single-digit milliseconds on the
+    /// macOS reference. What it must never become is a walk that grows
+    /// faster than the body, which would be the original hang moved one
+    /// function along; there is a wall-clock test on it in the interop
+    /// suite.
+    /// </remarks>
+    private void BuildTranscriptDocument()
+    {
+        _document = new TranscriptDocument(ViewModel.Transcript);
+        _resident = new TranscriptResidentChunks<RichTextBlock>();
+        _shown = ChunkRange.Empty;
+        _columns = 0;
+        _rows = null;
+
+        if (TranscriptChunks is not null)
+        {
+            TranscriptChunks.Children.Clear();
+        }
+
+        if (TranscriptSizeCaption is not null)
+        {
+            TranscriptSizeCaption.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}, all of it.",
+                QueueEntryViewModel.FormatBytes(_document.TotalBytes));
+        }
+    }
+
+    /// <summary>
+    /// Moves the resident window to cover what is on screen, typesetting the
+    /// chunks that came into it and dropping the ones that fell out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Eviction is the load-bearing half. A window that only ever added
+    /// chunks would pass every "is it under the ceiling" check early in a
+    /// scroll and then run the reader out of memory further down a 17.5 MB
+    /// body: the same failure as the original, arriving more slowly. The
+    /// policy itself lives in
+    /// <see cref="TranscriptResidentChunks{TRendered}"/> so it can be
+    /// asserted against real byte counts on a machine with no WinUI at all.
+    /// </para>
+    /// <para>
+    /// The children are diffed rather than rebuilt: the window is contiguous
+    /// and moves a chunk at a time, so a scroll costs one chunk of layout
+    /// rather than a window's worth. Re-adding an element that was already
+    /// laid out would cost the whole window on every scroll event.
+    /// </para>
+    /// </remarks>
+    private void RefreshTranscript()
+    {
+        if (_document is null || TranscriptChunks is null || TranscriptPanel is null)
+        {
+            return;
+        }
+
+        MeasureTranscriptColumns();
+        if (_rows is null)
+        {
+            return;
+        }
+
+        ChunkRange visible = TranscriptViewport.VisibleChunks(
+            _rows,
+            TranscriptScrollIntoBody(),
+            TranscriptPanel.ViewportHeight);
+
+        _resident.Update(_document, visible, RenderTranscriptChunk);
+        ChunkRange next = _resident.Window;
+        if (next == _shown)
+        {
+            return;
+        }
+
+        _updatingTranscript = true;
+        try
+        {
+            // A jump lands somewhere with nothing in common with what is on
+            // screen. Diffing that is a rebuild with extra steps.
+            if (next.End <= _shown.Start || next.Start >= _shown.End)
+            {
+                TranscriptChunks.Children.Clear();
+                _shown = new ChunkRange(next.Start, next.Start);
+            }
+
+            while (_shown.Start < next.Start && !_shown.IsEmpty)
+            {
+                TranscriptChunks.Children.RemoveAt(0);
+                _shown = new ChunkRange(_shown.Start + 1, _shown.End);
+            }
+
+            while (_shown.End > next.End && !_shown.IsEmpty)
+            {
+                TranscriptChunks.Children.RemoveAt(TranscriptChunks.Children.Count - 1);
+                _shown = new ChunkRange(_shown.Start, _shown.End - 1);
+            }
+
+            while (_shown.Start > next.Start)
+            {
+                int index = _shown.Start - 1;
+                if (_resident.TryGet(index, out RichTextBlock block))
+                {
+                    TranscriptChunks.Children.Insert(0, block);
+                }
+
+                _shown = new ChunkRange(index, _shown.End);
+            }
+
+            while (_shown.End < next.End)
+            {
+                if (_resident.TryGet(_shown.End, out RichTextBlock block))
+                {
+                    TranscriptChunks.Children.Add(block);
+                }
+
+                _shown = new ChunkRange(_shown.Start, _shown.End + 1);
+            }
+
+            (double above, double below) = TranscriptViewport.Spacers(_rows, next);
+            TranscriptSpacerAbove.Height = above;
+            TranscriptSpacerBelow.Height = below;
+        }
+        finally
+        {
+            _updatingTranscript = false;
+        }
+    }
+
+    /// <summary>
+    /// Where the scroll is, measured from the top of the transcript body
+    /// rather than the top of the panel.
+    /// </summary>
+    /// <remarks>
+    /// The caption and the copy row scroll with the transcript, so the
+    /// <c>ScrollViewer</c>'s own offset is a few dozen pixels ahead of the
+    /// body's. Taking the body host's position inside the scrolled content
+    /// is independent of where the scroll currently is, so this does not
+    /// feed back on itself.
+    /// </remarks>
+    private double TranscriptScrollIntoBody()
+    {
+        if (TranscriptPanel is null || TranscriptBodyHost is null || TranscriptContent is null)
+        {
+            return 0.0;
+        }
+
+        try
+        {
+            Point top = TranscriptBodyHost
+                .TransformToVisual(TranscriptContent)
+                .TransformPoint(new Point(0.0, 0.0));
+            return Math.Max(0.0, TranscriptPanel.VerticalOffset - top.Y);
+        }
+        catch (ArgumentException)
+        {
+            // TransformToVisual throws if the two elements are not in the
+            // same tree yet, which can happen on the first layout pass. The
+            // top of the body is the right answer then anyway.
+            return 0.0;
+        }
+    }
+
+    /// <summary>
+    /// Recomputes the row index when the width changes, since a narrower
+    /// sheet wraps more and a chunk's placeholder has to grow with it.
+    /// </summary>
+    private void MeasureTranscriptColumns()
+    {
+        if (_document is null || TranscriptPanel is null)
+        {
+            return;
+        }
+
+        double usable = TranscriptPanel.ViewportWidth - TranscriptBodyPadding;
+        int columns = TranscriptViewport.Columns(usable);
+        if (columns == _columns && _rows is not null)
+        {
+            return;
+        }
+
+        _columns = columns;
+        _rows = new TranscriptRowIndex(_document, columns);
+    }
+
+    /// <summary>
+    /// Typesets one chunk, with its redaction markers picked out.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -99,70 +328,53 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     /// The design draws each as a chip with a wash behind it. A WinUI
     /// <see cref="Run"/> carries a foreground and a weight but no background
     /// and no box, and building one <c>InlineUIContainer</c> per marker would
-    /// put hundreds of elements in a 169 KB transcript for a rounded corner.
-    /// So the chip's wash becomes the chip's colour: bold, in the brand's
-    /// "weigh this" gold, which the design system already carries at text
-    /// contrast in both themes. The property that matters survives either way,
-    /// which is that the marker reads as an object placed in the text rather
-    /// than as damage done to it. The Linux shell records the same compromise
-    /// for the same reason.
+    /// put hundreds of elements in a chunk for a rounded corner. So the
+    /// chip's wash becomes the chip's colour: bold, in the brand's "weigh
+    /// this" gold, which the design system already carries at text contrast
+    /// in both themes. The property that matters survives either way, which
+    /// is that the marker reads as an object placed in the text rather than
+    /// as damage done to it. The Linux shell records the same compromise for
+    /// the same reason.
+    /// </para>
+    /// <para>
+    /// The scan runs over ONE CHUNK, never the whole body. The chunker
+    /// refuses to cut through a marker precisely so that this is safe: a
+    /// marker split across two separately-typeset chunks would draw as two
+    /// halves in body type, and half a marker reads as content that was
+    /// never scrubbed. Both halves of that guarantee use
+    /// <see cref="TranscriptMarkers"/>'s one pattern, so they cannot drift
+    /// apart about what a marker is.
     /// </para>
     /// <para>
     /// Nothing in here is logged. The transcript is the ABI's one content
     /// exemption and it goes to the screen and nowhere else.
     /// </para>
-    /// <para>
-    /// The body handed to <see cref="TranscriptMarkers.Split"/> is
-    /// <see cref="TranscriptBudget"/>'s clamped slice, not the raw body: a
-    /// real Claude Code session can be tens of megabytes, and laying that
-    /// out as one <see cref="RichTextBlock"/> pins the UI thread and takes
-    /// gigabytes of glyph storage to do it. The marker scan only ever needs
-    /// to run over what is actually going on screen.
-    /// </para>
     /// </remarks>
-    private void DrawTranscript()
+    private RichTextBlock RenderTranscriptChunk(int index)
     {
-        if (TranscriptBody is null)
+        var block = new RichTextBlock
         {
-            return;
-        }
+            FontFamily = (FontFamily)Application.Current.Resources["TcMonoFontFamily"],
+            FontSize = (double)Application.Current.Resources["TcMonoTranscriptFontSize"],
+            Foreground = (Brush)Application.Current.Resources["TcInkPrimaryBrush"],
+            IsTextSelectionEnabled = true,
+        };
 
-        TranscriptBody.Blocks.Clear();
-
-        TranscriptBudget.Clamped clamped = TranscriptBudget.Clamp(ViewModel.Transcript);
-        string body = clamped.Shown;
-
-        if (TranscriptClampNotice is not null)
-        {
-            if (clamped.IsClamped)
-            {
-                TranscriptClampNotice.Text = TranscriptBudget.Notice(clamped);
-                TranscriptClampNotice.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                TranscriptClampNotice.Text = string.Empty;
-                TranscriptClampNotice.Visibility = Visibility.Collapsed;
-            }
-        }
-
+        string text = _document is null ? string.Empty : _document.TextOf(index);
         var paragraph = new Paragraph();
 
-        if (body.Length == 0)
+        if (text.Length == 0)
         {
-            // An empty redacted body is a real outcome and it must not look
-            // like a rendering failure.
-            paragraph.Inlines.Add(new Run { Text = "(empty)" });
-            TranscriptBody.Blocks.Add(paragraph);
-            return;
+            paragraph.Inlines.Add(new Run { Text = string.Empty });
+            block.Blocks.Add(paragraph);
+            return block;
         }
 
         var markerBrush = (Brush)Application.Current.Resources["TcGoldTextBrush"];
 
-        IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(body);
-        foreach (TranscriptRun run in runs)
+        foreach (TranscriptRun run in TranscriptMarkers.Split(text))
         {
-            var inline = new Run { Text = body.Substring(run.Start, run.Length) };
+            var inline = new Run { Text = text.Substring(run.Start, run.Length) };
             if (run.IsMarker)
             {
                 inline.FontWeight = FontWeights.Bold;
@@ -172,7 +384,56 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             paragraph.Inlines.Add(inline);
         }
 
-        TranscriptBody.Blocks.Add(paragraph);
+        block.Blocks.Add(paragraph);
+        return block;
+    }
+
+    private void OnTranscriptScrolled(object sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (_updatingTranscript)
+        {
+            return;
+        }
+
+        RefreshTranscript();
+    }
+
+    private void OnTranscriptResized(object sender, SizeChangedEventArgs e)
+    {
+        if (_updatingTranscript)
+        {
+            return;
+        }
+
+        RefreshTranscript();
+    }
+
+    /// <summary>
+    /// Puts the whole redacted body on the clipboard.
+    /// </summary>
+    /// <remarks>
+    /// Selection inside the transcript covers one block at a time, which is
+    /// intrinsic to paging rather than a detail that could be fixed with more
+    /// care: a chunk that is not typeset has nothing to select. This is the
+    /// deliberate trade. Whole-body selection is lost, whole-body copying is
+    /// gained, and copying is what the selection was for. It is also bounded
+    /// work regardless of size, because it is a string copy and not a layout.
+    /// </remarks>
+    private void OnCopyWholeTranscript(object sender, RoutedEventArgs e)
+    {
+        if (_document is null)
+        {
+            return;
+        }
+
+        var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
+        package.SetText(_document.WholeText());
+        Clipboard.SetContent(package);
+
+        if (sender is Button button)
+        {
+            button.Content = "Copied";
+        }
     }
 
     /// <summary>
