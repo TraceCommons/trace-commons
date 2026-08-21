@@ -69,6 +69,13 @@ pub struct TickReport {
     /// Sessions skipped because the contributor dismissed them. Distinct
     /// from `ignored`, which is a standing decision about a whole project.
     pub dismissed: usize,
+    /// Sessions that reached `TraceSource::load` and could not be read, for
+    /// any reason. Every one of these used to be a bare `continue`.
+    pub unloadable: usize,
+    /// The subset of `unloadable` the source declined by name over its own
+    /// byte budget, rather than failed to read. See
+    /// `source::SessionTooLarge` for why the two are counted apart.
+    pub too_large: usize,
 }
 
 /// One pass over the session roots.
@@ -161,7 +168,7 @@ fn tick_over(
         }
     }
 
-    finish_pass(shared, out.report, out.changed)
+    finish_pass(shared, out, true)
 }
 
 /// Maps a path something happened at to the session that owns it, without
@@ -247,7 +254,7 @@ fn tick_over_paths(
         }
     }
 
-    finish_pass(shared, out.report, out.changed)
+    finish_pass(shared, out, false)
 }
 
 /// What a pass reads once, up front, and hands to every session it visits.
@@ -301,6 +308,10 @@ struct PassOutcome {
     /// Whether anything the queue holds moved, and so whether the epilogue
     /// has a save and a publish to do.
     changed: bool,
+    /// Whether this pass met a session its source declines to read at all.
+    /// Separate from `report.too_large` only so the epilogue reads as the
+    /// condition it is testing rather than as a count.
+    too_large: bool,
 }
 
 /// Everything one session costs: observe, evaluate, ask the queue, and load
@@ -475,8 +486,58 @@ fn visit_session(
     // hold the result of. Everything already offered at this exact
     // observation, and everything a full queue could not have
     // taken, was skipped above.
-    let Ok(transcript) = source.load(session_ref) else {
-        return;
+    // A failed load used to be a bare `continue`, and that was the whole
+    // defect: `source::codex` declines an oversized rollout *by name*,
+    // saying in its own comment that the refusal is "named rather than
+    // silent", and this line then made it silent. The session never
+    // entered the queue, no counter moved, nothing was written down, and no
+    // shell could ever tell the contributor why a conversation they
+    // finished simply does not exist as far as the tool is concerned.
+    //
+    // The two failures are not the same failure, so they are not treated
+    // the same:
+    //
+    // - A `SessionTooLarge` is a verdict. The check is a stat against a
+    //   constant compiled into this binary, so it decides identically on
+    //   every poll from now until the file changes; a contributor who is
+    //   never told will wait forever. It raises a standing health label,
+    //   which `status` already reports and every shell already renders.
+    // - Anything else is an IO error -- a file deleted between `discover`
+    //   and here, a directory momentarily unreadable, a read interrupted.
+    //   Every one of those is very likely to succeed on the next poll
+    //   sixty seconds later, and a standing flag pinned on a healthy
+    //   daemon by one blip is worse than no flag: it trains the
+    //   contributor to ignore the surface that has to work when something
+    //   real breaks. Counted, so nothing is discarded unseen, and nothing
+    //   more.
+    //
+    // Neither branch logs the path or any part of the file. The byte
+    // counts on the refusal are the contributor's own file's, measured
+    // against a constant, and `source::codex` says explicitly that stating
+    // them is safe.
+    let transcript = match source.load(session_ref) {
+        Ok(t) => t,
+        Err(err) => {
+            out.report.unloadable += 1;
+            if let Some(too_large) = err.downcast_ref::<crate::source::SessionTooLarge>() {
+                out.report.too_large += 1;
+                out.too_large = true;
+                tracing::warn!(
+                    refusal = too_large.label,
+                    declared_bytes = too_large.declared_bytes,
+                    budget_bytes = too_large.budget_bytes,
+                    "declined a session larger than its source will read"
+                );
+                let mut health = shared.health.lock().expect("health lock");
+                health.fail(health::LABEL_SESSION_TOO_LARGE, ctx.now);
+            } else {
+                // No `err` in the field set: an IO error's `Display` is
+                // free to carry the path it failed on, and a log line is
+                // not a place a path may appear.
+                tracing::debug!("a session could not be read this pass");
+            }
+            return;
+        }
     };
 
     // Collision detection must see every project the daemon knows
@@ -615,7 +676,27 @@ fn visit_session(
 /// The single implementation of the epilogue, and it runs once per pass, not
 /// once per session -- `queue.save` and `state.save` each rewrite a whole
 /// file, and the publish is a wake-up for every subscribed shell.
-fn finish_pass(shared: &DaemonShared, report: TickReport, mut changed: bool) -> Result<TickReport> {
+fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
+    let PassOutcome {
+        report,
+        mut changed,
+        too_large,
+    } = out;
+
+    // Retract the unreadable-session flag only from a pass that asked every
+    // source what it has and found nothing it could not read. A scoped pass
+    // visits the handful of sessions some paths resolved to, so it is
+    // entitled to *raise* the flag -- it saw one -- and never to clear it:
+    // one readable session says nothing about the rest of the corpus, and a
+    // status indicator that blinks off every time an unrelated file is
+    // written is not one anybody will trust. A condition that cannot
+    // retract itself masks every lower-precedence one forever, which is why
+    // this is here at all.
+    if exhaustive && !too_large {
+        let mut health = shared.health.lock().expect("health lock");
+        health.resolve(health::LABEL_SESSION_TOO_LARGE);
+    }
+
     // Relabel pass: `Queue::upsert` never rewrites an existing entry, so a
     // project that was unique when its entry was first queued would
     // otherwise keep a bare label forever even after a colliding project
@@ -1805,6 +1886,139 @@ mod tests {
             1,
             "an oversized refusal must not condemn the conversation: {:?}",
             queue.all()
+        );
+    }
+
+    /// A real source whose `load` always fails, so a test can choose which
+    /// *kind* of failure the pass sees.
+    ///
+    /// Wrapping the genuine adapter rather than faking one keeps discovery,
+    /// grouping and eligibility exactly as they are in production: the only
+    /// thing that differs is the one call this is about.
+    struct RefusingSource {
+        inner: Box<dyn TraceSource>,
+        err: fn() -> anyhow::Error,
+    }
+
+    impl TraceSource for RefusingSource {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            self.inner.discover()
+        }
+        fn load(&self, _r: &SessionRef) -> Result<crate::source::SessionTranscript> {
+            Err((self.err)())
+        }
+    }
+
+    /// The refusal `source::codex` raises for a rollout past its byte
+    /// budget, built here rather than by writing a 64 MB file: this is a
+    /// test about what the *watcher* does with the refusal, and the refusal
+    /// itself is pinned in `source::codex`'s own suite.
+    fn too_large() -> anyhow::Error {
+        crate::source::SessionTooLarge {
+            label: "rollout-too-large",
+            declared_bytes: 70_000_000,
+            budget_bytes: 64_000_000,
+        }
+        .into()
+    }
+
+    /// A read that failed because of what the machine was doing at that
+    /// instant, not because of what the session is.
+    fn transient_io() -> anyhow::Error {
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()
+    }
+
+    impl WatcherFixture {
+        /// One pass over sources that refuse every `load` with `err`.
+        fn tick_refusing(&self, now: DateTime<Utc>, err: fn() -> anyhow::Error) -> TickReport {
+            let (max_queue_entries, claude_source, codex_source) = {
+                let s = self.shared.settings.lock().unwrap();
+                (
+                    s.max_queue_entries,
+                    s.claude_source.clone(),
+                    s.codex_source.clone(),
+                )
+            };
+            let sources = all_sources(claude_source, codex_source, None)
+                .into_iter()
+                .map(|inner| Box::new(RefusingSource { inner, err }) as Box<dyn TraceSource>)
+                .collect();
+            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+        }
+
+        fn health_label(&self) -> Option<String> {
+            self.shared.health.lock().unwrap().last_error_label.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_refused_by_name_is_counted_and_flagged() {
+        // The bug: the pass used to drop `source.load`'s error on the floor
+        // with a bare `continue`. `source::codex` declines an oversized
+        // rollout *by name*, and its comment says so deliberately -- and
+        // then nothing counted it, nothing recorded it, and no shell could
+        // ever say why a session the contributor finished never appeared.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let now = at("2030-01-01T00:00:00Z");
+        f.tick_refusing(now, too_large);
+        let r = f.tick_refusing(now, too_large);
+
+        assert_eq!(r.unloadable, 1, "the failure must be counted: {r:?}");
+        assert_eq!(r.too_large, 1, "and classified: {r:?}");
+        assert_eq!(
+            f.health_label().as_deref(),
+            Some(health::LABEL_SESSION_TOO_LARGE),
+            "a refusal that recurs on every poll must reach the status surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transient_read_failure_is_counted_but_raises_no_standing_flag() {
+        // The other half of the classification. A read that failed because
+        // of what the machine was doing at that instant will very likely
+        // succeed on the next poll sixty seconds later, and a status flag
+        // that a single blip pins on a healthy daemon is worse than no flag
+        // at all. It is still counted -- nothing is discarded unseen.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let now = at("2030-01-01T00:00:00Z");
+        f.tick_refusing(now, transient_io);
+        let r = f.tick_refusing(now, transient_io);
+
+        assert_eq!(r.unloadable, 1, "{r:?}");
+        assert_eq!(r.too_large, 0, "an IO blip is not a verdict: {r:?}");
+        assert_eq!(
+            f.health_label(),
+            None,
+            "one failed read must not flag the daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_pass_that_reads_everything_retracts_the_flag() {
+        // A condition that cannot retract itself masks every
+        // lower-precedence one forever, so the flag has to come off when
+        // the corpus is readable again -- and only a pass that asked every
+        // source what it has is entitled to say so.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        let now = at("2030-01-01T00:00:00Z");
+        f.tick_refusing(now, too_large);
+        f.tick_refusing(now, too_large);
+        assert_eq!(
+            f.health_label().as_deref(),
+            Some(health::LABEL_SESSION_TOO_LARGE)
+        );
+
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        assert_eq!(
+            f.health_label(),
+            None,
+            "the session loads now; the flag must not outlive the condition"
         );
     }
 

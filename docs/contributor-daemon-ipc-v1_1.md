@@ -1616,6 +1616,7 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
+| `session-too-large` | at least one session on disk is past the byte budget its source will read, so it is not being offered | no |
 | `dismissed-by-contributor` | declined by hand | n/a |
 | `expired-without-decision` | aged out | n/a |
 | `session-changed-after-offer` | superseded | n/a |
@@ -1638,6 +1639,18 @@ listed highest first:
 6. `ingest-unreachable`
 7. `queue-full`
 8. `daily-cap-reached`
+9. `session-too-large`
+
+`session-too-large` sits last on purpose: every label above it describes the
+daemon, and this one describes a single file on disk. It must never mask an
+outage. It is raised by the poll pass when a source declines to read a
+session at all, and retracted by the next full pass that reads everything --
+a scoped pass over a handful of changed paths may raise it and never clears
+it, since one readable session says nothing about the rest of the corpus.
+A read that merely *failed* -- a file deleted mid-pass, a momentary
+permission or IO error -- does not raise it: that is expected to succeed on
+the next poll, and a flag a blip pins on a healthy daemon is one nobody will
+trust.
 
 Because `daily-cap-reached` is last, it is the label most often masked by
 another condition. That is why the daily caps are also reported in full on
