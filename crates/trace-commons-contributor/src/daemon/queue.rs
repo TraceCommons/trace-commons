@@ -249,6 +249,28 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
 
+/// The reason label an approve records when the envelope it built is past
+/// `envelope::MAX_ENVELOPE_BYTES`.
+///
+/// The exact string the `approve` response already reports in `skipped`,
+/// and the one all three shells translate into "too large to send". It is
+/// reused verbatim for the persisted refusal rather than given a second
+/// name, because the toast and the entry describe one fact to one person:
+/// a contributor told their trace was too large, who then goes looking for
+/// it, must not find it filed under a different word.
+///
+/// The CLI's own `session-too-large` is deliberately left alone. That is a
+/// one-shot line printed by `submit`, carrying the measured size and the
+/// limit with it, and it is never written to the queue -- a different
+/// surface with a different audience, and renaming it would churn a
+/// documented CLI contract for no gain to the daemon.
+///
+/// Unlike `REASON_DISMISSED` this label suppresses nothing at the path
+/// level. See `dismissed_at_path` for why: this is a verdict on one set of
+/// bytes under one set of consent scopes, not a decision about the
+/// conversation.
+pub const REASON_TOO_LARGE: &str = "envelope-too-large";
+
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
 /// Factored out so `supersede` and any future re-offer path cannot drift:

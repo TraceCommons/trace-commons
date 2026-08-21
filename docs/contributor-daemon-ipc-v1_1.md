@@ -967,9 +967,21 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `not-enrolled` | No config was readable when the build ran | Retry after enrolling |
   | `session-file-vanished` | The session file behind the entry is gone | Will not succeed for this entry |
   | `preview-failed` | The redaction pipeline itself failed | May be transient |
-  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded | **Never** succeeds for this entry -- do not offer retry |
+  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded. The entry is moved to `refused` with this same string as its `reason_label`, so it stops being offered | **Never** succeeds for this entry -- do not offer retry |
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+
+  Only `envelope-too-large` changes the entry's state; every other label
+  above leaves the entry exactly where it stood. A refusal that no retry
+  can ever get past is not a state a queue should keep calling `pending`,
+  and leaving it there re-offered the same unapprovable card on every poll.
+  The refusal binds to the entry, not to the session's path: a dismissal
+  (`dismissed-by-contributor`) silences a conversation permanently, but
+  this is a verdict on one envelope built under one set of consent scopes,
+  so a session that grows or is rebuilt under narrower scopes is offered
+  again. Note that `list_pending` returns `pending` entries only, so a
+  client's own toast is the only place the contributor sees this: render
+  the skip rather than dropping it.
 
   Nothing here is free text, a path, or trace content. **`approved` plus
   the length of `skipped` always equals the number of entries `approve` was

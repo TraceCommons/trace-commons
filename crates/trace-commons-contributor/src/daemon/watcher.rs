@@ -1659,6 +1659,155 @@ mod tests {
         assert_eq!(count(&c), 0, "a declined session must not be re-read");
     }
 
+    /// Enrol the fixture, so `approve` has a config to build an envelope
+    /// against. Without one it skips every entry `not-enrolled` and never
+    /// reaches the size check at all.
+    fn enrol(f: &WatcherFixture) {
+        let device = crate::identity::DeviceIdentity::load_or_generate(&f.shared.store).unwrap();
+        let cfg = crate::config::ContributorConfig {
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: "http://issuer.invalid".into(),
+            ingest_url: "http://ingest.invalid".into(),
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+        };
+        f.shared.store.save_config(&cfg).unwrap();
+    }
+
+    /// One event carrying more than `MAX_ENVELOPE_BYTES`, so the envelope
+    /// `approve` builds cannot be stored and the entry can never be
+    /// approved.
+    fn write_oversized_session(f: &WatcherFixture, project: &str, name: &str) -> PathBuf {
+        let project_dir = f
+            .claude_root
+            .join(format!("-Users-testuser-code-{project}"));
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let path = project_dir.join(format!("{name}.jsonl"));
+        let content = "x".repeat(crate::envelope::MAX_ENVELOPE_BYTES + 1);
+        let event = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "cwd": format!("/Users/testuser/code/{project}"),
+            "timestamp": "2026-08-08T10:00:00Z",
+            "version": "2.0.1",
+            "sessionId": name,
+            "uuid": "a1",
+        });
+        std::fs::write(&path, format!("{event}\n")).unwrap();
+        path
+    }
+
+    async fn approve_entry(f: &WatcherFixture, entry_id: uuid::Uuid) -> serde_json::Value {
+        let r = crate::daemon::ipc::handle_request_async(
+            &f.shared,
+            &serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "method": "approve",
+                "params": { "entry_id": entry_id.to_string() },
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert!(r.error.is_none(), "{r:?}");
+        r.result.expect("approve result")
+    }
+
+    #[tokio::test]
+    async fn an_oversized_session_is_refused_once_and_not_offered_again() {
+        // `approve` recognises an envelope past `MAX_ENVELOPE_BYTES` and
+        // reports it `skipped`, but used to persist nothing: the entry
+        // stayed `Pending`, so the card sat in the queue for a session no
+        // click could ever get past the size guard, and every later poll
+        // found it still there. The refusal has to be written down, on the
+        // entry, for the same reason every other decision is.
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let name = "11111111-1111-1111-1111-111111111111";
+        write_oversized_session(&f, "proj", name);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+
+        let v = approve_entry(&f, entry_id).await;
+        assert_eq!(v["approved"].as_u64(), Some(0), "{v}");
+        let skipped = v["skipped"].as_array().expect("skipped");
+        assert_eq!(skipped.len(), 1, "{v}");
+        assert_eq!(
+            skipped[0]["reason_label"].as_str(),
+            Some(crate::daemon::queue::REASON_TOO_LARGE),
+            "the wire label the shells already translate must not change: {v}"
+        );
+
+        assert!(
+            f.shared.queue.lock().unwrap().pending().is_empty(),
+            "a refusal nothing can retry must take the card off the pending list"
+        );
+
+        // And it must stay off it. This is the half the response alone
+        // could not deliver: the watcher re-observes the same quiescent
+        // session on every poll, and an entry left `Pending` is an offer
+        // that comes back forever.
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            !queue
+                .all()
+                .iter()
+                .any(|e| matches!(e.state, QueueState::Pending | QueueState::Approved)),
+            "an oversized session must not be re-offered: {:?}",
+            queue.all()
+        );
+        let refused = queue
+            .all()
+            .iter()
+            .find(|e| e.state == QueueState::Refused)
+            .expect("the refusal is recorded on the entry");
+        assert_eq!(
+            refused.reason_label.as_deref(),
+            Some(crate::daemon::queue::REASON_TOO_LARGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_refusal_is_not_a_dismissal_and_a_grown_session_is_offered_again() {
+        // The deliberate difference from `dismiss`. A dismissal is the
+        // contributor's decision about a conversation, so it suppresses the
+        // path forever; this is the pipeline's verdict on one set of bytes
+        // under one set of consent scopes, and those bytes are not the last
+        // word -- narrower scopes can produce a smaller envelope from the
+        // same conversation. So it is recorded on the entry, like every
+        // other pipeline refusal, and a session that has moved on is still
+        // offered.
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = write_oversized_session(&f, "proj", name);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        approve_entry(&f, entry_id).await;
+        assert!(f.shared.queue.lock().unwrap().pending().is_empty());
+
+        f.append_to_session(&path, "proj", name);
+        f.settle(at("2030-01-03T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert_eq!(
+            queue.pending().len(),
+            1,
+            "an oversized refusal must not condemn the conversation: {:?}",
+            queue.all()
+        );
+    }
+
     #[tokio::test]
     async fn a_pipeline_refusal_is_not_a_dismissal_and_still_re_offers() {
         // `Refused` is also what the pipeline records when it will not send
