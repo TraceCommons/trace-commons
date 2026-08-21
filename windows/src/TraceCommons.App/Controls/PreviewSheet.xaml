@@ -318,39 +318,68 @@
             -->
             <ScrollViewer x:Name="TranscriptPanel"
                           x:Load="{x:Bind ViewModel.IsTranscriptTab, Mode=OneWay}"
-                          Loaded="OnTranscriptRealized">
-                <StackPanel Spacing="8">
+                          Loaded="OnTranscriptRealized"
+                          ViewChanged="OnTranscriptScrolled"
+                          SizeChanged="OnTranscriptResized">
+                <StackPanel x:Name="TranscriptContent" Spacing="8">
                     <TextBlock Text="These are the exact bytes an approval covers. Marks like &lt;PRIVATE_SECRET_1&gt; show where scrubbing fired, legible as chips, not holes."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap" />
                     <!--
-                        Only a very large body reaches TranscriptBudget's
-                        limit, so this stays collapsed for every session the
-                        pilot has seen so far. Filled and shown from
-                        DrawTranscript when and only when the body was
-                        clamped; see TranscriptBudget.Clamp. Styled as a
-                        caption like the caveat below, because it is the
-                        same kind of sentence: true, load-bearing, and not
-                        the point of the screen.
+                        Every byte is here. Only the chunks near the viewport
+                        are typeset, and chunks that scroll away are dropped,
+                        so what is bounded is glyph storage rather than what
+                        the reader can reach. Selection therefore covers one
+                        block at a time, which is what the Copy everything
+                        button is for: it puts the whole redacted body on the
+                        clipboard, and copying is a string copy rather than a
+                        layout.
                     -->
-                    <TextBlock x:Name="TranscriptClampNotice"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               Foreground="{ThemeResource TcInkSecondaryBrush}"
-                               TextWrapping="Wrap"
-                               Visibility="Collapsed" />
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="TranscriptSizeCaption"
+                                   Grid.Column="0"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap" />
+                        <Button x:Name="TranscriptCopyAll"
+                                Grid.Column="1"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="Copy everything"
+                                Click="OnCopyWholeTranscript"
+                                ToolTipService.ToolTip="Puts the whole redacted body on the clipboard. Selection inside the transcript covers one block at a time." />
+                    </Grid>
                     <Border Background="{ThemeResource TcSurfaceCardBrush}"
                             BorderBrush="{ThemeResource TcHairlineBrush}"
                             BorderThickness="1"
                             CornerRadius="{StaticResource TcCardCornerRadius}"
                             Padding="12,10">
-                        <!-- Filled in code behind from TranscriptMarkers.Split
-                             so the markers can be drawn as chips. A plain
-                             TextBlock cannot carry two backgrounds. -->
-                        <RichTextBlock x:Name="TranscriptBody"
-                                       FontFamily="{StaticResource TcMonoFontFamily}"
-                                       FontSize="{StaticResource TcMonoTranscriptFontSize}"
-                                       Foreground="{ThemeResource TcInkPrimaryBrush}"
-                                       IsTextSelectionEnabled="True" />
+                        <!--
+                            Three parts, filled from code behind. The two
+                            spacers stand in for every chunk that is not
+                            typeset, so the scroll extent is the whole body's
+                            rather than the resident window's; the middle
+                            panel holds one RichTextBlock per resident chunk,
+                            each built from TranscriptMarkers.Split so the
+                            markers draw as chips. A plain TextBlock cannot
+                            carry two foregrounds, which is why these are
+                            RichTextBlocks.
+
+                            One element per chunk across a 17.5 MB body would
+                            be 4,480 elements in a panel that does not
+                            virtualise. The spacers are what keep the element
+                            count bounded by the retention ceiling instead,
+                            whatever the size of the trace.
+                        -->
+                        <StackPanel x:Name="TranscriptBodyHost" Orientation="Vertical">
+                            <Border x:Name="TranscriptSpacerAbove" Height="0" />
+                            <StackPanel x:Name="TranscriptChunks" Orientation="Vertical" />
+                            <Border x:Name="TranscriptSpacerBelow" Height="0" />
+                        </StackPanel>
                     </Border>
                 </StackPanel>
             </ScrollViewer>
