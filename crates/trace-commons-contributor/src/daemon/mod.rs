@@ -694,7 +694,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         // must not fail an upload pass that already succeeded.
         let _ = approved_envelope::sweep(&shared.store, &q.pinned_entry_ids());
         drop(q);
-        let state = shared.state.lock().expect("state lock");
+        let mut state = shared.state.lock().expect("state lock");
         state.save(&shared.store)?;
         drop(state);
         shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));

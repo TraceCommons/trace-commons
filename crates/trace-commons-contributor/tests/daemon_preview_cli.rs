@@ -118,6 +118,7 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
                 approved_at: None,
                 subagent_count: 0,
                 subagents_dropped: 0,
+                observed_modified_at: None,
             },
             100,
         )

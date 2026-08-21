@@ -1140,6 +1140,112 @@ fn an_unknown_settings_field_is_rejected_not_silently_ignored() {
 }
 
 #[test]
+fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
+    // `tc_daemon_start_with_settings` and `tc_call(handle, "set_settings",
+    // ...)` share one validator (`apply_settings_object`); this proves that
+    // in practice, not just by code inspection, by driving both paths for
+    // the same fields against the same running daemon and checking they
+    // land on the same values.
+    let dir = tempfile::tempdir().unwrap();
+    write_tempdir_session_roots(dir.path());
+
+    let settings_json = serde_json::json!({
+        "max_uploads_per_day": 200,
+        "max_bytes_per_day": 2_147_483_648u64,
+    })
+    .to_string();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(
+        !h.is_null(),
+        "tc_daemon_start_with_settings failed: {:?}",
+        last_error()
+    );
+
+    // The pre-start override is already visible on the very first tick,
+    // through the same `get_settings` the IPC path answers.
+    let out = call(h, "get_settings", "{}");
+    assert!(
+        out.contains("\"max_uploads_per_day\":200"),
+        "pre-start override did not take effect: {out}"
+    );
+    assert!(
+        out.contains("\"max_bytes_per_day\":2147483648"),
+        "pre-start override did not take effect: {out}"
+    );
+
+    // Now raise it further over the socket, the same call a running
+    // contributor app makes.
+    let out = call(
+        h,
+        "set_settings",
+        &serde_json::json!({"max_uploads_per_day": 500}).to_string(),
+    );
+    assert!(
+        out.contains("\"max_uploads_per_day\":500"),
+        "set_settings did not apply over the socket: {out}"
+    );
+    // The field it did not touch is untouched.
+    assert!(
+        out.contains("\"max_bytes_per_day\":2147483648"),
+        "set_settings must not disturb a field it was not asked to change: {out}"
+    );
+
+    stop(h);
+}
+
+#[test]
+fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // The pre-start path.
+    let settings_json = serde_json::json!({ "max_uploads_per_day": 1_000_001u64 }).to_string();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = unsafe {
+        tc_daemon_start_with_settings(
+            cstr(dir.path()).as_ptr(),
+            cstr_str(&settings_json).as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(
+        h.is_null(),
+        "an out-of-range cap must not silently start the daemon"
+    );
+    assert!(!err.is_null(), "a failure must set the error out-param");
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert_eq!(msg, "settings-invalid-value", "{msg}");
+
+    // The IPC path, on an otherwise healthy daemon.
+    let dir2 = tempfile::tempdir().unwrap();
+    write_tempdir_session_roots(dir2.path());
+    let mut err2: *mut c_char = std::ptr::null_mut();
+    let h2 = unsafe {
+        tc_daemon_start_with_settings(cstr(dir2.path()).as_ptr(), std::ptr::null(), &mut err2)
+    };
+    assert!(!h2.is_null(), "{:?}", last_error());
+    let out = call(
+        h2,
+        "set_settings",
+        &serde_json::json!({"max_bytes_per_day": 5u64 * 1024 * 1024 * 1024 + 1}).to_string(),
+    );
+    assert!(
+        out.contains("settings-invalid-value"),
+        "an out-of-range byte cap must be refused over the socket: {out}"
+    );
+    stop(h2);
+}
+
+#[test]
 fn null_settings_json_behaves_exactly_like_tc_daemon_start() {
     let dir = tempfile::tempdir().unwrap();
     write_tempdir_session_roots(dir.path());
