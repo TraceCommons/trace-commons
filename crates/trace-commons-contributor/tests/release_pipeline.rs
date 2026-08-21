@@ -1521,7 +1521,18 @@ fn windows_msix_job_installs_and_verifies_before_publishing() {
         "does not match the stamped",
         "Confirm the state directory is not virtualized",
         "Invoke-CommandInDesktopPackage",
-        "Write virtualization is still on",
+        "Write virtualization is on",
+        // The probe must be able to name its cause. A missing file at the
+        // real path is equally consistent with virtualization being on and
+        // with the container process never having started, so the step also
+        // watches the redirected location and reads back a transcript the
+        // container process writes outside the redirected tree.
+        "LocalCache\\Local\\trace-commons",
+        "container process transcript",
+        // Get-AppxPackage returning nothing or more than one entry leaves
+        // PackageFamilyName empty or an array, and
+        // Invoke-CommandInDesktopPackage then silently does nothing.
+        "expected exactly 1 registered",
     ] {
         assert!(
             job.contains(needle),
