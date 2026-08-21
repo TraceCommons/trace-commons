@@ -20,8 +20,11 @@
     the footer and nowhere else. The queue row has no approve button on
     purpose, because approving from the row is approving without looking.
 
-    Contribute is armed by the read gate above it, never by the sheet having
-    loaded. See PreviewSheetViewModel and TraceCommons.Interop.ReadGate.
+    Contribute is armed by one thing, a preview that actually loaded and
+    pinned. It used to wait on a read gate as well (transcript tab shown, plus
+    an acknowledgement ticked); that came out as friction, and the sentence it
+    carried is printed above the buttons instead. See PreviewSheetViewModel and
+    TraceCommons.Interop.ReadGate.
 
     XML comments cannot contain a double hyphen, so the prose here uses commas
     and parentheses where the C# files use dashes.
@@ -426,40 +429,12 @@
                        Style="{StaticResource TcCaptionTextStyle}"
                        TextWrapping="Wrap" />
 
-            <!-- Gate line 1. A button, because its job is to take you to the
-                 thing it is asking you to look at. -->
-            <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                    HorizontalAlignment="Left"
-                    Click="OnTranscriptTab"
-                    IsEnabled="{x:Bind ViewModel.IsShowingContent, Mode=OneWay}">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <!-- The shape changes with the state, not only the
-                         colour, so it survives greyscale and colour
-                         blindness. -->
-                    <FontIcon FontSize="12"
-                              Glyph="&#xE73E;"
-                              Visibility="{x:Bind ViewModel.GateTranscriptShown, Mode=OneWay}" />
-                    <TextBlock Text="{x:Bind ViewModel.GateOpenedLine, Mode=OneWay}"
-                               TextWrapping="Wrap" />
-                </StackPanel>
-            </Button>
-
-            <!-- Gate line 2. Disabled until the transcript has been on screen,
-                 because a box ticked about bytes nobody has seen acknowledges
-                 nothing. ReadGate refuses it in that order too, so the rule
-                 does not depend on this attribute. -->
-            <CheckBox IsChecked="{x:Bind ViewModel.GateAcknowledged, Mode=TwoWay}"
-                      IsEnabled="{x:Bind ViewModel.GateTranscriptShown, Mode=OneWay}">
-                <TextBlock Text="I have looked at what would be sent, and I understand scrubbing is pattern-based and may have missed something."
-                           Style="{StaticResource TcBodyTextStyle}"
-                           TextWrapping="Wrap"
-                           MaxWidth="620" />
-            </CheckBox>
-
-            <!-- The concession. A gate that overstated what it verified would
-                 be worse than no gate at all. -->
-            <TextBlock Text="Contribute stays off until both are done. Looking at the first screen is what this checks, it cannot check that you read all of it, and it does not claim to."
-                       Visibility="{x:Bind ViewModel.ShowGateFootnote, Mode=OneWay}"
+            <!-- What the acknowledgement checkbox used to make a contributor
+                 tick, said as a statement instead, in the place the tick used
+                 to be asked for. Bound rather than typed out: the same
+                 sentence is printed by the macOS and Linux sheets, and
+                 TraceCommons.Interop.ReadGate is the one copy of it. -->
+            <TextBlock Text="{x:Bind ViewModel.GateStatement}"
                        Style="{StaticResource TcCaptionSmallTextStyle}"
                        Foreground="{ThemeResource TcInkSecondaryBrush}"
                        TextWrapping="Wrap" />
