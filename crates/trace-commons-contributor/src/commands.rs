@@ -201,7 +201,8 @@ pub async fn login(
             println!("enrolled: tenant_id={}", cfg.tenant_id);
             println!("this invite use is now spent");
             println!(
-                "run `whoami` to confirm, then `submit --dry-run` before contributing anything"
+                "run `trace-commons-contributor whoami` to confirm, then \
+                 `trace-commons-contributor submit --dry-run` before contributing anything"
             );
         }
         EnrollOutcome::Enrolled(cfg) => {
