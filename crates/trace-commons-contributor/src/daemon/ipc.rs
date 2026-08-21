@@ -1509,6 +1509,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // only, per the hash-only rule -- never the text a redaction removed.
     let mut redactions: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let mut flagged: u64 = 0;
+    // The entries whose refusal has to outlive this response. See the size
+    // check below, and the write under the queue lock further down.
+    let mut too_large: Vec<Uuid> = Vec::new();
     for (id, entry) in unpinned {
         // An unenrolled build is never pinned -- it is a placeholder
         // -identity artifact, not the one an upload would send -- so there
@@ -1533,7 +1536,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                 // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
                 if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
-                    skipped.push((id, "envelope-too-large"));
+                    skipped.push((id, super::queue::REASON_TOO_LARGE));
+                    // Reported *and* recorded. Reporting alone left the
+                    // entry `Pending`, which is the state that means "still
+                    // waiting on the contributor" -- so the watcher kept
+                    // finding a live offer at this path and the card sat
+                    // there for a session no click could ever get past this
+                    // very check. A decision that can never come out
+                    // differently for these bytes is a decision, and it
+                    // belongs on the entry like every other one.
+                    too_large.push(id);
                     continue;
                 }
                 for (category, count) in &summary.redactions {
@@ -1548,6 +1560,33 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     }
     let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
     let mut queue = shared.queue.lock().expect("queue lock");
+    // Written under the same lock that approves, and saved by the same
+    // `queue.save` below, so the refusal and the approvals in this batch
+    // land together or not at all.
+    //
+    // Guarded on `Pending`, which is what `set_state` does not check for
+    // itself: the build ran without the lock held, and an entry that was
+    // cancelled, dismissed or superseded in that window has a newer
+    // decision on it than this one.
+    //
+    // `Refused` is the right terminal state and `REASON_TOO_LARGE` the
+    // right label, but they are deliberately *not* `REASON_DISMISSED`:
+    // `Queue::dismissed_at_path` suppresses a whole conversation forever,
+    // and that is reserved for a contributor saying no. This is the
+    // pipeline's verdict on one envelope built under one set of consent
+    // scopes -- narrower scopes can yield a smaller envelope from the same
+    // conversation -- so it binds to the entry, and a session that has
+    // moved on is offered again exactly as it is after any other pipeline
+    // refusal.
+    for id in &too_large {
+        if queue.get(*id).map(|e| e.state) == Some(QueueState::Pending) {
+            queue.set_state(
+                *id,
+                QueueState::Refused,
+                Some(super::queue::REASON_TOO_LARGE.to_string()),
+            );
+        }
+    }
     let mut approved_ids = Vec::new();
     for id in &ids {
         let id = *id;
