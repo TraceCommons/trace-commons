@@ -334,33 +334,47 @@ visible scroll jump on a fast flick, whether the re-entrancy guard around
 child and spacer updates is sufficient, and whether `RichTextBlock`
 per-chunk layout really costs a frame, are all open until someone runs it.
 
-## What the other two shells must mirror
+## What the other two shells did
 
-`crates/trace-commons-contributor-gtk/src/transcript_budget.rs` and
-`windows/src/TraceCommons.Interop/TranscriptBudget.cs` still clamp to 64 KB
-and still render the notice, and their doc comments now point at a deleted
-Swift file. Until they are ported:
+Both are ported. The notice is retired everywhere, so there is no longer a
+cross-shell copy contract for it to be part of, and all three budget modules
+are deleted in favour of paging ones.
 
-1. **Delete the notice and its worked-example tests.** The string
-   `"Showing the first {} of {}. The rest is not displayed here. Approving
-   still covers the whole body."` is retired in all three shells. There is no
-   longer a cross-shell copy contract for it to be part of.
-2. **Mirror the constants, not the code.** `targetChunkBytes = 4096`,
-   `maxMarkerBytes = 256`, `retainedLimitBytes = 131072`. Re-measure the
-   layout curve on that toolkit before adopting them — the *reasoning* is
-   what ports (chunk = largest unit that lays out inside a frame; retention =
-   at least ~18 screenfuls). GTK's `TextView` and WinUI's `RichTextBlock` are
-   not SwiftUI `Text`, and if either turns out to be linear in the run then
-   its chunk size is free to be larger. Do not copy 4 KB on faith.
-3. **Mirror the cut rules exactly.** Line boundary preferred, marker-aware
-   fallback, scalar-aligned. The marker regex must be the same, including the
-   newline exclusion in the `[REDACTED…]` arm.
-4. **Mirror the assertions.** Every byte reachable (chunks concatenate to the
-   body), no chunk over the ceiling, no split characters, no split markers,
-   retained bytes under the ceiling *while scrolling*, and a chunk that
-   scrolled away actually gone.
-5. **Do not mirror the read gate into something stronger.** Same gate, same
-   claim, on all three.
+**GTK re-measured and chose different numbers, and the measurement changed
+the reasoning.** `GtkTextView` lays out one `PangoLayout` per line, so its
+layout is LINEAR -- roughly 250 microseconds per KB, flat from 4 KB to 4 MB.
+What freezes that shell is the redaction tag pass, which is quadratic:
+0.77 ms at 64 KB, 10.67 ms at 256 KB, 165.95 ms at 1 MB, 2923.85 ms at 4 MB,
+extrapolating to about a minute of frozen main loop at 17.5 MB. Rewriting
+the scan to a single pass only moves the constant, because `GtkTextBuffer`
+offset addressing is not O(1); bounding what gets tagged is the fix. Single-
+run layout is superlinear there too, which still matters for a minified body
+where one 17.5 MB line is one layout.
+
+So GTK chunks at 16 KB rather than 4 KB -- on that toolkit chunk size does
+not change total cost at all, making it pure granularity, and 16 KB
+materialises in 3.5 ms while 4 KB would quadruple the widget count to buy
+nothing measurable -- and retains 256 KB rather than 128 KB, refilling cold
+in 55.8 ms. See `crates/trace-commons-contributor-gtk/src/transcript_paging.rs`,
+which carries the tables at the point of use.
+
+**Windows inherited the numbers and says so.** `RichTextBlock` could not be
+measured: the WinUI project does not build off Windows. All four constants
+sit in one named class whose doc states in bold that they are inherited and
+not measured, each constant repeats it, and the two font metrics are marked
+derived rather than measured with their derivation shown. If `RichTextBlock`
+turns out to be linear in the run, its chunk size is free to be much larger.
+See `windows/src/TraceCommons.Interop/TranscriptPaging.cs`.
+
+The rules that did port unchanged, and must stay that way in any future
+shell: the cut rules (line boundary preferred, marker-aware fallback,
+scalar-aligned) and the marker grammar including the newline exclusion in
+the `[REDACTED...]` arm -- an omission that made a single unclosed bracket
+stop the chunker from cutting for the rest of the body, found independently
+on macOS and on Windows; the assertions (every byte reachable, no chunk over
+the ceiling, no split characters, no split markers, retained bytes under the
+ceiling *while scrolling*, and a chunk that scrolled away actually gone);
+and the read gate, which is the same gate making the same claim on all three.
 
 ## What is not verified
 
