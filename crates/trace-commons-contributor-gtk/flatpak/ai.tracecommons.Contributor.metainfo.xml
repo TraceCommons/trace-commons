@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.4.5" date="2026-08-21">
+      <description>
+        <p>The watcher no longer re-reads and re-hashes every waiting session on every poll, so the app stops working when there is nothing to do. The daily upload budget can be changed without editing a file, and the app says when uploads are waiting on it.</p>
+      </description>
+    </release>
     <release version="0.4.4" date="2026-08-21">
       <description>
         <p>The history screen now updates when a submission lands, instead of showing the counts it had at launch.</p>
