@@ -164,6 +164,26 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public string SizeText => FormatBytes(_entry.SizeBytes);
 
     /// <summary>
+    /// What this one card actually covers, and -- the half the contract makes
+    /// mandatory -- whether any of it was left out to fit. See
+    /// <see cref="SubagentCopy"/>.
+    ///
+    /// Not a property of the preview: both counts are load-time facts carried
+    /// on the entry itself, so this line is as true while the card still reads
+    /// "Loading preview…" as it is after one lands. A trimmed conversation
+    /// must not be able to reach a decision through a card that never got a
+    /// preview.
+    /// </summary>
+    public string SubagentText => SubagentCopy.Line(_entry.SubagentCount, _entry.SubagentsDropped);
+
+    /// <summary>
+    /// Whether there is anything to say at all. A session that delegated
+    /// nothing and dropped nothing carries no line about subagents -- never a
+    /// row reading zero.
+    /// </summary>
+    public bool HasSubagentText => SubagentText.Length > 0;
+
+    /// <summary>
     /// When the session was discovered, in the viewer's local time. The daemon
     /// sends an RFC 3339 timestamp; an unparsable one degrades to a dash
     /// rather than to the epoch, which would read as a real date.

@@ -311,6 +311,28 @@ public sealed class QueueEntry
 
     [JsonPropertyName("submission_id")]
     public string? SubmissionId { get; set; }
+
+    /// <summary>
+    /// How many delegated subagent transcripts this entry's session covers.
+    /// A Claude Code conversation is not one file, and a card standing for
+    /// 114 of them has to be able to say so: what is being consented to is
+    /// the whole conversation, and its extent is part of the description.
+    /// </summary>
+    [JsonPropertyName("subagent_count")]
+    public int SubagentCount { get; set; }
+
+    /// <summary>
+    /// How many delegated subagent transcripts were left out because the
+    /// conversation exceeded the source's raw byte budget. The contract
+    /// makes surfacing a non-zero value a <b>must</b>: the difference
+    /// between a trace the contributor knows was trimmed and one that
+    /// silently arrives partial is the whole point of showing it.
+    ///
+    /// Zero on every source with no such structure, and on any daemon
+    /// predating the field -- which is the only safe reading of silence.
+    /// </summary>
+    [JsonPropertyName("subagents_dropped")]
+    public int SubagentsDropped { get; set; }
 }
 
 /// <summary>
