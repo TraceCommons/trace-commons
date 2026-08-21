@@ -15,7 +15,7 @@
 //! is not the contributor declining to upload, and letting a two-week clock
 //! run through one would silently discard traces nobody chose to discard.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -166,6 +166,34 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// The `modified_at` of the observation this entry was built from --
+    /// the group mtime for a claude-code session, the file's own mtime for
+    /// every single-file source. Pairs with `size_bytes`, which is the
+    /// observed size, to record the *whole* observation the watcher hashed.
+    ///
+    /// The watcher polls every discovered session on every pass, and until
+    /// this field existed it had no cheap way to tell "already offered,
+    /// nothing has moved" from "offered, then grew". So it read, parsed and
+    /// hashed every queued session again on every poll -- on a real corpus,
+    /// 11 GB of transcripts re-hashed every sixty seconds -- and threw the
+    /// result away at `replace_live_at_path`, which then found the entry
+    /// already tracked. `Queue::unchanged_offer_at_path` answers that
+    /// question from this pair instead.
+    ///
+    /// It lives on the entry rather than in `DaemonState` deliberately: the
+    /// question being asked is "what observation is this queue entry made
+    /// of", so the answer belongs to the entry and dies with it. A parallel
+    /// map in the state file would be a second source of truth that a
+    /// dropped queue line, a wipe, or a supersede could leave disagreeing
+    /// with the queue -- and disagreeing in the unsafe direction, claiming
+    /// an offer exists for content nothing was offered for.
+    ///
+    /// `None` on every entry written before this field existed and on the
+    /// re-offer `Queue::supersede` mints, whose content the watcher never
+    /// observed. `None` never matches, so those entries take the load path
+    /// exactly as they did before: the fast path fails open.
+    #[serde(default)]
+    pub observed_modified_at: Option<DateTime<Utc>>,
 }
 
 impl QueueEntry {
@@ -230,6 +258,12 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         approved_inputs: None,
         approved_at: None,
         previewed_envelope_digest: None,
+        // The caller found content the watcher never observed (the
+        // uploader's re-hash guard is the only path here), so this entry is
+        // not made of any observation the poll loop can match against.
+        // `None` sends the next poll down the load path, which is the
+        // fail-open direction.
+        observed_modified_at: None,
         ..old
     }
 }
@@ -560,6 +594,57 @@ impl Queue {
         })
     }
 
+    /// The queue entry a fresh observation of `path` would land on, when
+    /// nothing about that observation has moved since the entry was built.
+    ///
+    /// This is the poll loop's cheap pre-check. `eligibility::evaluate`
+    /// cannot answer it: it sees the observation, the previous poll's size
+    /// and any *prior upload*, and a session sitting here `Pending` has
+    /// never uploaded, so it has no prior and comes back `Eligible` on
+    /// every single poll. The watcher then paid `source.load` -- read,
+    /// parse, hash the whole group -- only for `replace_live_at_path` to
+    /// find the entry already tracked and discard the work.
+    ///
+    /// Answering `Some` means, and must only mean, that a load would find
+    /// the same `session_hash` this queue already holds, so the load can be
+    /// skipped without changing what the queue ends up containing. Two
+    /// rules keep that true:
+    ///
+    /// - The match is on the **whole** observation -- `size_bytes` and
+    ///   `observed_modified_at` together -- and for claude-code both are
+    ///   group-wide (`SessionRef::size_bytes`, `SessionRef::group_modified_at`).
+    ///   Matching on the parent file's own stat would miss a delegated
+    ///   transcript still being written beside it, which is precisely the
+    ///   bug the group fields were added to fix.
+    /// - A live offer (`Pending`/`Approved`) at this path built from a
+    ///   *different* observation forces `None`, because that is the offer
+    ///   `replace_live_at_path` exists to retire: the supersede path must
+    ///   still fire, and it can only fire from a real load.
+    ///
+    /// An entry with no recorded observation (`observed_modified_at ==
+    /// None`: written before the field existed, or minted by `supersede`)
+    /// never matches, so it takes the load path exactly as before.
+    pub fn unchanged_offer_at_path(
+        &self,
+        path: &Path,
+        size_bytes: u64,
+        modified_at: DateTime<Utc>,
+    ) -> Option<&QueueEntry> {
+        let same_observation = |e: &QueueEntry| {
+            e.size_bytes == size_bytes && e.observed_modified_at == Some(modified_at)
+        };
+        let at_path: Vec<&QueueEntry> = self.entries.iter().filter(|e| e.path == path).collect();
+        let live = |e: &QueueEntry| matches!(e.state, QueueState::Pending | QueueState::Approved);
+        if at_path.iter().any(|e| live(e) && !same_observation(e)) {
+            return None;
+        }
+        at_path
+            .iter()
+            .find(|e| same_observation(e) && live(e))
+            .or_else(|| at_path.iter().find(|e| same_observation(e)))
+            .copied()
+    }
+
     /// Add `entry` and, in the same step, retire every live entry at the same
     /// path whose hash is no longer `entry.session_hash`.
     ///
@@ -779,7 +864,185 @@ mod tests {
             approved_at: None,
             subagent_count: 0,
             subagents_dropped: 0,
+            observed_modified_at: None,
         }
+    }
+
+    /// `entry`, plus the observation it is supposed to be made of.
+    fn observed_entry(hash: &str, size_bytes: u64, observed: &str) -> QueueEntry {
+        QueueEntry {
+            size_bytes,
+            observed_modified_at: Some(at(observed)),
+            ..entry(hash, "2026-08-08T12:00:00Z")
+        }
+    }
+
+    fn queue_of(entries: Vec<QueueEntry>) -> Queue {
+        let mut q = Queue::new();
+        for e in entries {
+            q.upsert(e, 5000).unwrap();
+        }
+        q
+    }
+
+    fn the_path() -> PathBuf {
+        PathBuf::from("/Users/z/.claude/projects/x/s.jsonl")
+    }
+
+    #[test]
+    fn an_unchanged_observation_finds_the_offer_it_produced() {
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        let hit = q
+            .unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
+            .expect("the same observation must match");
+        assert_eq!(hit.session_hash, "sha256:aa");
+        assert_eq!(hit.state, QueueState::Pending);
+    }
+
+    #[test]
+    fn a_grown_group_does_not_match_and_must_be_reloaded() {
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(
+            q.unchanged_offer_at_path(&the_path(), 140, at("2026-08-08T11:00:00Z"))
+                .is_none(),
+            "a larger group is a different description and must supersede"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_member_at_the_same_total_size_still_does_not_match() {
+        // Size alone is not the observation. A delegated transcript
+        // rewritten to the same length moves the group mtime and nothing
+        // else, and the content it hashes to is different.
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(
+            q.unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:05:00Z"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_entry_with_no_recorded_observation_never_matches() {
+        // Entries written before the field existed, and the re-offer
+        // `supersede` mints. They take the load path exactly as before:
+        // the pre-check fails open.
+        let q = queue_of(vec![entry("sha256:aa", "2026-08-08T12:00:00Z")]);
+        assert_eq!(q.all()[0].observed_modified_at, None);
+        assert!(
+            q.unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_live_offer_built_from_a_different_observation_forces_a_reload() {
+        // A resolved entry happens to match the current observation while a
+        // live one at the same path does not. The live one is exactly what
+        // `replace_live_at_path` exists to retire, so the load must happen.
+        let mut q = queue_of(vec![
+            observed_entry("sha256:old", 100, "2026-08-08T11:00:00Z"),
+            observed_entry("sha256:new", 140, "2026-08-08T11:30:00Z"),
+        ]);
+        q.set_state(entry_id_for("sha256:old"), QueueState::Refused, None);
+        assert!(
+            q.unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_resolved_entry_matching_the_observation_still_suppresses_the_load() {
+        // An expired or refused offer with no live sibling: a load would
+        // re-derive a hash the queue already tracks and insert nothing, so
+        // it is pure waste. This is the case that made expired entries churn
+        // forever.
+        let mut q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        q.set_state(entry_id_for("sha256:aa"), QueueState::Expired, None);
+        let hit = q
+            .unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
+            .expect("nothing live here, and a load would change nothing");
+        assert_eq!(hit.state, QueueState::Expired);
+    }
+
+    #[test]
+    fn a_matching_live_offer_is_preferred_over_a_matching_resolved_one() {
+        // The caller re-applies a standing opt-in to what comes back, so it
+        // must come back the entry that can still be approved.
+        let mut q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        q.set_state(entry_id_for("sha256:aa"), QueueState::Superseded, None);
+        q.upsert(
+            QueueEntry {
+                entry_id: entry_id_for("sha256:bb"),
+                session_hash: "sha256:bb".into(),
+                ..observed_entry("sha256:bb", 100, "2026-08-08T11:00:00Z")
+            },
+            5000,
+        )
+        .unwrap();
+        let hit = q
+            .unchanged_offer_at_path(&the_path(), 100, at("2026-08-08T11:00:00Z"))
+            .unwrap();
+        assert_eq!(hit.session_hash, "sha256:bb");
+        assert_eq!(hit.state, QueueState::Pending);
+    }
+
+    #[test]
+    fn a_path_with_no_entry_at_all_never_matches() {
+        let q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        assert!(
+            q.unchanged_offer_at_path(
+                Path::new("/Users/z/.claude/projects/x/other.jsonl"),
+                100,
+                at("2026-08-08T11:00:00Z")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_reoffer_supersede_mints_carries_no_observation() {
+        // Its content is what the uploader's re-hash found, which the
+        // watcher never observed. Recording the old entry's observation
+        // against it would claim an offer exists for content nothing was
+        // offered for.
+        let mut q = queue_of(vec![observed_entry(
+            "sha256:aa",
+            100,
+            "2026-08-08T11:00:00Z",
+        )]);
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.observed_modified_at, None);
     }
 
     #[test]

@@ -464,6 +464,7 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
                 approved_at: None,
                 subagent_count: 0,
                 subagents_dropped: 0,
+                observed_modified_at: None,
             },
             100,
         )
@@ -810,6 +811,7 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
                 // index, not about grouping.
                 subagent_count: 0,
                 subagents_dropped: 0,
+                observed_modified_at: None,
             },
             100,
         )
@@ -915,6 +917,7 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
                 approved_at: None,
                 subagent_count: 0,
                 subagents_dropped: 0,
+                observed_modified_at: None,
             },
             100,
         )
@@ -1397,6 +1400,7 @@ async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, Con
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     100,
                 )
@@ -1668,6 +1672,7 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
                         approved_at: None,
                         subagent_count: 0,
                         subagents_dropped: 0,
+                        observed_modified_at: None,
                     },
                     100,
                 )
