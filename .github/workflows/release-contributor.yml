@@ -576,10 +576,17 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # Opens a pull request rather than pushing, matching the Homebrew
-      # formula bump above: winget-pkgs is a third-party repository with its
-      # own review, and a bad manifest reaches everyone who runs
-      # `winget upgrade`.
+      # Pushes a branch to the fork and stops there. It deliberately does
+      # NOT open the pull request: winget-pkgs is a third-party repository
+      # with its own review, and the token available here cannot create pull
+      # requests against it -- `createPullRequest` returns "Resource not
+      # accessible by personal access token", which failed the whole release
+      # on contributor-v0.4.7 after every artifact had already published.
+      #
+      # The manifest work is the part worth automating; opening the PR is one
+      # click. The step prints the compare URL and writes it to the job
+      # summary so the last manual step is in front of whoever cut the
+      # release rather than buried in a log.
       #
       # No artifact download and no hash argument here: generate-manifests.sh
       # fetches the published asset itself and computes InstallerSha256 from
@@ -606,5 +613,14 @@ jobs:
           git add "manifests/t/TraceCommons/Contributor/$V"
           git commit -m "New version: TraceCommons.Contributor version $V"
           git push -u origin "$BRANCH"
-          gh pr create --fill --repo microsoft/winget-pkgs \
-            --head "${FORK_OWNER}:$BRANCH"
+          URL="https://github.com/microsoft/winget-pkgs/compare/master...${FORK_OWNER}:${BRANCH}?expand=1"
+          echo "Manifest branch pushed. Open the pull request here:"
+          echo "  $URL"
+          {
+            echo "### winget manifest ready for review"
+            echo
+            echo "Branch \`$BRANCH\` is pushed to \`${FORK_OWNER}/winget-pkgs\`."
+            echo "It does not reach winget users until a pull request is opened and merged:"
+            echo
+            echo "[Open the pull request]($URL)"
+          } >> "$GITHUB_STEP_SUMMARY"
