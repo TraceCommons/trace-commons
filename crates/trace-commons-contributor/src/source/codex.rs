@@ -340,11 +340,18 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // would be consenting to something the preview misdescribes. The size is
     // the contributor's own file's, not operator-secret, so it is safe to
     // state -- but the path is not, and is deliberately absent.
+    //
+    // Typed, not a bare `bail!`, so a caller can tell this refusal apart
+    // from the IO errors around it without matching on message text. The
+    // rendered message is unchanged. See `source::SessionTooLarge`.
     let declared = std::fs::metadata(path)?.len();
     if declared > ROLLOUT_BYTE_BUDGET {
-        anyhow::bail!(
-            "rollout-too-large: {declared} bytes exceeds the {ROLLOUT_BYTE_BUDGET}-byte budget"
-        );
+        return Err(super::SessionTooLarge {
+            label: "rollout-too-large",
+            declared_bytes: declared,
+            budget_bytes: ROLLOUT_BYTE_BUDGET,
+        }
+        .into());
     }
     // Streamed rather than read whole. A rollout can be hundreds of
     // megabytes, and the old `fs::read` plus `from_utf8_lossy` held two
@@ -785,7 +792,17 @@ mod tests {
         bytes.resize(ROLLOUT_BYTE_BUDGET as usize + 1, b'x');
         std::fs::write(&path, &bytes).unwrap();
 
-        let err = load_session(&path).unwrap_err().to_string();
+        let raw = load_session(&path).unwrap_err();
+        // Typed, so the daemon can tell this refusal -- a verdict that will
+        // decide the same way on every poll -- from the IO errors around
+        // it, which very likely will not. Matching on the message text
+        // would make the wording load-bearing.
+        let typed = raw
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .expect("an oversized rollout is refused by type, not only by message");
+        assert_eq!(typed.budget_bytes, ROLLOUT_BYTE_BUDGET);
+        assert!(typed.declared_bytes > ROLLOUT_BYTE_BUDGET);
+        let err = raw.to_string();
         assert!(
             err.contains("rollout-too-large"),
             "expected a named refusal, got: {err}"

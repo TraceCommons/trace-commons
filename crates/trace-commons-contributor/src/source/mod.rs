@@ -14,6 +14,35 @@ pub mod codex;
 pub mod discovery;
 pub mod trajectory;
 
+/// A load declined because of what the session *is*, not because of what
+/// the machine happened to be doing when it was asked.
+///
+/// The distinction is the whole point of the type. A source that refuses a
+/// session over its own byte budget will refuse the same session on every
+/// poll for the rest of its life, so the contributor has to be able to find
+/// out; a read that failed because a file was momentarily unreadable will
+/// very likely succeed sixty seconds later, and treating the two alike
+/// means either flagging a healthy daemon over an IO blip or staying silent
+/// about a session that is never going to be offered. The callers that care
+/// downcast for this rather than matching on message text -- see
+/// `daemon::watcher::visit_session`.
+///
+/// `label` is the refusal's existing wire name, carried on the type so the
+/// message a source already emits does not change: `source::codex` says
+/// `rollout-too-large`, and a shell or a log line that recognises that
+/// string keeps recognising it.
+///
+/// Both byte counts describe the contributor's own file against a constant
+/// compiled into this binary. Neither is operator-secret and both are safe
+/// to state; the path is neither, and is deliberately absent.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("{label}: {declared_bytes} bytes exceeds the {budget_bytes}-byte budget")]
+pub struct SessionTooLarge {
+    pub label: &'static str,
+    pub declared_bytes: u64,
+    pub budget_bytes: u64,
+}
+
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";

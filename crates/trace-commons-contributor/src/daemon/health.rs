@@ -32,6 +32,23 @@ pub const LABEL_NEAR_AI_NOTICE_PENDING: &str = "near-ai-notice-not-acknowledged"
 pub const LABEL_CANARY_FAILED: &str = "privacy-filter-canary-failed";
 /// The queue is at its configured maximum.
 pub const LABEL_QUEUE_FULL: &str = "queue-full";
+/// At least one session on this machine is too large for its source to read,
+/// so it is not being offered and never will be.
+///
+/// The only load failure that gets a standing label, and only because it is
+/// the only one that is a *verdict*: the size check is a stat against a
+/// constant, so it decides the same way on every poll forever. A session
+/// that failed to read for any other reason is very likely readable on the
+/// next one, and a flag a single IO blip pins on a healthy daemon is worse
+/// than no flag. See `daemon::watcher::visit_session`.
+///
+/// The same words the CLI's own `session-too-large` uses, and the same fact
+/// as the queue's `envelope-too-large`, deliberately: a contributor told
+/// their session is too big must not have to learn three vocabularies for
+/// one problem. The three stay distinct constants because they are raised
+/// by three different surfaces at three different points -- reading the
+/// file, building the envelope, and a one-shot `submit` line.
+pub const LABEL_SESSION_TOO_LARGE: &str = "session-too-large";
 
 /// Labels describing a condition the contributor cannot resolve by making a
 /// decision about a trace. While one of these is in force, pending entries do
@@ -60,7 +77,13 @@ pub fn precedence(label: &str) -> u8 {
         LABEL_INGEST_UNREACHABLE => 5,
         LABEL_QUEUE_FULL => 6,
         LABEL_DAILY_CAP_REACHED => 7,
-        _ => 8,
+        // Last, below every condition above it, because it is the only one
+        // that is not about the daemon: everything else here stops the
+        // whole pipeline, while this describes one file the contributor can
+        // still work around by leaving it alone. It must never mask an
+        // outage.
+        LABEL_SESSION_TOO_LARGE => 8,
+        _ => 9,
     }
 }
 
@@ -165,6 +188,22 @@ mod tests {
             h.fail(label, at("2026-08-08T12:00:00Z"));
             assert!(h.blocks_expiry(), "{label} should suspend expiry");
         }
+    }
+
+    #[test]
+    fn one_unreadable_session_never_masks_an_outage_or_stops_the_clock() {
+        // It describes one file, not the daemon. Everything else in this
+        // vocabulary stops the whole pipeline, so none of them may be
+        // hidden behind it -- and the contributor's other pending traces
+        // must not stop aging because one session on disk is too big.
+        let mut h = HealthState::default();
+        h.fail(LABEL_SESSION_TOO_LARGE, at("2026-08-08T12:00:00Z"));
+        assert!(!h.blocks_expiry());
+        h.fail(LABEL_INGEST_UNREACHABLE, at("2026-08-08T12:01:00Z"));
+        assert_eq!(
+            h.last_error_label.as_deref(),
+            Some(LABEL_INGEST_UNREACHABLE)
+        );
     }
 
     #[test]
