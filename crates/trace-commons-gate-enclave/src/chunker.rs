@@ -24,8 +24,10 @@ pub struct ChunkerConfig {
     /// event larger than this splits into fixed `target_tokens`-sized
     /// char windows.
     pub max_tokens: usize,
-    /// Hard cap on chunks per trace (default 16). Beyond it, later chunks
-    /// are dropped and counted — never silently.
+    /// Hard cap on chunks per trace (default 16). Beyond it, an evenly
+    /// strided subset spanning the whole trace is scored (see
+    /// [`strided_selection_indices`]) and the rest are dropped and counted
+    /// — never silently.
     pub chunk_cap: usize,
 }
 
@@ -122,7 +124,8 @@ fn split_fixed_char_windows(text: &str, window_chars: usize) -> Vec<String> {
 
 /// Greedily pack consecutive rendered events into chunks of at most
 /// `target_chars`, respecting event boundaries. A single event larger than
-/// `max_chars` splits into `target_chars` fixed windows. Applies the cap.
+/// `max_chars` splits into `target_chars` fixed windows. Applies the cap via
+/// coverage-preserving strided selection.
 pub fn chunk_rendered_events(events: &[String], cfg: &ChunkerConfig) -> ChunkPlan {
     let target = cfg.target_chars();
     let max = cfg.max_chars();
@@ -156,24 +159,84 @@ pub fn chunk_rendered_events(events: &[String], cfg: &ChunkerConfig) -> ChunkPla
     finalize_plan(texts, cfg)
 }
 
-fn finalize_plan(mut texts: Vec<String>, cfg: &ChunkerConfig) -> ChunkPlan {
+/// Identifier for the chunk-SELECTION algorithm (which chunks survive the
+/// cap), distinct from the chunk-PACKING knobs. Stamped into the gate
+/// version hash so decisions made under different selection arithmetic are
+/// never comparable under one version stamp. Bump this on any change to
+/// [`strided_selection_indices`].
+pub const CHUNK_SELECTION_ALGORITHM: &str = "stride_endpoint_inclusive.v1";
+
+/// Deterministically choose exactly `min(total, cap)` positions spread
+/// evenly across `0..total`, endpoint-inclusive.
+///
+/// Replaces prefix truncation. Prefix-keeping made the gate judge a long
+/// trace on its opening — the most boilerplate, most cross-session-repeated
+/// part (system prompt, env banner, first file reads) — which biases the
+/// novelty signal toward "duplicate" precisely for the longest traces.
+///
+/// Properties (all asserted in tests):
+///  - returns exactly `min(total, cap)` indices, never more: chunk count
+///    drives both scorer cost and fail-closed failure exposure, so this
+///    change is cost-neutral by construction;
+///  - strictly increasing, hence unique and chronological;
+///  - index 0 is always first and `total - 1` is always last whenever more
+///    than one chunk is scored, so the trace's ending — where novel content
+///    concentrates — is always scored;
+///  - pure integer arithmetic, no RNG / clock / map iteration: identical
+///    input always yields an identical selection, which the attestation
+///    chain requires;
+///  - when `total <= cap` it degenerates to `0..total`, i.e. the uncapped
+///    path is unchanged.
+pub fn strided_selection_indices(total: usize, cap: usize) -> Vec<usize> {
+    let cap = cap.max(1);
+    let keep = total.min(cap);
+    if keep == 0 {
+        return Vec::new();
+    }
+    if keep == 1 {
+        return vec![0];
+    }
+    // Endpoint-inclusive stride with round-half-up, in u128 so the multiply
+    // cannot overflow: idx(j) = round(j * (total - 1) / (keep - 1)).
+    // Because total - 1 >= keep - 1, consecutive indices differ by at least
+    // floor((total - 1) / (keep - 1)) >= 1, so they are strictly increasing
+    // and unique.
+    let span = (total - 1) as u128;
+    let steps = (keep - 1) as u128;
+    (0..keep)
+        .map(|j| (((j as u128) * span + steps / 2) / steps) as usize)
+        .collect()
+}
+
+fn finalize_plan(texts: Vec<String>, cfg: &ChunkerConfig) -> ChunkPlan {
     let cap = cfg.chunk_cap.max(1);
     let total = texts.len();
+    // Unchanged meaning: capped iff more chunks existed than the cap allows,
+    // and the drop count is how many the cap removed.
     let (chunks_capped, dropped_chunk_count) = if total > cap {
-        texts.truncate(cap);
         (true, (total - cap) as u32)
     } else {
         (false, 0)
     };
+    // `chunk_index` is the ORIGINAL position in the trace, not the position
+    // within the surviving set. Original indices stay unique within a
+    // decision (the selection is strictly increasing), which is all the
+    // `(tenant_id, decision_id, chunk_index)` primary key needs; nothing
+    // downstream requires contiguity or a zero start — per-chunk vector
+    // entries are already sparse today, since only chunks clearing
+    // `embed_insert_novelty_micros` are inserted.
+    let mut texts: Vec<Option<String>> = texts.into_iter().map(Some).collect();
+    let chunks = strided_selection_indices(total, cap)
+        .into_iter()
+        .map(|i| TraceChunk {
+            chunk_index: i as u32,
+            text: texts[i]
+                .take()
+                .expect("strided selection indices are unique"),
+        })
+        .collect();
     ChunkPlan {
-        chunks: texts
-            .into_iter()
-            .enumerate()
-            .map(|(i, text)| TraceChunk {
-                chunk_index: i as u32,
-                text,
-            })
-            .collect(),
+        chunks,
         chunks_capped,
         dropped_chunk_count,
     }
@@ -337,6 +400,128 @@ mod tests {
         assert_eq!(plan.chunks.len(), 1);
         assert_eq!(plan.chunks[0].text, "");
         assert!(!plan.chunks_capped);
+    }
+
+    /// Build N distinct one-event-per-chunk texts, each 100 chars of a
+    /// content marker so the chunk a given event lands in is identifiable.
+    fn marked_contents(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("{:*<100}", format!("mark{i}-")))
+            .collect()
+    }
+
+    fn plan_for_marked(n: usize, cap: usize) -> ChunkPlan {
+        let contents = marked_contents(n);
+        let refs: Vec<&str> = contents.iter().map(|s| s.as_str()).collect();
+        // target 25 tokens = 100 chars -> exactly one event per chunk.
+        chunk_envelope_plaintext(&envelope_json(&refs), &cfg(25, 50, cap))
+    }
+
+    #[test]
+    fn selection_count_is_exactly_min_total_cap() {
+        for (total, cap) in [(1, 16), (10, 16), (16, 16), (17, 16), (100, 16), (5, 1)] {
+            let plan = plan_for_marked(total, cap);
+            assert_eq!(
+                plan.chunks.len(),
+                total.min(cap),
+                "total={total} cap={cap} must select exactly min(total, cap)"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_is_deterministic_across_repeated_calls() {
+        let a = plan_for_marked(97, 16);
+        let b = plan_for_marked(97, 16);
+        let c = plan_for_marked(97, 16);
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn selection_spans_the_whole_array_not_just_the_prefix() {
+        let total = 100usize;
+        let cap = 16usize;
+        let plan = plan_for_marked(total, cap);
+        let idx: Vec<u32> = plan.chunks.iter().map(|c| c.chunk_index).collect();
+        // First and last chunks of the trace are always selected.
+        assert_eq!(idx.first().copied(), Some(0));
+        assert_eq!(
+            idx.last().copied(),
+            Some((total - 1) as u32),
+            "the final chunk of the trace must be scored"
+        );
+        // Strictly increasing, no duplicates.
+        assert!(idx.windows(2).all(|w| w[0] < w[1]), "indices must ascend");
+        // Coverage is real: the selection reaches far past the cap.
+        assert!(
+            idx.iter().any(|i| *i as usize >= total / 2),
+            "selection must reach the back half of the trace"
+        );
+        // Text matches the origin position, i.e. we kept the right chunk.
+        for chunk in &plan.chunks {
+            assert!(
+                chunk.text.contains(&format!("mark{}-", chunk.chunk_index)),
+                "chunk_index must be the ORIGINAL position of the kept text"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_is_evenly_strided() {
+        // 100 -> 16: ideal stride 99/15 = 6.6. Every gap must be 6 or 7.
+        let plan = plan_for_marked(100, 16);
+        let idx: Vec<u32> = plan.chunks.iter().map(|c| c.chunk_index).collect();
+        for w in idx.windows(2) {
+            let gap = w[1] - w[0];
+            assert!((6..=7).contains(&gap), "uneven stride gap {gap} in {idx:?}");
+        }
+    }
+
+    #[test]
+    fn uncapped_path_is_unchanged_contiguous_from_zero() {
+        // Uncapped traces must be byte-identical to the pre-stride behavior:
+        // every chunk kept, indices 0..n contiguous, in order.
+        let total = 12usize;
+        let plan = plan_for_marked(total, 16);
+        assert!(!plan.chunks_capped);
+        assert_eq!(plan.dropped_chunk_count, 0);
+        assert_eq!(plan.chunks.len(), total);
+        for (i, chunk) in plan.chunks.iter().enumerate() {
+            assert_eq!(chunk.chunk_index, i as u32);
+            assert!(chunk.text.contains(&format!("mark{i}-")));
+        }
+    }
+
+    #[test]
+    fn capped_flags_keep_their_meaning() {
+        let plan = plan_for_marked(100, 16);
+        assert!(plan.chunks_capped);
+        assert_eq!(plan.dropped_chunk_count, (100 - 16) as u32);
+        let exact = plan_for_marked(16, 16);
+        assert!(!exact.chunks_capped);
+        assert_eq!(exact.dropped_chunk_count, 0);
+    }
+
+    #[test]
+    fn strided_selection_indices_are_unique_and_bounded() {
+        for total in 1..200usize {
+            for cap in [1usize, 2, 3, 7, 16, 64] {
+                let sel = strided_selection_indices(total, cap);
+                assert_eq!(sel.len(), total.min(cap), "total={total} cap={cap}");
+                assert!(sel.iter().all(|i| *i < total), "total={total} cap={cap}");
+                assert!(
+                    sel.windows(2).all(|w| w[0] < w[1]),
+                    "total={total} cap={cap} indices must be strictly increasing: {sel:?}"
+                );
+                assert_eq!(sel[0], 0, "first chunk is always pinned");
+                assert_eq!(
+                    *sel.last().unwrap(),
+                    if total.min(cap) == 1 { 0 } else { total - 1 },
+                    "last chunk is pinned whenever more than one chunk is scored"
+                );
+            }
+        }
     }
 
     #[test]

@@ -5669,10 +5669,17 @@ fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
 
 /// Stable canonical-bytes hash of every dimension that influences the gate
 /// decision: policy version, floors, top-k, both model identifiers + token
-/// caps, and the vector index dim. Operators rotating any of these MUST see
-/// the audit trail break — the previous fixed `"sha256:enclave_mock_v1"` value
-/// stamped every decision regardless of configuration.
-#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+/// caps, the vector index dim, the chunking knobs, and the chunk-SELECTION
+/// algorithm. Operators rotating any of these MUST see the audit trail break
+/// — the previous fixed `"sha256:enclave_mock_v1"` value stamped every
+/// decision regardless of configuration.
+///
+/// Not feature-gated (unlike the gate-service wiring that calls it), for the
+/// same reason as `parse_usize_env` above: this is a pure function whose
+/// output is an audit-visible stamp, and the plain `cargo test` CI path is
+/// the only one that runs tests, so gating it would leave the stamp
+/// untested.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn compute_gate_version_hash(
     policy_version: &str,
@@ -5701,7 +5708,9 @@ fn compute_gate_version_hash(
          perplexity={perplexity_model_id}:{perplexity_max_tokens}:{perplexity_tail_cutoff}\n\
          embedder={embedder_model_id}:{embedder_max_tokens}:{embedder_matryoshka_dim:?}\n\
          vector_dim={vector_index_dim}\n\
-         chunking={chunk_target_tokens},{chunk_max_tokens},{chunk_cap},{chunk_min_tokens},{embed_insert_novelty_micros}",
+         chunking={chunk_target_tokens},{chunk_max_tokens},{chunk_cap},{chunk_min_tokens},{embed_insert_novelty_micros}\n\
+         chunk_selection={chunk_selection}",
+        chunk_selection = trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
     );
     let mut h = Sha256::new();
     h.update(canonical.as_bytes());
