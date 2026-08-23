@@ -62,6 +62,13 @@
   </provides>
 
   <releases>
+    <release version="0.4.7" date="2026-08-23">
+      <description>
+        <p>Declining a trace now sticks. Choosing "Not this one" used to set aside only the exact conversation as it stood at that moment, so the moment you typed another message the same conversation came back to the waiting list, and it kept coming back for as long as you kept working in it. A declined conversation is now left alone for good, and in projects set to send automatically it is no longer picked up on your behalf after you have said no.</p>
+        <p>Cards are honest about what they cover. A very large conversation has its biggest delegated transcripts left out to keep it within its size limit, and the card now says so instead of describing a trimmed conversation as though it were whole. The conversation itself is never trimmed.</p>
+        <p>Traces that cannot be sent no longer wait forever. One too large to send is now recorded as refused when you approve it, rather than staying in the list offering a choice that could never succeed. A session the app cannot read at all is reported instead of quietly disappearing.</p>
+      </description>
+    </release>
     <release version="0.4.6" date="2026-08-21">
       <description>
         <p>The app now costs almost nothing when it has nothing to do. It was re-reading and re-hashing every waiting session on every check, including the ones it had no room to offer you, which kept a processor core busy continuously and read gigabytes a minute to no purpose. It also no longer rewrites its records when nothing has changed.</p>
