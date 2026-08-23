@@ -80,19 +80,28 @@ A JWS over canonical JSON, `kid` in the header:
 
 ```json
 {
-  "schema_version": "trace_commons.score_attestation.v1",
+  "schema_version": "trace_commons.score_attestation.v2",
   "tenant_id": "...",
   "auth_principal_ref": "...",
   "submissions": [
     { "submission_id": "...", "credit_quality_micros": 0,
       "perplexity_micros": 0, "novelty_score_micros": 0,
-      "gate_passed": true }
+      "gate_passed": true,
+      "coverage": { "coverage_state": "complete",
+                    "chunks_scored": 3, "chunks_total": 3 } }
   ],
   "issued_at": "...",
   "expires_at": "...",
   "nonce": "..."
 }
 ```
+
+`coverage` (schema v2) states how much of the trace the scores were computed
+over: `complete`, `partial` (with a known `chunks_total`), or
+`partial_unknown_total` for a decision recorded before the pre-cap total was
+persisted (migration V47). An unknown denominator is reported as unknown and
+is never estimated. v1 is no longer issued; see `docs/collector-integration.md`
+for the collector-facing migration.
 
 `auth_principal_ref` is included so a collector can detect two participants
 relaying attestations for the same contributor. It is already a reference

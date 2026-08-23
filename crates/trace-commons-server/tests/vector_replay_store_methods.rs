@@ -107,6 +107,7 @@ fn sample_gate_decision(
         peak_perplexity_micros: None,
         peak_novelty_micros: None,
         chunk_count: None,
+        total_chunk_count: None,
         chunks_capped: None,
     }
 }

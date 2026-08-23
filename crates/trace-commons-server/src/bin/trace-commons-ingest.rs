@@ -182,8 +182,8 @@ use trace_commons_server::trace_gate_service::{
     TenantCtx as GateTenantCtx, TraceGateService,
 };
 use trace_commons_server::trace_score_attestation::{
-    AttestationConfig, AttestationSigningState, ScoreAttestationSubmissionEntry,
-    sign_score_attestation,
+    AttestationConfig, AttestationSigningState, ScoreAttestationCoverage,
+    ScoreAttestationSubmissionEntry, sign_score_attestation,
 };
 use uuid::Uuid;
 
@@ -13874,6 +13874,14 @@ async fn score_attestation_handler(
             perplexity_micros: row.perplexity_micros,
             novelty_score_micros: row.novelty_score_micros,
             gate_passed: row.gate_passed,
+            // Schema v2: state how much of the trace was actually scored.
+            // A pre-V47 capped decision has no stored denominator and is
+            // signed as an honest unknown, never an estimate.
+            coverage: ScoreAttestationCoverage::from_decision_columns(
+                row.chunk_count,
+                row.total_chunk_count,
+                row.chunks_capped,
+            ),
         })
         .collect::<Vec<_>>();
     let item_count = submissions.len();
@@ -48804,6 +48812,10 @@ async fn evaluate_and_record_gate(
         ),
         peak_novelty_micros: Some(i64::try_from(decision.peak_novelty_micros).unwrap_or(i64::MAX)),
         chunk_count: Some(i32::try_from(decision.chunk_count).unwrap_or(i32::MAX)),
+        // Pre-cap denominator (migration V47). Persisted on every new
+        // decision so a capped one can state real coverage ("16 of 61")
+        // instead of leaving a reader to assume the whole trace was scored.
+        total_chunk_count: Some(i32::try_from(decision.total_chunk_count).unwrap_or(i32::MAX)),
         chunks_capped: Some(decision.chunks_capped),
     };
     let chunk_entries: Vec<StorageTraceGateChunkVectorEntryRow> = decision
@@ -49766,6 +49778,7 @@ async fn score_one_submission(
                             peak_perplexity_micros: None,
                             peak_novelty_micros: None,
                             chunk_count: None,
+                            total_chunk_count: None,
                             chunks_capped: None,
                         },
                     );
@@ -49995,6 +50008,7 @@ async fn gate_evaluate_worker_handler(
             peak_perplexity_micros: 0,
             peak_novelty_micros: 0,
             chunk_count: 1,
+            total_chunk_count: 1,
             chunks_capped: false,
             chunk_vector_entries: Vec::new(),
             // This is a synthetic re-hydration of the already-persisted

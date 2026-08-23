@@ -5641,6 +5641,7 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
                 peak_perplexity_micros: None,
                 peak_novelty_micros: None,
                 chunk_count: None,
+                total_chunk_count: None,
                 chunks_capped: None,
             },
         )

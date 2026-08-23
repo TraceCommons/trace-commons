@@ -133,21 +133,83 @@ The attestation is a compact JWS, EdDSA (Ed25519), with `kid` in the header.
 
    ```json
    {
-     "schema_version": "trace_commons.score_attestation.v1",
+     "schema_version": "trace_commons.score_attestation.v2",
      "tenant_id": "...",
      "auth_principal_ref": "...",
      "submissions": [
        { "submission_id": "...", "credit_quality_micros": 0,
          "perplexity_micros": 0, "novelty_score_micros": 0,
-         "gate_passed": true }
+         "gate_passed": true,
+         "coverage": { "coverage_state": "complete",
+                       "chunks_scored": 3, "chunks_total": 3 } }
      ],
      "issued_at": "...", "expires_at": "...", "nonce": "..."
    }
    ```
 
-5. Bind `auth_principal_ref` to your own participant record, and reject a
+   `schema_version` is **`trace_commons.score_attestation.v2`**. v1 is no
+   longer issued; a verifier that pins the v1 string will reject every
+   attestation until it is updated. See "Migrating from v1" below.
+
+5. Read `coverage` on every entry. **The scores may describe only part of
+   the trace.** The gate splits a large trace into chunks and scores at most
+   a fixed number of them; anything past that cap is not scored, and
+   `gate_passed` is then a judgment on a prefix. This is not rare: on the
+   pilot, 15% of decisions overall and 41% of one recent month's were
+   capped, and capped traces pass far less often than uncapped ones.
+
+   `coverage_state` has exactly three values:
+
+   | `coverage_state` | Meaning | `chunks_total` |
+   | --- | --- | --- |
+   | `complete` | Every chunk was scored. | present, equals `chunks_scored` |
+   | `partial` | The cap dropped chunks; the pre-cap total is known. Scores cover `chunks_scored` of `chunks_total`. | present, greater than `chunks_scored` |
+   | `partial_unknown_total` | The cap dropped chunks, but this decision predates the column that records the total. How much was omitted is **unknown**. | **absent** |
+
+   `chunks_total` is absent — not zero, not `-1`, not null — when the
+   denominator is unknown. The server will not estimate it (for example from
+   envelope size): an estimate inside a signed statement would be worse than
+   an honest unknown. Do not estimate it yourself and then treat the result
+   as attested.
+
+   Treat an unknown state as unknown. A reasonable policy is to accept
+   `complete` at face value, discount or review `partial` by its ratio, and
+   route `partial_unknown_total` to whatever you do with unverifiable
+   claims — but that is your policy call, not something the attestation
+   makes for you. Reject an entry whose `coverage_state` you do not
+   recognize rather than defaulting it to `complete`; new states may be
+   added under a future schema version.
+
+6. Bind `auth_principal_ref` to your own participant record, and reject a
    second participant presenting an attestation for the same ref. `nonce`
    lets you detect a replayed document inside its validity window.
+
+## Migrating from v1
+
+v2 is a deliberate breaking change to this contract. What changed:
+
+- `schema_version` is now `trace_commons.score_attestation.v2`.
+- Every entry in `submissions` carries a new required `coverage` object.
+- Nothing was removed or renamed; the five v1 score fields are unchanged.
+
+**v1 attestations are no longer issued.** There is no compatibility mode and
+no way to request a v1 document.
+
+To migrate:
+
+1. Accept `trace_commons.score_attestation.v2` where you previously required
+   `...v1`. If you accept a set of versions, drop v1 from it once your
+   collector is deployed — nothing will ever present a v1 document again, and
+   continuing to accept the string only leaves a hole for a forged one.
+2. Parse `coverage` per entry and decide what a partially scored trace is
+   worth to you. If you do nothing else, at minimum stop treating
+   `gate_passed` as a statement about a whole trace.
+3. Handle `partial_unknown_total` explicitly. It is the honest report for
+   decisions made before the server recorded the denominator, and those rows
+   will never gain one.
+
+Everything else — keyset fetch, signature verification, expiry, and the
+`auth_principal_ref` binding — is unchanged.
 
 ## What this does and does not prove
 
@@ -158,6 +220,9 @@ issued.
 **Does not prove** that the participant submitted everything they produced.
 Attestations cover what is claimed, not completeness — a participant may
 withhold traces.
+
+**Does not prove** that a score covers a whole trace. Read `coverage`; a
+`partial` or `partial_unknown_total` entry was scored on a prefix.
 
 **Does not bind** the contributor to an external identity. Mapping
 `auth_principal_ref` to a platform account is your join. The most robust
