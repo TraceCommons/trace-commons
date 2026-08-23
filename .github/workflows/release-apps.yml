@@ -1154,10 +1154,23 @@ jobs:
       # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
       # TraceCommons/homebrew-tap with contents and pull-request write.
       # github.token cannot reach another repository, which is why this
-      # secret exists. This opens a pull request rather than pushing: a
-      # direct push would auto-publish a bad release to everyone who has
-      # already tapped us, with no gate between a failed verification and
-      # someone's `brew upgrade`.
+      # secret exists. Merging a pull request needs pull-request write and
+      # nothing beyond it, so the same secret covers the auto-merge below.
+      #
+      # This still opens a pull request rather than pushing to the tap's
+      # default branch -- the pull request is the audit trail, and the place
+      # the tap's own checks run -- but it now merges that pull request
+      # itself. Leaving the merge to a human is what left eleven bump pull
+      # requests open back to 0.4.1 while the tap kept serving cask 0.4.0 to
+      # everyone who had already tapped us: releases shipped, Homebrew users
+      # silently stopped receiving them.
+      #
+      # The gate this comment used to attribute to the pull request is not
+      # the pull request at all -- it is `if: needs.macos.result ==
+      # 'success'` on this step. The macOS job builds, signs, notarizes and
+      # staples the DMG, and only writes the checksum read below once all of
+      # that has succeeded, so a failed verification never reaches here.
+      # That gate is what is preserved; the human merge was never the gate.
       - name: Open a cask bump
         if: needs.macos.result == 'success'
         env:
@@ -1166,13 +1179,27 @@ jobs:
         run: |
           set -euo pipefail
           V="$SHORT_VERSION"
-          # No -arm64 suffix: the DMG is universal now.
+          # No -arm64 suffix: the DMG is universal now. This reads the
+          # checksum THIS run's macOS job produced, out of the artifact
+          # downloaded into dist/. It is the only source of a hash anywhere
+          # in this step.
           SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
           # Clone with the token IN the remote URL. `gh repo clone` leaves a
           # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
           # raw `git push` -- which failed on the first real release with
           # "could not read Username for https://github.com".
-          git clone --depth 1 \
+          #
+          # --single-branch --depth 1 fetches the tap's DEFAULT branch and
+          # nothing else. The bump branch is never fetched, checked out or
+          # read at any point. That is what makes a stale checksum
+          # structurally impossible to carry across a re-run: the branch is
+          # rebuilt from the tap's default branch plus the $SHA computed
+          # above, so no previous attempt's bytes can survive into the push.
+          # app-v0.4.7 is why that matters -- the tag was re-cut, the DMG was
+          # rebuilt, and the branch left behind by the first run named a hash
+          # (5234e018...) that no longer matched the published asset
+          # (d60ce434...).
+          git clone --depth 1 --single-branch \
             "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
           BRANCH="bump-cask-$V"
@@ -1189,14 +1216,60 @@ jobs:
             exit 1
           fi
           sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
+          # Prove the hash now in the file is the one computed from this
+          # run's DMG. Everything up to here is a hard failure by design: it
+          # runs before anything has been pushed, so refusing costs a
+          # package-manager bump, not a published release.
+          if ! grep -qF "$SHA" Casks/trace-commons.rb; then
+            echo "cask bump did not apply the checksum computed from this run's DMG; refusing to push a stale hash" >&2
+            exit 1
+          fi
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
+          if git diff --quiet; then
+            echo "the tap already carries version $V with $SHA; nothing to bump."
+            exit 0
+          fi
           git commit -am "trace-commons $V"
-          git push -u origin "$BRANCH"
-          # `--repo` changes gh's base repository but does not tell it which
-          # remote branch is the PR head. Without an explicit head, the real
-          # tag run aborts here even though the branch was pushed successfully.
-          gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH"
+          # --force, not a plain push. `bump-cask-$V` already exists whenever
+          # a tag is deleted and re-cut, and the plain push was rejected with
+          # "! [rejected] (fetch first)", failing the whole publish job on
+          # app-v0.4.7 after every artifact had already published. Forcing is
+          # only safe because of the clone above: the branch being replaced
+          # cannot have contributed a single byte to what is being pushed.
+          git push --force -u origin "$BRANCH"
+          # A re-run finds its own pull request already open, and `gh pr
+          # create` exits non-zero on a duplicate head. The force-push has
+          # already updated that pull request's contents, so reuse it.
+          PR_URL="$(gh pr list --repo TraceCommons/homebrew-tap --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$PR_URL" ]; then
+            # `--repo` changes gh's base repository but does not tell it which
+            # remote branch is the PR head. Without an explicit head, the real
+            # tag run aborts here even though the branch was pushed successfully.
+            PR_URL="$(gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH")"
+          fi
+          echo "cask bump: $PR_URL"
+          # Deliberately NOT merged here. Auto-merge is disabled on
+          # TraceCommons/homebrew-tap, the default branch carries no branch
+          # protection, and the tap has no CI at all -- so `--auto` would
+          # fail outright and any fallback would be an immediate, ungated
+          # merge straight to what `brew upgrade` serves. That is the direct
+          # push this step exists to avoid, wearing a pull request as a
+          # disguise.
+          #
+          # Automating the merge is wanted, but it needs something to gate
+          # on first: a cask/formula audit workflow on the tap, auto-merge
+          # enabled, and that check required. Until then the merge stays a
+          # human step, and tap-bump-staleness.yml is what stops the queue
+          # growing unnoticed the way it did through 0.4.1-0.4.6.
+          echo "::notice::cask bump open at $PR_URL -- merge it, or brew upgrade keeps serving the previous version"
+          {
+            echo "### cask bump ready to merge"
+            echo
+            echo "[$PR_URL]($PR_URL)"
+            echo
+            echo "Homebrew serves the previous version until this is merged."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-updates:
     name: publish update manifests
