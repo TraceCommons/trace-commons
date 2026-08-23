@@ -3749,6 +3749,7 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
                 peak_perplexity_micros: None,
                 peak_novelty_micros: None,
                 chunk_count: None,
+                total_chunk_count: None,
                 chunks_capped: None,
             },
         )
@@ -66846,6 +66847,9 @@ impl Database for PerplexityDriverTestDb {
                     perplexity_micros: row.perplexity_micros,
                     novelty_score_micros: row.novelty_score_micros,
                     gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
                 }
             })
             .collect())
@@ -66905,6 +66909,9 @@ impl Database for PerplexityDriverTestDb {
                         perplexity_micros: row.perplexity_micros,
                         novelty_score_micros: row.novelty_score_micros,
                         gate_passed: row.perplexity_passed && row.novelty_passed,
+                        chunk_count: row.chunk_count,
+                        total_chunk_count: row.total_chunk_count,
+                        chunks_capped: row.chunks_capped,
                     }
                 })
                 .collect();
@@ -67195,6 +67202,7 @@ fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow
         peak_perplexity_micros: Some(444),
         peak_novelty_micros: Some(555_555),
         chunk_count: Some(7),
+        total_chunk_count: Some(19),
         chunks_capped: Some(true),
     }
 }
@@ -82509,6 +82517,21 @@ async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_c
         Some(750_000)
     );
     assert!(decoded.claims.submissions[0].gate_passed);
+    // Schema v2: the signed entry states how much of the trace was scored.
+    // `rescore_test_decision_row` is a capped decision with a persisted
+    // pre-cap total, so the attestation must say 7 of 19 rather than let a
+    // reader assume the whole trace was judged.
+    assert_eq!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::Partial {
+            chunks_scored: 7,
+            chunks_total: 19,
+        }
+    );
+    assert_eq!(
+        decoded.claims.schema_version,
+        "trace_commons.score_attestation.v2"
+    );
 
     // The second contributor's own request returns THEIR OWN scores, never
     // token-a's — the resolution is auth-only, with no parameter through
@@ -84262,5 +84285,69 @@ async fn admin_config_status_reports_an_absent_privacy_filter_as_none() {
     assert_eq!(
         response.privacy_filter_backend, "none",
         "a missing filter must be visible as \"none\", never omitted"
+    );
+}
+
+/// A capped decision recorded before migration V47 has no stored denominator,
+/// and no honest one can be recovered. The v2 attestation must say so — an
+/// unknown total, distinguishable from a fully scored trace and never
+/// estimated (e.g. from envelope byte size).
+#[tokio::test]
+async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_decisions() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal = static_token_principal_ref("token-a");
+
+    let id = Uuid::new_v4();
+    let mut row = rescore_test_decision_row(id);
+    row.perplexity_passed = true;
+    row.novelty_passed = true;
+    row.chunk_count = Some(16);
+    // Pre-V47 shape: the cap fired, but the total was never persisted.
+    row.total_chunk_count = None;
+    row.chunks_capped = Some(true);
+    db.seed_gate_decision("tenant-a", row.clone());
+    db.seed_submission_with_principal("tenant-a", id, &principal);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("configured signing key succeeds");
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    let decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&response.attestation, &decoding_key, &validation)
+    .expect("attestation verifies against the published key");
+
+    assert_eq!(decoded.claims.submissions.len(), 1);
+    assert_eq!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::PartialUnknownTotal {
+            chunks_scored: 16,
+        },
+        "a decision with no stored denominator must be attested as unknown, never estimated"
+    );
+    assert_ne!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::Complete {
+            chunks_scored: 16,
+        },
+        "unknown-denominator coverage must not be confusable with a fully scored trace"
     );
 }

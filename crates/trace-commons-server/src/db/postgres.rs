@@ -1823,6 +1823,30 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V47 persists the pre-cap chunk total on gate decisions and repairs
+        // the gate-driver column-grant drift left by V37 (chunk_count and
+        // chunks_capped were added without extending the column-level
+        // grants).
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&47_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V47__trace_gate_decision_total_chunk_count.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&47_i32, &"trace_gate_decision_total_chunk_count"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -4761,7 +4785,10 @@ impl Database for PgBackend {
                     perplexity_micros,
                     novelty_score_micros,
                     perplexity_passed,
-                    novelty_passed
+                    novelty_passed,
+                    chunk_count,
+                    total_chunk_count,
+                    chunks_capped
                  FROM trace_gate_decisions
                  WHERE submission_id = ANY($1)
                  -- decision_id is the final, unique tiebreaker (mirrors
@@ -4784,6 +4811,9 @@ impl Database for PgBackend {
                     perplexity_micros: row.get("perplexity_micros"),
                     novelty_score_micros: row.get("novelty_score_micros"),
                     gate_passed: perplexity_passed && novelty_passed,
+                    chunk_count: row.get("chunk_count"),
+                    total_chunk_count: row.get("total_chunk_count"),
+                    chunks_capped: row.get("chunks_capped"),
                 }
             })
             .collect())
@@ -4815,7 +4845,10 @@ impl Database for PgBackend {
                     d.perplexity_micros,
                     d.novelty_score_micros,
                     d.perplexity_passed,
-                    d.novelty_passed
+                    d.novelty_passed,
+                    d.chunk_count,
+                    d.total_chunk_count,
+                    d.chunks_capped
                  FROM trace_gate_decisions d
                  JOIN trace_submissions s
                    ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
@@ -4841,6 +4874,9 @@ impl Database for PgBackend {
                     perplexity_micros: row.get("perplexity_micros"),
                     novelty_score_micros: row.get("novelty_score_micros"),
                     gate_passed: perplexity_passed && novelty_passed,
+                    chunk_count: row.get("chunk_count"),
+                    total_chunk_count: row.get("total_chunk_count"),
+                    chunks_capped: row.get("chunks_capped"),
                 }
             })
             .collect())
@@ -5113,6 +5149,49 @@ mod tests {
         assert!(
             LEADERBOARD_INPUTS_SQL.contains("cl.credit_account_ref = cp.principal_ref"),
             "legacy credit-account joins must remain supported"
+        );
+    }
+
+    /// V47 persists the pre-cap chunk total and repairs the gate-driver
+    /// column-grant drift. A grant-less column is exactly the bug V37 shipped:
+    /// `chunk_count`/`chunks_capped` were added without extending the
+    /// column-level grants, and the gate-driver role could not read them
+    /// (column privileges live in `pg_attribute.attacl`, so the table looks
+    /// granted while the column is not).
+    #[test]
+    fn v47_grants_every_chunk_coverage_column_to_the_gate_driver() {
+        const V47: &str =
+            include_str!("../../../../migrations/V47__trace_gate_decision_total_chunk_count.sql");
+        assert!(
+            V47.contains("ADD COLUMN IF NOT EXISTS total_chunk_count INT"),
+            "V47 must add the pre-cap chunk total column"
+        );
+        for column in ["total_chunk_count", "chunk_count", "chunks_capped"] {
+            assert!(
+                V47.contains(&format!(
+                    "GRANT SELECT ({column}) ON trace_gate_decisions TO trace_gate_driver;"
+                )),
+                "V47 must grant column-level SELECT on {column} to trace_gate_driver"
+            );
+        }
+        assert!(
+            !V47.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V47 must not weaken forced RLS"
+        );
+    }
+
+    /// `run_migrations` is hand-rolled: a migration file that is not wired in
+    /// with its own `include_str!` never runs. Pin the wiring.
+    #[test]
+    fn v47_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V47__trace_gate_decision_total_chunk_count.sql"),
+            "V47 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&47_i32"),
+            "V47 must record itself in _trace_commons_migrations"
         );
     }
 

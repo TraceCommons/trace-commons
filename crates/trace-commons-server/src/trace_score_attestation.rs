@@ -26,7 +26,16 @@ use crate::trace_upload_claim_issuer::{
     optional_env, validate_eddsa_private_key_pem, validate_eddsa_public_key_pem,
 };
 
-pub const SCORE_ATTESTATION_SCHEMA_VERSION: &str = "trace_commons.score_attestation.v1";
+/// Schema version stamped into every signed attestation.
+///
+/// v2 (breaking): every submission entry now carries `coverage`, stating how
+/// much of the trace the scores were actually computed over. A gate decision
+/// on a trace whose chunk count exceeded the per-trace cap is a judgment on a
+/// prefix, and v1 had no way to say so — the signed document read as if the
+/// whole trace had been scored. Verifiers that pin the version string will
+/// reject v2 until they are updated; that is intended, because the meaning of
+/// the document changed. v1 attestations are no longer issued.
+pub const SCORE_ATTESTATION_SCHEMA_VERSION: &str = "trace_commons.score_attestation.v2";
 
 pub const TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM_ENV: &str =
     "TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM";
@@ -161,6 +170,135 @@ pub struct ScoreAttestationSubmissionEntry {
     pub perplexity_micros: i64,
     pub novelty_score_micros: i64,
     pub gate_passed: bool,
+    /// How much of the trace these scores were computed over (schema v2).
+    pub coverage: ScoreAttestationCoverage,
+}
+
+/// Wire shape of `ScoreAttestationCoverage`. A separate struct (rather than a
+/// serde-tagged enum) so `chunks_total` is emitted for a fully scored trace —
+/// where it equals `chunks_scored` — and is ABSENT, never a sentinel, when the
+/// denominator is genuinely unknown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CoverageWire {
+    coverage_state: String,
+    chunks_scored: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chunks_total: Option<u32>,
+}
+
+const COVERAGE_STATE_COMPLETE: &str = "complete";
+const COVERAGE_STATE_PARTIAL: &str = "partial";
+const COVERAGE_STATE_PARTIAL_UNKNOWN_TOTAL: &str = "partial_unknown_total";
+
+/// How much of a trace a gate decision actually scored.
+///
+/// The gate chunks a large trace and scores at most `chunk_cap` chunks; the
+/// remainder is dropped. A signed statement that a trace passed or failed is
+/// therefore sometimes a statement about a prefix, and a collector deciding
+/// what to pay for needs to know which.
+///
+/// Three states, deliberately distinct:
+///  * `Complete` — every chunk was scored.
+///  * `Partial` — the cap dropped chunks and the pre-cap total is known
+///    (migration V47 persists it).
+///  * `PartialUnknownTotal` — the cap dropped chunks on a decision recorded
+///    before V47. The denominator was never stored and cannot be recovered.
+///    It is reported as unknown and is NEVER estimated (e.g. from envelope
+///    byte size): an estimate inside a signed statement is worse than an
+///    honest unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "CoverageWire", try_from = "CoverageWire")]
+pub enum ScoreAttestationCoverage {
+    Complete {
+        chunks_scored: u32,
+    },
+    Partial {
+        chunks_scored: u32,
+        chunks_total: u32,
+    },
+    PartialUnknownTotal {
+        chunks_scored: u32,
+    },
+}
+
+impl ScoreAttestationCoverage {
+    /// Derive coverage from the three `trace_gate_decisions` columns.
+    ///
+    /// NULL semantics match migration V37's: `chunk_count` NULL reads as one
+    /// chunk and `chunks_capped` NULL reads as false, so pre-chunking rows are
+    /// fully scored single-chunk traces. `total_chunk_count` (V47) is NULL on
+    /// every decision recorded before that migration.
+    ///
+    /// A stored total that is not strictly greater than what was scored cannot
+    /// describe a capped trace, so it is reported as unknown rather than
+    /// signing a coverage claim the data does not support.
+    pub fn from_decision_columns(
+        chunk_count: Option<i32>,
+        total_chunk_count: Option<i32>,
+        chunks_capped: Option<bool>,
+    ) -> Self {
+        let chunks_scored = chunk_count.filter(|c| *c > 0).unwrap_or(1) as u32;
+        if !chunks_capped.unwrap_or(false) {
+            return Self::Complete { chunks_scored };
+        }
+        match total_chunk_count {
+            Some(total) if total > 0 && total as u32 > chunks_scored => Self::Partial {
+                chunks_scored,
+                chunks_total: total as u32,
+            },
+            _ => Self::PartialUnknownTotal { chunks_scored },
+        }
+    }
+}
+
+impl From<ScoreAttestationCoverage> for CoverageWire {
+    fn from(value: ScoreAttestationCoverage) -> Self {
+        match value {
+            ScoreAttestationCoverage::Complete { chunks_scored } => CoverageWire {
+                coverage_state: COVERAGE_STATE_COMPLETE.to_string(),
+                chunks_scored,
+                chunks_total: Some(chunks_scored),
+            },
+            ScoreAttestationCoverage::Partial {
+                chunks_scored,
+                chunks_total,
+            } => CoverageWire {
+                coverage_state: COVERAGE_STATE_PARTIAL.to_string(),
+                chunks_scored,
+                chunks_total: Some(chunks_total),
+            },
+            ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored } => CoverageWire {
+                coverage_state: COVERAGE_STATE_PARTIAL_UNKNOWN_TOTAL.to_string(),
+                chunks_scored,
+                chunks_total: None,
+            },
+        }
+    }
+}
+
+impl TryFrom<CoverageWire> for ScoreAttestationCoverage {
+    type Error = String;
+
+    fn try_from(wire: CoverageWire) -> Result<Self, Self::Error> {
+        match wire.coverage_state.as_str() {
+            COVERAGE_STATE_COMPLETE => Ok(Self::Complete {
+                chunks_scored: wire.chunks_scored,
+            }),
+            COVERAGE_STATE_PARTIAL => {
+                let chunks_total = wire
+                    .chunks_total
+                    .ok_or_else(|| "partial coverage requires chunks_total".to_string())?;
+                Ok(Self::Partial {
+                    chunks_scored: wire.chunks_scored,
+                    chunks_total,
+                })
+            }
+            COVERAGE_STATE_PARTIAL_UNKNOWN_TOTAL => Ok(Self::PartialUnknownTotal {
+                chunks_scored: wire.chunks_scored,
+            }),
+            other => Err(format!("unknown coverage_state: {other}")),
+        }
+    }
 }
 
 /// The signed statement's claims, in the field order the design spec's JSON
@@ -242,6 +380,157 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_is_v2() {
+        assert_eq!(
+            SCORE_ATTESTATION_SCHEMA_VERSION,
+            "trace_commons.score_attestation.v2"
+        );
+    }
+
+    #[test]
+    fn coverage_from_columns_distinguishes_the_three_states() {
+        // Fully scored: not capped, chunk_count known.
+        assert_eq!(
+            ScoreAttestationCoverage::from_decision_columns(Some(4), Some(4), Some(false)),
+            ScoreAttestationCoverage::Complete { chunks_scored: 4 }
+        );
+        // Pre-chunking legacy row: NULL chunk_count reads as one chunk, NULL
+        // chunks_capped reads as false.
+        assert_eq!(
+            ScoreAttestationCoverage::from_decision_columns(None, None, None),
+            ScoreAttestationCoverage::Complete { chunks_scored: 1 }
+        );
+        // Capped with a persisted denominator.
+        assert_eq!(
+            ScoreAttestationCoverage::from_decision_columns(Some(16), Some(61), Some(true)),
+            ScoreAttestationCoverage::Partial {
+                chunks_scored: 16,
+                chunks_total: 61
+            }
+        );
+        // Capped before V47: the denominator was never stored and must NOT be
+        // fabricated or estimated.
+        assert_eq!(
+            ScoreAttestationCoverage::from_decision_columns(Some(16), None, Some(true)),
+            ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored: 16 }
+        );
+        // Inconsistent stored total (not greater than what was scored) is
+        // reported as unknown rather than as a coverage claim we cannot back.
+        assert_eq!(
+            ScoreAttestationCoverage::from_decision_columns(Some(16), Some(16), Some(true)),
+            ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored: 16 }
+        );
+    }
+
+    #[test]
+    fn coverage_states_serialize_distinguishably() {
+        let complete =
+            serde_json::to_value(ScoreAttestationCoverage::Complete { chunks_scored: 3 })
+                .expect("serializes");
+        assert_eq!(complete["coverage_state"], "complete");
+        assert_eq!(complete["chunks_scored"], 3);
+        assert_eq!(complete["chunks_total"], 3);
+
+        let partial = serde_json::to_value(ScoreAttestationCoverage::Partial {
+            chunks_scored: 16,
+            chunks_total: 61,
+        })
+        .expect("serializes");
+        assert_eq!(partial["coverage_state"], "partial");
+        assert_eq!(partial["chunks_scored"], 16);
+        assert_eq!(partial["chunks_total"], 61);
+
+        let unknown = serde_json::to_value(ScoreAttestationCoverage::PartialUnknownTotal {
+            chunks_scored: 16,
+        })
+        .expect("serializes");
+        assert_eq!(unknown["coverage_state"], "partial_unknown_total");
+        assert_eq!(unknown["chunks_scored"], 16);
+        assert!(
+            unknown.get("chunks_total").is_none(),
+            "an unknown denominator must be absent, never a sentinel"
+        );
+    }
+
+    #[test]
+    fn signed_v2_attestation_round_trips_with_coverage() {
+        let keypair = generate_test_keypair();
+        let config = AttestationConfig {
+            signing_private_key_pem: keypair.private_key_pem.clone(),
+            signing_public_key_pem: keypair.public_key_pem.clone(),
+            signing_kid: "attestation-key-1".to_string(),
+            ttl_seconds: 3600,
+        };
+        let state = AttestationSigningState::build(&config).expect("builds");
+        let full_id = Uuid::new_v4();
+        let capped_id = Uuid::new_v4();
+        let legacy_capped_id = Uuid::new_v4();
+        let submissions = vec![
+            ScoreAttestationSubmissionEntry {
+                submission_id: full_id,
+                credit_quality_micros: Some(750_000),
+                perplexity_micros: 1_200_000,
+                novelty_score_micros: 900_000,
+                gate_passed: true,
+                coverage: ScoreAttestationCoverage::Complete { chunks_scored: 3 },
+            },
+            ScoreAttestationSubmissionEntry {
+                submission_id: capped_id,
+                credit_quality_micros: None,
+                perplexity_micros: 1_000_000,
+                novelty_score_micros: 100_000,
+                gate_passed: false,
+                coverage: ScoreAttestationCoverage::Partial {
+                    chunks_scored: 16,
+                    chunks_total: 61,
+                },
+            },
+            ScoreAttestationSubmissionEntry {
+                submission_id: legacy_capped_id,
+                credit_quality_micros: None,
+                perplexity_micros: 1_000_000,
+                novelty_score_micros: 100_000,
+                gate_passed: false,
+                coverage: ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored: 16 },
+            },
+        ];
+        let token =
+            sign_score_attestation(&state, "tenant-a", "principal:abc", submissions, Utc::now())
+                .expect("signs");
+        let decoding_key =
+            DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes()).expect("decoding key");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        let decoded =
+            jsonwebtoken::decode::<ScoreAttestationClaims>(&token, &decoding_key, &validation)
+                .expect("verifies");
+        assert_eq!(
+            decoded.claims.schema_version,
+            "trace_commons.score_attestation.v2"
+        );
+        assert_eq!(
+            decoded.claims.submissions[0].coverage,
+            ScoreAttestationCoverage::Complete { chunks_scored: 3 }
+        );
+        assert_eq!(
+            decoded.claims.submissions[1].coverage,
+            ScoreAttestationCoverage::Partial {
+                chunks_scored: 16,
+                chunks_total: 61
+            }
+        );
+        assert_eq!(
+            decoded.claims.submissions[2].coverage,
+            ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored: 16 }
+        );
+        assert_ne!(
+            decoded.claims.submissions[0].coverage, decoded.claims.submissions[2].coverage,
+            "a fully scored trace must not be confusable with an unknown denominator"
+        );
+    }
+
+    #[test]
     fn from_env_returns_none_when_fully_unconfigured() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
@@ -290,6 +579,7 @@ mod tests {
             perplexity_micros: 1_200_000,
             novelty_score_micros: 900_000,
             gate_passed: true,
+            coverage: ScoreAttestationCoverage::Complete { chunks_scored: 1 },
         }];
         let now = Utc::now();
         let token = sign_score_attestation(&state, "tenant-a", "principal:abc", submissions, now)

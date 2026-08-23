@@ -101,6 +101,10 @@ pub struct GateDecision {
     pub peak_novelty_micros: u64,
     /// Number of chunks scored (>= 1; deterministic services report 1).
     pub chunk_count: u32,
+    /// Total chunks before the per-trace cap dropped any (>= `chunk_count`;
+    /// deterministic services report 1). The denominator behind a capped
+    /// decision's coverage.
+    pub total_chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
     /// Every per-chunk vector-index entry the gate inserted. Empty for
@@ -306,6 +310,7 @@ fn build_deterministic_decision(
         peak_perplexity_micros: perplexity_micros,
         peak_novelty_micros: novelty_score_micros,
         chunk_count: 1,
+        total_chunk_count: 1,
         chunks_capped: false,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
@@ -631,6 +636,7 @@ where
             peak_perplexity_micros: decision.peak_perplexity_micros,
             peak_novelty_micros: decision.peak_novelty_micros,
             chunk_count: decision.chunk_count,
+            total_chunk_count: decision.total_chunk_count,
             chunks_capped: decision.chunks_capped,
             chunk_vector_entries: decision
                 .inserted_chunk_entries

@@ -5735,7 +5735,8 @@ impl TraceCorpusStore for PgBackend {
                         novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
                         vector_entry_id, credit_withheld_reason, \
-                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped \
+                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped, \
+                        total_chunk_count \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
                    AND vector_entry_id IS NOT NULL \
@@ -5753,7 +5754,8 @@ impl TraceCorpusStore for PgBackend {
                         novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
                         vector_entry_id, credit_withheld_reason, \
-                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped \
+                        peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped, \
+                        total_chunk_count \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
                    AND vector_entry_id IS NOT NULL \
@@ -5785,6 +5787,7 @@ impl TraceCorpusStore for PgBackend {
                 peak_perplexity_micros: row.get("peak_perplexity_micros"),
                 peak_novelty_micros: row.get("peak_novelty_micros"),
                 chunk_count: row.get("chunk_count"),
+                total_chunk_count: row.get("total_chunk_count"),
                 chunks_capped: row.get("chunks_capped"),
             })
             .collect();
@@ -5836,8 +5839,9 @@ impl TraceCorpusStore for PgBackend {
                  perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
                  decided_at, vector_entry_id, credit_withheld_reason,
-                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped,
+                 total_chunk_count
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5859,6 +5863,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.peak_novelty_micros,
                 &decision.chunk_count,
                 &decision.chunks_capped,
+                &decision.total_chunk_count,
             ],
         )
         .await
@@ -5882,8 +5887,9 @@ impl TraceCorpusStore for PgBackend {
                  perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
                  decided_at, vector_entry_id, credit_withheld_reason,
-                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+                 peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped,
+                 total_chunk_count
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5905,6 +5911,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.peak_novelty_micros,
                 &decision.chunk_count,
                 &decision.chunks_capped,
+                &decision.total_chunk_count,
             ],
         )
         .await
@@ -6191,7 +6198,8 @@ impl TraceCorpusStore for PgBackend {
                         d.novelty_score_micros, d.nearest_neighbor_hash, d.novelty_passed,
                         d.embedding_evidence_hash, d.attestation_chain_hash, d.decided_at,
                         d.vector_entry_id, d.credit_withheld_reason,
-                        d.peak_perplexity_micros, d.peak_novelty_micros, d.chunk_count, d.chunks_capped
+                        d.peak_perplexity_micros, d.peak_novelty_micros, d.chunk_count, d.chunks_capped,
+                        d.total_chunk_count
                  FROM trace_gate_decisions d
                  JOIN trace_submissions s
                    ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
@@ -6225,6 +6233,7 @@ impl TraceCorpusStore for PgBackend {
             peak_novelty_micros: row.get(16),
             chunk_count: row.get(17),
             chunks_capped: row.get(18),
+            total_chunk_count: row.get(19),
         }))
     }
 }

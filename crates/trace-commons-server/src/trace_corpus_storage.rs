@@ -1808,6 +1808,12 @@ pub struct TraceGateDecisionRow {
     pub peak_novelty_micros: Option<i64>,
     /// Number of chunks scored (migration V37). `None` reads as 1.
     pub chunk_count: Option<i32>,
+    /// Total chunks the trace produced before the per-trace cap dropped any
+    /// (migration V47). `None` means the denominator was never recorded —
+    /// every decision written before V47 — and readers MUST report it as
+    /// unknown rather than estimating one. When `chunks_capped` is false this
+    /// equals `chunk_count`.
+    pub total_chunk_count: Option<i32>,
     /// True when the per-trace chunk cap dropped trailing chunks
     /// (migration V37). `None` reads as false.
     pub chunks_capped: Option<bool>,
@@ -1894,6 +1900,14 @@ pub struct TraceScoreBySubmissionRow {
     pub perplexity_micros: i64,
     pub novelty_score_micros: i64,
     pub gate_passed: bool,
+    /// Chunk-coverage columns, carried so a caller can state how much of the
+    /// trace these scores were computed over. Same NULL semantics as
+    /// `TraceGateDecisionRow`: `chunk_count` NULL reads as 1, `chunks_capped`
+    /// NULL reads as false, and `total_chunk_count` NULL is an UNKNOWN
+    /// denominator (pre-V47 decision) that must never be estimated.
+    pub chunk_count: Option<i32>,
+    pub total_chunk_count: Option<i32>,
+    pub chunks_capped: Option<bool>,
 }
 
 /// Safe, label-only missing-control name returned when a storage backend has
