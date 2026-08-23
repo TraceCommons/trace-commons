@@ -930,9 +930,23 @@ fn cross_repository_pull_requests_name_their_head_branches() {
         contributor.contains("FORK_OWNER=\"$(gh api user --jq .login)\""),
         "the winget job must derive the owner of the token-scoped fork"
     );
+    // The winget pull request is deliberately NOT opened by the workflow:
+    // no token we can issue is permitted to call `createPullRequest`
+    // against microsoft/winget-pkgs, and attempting it failed the whole
+    // release on contributor-v0.4.7 after every artifact had published.
+    // What must survive is the pointer to the branch the job pushed, since
+    // that is now the only route to the manifest reaching winget users.
     assert!(
-        contributor.contains("--head \"${FORK_OWNER}:$BRANCH\""),
-        "the winget PR must explicitly name its fork-owned head branch"
+        !contributor.contains("gh pr create --fill --repo microsoft/winget-pkgs"),
+        "the winget job must not try to open a pull request it has no token for"
+    );
+    assert!(
+        contributor.contains("${FORK_OWNER}:${BRANCH}"),
+        "the winget job must print a compare URL naming the fork-owned branch"
+    );
+    assert!(
+        contributor.contains("GITHUB_STEP_SUMMARY"),
+        "the winget compare URL must reach the run summary, not just the log"
     );
 }
 
