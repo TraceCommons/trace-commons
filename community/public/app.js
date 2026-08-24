@@ -624,18 +624,18 @@ sh install.sh</code></pre>
     </section>
 
     <section class="section-band">
-      <p class="eyebrow">New on Windows</p>
-      <h1>Pause, Settings, and the tray reached parity.</h1>
-      <p class="lede">The Windows app now carries the same controls the macOS and Linux shells do.</p>
+      <p class="eyebrow">New in 0.4.8</p>
+      <h1>Turn down a whole project from the waiting list.</h1>
+      <p class="lede">The waiting list groups what is waiting by project, and each project could already send everything it had. Saying the opposite meant going to Settings and finding the project in a list. Both now sit together, on macOS, Windows, and Linux.</p>
     </section>
 
     <section class="about-grid">
-      <div class="panel"><h2>Pause and resume</h2><p class="lede">Pause capture from the window or the tray for any of the three shared durations, and resume before it lapses.</p></div>
-      <div class="panel"><h2>Settings</h2><p class="lede">Connection, startup, consent, behavior, per-project, public-profile, and audit surfaces are all present.</p></div>
-      <div class="panel"><h2>Tray</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
-      <div class="panel"><h2>Preview and undo</h2><p class="lede">Approve a trace from the native envelope preview, and undo the approval on the same round trip.</p></div>
-      <div class="panel"><h2>Run at login</h2><p class="lede">The MSIX build registers through the Windows startup-task API. The portable build uses the per-user Run key instead.</p></div>
-      <div class="panel"><h2>Projects</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered.</p></div>
+      <div class="panel"><h2>It asks first, and counts</h2><p class="lede">The confirmation says how many waiting traces it is about to clear before it clears them. It sits beside a button that would send those same traces, which is why it asks at all.</p></div>
+      <div class="panel"><h2>It clears what is waiting</h2><p class="lede">Declining a project used to stop future sessions being offered while leaving everything already waiting on screen. Those traces are now cleared, which is what the button always said it did.</p></div>
+      <div class="panel"><h2>Approved traces still go</h2><p class="lede">Anything you had already approved is still sent. A decision you have made about specific traces is not taken back by a preference you set afterwards, so a project with three waiting and one approved loses three and sends one.</p></div>
+      <div class="panel"><h2>You can change your mind</h2><p class="lede">Set the project back to being offered and its sessions come back, including finished ones whose files will never be written to again. That is the ordinary case, and it is the one this release fixed.</p></div>
+      <div class="panel"><h2>Paths are never shown</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered anywhere in the app.</p></div>
+      <div class="panel"><h2>The tray cannot send</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
     </section>
 
     <section class="section-band">
