@@ -54,6 +54,15 @@ where
         self.index.delete(tenant_storage_ref, entry_id)
     }
 
+    /// Make every pending vector-index write durable.
+    ///
+    /// The novelty corpus is the only thing that defines what "duplicate"
+    /// means, so a shutdown path that skips this quietly resets the gate.
+    /// Called on graceful shutdown; a no-op for in-memory indexes.
+    pub fn flush_vector_index(&self) -> anyhow::Result<()> {
+        self.index.flush()
+    }
+
     /// Chunk `plaintext` and score every chunk for perplexity, returning the
     /// chunk plan, the per-chunk scores, and the aggregated perplexity. This is
     /// the perplexity-only prefix shared by [`Self::evaluate`] and

@@ -35,12 +35,26 @@
 //! within the per-tenant mutex's critical section. LRU eviction always
 //! flushes, regardless of the dirty-counter. Drop of `UsearchVectorIndex`
 //! flushes every still-cached tenant.
+//!
+//! None of those three triggers is sufficient on its own. A deployment with
+//! fewer live tenants than `max_open` never evicts, a tenant that takes fewer
+//! than `flush_every` writes between restarts never reaches the inline flush,
+//! and `Drop` does not run when the process is killed by a signal (SIGTERM
+//! terminates without unwinding). The result is a corpus that lives only in
+//! process memory. The design spec's fourth trigger — "or on a periodic timer
+//! (every 60 s)" — closes that hole, so it is implemented here: `try_new`
+//! takes a `flush_interval` and, when it is `Some`, owns a background thread
+//! that calls `flush_all` on that cadence. `None` disables the thread for
+//! short-lived callers (the replay CLI, tests) that flush explicitly.
 
 #![cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use lru::LruCache;
@@ -60,6 +74,28 @@ struct TenantHandle {
     file_path: PathBuf,
 }
 
+/// Shared state the background flusher needs. Held behind an `Arc` so the
+/// flusher thread can keep a `Weak` reference and exit on its own once the
+/// owning `UsearchVectorIndex` is gone.
+struct IndexInner {
+    open_indexes: Mutex<LruCache<String, Arc<Mutex<TenantHandle>>>>,
+}
+
+/// Background periodic flusher. Dropping it stops the thread.
+struct PeriodicFlusher {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for PeriodicFlusher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Production-shape vector index backed by usearch HNSW.
 pub struct UsearchVectorIndex {
     root_dir: PathBuf,
@@ -67,8 +103,11 @@ pub struct UsearchVectorIndex {
     hnsw_m: usize,
     ef_construction: usize,
     ef_search: usize,
-    open_indexes: Mutex<LruCache<String, Arc<Mutex<TenantHandle>>>>,
+    inner: Arc<IndexInner>,
     flush_every: usize,
+    /// `None` when no periodic flush was requested. Declared after `inner` so
+    /// the thread is stopped before the state it flushes goes away.
+    periodic_flusher: Option<PeriodicFlusher>,
 }
 
 impl std::fmt::Debug for UsearchVectorIndex {
@@ -84,23 +123,45 @@ impl std::fmt::Debug for UsearchVectorIndex {
     }
 }
 
+/// Construction knobs for [`UsearchVectorIndex`].
+#[derive(Debug, Clone)]
+pub struct UsearchVectorIndexConfig {
+    /// Embedding dimensionality every tenant index uses.
+    pub dim: usize,
+    /// HNSW out-degree.
+    pub hnsw_m: usize,
+    /// HNSW build-quality knob.
+    pub ef_construction: usize,
+    /// HNSW recall/speed knob.
+    pub ef_search: usize,
+    /// Upper bound on simultaneously-mapped tenant indexes; LRU eviction
+    /// (which always flushes) kicks in past this.
+    pub max_open: usize,
+    /// Writes between inline synchronous flushes, per tenant.
+    pub flush_every: usize,
+    /// Periodic-flush cadence. `Some(d)` spawns a background thread that calls
+    /// [`UsearchVectorIndex::flush_all`] every `d`, bounding how much of the
+    /// corpus a hard process kill can lose. `None` disables the thread; use it
+    /// only for callers whose whole lifetime is one operation and that flush
+    /// explicitly before exiting.
+    pub flush_interval: Option<Duration>,
+}
+
 impl UsearchVectorIndex {
-    /// Construct a new `UsearchVectorIndex`.
-    ///
-    /// `root_dir` is created if missing. `dim` is the embedding dimensionality
-    /// every tenant index will use; `hnsw_m` / `ef_construction` / `ef_search`
-    /// are the usearch HNSW knobs. `max_open` is the upper bound on
-    /// simultaneously-mapped tenant indexes (LRU eviction kicks in past that);
-    /// `flush_every` is the synchronous-flush cadence per tenant.
+    /// Construct a new `UsearchVectorIndex`. `root_dir` is created if missing.
     pub fn try_new(
         root_dir: impl AsRef<Path>,
-        dim: usize,
-        hnsw_m: usize,
-        ef_construction: usize,
-        ef_search: usize,
-        max_open: usize,
-        flush_every: usize,
+        cfg: UsearchVectorIndexConfig,
     ) -> anyhow::Result<Self> {
+        let UsearchVectorIndexConfig {
+            dim,
+            hnsw_m,
+            ef_construction,
+            ef_search,
+            max_open,
+            flush_every,
+            flush_interval,
+        } = cfg;
         anyhow::ensure!(dim > 0, "UsearchVectorIndex dim must be greater than zero");
         anyhow::ensure!(
             max_open > 0,
@@ -117,15 +178,27 @@ impl UsearchVectorIndex {
                 root_dir.display()
             )
         })?;
+        if let Some(interval) = flush_interval {
+            anyhow::ensure!(
+                !interval.is_zero(),
+                "UsearchVectorIndex flush_interval must be greater than zero"
+            );
+        }
         let cap = NonZeroUsize::new(max_open).expect("max_open > 0 just checked");
+        let inner = Arc::new(IndexInner {
+            open_indexes: Mutex::new(LruCache::new(cap)),
+        });
+        let periodic_flusher =
+            flush_interval.map(|interval| spawn_periodic_flusher(&inner, interval));
         Ok(Self {
             root_dir,
             dim,
             hnsw_m,
             ef_construction,
             ef_search,
-            open_indexes: Mutex::new(LruCache::new(cap)),
+            inner,
             flush_every,
+            periodic_flusher,
         })
     }
 
@@ -153,6 +226,7 @@ impl UsearchVectorIndex {
     /// cache. Evicted handles are flushed to disk before being dropped.
     fn handle_for(&self, tenant_storage_ref: &str) -> anyhow::Result<Arc<Mutex<TenantHandle>>> {
         let mut cache = self
+            .inner
             .open_indexes
             .lock()
             .expect("UsearchVectorIndex lru mutex poisoned");
@@ -243,6 +317,7 @@ impl UsearchVectorIndex {
         // back to disk after we've removed the file.
         {
             let mut cache = self
+                .inner
                 .open_indexes
                 .lock()
                 .expect("UsearchVectorIndex lru mutex poisoned");
@@ -308,39 +383,88 @@ impl UsearchVectorIndex {
     /// Flush every still-cached tenant. Best-effort; returns the first error
     /// encountered (but attempts to flush every handle regardless).
     pub fn flush_all(&self) -> anyhow::Result<()> {
-        // Snapshot the cache so we don't hold the LRU mutex across per-tenant
-        // mutex acquisitions (which could deadlock if anyone is trying to
-        // acquire the LRU lock with a tenant lock already held — they're not
-        // today, but the snapshot keeps it future-proof).
-        let snapshot: Vec<Arc<Mutex<TenantHandle>>> = {
-            let cache = self
-                .open_indexes
-                .lock()
-                .expect("UsearchVectorIndex lru mutex poisoned");
-            cache.iter().map(|(_, v)| Arc::clone(v)).collect()
-        };
-        let mut first_err: Option<anyhow::Error> = None;
-        for handle in snapshot {
-            if let Err(e) = flush_handle_arc(&handle) {
-                tracing::warn!(
-                    error_class = "UsearchFlushFailed",
-                    error_hash = %short_error_hash(&e.to_string()),
-                    "UsearchVectorIndex flush_all encountered an error",
-                );
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+        flush_inner(&self.inner)
+    }
+}
+
+/// Flush every still-cached tenant of `inner`. Shared by
+/// [`UsearchVectorIndex::flush_all`] and the background flusher thread, which
+/// only holds the inner state.
+fn flush_inner(inner: &IndexInner) -> anyhow::Result<()> {
+    // Snapshot the cache so we don't hold the LRU mutex across per-tenant
+    // mutex acquisitions (which could deadlock if anyone is trying to
+    // acquire the LRU lock with a tenant lock already held — they're not
+    // today, but the snapshot keeps it future-proof).
+    let snapshot: Vec<Arc<Mutex<TenantHandle>>> = {
+        let cache = inner
+            .open_indexes
+            .lock()
+            .expect("UsearchVectorIndex lru mutex poisoned");
+        cache.iter().map(|(_, v)| Arc::clone(v)).collect()
+    };
+    let mut first_err: Option<anyhow::Error> = None;
+    for handle in snapshot {
+        if let Err(e) = flush_handle_arc(&handle) {
+            tracing::warn!(
+                error_class = "UsearchFlushFailed",
+                error_hash = %short_error_hash(&e.to_string()),
+                "UsearchVectorIndex flush encountered an error",
+            );
+            if first_err.is_none() {
+                first_err = Some(e);
             }
         }
-        match first_err {
-            None => Ok(()),
-            Some(e) => Err(e),
-        }
+    }
+    match first_err {
+        None => Ok(()),
+        Some(e) => Err(e),
+    }
+}
+
+/// Spawn the periodic flusher. The thread holds only a `Weak` to the shared
+/// state, so it never keeps the index alive, and it wakes on a short tick so
+/// shutdown never waits a full interval.
+fn spawn_periodic_flusher(inner: &Arc<IndexInner>, interval: Duration) -> PeriodicFlusher {
+    const TICK: Duration = Duration::from_millis(50);
+    let stop = Arc::new(AtomicBool::new(false));
+    let weak: Weak<IndexInner> = Arc::downgrade(inner);
+    let thread_stop = Arc::clone(&stop);
+    let handle = std::thread::Builder::new()
+        .name("usearch-flush".to_string())
+        .spawn(move || {
+            let mut waited = Duration::ZERO;
+            loop {
+                if thread_stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let tick = TICK.min(interval);
+                std::thread::sleep(tick);
+                waited += tick;
+                if waited < interval {
+                    continue;
+                }
+                waited = Duration::ZERO;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                // Errors are already logged hash-only inside `flush_inner`; a
+                // failed periodic flush must never kill the thread, because
+                // the next tick may well succeed (transient ENOSPC, etc).
+                let _ = flush_inner(&inner);
+            }
+        })
+        .expect("failed to spawn usearch periodic flush thread");
+    PeriodicFlusher {
+        stop,
+        handle: Some(handle),
     }
 }
 
 impl Drop for UsearchVectorIndex {
     fn drop(&mut self) {
+        // Stop the periodic flusher before the final flush so the two can't
+        // race on the same tenant file.
+        self.periodic_flusher = None;
         if let Err(e) = self.flush_all() {
             tracing::warn!(
                 error_class = "UsearchFlushFailedOnDrop",
@@ -502,6 +626,10 @@ impl VectorIndex for UsearchVectorIndex {
         }
         Ok(hit)
     }
+
+    fn flush(&self) -> anyhow::Result<()> {
+        self.flush_all()
+    }
 }
 
 #[cfg(test)]
@@ -521,8 +649,42 @@ mod tests {
         v
     }
 
+    fn test_config(dim: usize) -> UsearchVectorIndexConfig {
+        UsearchVectorIndexConfig {
+            dim,
+            hnsw_m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+            max_open: 32,
+            flush_every: 32,
+            flush_interval: None,
+        }
+    }
+
     fn build_index(root: &Path, dim: usize) -> UsearchVectorIndex {
-        UsearchVectorIndex::try_new(root, dim, 16, 200, 50, 32, 32).expect("index ctor")
+        UsearchVectorIndex::try_new(root, test_config(dim)).expect("index ctor")
+    }
+
+    fn build_index_with_periodic_flush(
+        root: &Path,
+        dim: usize,
+        interval: Duration,
+    ) -> UsearchVectorIndex {
+        UsearchVectorIndex::try_new(
+            root,
+            UsearchVectorIndexConfig {
+                flush_interval: Some(interval),
+                ..test_config(dim)
+            },
+        )
+        .expect("index ctor")
+    }
+
+    /// Abandon `idx` the way a SIGTERM does: the process dies without
+    /// unwinding, so `Drop` — and therefore the drop-time `flush_all` — never
+    /// runs. Anything still only in memory at this point is lost.
+    fn abandon_without_drop(idx: UsearchVectorIndex) {
+        std::mem::forget(idx);
     }
 
     #[test]
@@ -627,6 +789,92 @@ mod tests {
         );
     }
 
+    /// Pins what the inline `flush_every` trigger does and does NOT cover:
+    /// 40 writes with `flush_every = 32` leave 32 entries on disk and the
+    /// remaining 8 only in memory. Losing those 8 to a signal is why the
+    /// periodic flush below exists.
+    #[test]
+    fn inline_flush_every_persists_only_completed_batches() {
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        let idx = build_index(tmp.path(), dim);
+        for i in 0..40u32 {
+            let v = norm(vec![1.0 + i as f32, 0.5, 0.25, 0.125]);
+            idx.insert(Uuid::new_v4(), "tenant", &v).unwrap();
+        }
+        abandon_without_drop(idx);
+        let idx2 = build_index(tmp.path(), dim);
+        assert_eq!(idx2.tenant_entry_count("tenant").unwrap(), 32);
+    }
+
+    /// The regression this module's periodic flush exists for: a tenant that
+    /// takes fewer than `flush_every` writes and is never evicted (fewer live
+    /// tenants than `max_open`) has NO durable copy until the timer fires.
+    /// With the timer off, a signal-killed process loses the whole corpus.
+    #[test]
+    fn writes_below_flush_every_are_lost_without_a_periodic_flush() {
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        let idx = build_index(tmp.path(), dim);
+        for i in 0..5u32 {
+            let v = norm(vec![1.0 + i as f32, 0.5, 0.25, 0.125]);
+            idx.insert(Uuid::new_v4(), "tenant", &v).unwrap();
+        }
+        abandon_without_drop(idx);
+        let idx2 = build_index(tmp.path(), dim);
+        assert_eq!(idx2.tenant_entry_count("tenant").unwrap(), 0);
+    }
+
+    #[test]
+    fn periodic_flush_persists_writes_below_flush_every_across_a_hard_kill() {
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        let idx = build_index_with_periodic_flush(tmp.path(), dim, Duration::from_millis(100));
+        for i in 0..5u32 {
+            let v = norm(vec![1.0 + i as f32, 0.5, 0.25, 0.125]);
+            idx.insert(Uuid::new_v4(), "tenant", &v).unwrap();
+        }
+        // Give the flusher thread several intervals to run.
+        std::thread::sleep(Duration::from_millis(600));
+        abandon_without_drop(idx);
+        let idx2 = build_index(tmp.path(), dim);
+        assert_eq!(idx2.tenant_entry_count("tenant").unwrap(), 5);
+    }
+
+    /// The `VectorIndex::flush` seam is what a graceful shutdown calls, so it
+    /// must make pending writes durable without relying on `Drop`.
+    #[test]
+    fn trait_flush_persists_pending_writes_without_drop() {
+        let tmp = tempdir().unwrap();
+        let dim = 4;
+        let idx = build_index(tmp.path(), dim);
+        for i in 0..5u32 {
+            let v = norm(vec![1.0 + i as f32, 0.5, 0.25, 0.125]);
+            idx.insert(Uuid::new_v4(), "tenant", &v).unwrap();
+        }
+        VectorIndex::flush(&idx).unwrap();
+        abandon_without_drop(idx);
+        let idx2 = build_index(tmp.path(), dim);
+        assert_eq!(idx2.tenant_entry_count("tenant").unwrap(), 5);
+    }
+
+    #[test]
+    fn zero_flush_interval_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let err = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                flush_interval: Some(Duration::ZERO),
+                ..test_config(4)
+            },
+        )
+        .expect_err("zero interval must be refused");
+        assert!(
+            err.to_string().contains("flush_interval"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn persistence_across_instance_drop() {
         let tmp = tempdir().unwrap();
@@ -667,7 +915,14 @@ mod tests {
         // flushed to disk, and re-querying it must succeed (reload path).
         let tmp = tempdir().unwrap();
         let dim = 4;
-        let idx = UsearchVectorIndex::try_new(tmp.path(), dim, 16, 200, 50, 2, 32).unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 2,
+                ..test_config(dim)
+            },
+        )
+        .unwrap();
         let id_a = Uuid::new_v4();
         let id_b = Uuid::new_v4();
         let id_c = Uuid::new_v4();
@@ -758,7 +1013,15 @@ mod tests {
         // max_open = 1 so EVERY new tenant evicts the previous one.
         // flush_every = 1024 so the inline flush isn't triggered by a single
         // insert — only the eviction-path flush is.
-        let idx = UsearchVectorIndex::try_new(tmp.path(), dim, 16, 200, 50, 1, 1024).unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 1,
+                flush_every: 1024,
+                ..test_config(dim)
+            },
+        )
+        .unwrap();
         let id_a = Uuid::new_v4();
         let v_a = norm(vec![1.0, 0.0, 0.0, 0.0]);
         idx.insert(id_a, "tenant_a", &v_a).unwrap();

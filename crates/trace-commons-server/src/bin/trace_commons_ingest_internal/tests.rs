@@ -69671,7 +69671,9 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
 fn dedup_index_query_finds_near_vector() {
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::vector_index_usearch::{
+        UsearchVectorIndex, UsearchVectorIndexConfig,
+    };
 
     fn norm(mut v: Vec<f32>) -> Vec<f32> {
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -69685,8 +69687,19 @@ fn dedup_index_query_finds_near_vector() {
 
     let index_temp = tempfile::tempdir().expect("index temp dir");
     let dim = 8;
-    let idx = UsearchVectorIndex::try_new(index_temp.path(), dim, 16, 200, 50, 2, 32)
-        .expect("dedup index ctor");
+    let idx = UsearchVectorIndex::try_new(
+        index_temp.path(),
+        UsearchVectorIndexConfig {
+            dim,
+            hnsw_m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+            max_open: 2,
+            flush_every: 32,
+            flush_interval: None,
+        },
+    )
+    .expect("dedup index ctor");
 
     let state_temp = tempfile::tempdir().expect("state temp dir");
     let mut state = test_state(state_temp.path().to_path_buf());

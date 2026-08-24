@@ -190,7 +190,13 @@ the codebase's hash-only operational surface.
   no file exists, construct a new empty index.
 - Flush: after every N inserts/deletes (default 32) or on a periodic
   timer (every 60 s). The flush is a synchronous `index.save_to_file`
-  call inside the per-tenant mutex.
+  call inside the per-tenant mutex. **Both legs are load-bearing.** The
+  count leg alone leaves a deployment with few tenants and modest
+  traffic — where neither `flush_every` nor LRU eviction is reached
+  between restarts — with a corpus that exists only in process memory.
+  Drop-time flushing does not rescue it: SIGTERM terminates without
+  unwinding, so `Drop` never runs. `trace-commons-ingest` therefore also
+  handles SIGTERM and flushes explicitly before exiting.
 - Close: on LRU eviction, flush + drop. No background thread; the
   evicting call pays the flush cost.
 - Recovery: if `load_from_file` fails (corrupted file), the
@@ -225,6 +231,7 @@ themselves never log.
 | `TRACE_COMMONS_VECTOR_INDEX_DIM` | `1024` | Must match A3's embedder output dim |
 | `TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN` | `32` | LRU bound for hot tenant indexes |
 | `TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY` | `32` | Inserts/deletes between disk flushes |
+| `TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS` | `60` | Periodic-flush cadence (the timer leg of the flush strategy above); `0` disables it |
 | `TRACE_COMMONS_VECTOR_INDEX_HNSW_M` | `16` | HNSW out-degree |
 | `TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION` | `200` | HNSW build-quality knob |
 | `TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH` | `50` | HNSW recall/speed knob |
