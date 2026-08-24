@@ -4,7 +4,7 @@ import XCTest
 final class ProjectIgnoreCopyTests: XCTestCase {
     func testSingularReadsAsOneTrace() {
         let body = ProjectIgnoreCopy.confirmationBody(project: "api", pendingCount: 1)
-        XCTAssertTrue(body.contains("1 waiting trace."), body)
+        XCTAssertTrue(body.contains("1 waiting trace"), body)
         XCTAssertFalse(body.contains("traces"), body)
     }
 

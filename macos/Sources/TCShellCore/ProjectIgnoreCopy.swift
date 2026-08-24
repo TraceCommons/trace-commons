@@ -25,7 +25,7 @@ public enum ProjectIgnoreCopy {
             return "Stops this project being offered. \(tail)"
         }
         let noun = pendingCount == 1 ? "trace" : "traces"
-        return "This removes \(pendingCount) waiting \(noun). It also stops this project "
+        return "This removes \(pendingCount) waiting \(noun) and stops this project "
             + "being offered. \(tail)"
     }
 }
