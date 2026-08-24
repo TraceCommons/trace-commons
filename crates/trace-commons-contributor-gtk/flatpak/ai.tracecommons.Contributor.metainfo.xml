@@ -62,6 +62,13 @@
   </provides>
 
   <releases>
+    <release version="0.4.8" date="2026-08-24">
+      <description>
+        <p>You can now turn down a whole project from the waiting list itself. Each project already offered a way to send everything it had waiting; there was no way to say the opposite without going to Settings and finding the project in a list. The waiting list now offers both, and asks you to confirm, telling you how many traces it is about to clear.</p>
+        <p>Turning a project down also does what it says. Until now it stopped future sessions being offered but left everything already waiting sitting in the list, so the traces you had just declined stayed on screen. They are now cleared, and anything you had already approved is still sent -- a decision you have already made is not taken back by a preference you set afterwards.</p>
+        <p>The choice remains reversible. Setting the project back to being offered brings its waiting sessions back, including finished ones whose files will never change again.</p>
+      </description>
+    </release>
     <release version="0.4.7" date="2026-08-23">
       <description>
         <p>Declining a trace now sticks. Choosing "Not this one" used to set aside only the exact conversation as it stood at that moment, so the moment you typed another message the same conversation came back to the waiting list, and it kept coming back for as long as you kept working in it. A declined conversation is now left alone for good, and in projects set to send automatically it is no longer picked up on your behalf after you have said no.</p>
