@@ -348,7 +348,7 @@ import XCTest
 final class ProjectIgnoreCopyTests: XCTestCase {
     func testSingularReadsAsOneTrace() {
         let body = ProjectIgnoreCopy.confirmationBody(project: "api", pendingCount: 1)
-        XCTAssertTrue(body.contains("1 waiting trace."), body)
+        XCTAssertTrue(body.contains("1 waiting trace"), body)
         XCTAssertFalse(body.contains("traces"), body)
     }
 
@@ -550,7 +550,7 @@ Add to `mod tests` in `copy.rs`:
 ```rust
 #[test]
 fn the_ignore_confirmation_counts_in_words_a_person_can_read() {
-    assert!(ignore_project_body(1).contains("1 waiting trace."));
+    assert!(ignore_project_body(1).contains("1 waiting trace"));
     assert!(!ignore_project_body(1).contains("traces"));
     assert!(ignore_project_body(12).contains("12 waiting traces"));
 }
@@ -732,7 +732,7 @@ using Xunit;
 public class ProjectIgnoreCopyTests
 {
     [Theory]
-    [InlineData(1, "1 waiting trace.")]
+    [InlineData(1, "1 waiting trace")]
     [InlineData(12, "12 waiting traces")]
     public void CountsInWordsAPersonCanRead(int n, string expected)
     {
