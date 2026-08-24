@@ -141,6 +141,30 @@ pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this p
      Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
      then.";
 
+/// Stops a project being offered again and clears whatever it has waiting.
+/// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry
+/// its primary-action styling -- the two buttons take a contributor's queue
+/// in opposite directions.
+pub const IGNORE_PROJECT: &str = "Ignore project";
+pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
+     Anything already submitted is unaffected, and you can undo this in Settings.";
+
+pub fn ignore_project_title(project: &str) -> String {
+    format!("Ignore {project}?")
+}
+
+/// The removal clause is dropped when nothing is waiting: a group can render
+/// with every card approved or uploading, and "removes 0 waiting traces"
+/// would be both wrong and alarming.
+pub fn ignore_project_body(pending: usize) -> String {
+    let tail = "Nothing already submitted is affected. You can undo this in Settings.";
+    if pending == 0 {
+        return format!("Stops this project being offered. {tail}");
+    }
+    let noun = if pending == 1 { "trace" } else { "traces" };
+    format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
+}
+
 /// A project group's header line: the label and how many are waiting under
 /// it. Deliberately plain -- the manifest strip already carries the figures
 /// a contributor weighs; this is only what tells the sessions below apart
@@ -2253,5 +2277,37 @@ mod tests {
             scrub_detector_label("some_new_vendor_key"),
             "some new vendor key"
         );
+    }
+
+    #[test]
+    fn the_ignore_confirmation_counts_in_words_a_person_can_read() {
+        assert!(ignore_project_body(1).contains("1 waiting trace"));
+        assert!(!ignore_project_body(1).contains("traces"));
+        assert!(ignore_project_body(12).contains("12 waiting traces"));
+    }
+
+    #[test]
+    fn the_ignore_confirmation_says_nothing_about_zero() {
+        let body = ignore_project_body(0);
+        assert!(!body.contains('0'), "{body}");
+        assert!(!body.to_lowercase().contains("removes"), "{body}");
+        assert!(body.contains("Stops this project being offered."), "{body}");
+    }
+
+    #[test]
+    fn the_ignore_confirmation_always_names_the_way_back() {
+        for n in [0usize, 1, 7] {
+            let body = ignore_project_body(n);
+            assert!(body.contains("undo this in Settings"), "n={n}: {body}");
+            assert!(
+                body.contains("Nothing already submitted is affected."),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ignore_title_names_the_project() {
+        assert_eq!(ignore_project_title("api"), "Ignore api?");
     }
 }
