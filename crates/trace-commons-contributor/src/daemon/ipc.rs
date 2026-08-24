@@ -858,22 +858,32 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // rather than leaving the queue to lag until the next poll,
             // which would leave two same-basename projects briefly
             // indistinguishable in the one place uploads are approved from.
-            let relabelled = {
+            // Ignoring a project clears what it already has waiting. Doing
+            // it here rather than in the UI means Settings, onboarding and
+            // the CLI all get it: before this, ignoring from Settings left
+            // the contributor staring at the cards they had just declined.
+            //
+            // Pending only. See `refuse_pending_for_project`.
+            let (relabelled, purged) = {
                 let mut queue = shared.queue.lock().expect("queue lock");
-                if relabel_queue_entries(&policy, &mut queue) {
+                let purged = if mode == ProjectMode::Ignore {
+                    queue.refuse_pending_for_project(&key)
+                } else {
+                    0
+                };
+                let relabelled = relabel_queue_entries(&policy, &mut queue);
+                if relabelled || purged > 0 {
                     if let Err(_e) = queue.save(&shared.store) {
                         return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
                     }
-                    true
-                } else {
-                    false
                 }
+                (relabelled, purged)
             };
             drop(policy);
-            if relabelled {
+            if relabelled || purged > 0 {
                 shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
-            Response::ok(req.id, serde_json::json!({ "ok": true }))
+            Response::ok(req.id, serde_json::json!({ "ok": true, "purged": purged }))
         }
         "dismiss" => {
             let id = match parse_entry_id(&req.params) {

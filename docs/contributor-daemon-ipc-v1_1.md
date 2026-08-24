@@ -388,7 +388,7 @@ history record, audit entry, notification text, or IPC response.
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `refresh_history` | — | `requested: true` | |
@@ -689,6 +689,25 @@ and `approve` still builds and pins one.
 path, size, and mtime, the entry's whole-group size, and a fingerprint of
 the local configuration. Any of those changing rebuilds. The cache lives in
 the daemon process and does not survive a daemon restart.
+
+### `set_project_mode` and the ignore purge
+
+Setting a project to `ignore` also clears whatever it has waiting: every
+`pending` entry for that project moves to `refused` with
+`reason_label = "project-ignored"`. The response carries `purged`, the
+number of entries that moved.
+
+`approved` and `uploading` entries are deliberately untouched. An approval
+is a decision already made about specific bytes under specific consent
+scopes, and a project-level preference set afterwards does not retract it --
+so a project with three waiting and one approved loses three and still
+uploads one. A client MUST say so rather than let a contributor discover it.
+
+`"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
+permanent and suppresses that conversation at its path forever; this is a
+verdict on whatever was queued at the moment the mode changed, so setting
+the project back to `notify_only` or `auto_upload` lets those sessions be
+offered again.
 
 ### `preview_body`
 
