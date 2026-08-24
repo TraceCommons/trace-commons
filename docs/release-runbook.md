@@ -80,15 +80,80 @@ never publishes) that:
 1. Downloads the platform artifacts and creates a GitHub Release with
    `gh release create`, tagged from the pushed tag.
 2. Opens a pull request against `TraceCommons/homebrew-tap` bumping the
-   cask's (or formula's) `version` and `sha256` — never pushes directly.
-   A direct push would auto-publish a bad release to everyone who has
-   already tapped us, with no gate between a failed verification and
-   someone's `brew upgrade`.
+   cask's (or formula's) `version` and `sha256`, then **merges that pull
+   request automatically**. The pull request is still opened rather than
+   pushed directly, because it is the audit trail and the place the tap's
+   own checks run — but nothing waits on a human.
+
+**Nothing here is a manual step any more, and it must not become one
+again.** Between 0.4.1 and 0.4.7, eleven bump pull requests sat unmerged
+because this document stopped at "opens a pull request" and never told
+anyone to merge them. The tap stayed on cask 0.4.0 and formula 0.3.0
+while releases kept shipping, so every Homebrew user silently stopped
+receiving them.
+
+The verification gate people assumed the manual merge provided was never
+the merge. It is upstream, on the job: in `release-apps.yml` the cask step
+carries `if: needs.macos.result == 'success'`, and the macOS job builds,
+signs, notarizes and staples the DMG before writing the checksum the step
+reads; in `release-contributor.yml` the publish job `needs: build`. A
+failed verification never reaches the bump step at all.
+
+**The merge is still a manual step, deliberately.** Automating it is
+wanted, but `TraceCommons/homebrew-tap` currently has `allow_auto_merge`
+disabled, no branch protection on its default branch, and no CI workflows
+at all. `gh pr merge --auto` would fail there outright, and falling back to
+a plain `--squash` would be an immediate ungated merge into what
+`brew upgrade` serves — the direct push this step exists to avoid, wearing
+a pull request as a disguise.
+
+Automating it needs something to gate on first: a cask/formula audit
+workflow on the tap, auto-merge enabled on that repository, and that check
+made required. Then, and only then, `gh pr merge --squash --auto` with no
+fallbacks.
+
+So: **after every release, merge the bump pull request.** The publish step
+prints a `::notice::` and writes the pull request URL to the run summary
+under "ready to merge". Homebrew serves the previous version until you do.
+
+The weekly `tap-bump-staleness` workflow is the backstop: it fails if any
+`bump-*` pull request on the tap has been open for more than a day. It is
+deliberately not part of CI or of a release, so it can never fail a code
+pull request or a release over a previous release's leftovers.
+
+### Re-running a release tag
+
+A deleted-and-re-cut tag re-runs these steps against branches that already
+exist (`bump-cask-$V`, `bump-formula-$V`, `TraceCommons.Contributor-$V`).
+That used to fail the publish job with `! [rejected] (fetch first)` after
+every artifact had published. The steps now force-push.
+
+Force-pushing is only safe because of how the branch is built: each step
+clones the tap (or the winget fork) with `--depth 1 --single-branch`,
+which fetches the *default* branch and nothing else, and never fetches,
+checks out or reads the bump branch. The branch is reconstructed from the
+default branch plus a checksum computed from this run's own artifact, so
+there is no path by which a previous attempt's bytes reach the push. This
+matters concretely: on the `app-v0.4.7` re-run the DMG was rebuilt, and
+the branch left behind by the first run named a hash that no longer
+matched the published asset. A force-push that carried that hash forward
+would have shipped a broken `brew install --cask trace-commons` to every
+macOS user.
+
+Each step also asserts, after substitution and before pushing, that the
+hash it computed is actually present in the file it is about to commit,
+and exits 0 without pushing if the tap already carries that exact content.
+Opening the pull request tolerates one already existing for the branch:
+the step looks for an open pull request on that head first and reuses it,
+since the force-push has already updated its contents.
 
 This second step authenticates with the `HOMEBREW_TAP_TOKEN` repository
 secret — a fine-grained PAT scoped to `TraceCommons/homebrew-tap` with
 `contents` and `pull-request` write. `github.token` cannot reach another
-repository, which is why this secret exists. It must be rotated like any
+repository, which is why this secret exists. Merging a pull request (and
+enabling auto-merge on one) needs `pull-request` write and nothing more,
+so the same secret covers the merge; the `tap-bump-staleness` workflow
+reuses it read-only. It must be rotated like any
 other credential in this pipeline; rotating it does not require touching
 the workflow files, only the secret's value.
 
