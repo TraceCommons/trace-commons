@@ -951,6 +951,24 @@ mod tests {
                 .unwrap();
         }
 
+        /// Like `set_mode`, but through the real IPC arm rather than
+        /// setting the policy directly. `set_mode` above only exercises the
+        /// policy layer -- the queue purge on `Ignore` lives in
+        /// `ipc::handle_request`'s `set_project_mode` arm, so a test that
+        /// wants to prove the purge happens has to go in this door.
+        fn set_mode_via_ipc(&self, project: &str, mode: ProjectMode) {
+            let req = super::super::ipc::Request {
+                id: 1,
+                method: "set_project_mode".to_string(),
+                params: serde_json::json!({
+                    "project_key": format!("/Users/testuser/code/{project}"),
+                    "mode": mode,
+                }),
+            };
+            let resp = super::super::ipc::handle_request(&self.shared, &req);
+            assert!(resp.error.is_none(), "{:?}", resp.error);
+        }
+
         fn queue_len(&self) -> usize {
             self.shared.queue.lock().unwrap().all().len()
         }
@@ -1711,6 +1729,70 @@ mod tests {
                 .any(|e| matches!(e.state, QueueState::Pending | QueueState::Approved)),
             "{:?}",
             queue.all()
+        );
+    }
+
+    #[tokio::test]
+    async fn ignoring_a_project_clears_what_is_already_waiting() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 1);
+
+        f.set_mode_via_ipc("proj", ProjectMode::Ignore);
+
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(queue.pending().is_empty(), "{:?}", queue.all());
+        assert_eq!(
+            queue.all()[0].reason_label.as_deref(),
+            Some(crate::daemon::queue::REASON_PROJECT_IGNORED)
+        );
+    }
+
+    #[tokio::test]
+    async fn un_ignoring_a_project_lets_its_sessions_be_offered_again() {
+        // The confirmation copy promises this is undoable in Settings. Without
+        // this test that promise is unverified.
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.set_mode_via_ipc("proj", ProjectMode::Ignore);
+        assert!(f.shared.queue.lock().unwrap().pending().is_empty());
+
+        f.set_mode_via_ipc("proj", ProjectMode::NotifyOnly);
+        f.append_to_session(&path, "proj", "22222222-2222-2222-2222-222222222222");
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        assert!(
+            !f.shared.queue.lock().unwrap().pending().is_empty(),
+            "un-ignoring must let the watcher offer the project again"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_ignoring_a_project_re_offers_a_session_that_never_changes() {
+        // The ordinary case, and the one the confirmation copy is actually
+        // about: the sessions cleared by an ignore are *finished*. The work
+        // is done, the files will never be written to again. If undo only
+        // works for a session that happens to grow afterwards, "You can undo
+        // this in Settings" is false for every trace it was written for.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "33333333-3333-3333-3333-333333333333", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 1);
+
+        f.set_mode_via_ipc("proj", ProjectMode::Ignore);
+        assert!(f.shared.queue.lock().unwrap().pending().is_empty());
+
+        f.set_mode_via_ipc("proj", ProjectMode::NotifyOnly);
+        // Deliberately no `append_to_session`: the file is untouched from
+        // here on, exactly as a finished session would be.
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        assert!(
+            !f.shared.queue.lock().unwrap().pending().is_empty(),
+            "un-ignoring must re-offer a session that never changes again: {:?}",
+            f.shared.queue.lock().unwrap().all()
         );
     }
 

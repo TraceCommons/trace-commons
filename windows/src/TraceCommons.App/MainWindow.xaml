@@ -606,7 +606,24 @@
                                     QueueGroupViewModel.ShowSubmitAll, the
                                     "Submit all" action. A single-entry group
                                     offers no second way to do what its one
-                                    row's own Submit already does.
+                                    row's own Submit already does. "Ignore
+                                    project", see QueueGroupViewModel.
+                                    ShowIgnoreProject, renders at every group
+                                    size: no row-level control declines the
+                                    whole project the way this one does.
+
+                                    Ignore sits to the RIGHT of "Submit all",
+                                    matching macOS and GTK. The dialog on it
+                                    is justified by the neighbour: two
+                                    adjacent controls acting on one set of
+                                    traces in opposite directions, and which
+                                    side each is on is part of that muscle
+                                    memory, so it is not a per-shell choice.
+
+                                    Both labels and the tooltip are bound, not
+                                    typed here: they live in ProjectIgnoreCopy,
+                                    which is where three shells are kept from
+                                    drifting.
                                 -->
                                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                                     <StackPanel Grid.Column="0"
@@ -621,13 +638,22 @@
                                                    Foreground="{ThemeResource TcInkSecondaryBrush}"
                                                    VerticalAlignment="Center" />
                                     </StackPanel>
-                                    <Button Grid.Column="1"
-                                            Style="{StaticResource TcPrimaryButtonStyle}"
-                                            Content="{x:Bind SubmitAllText}"
-                                            Visibility="{x:Bind ShowSubmitAll}"
-                                            Tag="{x:Bind}"
-                                            ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
-                                            Click="OnSubmitAll" />
+                                    <StackPanel Grid.Column="1"
+                                                Orientation="Horizontal"
+                                                Spacing="8">
+                                        <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                                Content="{x:Bind SubmitAllText}"
+                                                Visibility="{x:Bind ShowSubmitAll}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
+                                                Click="OnSubmitAll" />
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind IgnoreProjectText}"
+                                                Visibility="{x:Bind ShowIgnoreProject}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
+                                                Click="OnIgnoreProject" />
+                                    </StackPanel>
                                 </Grid>
 
                                 <!--

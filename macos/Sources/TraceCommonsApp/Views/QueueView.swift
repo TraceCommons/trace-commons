@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 
 /// The queue: one per session waiting for a decision.
 ///
@@ -73,6 +74,11 @@ struct QueueContent: View {
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
             }
+            if let notice = model.lastActionNotice {
+                Text(notice)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
 
             if model.awaitingDecision.isEmpty {
                 CenteredNotice(
@@ -126,6 +132,13 @@ struct QueueContent: View {
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
+                        onIgnoreProject: {
+                            model.ignoreProject(
+                                id: group.id,
+                                label: group.label,
+                                promised: group.count
+                            )
+                        },
                         onAppear: { entry in
                             model.requestPreview(for: entry)
                             visibleRowIDs.insert(entry.entryID)
@@ -164,6 +177,7 @@ private struct ProjectQueueGroup: View {
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
+    let onIgnoreProject: () -> Void
     /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
     /// which is where the daemon-side scheduler dedupe lives. See `rowList`
     /// for why this is what drives loading at all now.
@@ -173,6 +187,8 @@ private struct ProjectQueueGroup: View {
     /// away keeps its place in the daemon's queue until it is dismissed or
     /// leaves the pending list for good (`AppModel.applyPendingUpdate`).
     let onDisappear: (QueueEntry) -> Void
+
+    @State private var confirmingIgnore = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -190,6 +206,29 @@ private struct ProjectQueueGroup: View {
                         included, not held back.
                         """)
                 }
+                // Shown at every count, unlike `Submit all`, which hides at
+                // one because the row's own Submit already does the same
+                // thing. This has no row-level equivalent: it is a statement
+                // about the project, not about a trace.
+                //
+                // Never `.tcPrimaryAction()`. It sits beside a control that
+                // uploads the very traces this removes, and two adjacent
+                // actions that do opposite things must not look alike.
+                Button(ProjectIgnoreCopy.buttonLabel) { confirmingIgnore = true }
+                    .help(ProjectIgnoreCopy.tooltip)
+            }
+            .confirmationDialog(
+                ProjectIgnoreCopy.confirmationTitle(project: group.label),
+                isPresented: $confirmingIgnore,
+                titleVisibility: .visible
+            ) {
+                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive, action: onIgnoreProject)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(ProjectIgnoreCopy.confirmationBody(
+                    project: group.label,
+                    pendingCount: entries.count
+                ))
             }
             rowList
         }

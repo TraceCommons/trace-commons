@@ -92,6 +92,12 @@ final class AppModel: ObservableObject {
     @Published var undo: Undo?
     @Published var lastActionError: String?
 
+    /// A one-line statement about something that DID happen, as opposed to
+    /// `lastActionError`, which is about something that did not. Kept apart
+    /// so the two never have to be told from each other by their wording:
+    /// the Waiting screen renders this one in its own voice.
+    @Published var lastActionNotice: String?
+
     private var daemon: TCDaemon?
     private var client: DaemonClient?
     private var subscription: TCSubscription?
@@ -411,6 +417,34 @@ final class AppModel: ObservableObject {
             self.refreshProjects()
             // Arming or disarming a project is one of the changes the daemon
             // records; see `refreshAudit`.
+            self.refreshAudit()
+        }
+    }
+
+    /// Decline a whole project from the Waiting screen.
+    ///
+    /// The daemon clears what that project has waiting as part of setting the
+    /// mode, so this refreshes the queue as well as the project list -- the
+    /// cards are expected to disappear in the same round trip.
+    ///
+    /// `promised` is the count the confirmation named, which had to be read
+    /// off this shell's own queue before the call. The daemon's `purged` is
+    /// the authority: the queue is live, and a poll or an approval between
+    /// the render and the click moves it. When the two disagree the
+    /// contributor is told rather than left to notice -- see
+    /// `ProjectIgnoreCopy.reconciliation`.
+    func ignoreProject(id projectID: String, label: String, promised: Int) {
+        perform(
+            "set_project_mode",
+            work: { try $0.setProjectMode(projectID: projectID, mode: .ignore) }
+        ) { purged in
+            self.lastActionNotice = ProjectIgnoreCopy.reconciliation(
+                project: label,
+                promised: promised,
+                purged: purged
+            )
+            self.refreshQueue()
+            self.refreshProjects()
             self.refreshAudit()
         }
     }

@@ -205,22 +205,31 @@ public sealed partial class MainWindow : Window
         _quitDialogOpen = true;
         try
         {
-            result = await dialog.ShowAsync();
+            // WinUI allows one ContentDialog per XamlRoot, and this window now
+            // has three other callers into it -- WithdrawDialog, from
+            // History; GoPublicDialog, from Settings; and, since this task,
+            // the "Ignore project" confirmation from this same window's own
+            // queue header. Going through DialogGuard is what actually
+            // prevents the crash: it serializes every ShowAsync in the app
+            // behind one semaphore, so a dialog opened while this one (or any
+            // other) is already up now WAITS its turn instead of throwing.
+            // _quitDialogOpen above is a narrower, same-class guard kept for
+            // its own reason -- see below -- not the thing preventing the
+            // cross-class race.
+            //
+            // DialogGuard swallows a ShowAsync failure itself and answers
+            // None rather than throwing, so the catch below is defense in
+            // depth for anything else in this block (Gate.WaitAsync, in
+            // principle) rather than the primary safeguard it used to be.
+            result = await DialogGuard.ShowOnceAsync(dialog);
         }
         catch (Exception)
         {
-            // WinUI allows one ContentDialog per XamlRoot, and this window now
-            // has two other callers -- WithdrawDialog, from History, and
-            // GoPublicDialog, from Settings. If either is open, ShowAsync
-            // throws, and this handler is `async void`, so the throw would
-            // take the process down.
-            //
-            // Catching is the whole fix, and there is no second decision to
-            // make here: `args.Cancel = true` ran synchronously above, before
-            // the first await, so WinUI has already honoured the cancellation
-            // by the time this throw is possible. The close is refused
-            // whatever happens next; the only question was whether the
-            // process survived to be closed again.
+            // `args.Cancel = true` ran synchronously above, before the first
+            // await, so WinUI has already honoured the cancellation by the
+            // time any throw here is possible. The close is refused whatever
+            // happens next; the only question was whether the process
+            // survived to be closed again.
             //
             // The window then refuses to close without saying so, and that
             // is right rather than merely tolerable. This runs precisely
@@ -232,21 +241,26 @@ public sealed partial class MainWindow : Window
             //
             // Recorded because both obvious places to add one are wrong, and
             // that is not obvious. MainViewModel.Notice renders inside the
-            // QUEUE pane, while the two dialogs that can land us here are
-            // reachable only from History and Settings -- so the pane
-            // carrying the message would never be the pane on screen. The
-            // health banner is above all three panes and would be seen, but
-            // it is single-writer over the daemon's own health label, and
-            // every sentence in it states what happened to the data; a
-            // transient UI collision is neither, and an unrecognised label
-            // there renders "Contributions are on hold.", which would be
-            // false in the direction that makes people quit.
+            // QUEUE pane, and this catch can in principle be reached from any
+            // of History, Settings, or this window's own queue header -- so
+            // the pane carrying the message would not reliably be the pane on
+            // screen. The health banner is above all three panes and would be
+            // seen, but it is single-writer over the daemon's own health
+            // label, and every sentence in it states what happened to the
+            // data; a transient UI collision is neither, and an unrecognised
+            // label there renders "Contributions are on hold.", which would
+            // be false in the direction that makes people quit.
             return;
         }
         finally
         {
             _quitDialogOpen = false;
         }
+
+        // ContentDialogResult.None -- DialogGuard's answer when it could not
+        // show the dialog at all -- falls through to the same place a
+        // deliberate Cancel does: neither equals Primary, so quit is not
+        // confirmed. A dialog that never appeared must not be read as a yes.
 
         if (result == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
         {
@@ -747,6 +761,65 @@ public sealed partial class MainWindow : Window
         {
             await ViewModel.SubmitProjectAsync(group.ProjectId);
         }
+    }
+
+    /// <summary>
+    /// "Ignore project" from a project's group header: confirms, then hands
+    /// off to <see cref="MainViewModel.IgnoreProjectAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// The confirmation is built here, from <see cref="ProjectIgnoreCopy"/>,
+    /// the same word-for-word text macOS and GTK show -- and shown through
+    /// <see cref="DialogGuard"/> rather than a raw ShowAsync, because this is
+    /// now a third caller into the one <see cref="XamlRoot"/> this window
+    /// owns, alongside <see cref="Controls.WithdrawDialog"/> and
+    /// <see cref="Controls.GoPublicDialog"/>.
+    /// </remarks>
+    private async void OnIgnoreProject(object sender, RoutedEventArgs e)
+    {
+        if (GroupOf(sender) is not QueueGroupViewModel group)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = ProjectIgnoreCopy.ConfirmationTitle(group.ProjectLabel),
+            Content = ProjectIgnoreCopy.ConfirmationBody(group.ProjectLabel, group.PendingCount),
+            PrimaryButtonText = ProjectIgnoreCopy.ButtonLabel,
+            CloseButtonText = "Cancel",
+
+            // Keeping the project offered is what Enter and Escape both do.
+            // This purges every one of its waiting sessions server-side; it
+            // does not get to be the thing a stray keypress commits.
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        // Three outcomes, not two. Primary is a yes; Close (and Escape) is a
+        // no and needs nothing said, because the person who cancelled knows
+        // they cancelled. None means the dialog never appeared -- see
+        // DialogGuard -- and folding that into the cancel branch leaves a
+        // contributor who pressed a button with no dialog, no change, and no
+        // word about either. The quit path can fold them, because there the
+        // safe reading is "do not quit" and the window is still there to
+        // press again; here the only feedback surface is Notice.
+        ContentDialogResult outcome = await DialogGuard.ShowOnceAsync(dialog);
+        if (outcome == ContentDialogResult.None)
+        {
+            ViewModel.ShowNotice("That couldn't be asked just now. Nothing has changed.");
+            return;
+        }
+
+        if (outcome != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ViewModel.IgnoreProjectAsync(
+            group.ProjectId,
+            group.ProjectLabel,
+            group.PendingCount);
     }
 
     /// <summary>

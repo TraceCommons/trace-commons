@@ -858,22 +858,56 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // rather than leaving the queue to lag until the next poll,
             // which would leave two same-basename projects briefly
             // indistinguishable in the one place uploads are approved from.
-            let relabelled = {
+            // Ignoring a project clears what it already has waiting. Doing
+            // it here rather than in the UI means Settings, onboarding and
+            // the CLI all get it: before this, ignoring from Settings left
+            // the contributor staring at the cards they had just declined.
+            //
+            // Pending only. See `refuse_pending_for_project`.
+            //
+            // Leaving `Ignore` undoes exactly that, and only that: see
+            // `clear_project_ignored`, which is what makes the
+            // confirmation's "You can undo this in Settings" true for a
+            // *finished* session -- the ordinary case, and the one the
+            // ignore was aimed at. It is the same arm because the two are
+            // one setting, and every route that can set it (Settings,
+            // onboarding, the CLI, the Waiting screen) must get both halves.
+            //
+            // The policy is already saved at this point, so a `queue.save`
+            // failure below leaves disk disagreeing with memory: the project
+            // is durably `Ignore` while its entries are still durably
+            // `Pending`, and a restart brings the cleared cards back. The
+            // error is reported and the daemon keeps the in-memory truth, so
+            // the contributor sees the right thing until then. Ordering the
+            // two writes the other way does not help -- the relabel below
+            // reads the *new* policy, so the queue cannot be written first --
+            // and a real fix wants both files under one atomic write, which
+            // the store does not offer.
+            let (queue_changed, purged) = {
                 let mut queue = shared.queue.lock().expect("queue lock");
-                if relabel_queue_entries(&policy, &mut queue) {
+                let purged = if mode == ProjectMode::Ignore {
+                    queue.refuse_pending_for_project(&key)
+                } else {
+                    0
+                };
+                let restored = if mode == ProjectMode::Ignore {
+                    0
+                } else {
+                    queue.clear_project_ignored(&key)
+                };
+                let relabelled = relabel_queue_entries(&policy, &mut queue);
+                if relabelled || purged > 0 || restored > 0 {
                     if let Err(_e) = queue.save(&shared.store) {
                         return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
                     }
-                    true
-                } else {
-                    false
                 }
+                (relabelled || restored > 0, purged)
             };
             drop(policy);
-            if relabelled {
+            if queue_changed || purged > 0 {
                 shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
-            Response::ok(req.id, serde_json::json!({ "ok": true }))
+            Response::ok(req.id, serde_json::json!({ "ok": true, "purged": purged }))
         }
         "dismiss" => {
             let id = match parse_entry_id(&req.params) {

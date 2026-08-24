@@ -54,6 +54,32 @@ public sealed class QueueGroupViewModel
     public string SubmitAllText =>
         string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.Count);
 
+    /// <summary>
+    /// Whether the header offers "Ignore project". Always true, unlike
+    /// <see cref="ShowSubmitAll"/>: a single-entry group's one row already
+    /// has its own way to send that one session, but declining the whole
+    /// project is not something any row-level control does, so the header
+    /// action belongs at every group size.
+    /// </summary>
+    public bool ShowIgnoreProject => true;
+
+    /// <summary>
+    /// "Ignore project" and its tooltip, bound rather than typed into the
+    /// XAML. The whole point of <see cref="ProjectIgnoreCopy"/> is that this
+    /// string exists in three shells and drifts; a copy of it sitting in
+    /// markup is outside everything that keeps it from drifting.
+    /// </summary>
+    public string IgnoreProjectText => ProjectIgnoreCopy.ButtonLabel;
+
+    /// <summary>See <see cref="IgnoreProjectText"/>.</summary>
+    public string IgnoreProjectTooltip => ProjectIgnoreCopy.Tooltip;
+
+    /// <summary>
+    /// The number of waiting sessions this project would lose if ignored --
+    /// what <see cref="ProjectIgnoreCopy.ConfirmationBody"/> is told.
+    /// </summary>
+    public int PendingCount => _group.Count;
+
     /// <summary>The rows in this project, in queue order.</summary>
     public ObservableCollection<QueueEntryViewModel> Entries { get; }
 }

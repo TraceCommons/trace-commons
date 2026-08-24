@@ -152,10 +152,15 @@ public sealed partial class OnboardingWindow : Window
             DefaultButton = ContentDialogButton.Close,
         };
 
+        // Through the guard like every other dialog, even though this window
+        // has its own XamlRoot and its own _removedDialogOpen flag: the flag
+        // stops this handler re-entering itself, and the guard is what makes
+        // "every dialog goes through DialogGuard" a fact the next person can
+        // rely on instead of a claim they have to re-check.
         _removedDialogOpen = true;
         try
         {
-            await dialog.ShowAsync();
+            await Controls.DialogGuard.ShowOnceAsync(dialog);
         }
         finally
         {
