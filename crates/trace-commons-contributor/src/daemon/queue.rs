@@ -497,6 +497,46 @@ impl Queue {
         purged
     }
 
+    /// Drop every `project-ignored` refusal belonging to `project_key`,
+    /// returning how many went. The inverse of
+    /// `refuse_pending_for_project`, and the thing that makes "You can undo
+    /// this in Settings" true.
+    ///
+    /// Removing the entries, rather than putting them back to `Pending`, is
+    /// what re-offers them. A refused entry keeps its `path`, `size_bytes`
+    /// and `observed_modified_at`, and `unchanged_offer_at_path` matches a
+    /// *non-live* entry on that observation too -- deliberately, so a
+    /// pipeline refusal (`residual-secret`, `envelope-too-large`) is not
+    /// re-offered on every poll for content that has not moved. So while the
+    /// row is here the watcher's cheap pre-check keeps finding it, sees the
+    /// project is no longer ignored and the state is not `Pending`, and
+    /// returns having done nothing. Nothing compacts `Refused` either (see
+    /// `dismissed_at_path`), so that state is permanent: for the ordinary
+    /// case -- a *finished* session, whose file will never be written to
+    /// again -- the trace would never come back. Only a session that
+    /// happened to grow afterwards would, and those are exactly the ones the
+    /// contributor was not thinking about when they undid the ignore.
+    ///
+    /// With the row gone the pre-check answers `None`, the poll pays for the
+    /// load it would have paid for had the session never been offered, and
+    /// the entry lands fresh -- subject to the queue cap and to eligibility,
+    /// like anything else. Putting it back to `Pending` in place would
+    /// instead restore it unconditionally, over `max_entries` included.
+    ///
+    /// Scoped to `REASON_PROJECT_IGNORED` and nothing else. A dismissal is a
+    /// decision about one conversation and outlives any project setting; a
+    /// pipeline refusal is a verdict on bytes that have not changed. Neither
+    /// is undone by re-configuring the project, and both must survive this.
+    pub fn clear_project_ignored(&mut self, project_key: &str) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| {
+            !(e.project_key == project_key
+                && e.state == QueueState::Refused
+                && e.reason_label.as_deref() == Some(REASON_PROJECT_IGNORED))
+        });
+        before - self.entries.len()
+    }
+
     /// Move an entry from `Pending` to `Approved`, recording the terms the
     /// approval was given under: the consent scopes, and a fingerprint of
     /// everything else outside the session file that determines the
@@ -1892,5 +1932,58 @@ mod tests {
 
         assert_eq!(q.refuse_pending_for_project("/w/alpha"), 0);
         assert_eq!(q.all()[0].reason_label.as_deref(), Some("residual-secret"));
+    }
+
+    #[test]
+    fn un_ignoring_a_project_drops_only_its_own_refusals() {
+        // The entries must go, not merely change state: while a row with this
+        // path and observation sits here, `unchanged_offer_at_path` keeps
+        // matching it and the watcher never re-offers. Everything else that
+        // is `Refused` stays -- a dismissal is about one conversation, a
+        // pipeline refusal is about bytes that have not changed.
+        let mut q = Queue::default();
+        q.entries.push(entry_in("/w/alpha", QueueState::Pending));
+        let mut dismissed = entry_in("/w/alpha", QueueState::Refused);
+        dismissed.path = PathBuf::from("/w/alpha/dismissed.jsonl");
+        dismissed.session_hash = "sha256:dd".to_string();
+        dismissed.reason_label = Some(REASON_DISMISSED.to_string());
+        q.entries.push(dismissed);
+        let mut secret = entry_in("/w/alpha", QueueState::Refused);
+        secret.path = PathBuf::from("/w/alpha/secret.jsonl");
+        secret.session_hash = "sha256:ee".to_string();
+        secret.reason_label = Some("residual-secret".to_string());
+        q.entries.push(secret);
+        let mut other = entry_in("/w/beta", QueueState::Pending);
+        other.session_hash = "sha256:ff".to_string();
+        q.entries.push(other);
+
+        assert_eq!(q.refuse_pending_for_project("/w/alpha"), 1);
+        let restored = q.clear_project_ignored("/w/alpha");
+
+        assert_eq!(restored, 1, "only the project-ignored refusal is dropped");
+        let alpha: Vec<_> = q
+            .all()
+            .iter()
+            .filter(|e| e.project_key == "/w/alpha")
+            .collect();
+        assert_eq!(alpha.len(), 2, "{alpha:?}");
+        assert_eq!(alpha[0].reason_label.as_deref(), Some(REASON_DISMISSED));
+        assert_eq!(alpha[1].reason_label.as_deref(), Some("residual-secret"));
+        assert_eq!(
+            q.all()
+                .iter()
+                .filter(|e| e.project_key == "/w/beta")
+                .count(),
+            1,
+            "another project is untouched"
+        );
+    }
+
+    #[test]
+    fn un_ignoring_a_project_with_nothing_ignored_drops_nothing() {
+        let mut q = Queue::default();
+        q.entries.push(entry_in("/w/alpha", QueueState::Pending));
+        assert_eq!(q.clear_project_ignored("/w/alpha"), 0);
+        assert_eq!(q.all().len(), 1);
     }
 }

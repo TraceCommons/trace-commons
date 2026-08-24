@@ -1770,6 +1770,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn un_ignoring_a_project_re_offers_a_session_that_never_changes() {
+        // The ordinary case, and the one the confirmation copy is actually
+        // about: the sessions cleared by an ignore are *finished*. The work
+        // is done, the files will never be written to again. If undo only
+        // works for a session that happens to grow afterwards, "You can undo
+        // this in Settings" is false for every trace it was written for.
+        let f = WatcherFixture::new();
+        f.write_session("proj", "33333333-3333-3333-3333-333333333333", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 1);
+
+        f.set_mode_via_ipc("proj", ProjectMode::Ignore);
+        assert!(f.shared.queue.lock().unwrap().pending().is_empty());
+
+        f.set_mode_via_ipc("proj", ProjectMode::NotifyOnly);
+        // Deliberately no `append_to_session`: the file is untouched from
+        // here on, exactly as a finished session would be.
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+
+        assert!(
+            !f.shared.queue.lock().unwrap().pending().is_empty(),
+            "un-ignoring must re-offer a session that never changes again: {:?}",
+            f.shared.queue.lock().unwrap().all()
+        );
+    }
+
+    #[tokio::test]
     async fn a_dismissed_session_costs_no_further_reads() {
         // The skip belongs in front of `source.load`, not after it. A
         // conversation the contributor declined and then kept working in
