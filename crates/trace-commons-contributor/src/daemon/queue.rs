@@ -271,6 +271,17 @@ pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
 /// conversation.
 pub const REASON_TOO_LARGE: &str = "envelope-too-large";
 
+/// A project the contributor has chosen to ignore; its waiting sessions are
+/// cleared when the mode is set.
+///
+/// Unlike `REASON_DISMISSED` this label suppresses nothing at the path
+/// level. See `dismissed_at_path`: a dismissal is a permanent decision about
+/// one conversation, while this is a verdict on whatever that project
+/// happened to have queued at the moment its mode changed. Re-offering after
+/// "Ask again" is the whole point, so borrowing the dismissal label would
+/// make the recovery route a lie.
+pub const REASON_PROJECT_IGNORED: &str = "project-ignored";
+
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
 /// Factored out so `supersede` and any future re-offer path cannot drift:
@@ -464,6 +475,26 @@ impl Queue {
             e.state = state;
             e.reason_label = reason_label;
         }
+    }
+
+    /// Refuse every `Pending` entry belonging to `project_key`, returning how
+    /// many moved.
+    ///
+    /// `Approved` and `Uploading` are deliberately left alone. An approval is
+    /// a decision the contributor already made about a specific set of bytes
+    /// under a specific set of consent scopes; a later project-level
+    /// preference does not silently retract it. `Queue::cancel` draws the
+    /// same line, and for the same reason.
+    pub fn refuse_pending_for_project(&mut self, project_key: &str) -> usize {
+        let mut purged = 0usize;
+        for e in self.entries.iter_mut() {
+            if e.project_key == project_key && e.state == QueueState::Pending {
+                e.state = QueueState::Refused;
+                e.reason_label = Some(REASON_PROJECT_IGNORED.to_string());
+                purged += 1;
+            }
+        }
+        purged
     }
 
     /// Move an entry from `Pending` to `Approved`, recording the terms the
@@ -1007,6 +1038,15 @@ mod tests {
             q.upsert(e, 5000).unwrap();
         }
         q
+    }
+
+    fn entry_in(project_key: &str, state: QueueState) -> QueueEntry {
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.entry_id = Uuid::new_v4();
+        e.project_key = project_key.to_string();
+        e.path = PathBuf::from(format!("{project_key}/session.jsonl"));
+        e.state = state;
+        e
     }
 
     fn the_path() -> PathBuf {
@@ -1769,5 +1809,88 @@ mod tests {
             !q.load_can_land(&the_path(), 1),
             "one live entry elsewhere still fills a cap of one"
         );
+    }
+
+    #[test]
+    fn ignoring_a_project_refuses_only_its_pending_entries() {
+        let mut q = Queue::default();
+        q.entries.push(entry_in("/w/alpha", QueueState::Pending));
+        q.entries.push(entry_in("/w/alpha", QueueState::Approved));
+        q.entries.push(entry_in("/w/alpha", QueueState::Uploading));
+        q.entries.push(entry_in("/w/beta", QueueState::Pending));
+
+        let purged = q.refuse_pending_for_project("/w/alpha");
+
+        assert_eq!(purged, 1, "only the pending entry moves");
+        let alpha: Vec<_> = q
+            .all()
+            .iter()
+            .filter(|e| e.project_key == "/w/alpha")
+            .collect();
+        assert_eq!(alpha[0].state, QueueState::Refused);
+        assert_eq!(
+            alpha[0].reason_label.as_deref(),
+            Some(REASON_PROJECT_IGNORED)
+        );
+        assert_eq!(
+            alpha[1].state,
+            QueueState::Approved,
+            "an approval is not retracted"
+        );
+        assert_eq!(
+            alpha[2].state,
+            QueueState::Uploading,
+            "an in-flight upload is not touched"
+        );
+        let beta: Vec<_> = q
+            .all()
+            .iter()
+            .filter(|e| e.project_key == "/w/beta")
+            .collect();
+        assert_eq!(
+            beta[0].state,
+            QueueState::Pending,
+            "another project is untouched"
+        );
+    }
+
+    #[test]
+    fn a_project_ignore_is_not_a_dismissal() {
+        // REASON_DISMISSED is path-keyed and permanent. If project-ignore used
+        // it, "Ask again" would restore nothing, because every purged session
+        // would still be suppressed individually at its path.
+        let mut q = Queue::default();
+        let e = entry_in("/w/alpha", QueueState::Pending);
+        let path = e.path.clone();
+        q.entries.push(e);
+
+        q.refuse_pending_for_project("/w/alpha");
+
+        assert_ne!(REASON_PROJECT_IGNORED, REASON_DISMISSED);
+        assert!(
+            !q.dismissed_at_path(&path),
+            "a project ignore must not suppress the path the way a dismissal does"
+        );
+    }
+
+    #[test]
+    fn ignoring_a_project_with_nothing_pending_purges_nothing() {
+        let mut q = Queue::default();
+        q.entries.push(entry_in("/w/alpha", QueueState::Approved));
+        assert_eq!(q.refuse_pending_for_project("/w/alpha"), 0);
+    }
+
+    #[test]
+    fn a_pipeline_refusal_keeps_its_own_reason() {
+        // `Refused` has more than one author -- the pipeline refuses for a
+        // residual secret or an unavailable privacy filter. Ignoring the project
+        // must not overwrite why one of those was refused.
+        let mut q = Queue::default();
+        let mut refused = entry_in("/w/alpha", QueueState::Refused);
+        refused.reason_label = Some("residual-secret".to_string());
+        q.entries.push(refused);
+
+        assert_eq!(q.refuse_pending_for_project("/w/alpha"), 0);
+        assert_eq!(q.all()[0].reason_label.as_deref(), Some("residual-secret"));
     }
 }
