@@ -415,6 +415,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Decline a whole project from the Waiting screen.
+    ///
+    /// The daemon clears what that project has waiting as part of setting the
+    /// mode, so this refreshes the queue as well as the project list -- the
+    /// cards are expected to disappear in the same round trip.
+    func ignoreProject(id projectID: String, label: String) {
+        perform(
+            "set_project_mode",
+            work: { try $0.setProjectMode(projectID: projectID, mode: .ignore) }
+        ) { _ in
+            self.refreshQueue()
+            self.refreshProjects()
+            self.refreshAudit()
+        }
+    }
+
     func refreshSettings() {
         perform("get_settings", work: { try $0.settings() }) { self.publishIfChanged(\.daemonSettings, $0) }
     }
