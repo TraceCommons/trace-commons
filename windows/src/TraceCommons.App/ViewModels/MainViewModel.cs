@@ -545,6 +545,44 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// "Ignore project" from a project's group header: turns the project's
+    /// mode to <c>ignore</c>, which the daemon answers by purging that
+    /// project's own waiting sessions server-side (Task 2).
+    /// </summary>
+    /// <remarks>
+    /// The confirmation dialog has already been shown and accepted by the
+    /// time this runs -- this method only makes the call and refreshes.
+    /// <see cref="RefreshAsync"/> is what actually removes the purged cards
+    /// from <see cref="Groups"/>; this project's mode does not stop it being
+    /// re-offered client-side, so a queue reload is not optional here the way
+    /// it is after a submit.
+    /// </remarks>
+    public async Task IgnoreProjectAsync(string projectId)
+    {
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return;
+        }
+
+        string payload = JsonSerializer.Serialize(
+            new Dictionary<string, string>
+            {
+                ["project_id"] = projectId,
+                ["mode"] = "ignore",
+            });
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
+            .ConfigureAwait(true);
+
+        Notice = response.IsError
+            ? "That project setting couldn't be changed."
+            : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// The shared tail of both one-click submit paths: render the toast, and
     /// arm Undo over exactly the entries this call actually approved.
     /// </summary>

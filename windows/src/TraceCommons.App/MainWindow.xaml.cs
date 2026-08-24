@@ -750,6 +750,47 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// "Ignore project" from a project's group header: confirms, then hands
+    /// off to <see cref="MainViewModel.IgnoreProjectAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// The confirmation is built here, from <see cref="ProjectIgnoreCopy"/>,
+    /// the same word-for-word text macOS and GTK show -- and shown through
+    /// <see cref="DialogGuard"/> rather than a raw ShowAsync, because this is
+    /// now a third caller into the one <see cref="XamlRoot"/> this window
+    /// owns, alongside <see cref="Controls.WithdrawDialog"/> and
+    /// <see cref="Controls.GoPublicDialog"/>.
+    /// </remarks>
+    private async void OnIgnoreProject(object sender, RoutedEventArgs e)
+    {
+        if (GroupOf(sender) is not QueueGroupViewModel group)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = ProjectIgnoreCopy.ConfirmationTitle(group.ProjectLabel),
+            Content = ProjectIgnoreCopy.ConfirmationBody(group.ProjectLabel, group.PendingCount),
+            PrimaryButtonText = ProjectIgnoreCopy.ButtonLabel,
+            CloseButtonText = "Cancel",
+
+            // Keeping the project offered is what Enter and Escape both do.
+            // This purges every one of its waiting sessions server-side; it
+            // does not get to be the thing a stray keypress commits.
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        if (await DialogGuard.ShowOnceAsync(dialog) != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ViewModel.IgnoreProjectAsync(group.ProjectId);
+    }
+
+    /// <summary>
     /// Which queue row a click came from.
     /// </summary>
     /// <remarks>
