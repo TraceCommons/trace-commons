@@ -707,7 +707,15 @@ uploads one. A client MUST say so rather than let a contributor discover it.
 permanent and suppresses that conversation at its path forever; this is a
 verdict on whatever was queued at the moment the mode changed, so setting
 the project back to `notify_only` or `auto_upload` lets those sessions be
-offered again.
+offered again -- including sessions that are finished and will never be
+written to again. Leaving `ignore` drops that project's `"project-ignored"`
+entries outright, which is what lets the watcher re-offer them; `dismissed`
+and pipeline refusals in the same project are untouched. The re-offer
+arrives on a later poll, not in this response, and is still subject to the
+queue cap.
+
+A client MUST NOT present the purge as irreversible, and MUST NOT rely on
+the entries reappearing within any particular time.
 
 ### `preview_body`
 

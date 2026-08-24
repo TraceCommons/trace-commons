@@ -91,7 +91,18 @@ gains the field and a note that `Ignore` now clears pending entries.
 The confirmation dialog needs the count *before* it acts, so the UI computes
 it from the queue it already holds and uses `purged` only to reconcile —
 the two can differ if the queue moved between render and click, and the
-response is the authority.
+response is the authority. When they differ the contributor is told, in a
+line that lives in the same tested copy unit as the confirmation body; when
+they agree nothing is said.
+
+Un-ignoring is the other half of the same handler: leaving `Ignore` drops
+that project's `project-ignored` rows so the watcher offers them again. It
+has to remove them rather than re-state them, because a `Refused` row keeps
+its path and observation and `Queue::unchanged_offer_at_path` matches a
+non-live entry on that observation — deliberately, so a pipeline refusal is
+not re-offered every poll. Left in place, the row silently suppresses the
+re-offer of any session that never changes again, which is every finished
+one. Dismissals and pipeline refusals are untouched by it.
 
 ### 3. The button
 
@@ -165,10 +176,19 @@ would be indefensible.
 - A pipeline `Refused` entry in the same project is not disturbed.
 
 **Shells**
-- Copy unit per shell: plural agreement, and the zero-waiting case (ignoring
-  a project with nothing queued must not say "removes 0 traces").
-- Ignore renders at `count == 1`; `Submit all` still does not.
+- Copy unit per shell: plural agreement, the zero-waiting case (ignoring a
+  project with nothing queued must not say "removes 0 traces"), and the
+  reconciliation line (silent when the counts agree; names both when they
+  do not).
 - Windows: the new dialog is guarded.
+
+Verified by code review rather than by a test, because no shell has a
+harness that renders a group header: that Ignore is built at every group
+size while `Submit all` is still built only above one, and that Ignore sits
+to the right of `Submit all` on all three. The visibility rule is one
+condition per shell in the header builder (`project_header` in GTK,
+`group.count > 1` in `QueueView`, `ShowSubmitAll` / `ShowIgnoreProject` in
+`QueueGroupViewModel`) and is read there.
 
 macOS and GTK are verifiable locally. Windows XAML compiles only in CI —
 that gets stated plainly in the PR rather than implied.
