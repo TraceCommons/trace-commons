@@ -7342,7 +7342,7 @@ version = "0.1.0"
 
 [[package]]
 name = "trace-commons-contributor"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7373,7 +7373,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-ffi"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "serde_json",
