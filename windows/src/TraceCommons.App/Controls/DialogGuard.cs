@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Controls;
@@ -43,7 +44,7 @@ internal static class DialogGuard
         {
             return await dialog.ShowAsync();
         }
-        catch (System.Exception)
+        catch (Exception)
         {
             // A dialog that cannot be shown must not be read as a yes.
             return ContentDialogResult.None;
