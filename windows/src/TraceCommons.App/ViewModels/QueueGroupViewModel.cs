@@ -64,6 +64,17 @@ public sealed class QueueGroupViewModel
     public bool ShowIgnoreProject => true;
 
     /// <summary>
+    /// "Ignore project" and its tooltip, bound rather than typed into the
+    /// XAML. The whole point of <see cref="ProjectIgnoreCopy"/> is that this
+    /// string exists in three shells and drifts; a copy of it sitting in
+    /// markup is outside everything that keeps it from drifting.
+    /// </summary>
+    public string IgnoreProjectText => ProjectIgnoreCopy.ButtonLabel;
+
+    /// <summary>See <see cref="IgnoreProjectText"/>.</summary>
+    public string IgnoreProjectTooltip => ProjectIgnoreCopy.Tooltip;
+
+    /// <summary>
     /// The number of waiting sessions this project would lose if ignored --
     /// what <see cref="ProjectIgnoreCopy.ConfirmationBody"/> is told.
     /// </summary>

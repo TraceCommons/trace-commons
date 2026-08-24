@@ -375,6 +375,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool HasNotice => _notice.Length > 0;
 
     /// <summary>
+    /// Lets the window put a line here for something it handled itself and
+    /// this model never saw -- today, a confirmation dialog that could not be
+    /// shown at all. The setter stays private: every other notice is written
+    /// by the call that earned it, and a view that can overwrite that at will
+    /// is how a refusal ends up displayed under a success.
+    /// </summary>
+    internal void ShowNotice(string line) => Notice = line;
+
+    /// <summary>
     /// Whether an approval can still be recalled.
     ///
     /// The five-second undo the shared spec asks for is trivially cheap and it
@@ -557,7 +566,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// re-offered client-side, so a queue reload is not optional here the way
     /// it is after a submit.
     /// </remarks>
-    public async Task IgnoreProjectAsync(string projectId)
+    public async Task IgnoreProjectAsync(string projectId, string projectLabel, int promised)
     {
         if (string.IsNullOrWhiteSpace(projectId))
         {
@@ -575,11 +584,39 @@ public sealed class MainViewModel : INotifyPropertyChanged
             .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
             .ConfigureAwait(true);
 
-        Notice = response.IsError
-            ? "That project setting couldn't be changed."
-            : string.Empty;
+        if (response.IsError)
+        {
+            Notice = "That project setting couldn't be changed.";
+        }
+        else
+        {
+            // The confirmation had to name a count before this call, off a
+            // queue that keeps moving; `purged` is what the daemon actually
+            // did and is the authority. A daemon older than the field sends
+            // none, which reads as 0 here -- so it is only reconciled when it
+            // is present, since silence is not a disagreement.
+            Notice = ReadPurged(response) is int purged
+                ? ProjectIgnoreCopy.Reconciliation(projectLabel, promised, purged) ?? string.Empty
+                : string.Empty;
+        }
 
         await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// <c>set_project_mode</c>'s <c>purged</c>, or null when the daemon did
+    /// not send one.
+    /// </summary>
+    private static int? ReadPurged(DaemonResponse response)
+    {
+        if (response.Result is not JsonElement result
+            || result.ValueKind != JsonValueKind.Object
+            || !result.TryGetProperty("purged", out JsonElement purged)
+            || !purged.TryGetInt32(out int value))
+        {
+            return null;
+        }
+        return value;
     }
 
     /// <summary>

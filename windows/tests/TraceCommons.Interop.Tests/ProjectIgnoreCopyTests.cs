@@ -17,6 +17,11 @@ public class ProjectIgnoreCopyTests
         Assert.DoesNotContain("traces", ProjectIgnoreCopy.ConfirmationBody("api", 1));
     }
 
+    /// <summary>
+    /// No group renders with nothing waiting today -- every shell groups the
+    /// pending list alone. The branch is defensive: this method must be right
+    /// about whatever count it is handed.
+    /// </summary>
     [Fact]
     public void NothingWaitingDropsTheRemovalClause()
     {
@@ -35,6 +40,27 @@ public class ProjectIgnoreCopyTests
         var body = ProjectIgnoreCopy.ConfirmationBody("api", n);
         Assert.Contains("undo this in Settings", body);
         Assert.Contains("Nothing already submitted is affected.", body);
+    }
+
+    [Theory]
+    [InlineData(3, 3)]
+    [InlineData(0, 0)]
+    public void ReconciliationSaysNothingWhenTheCountHeld(int promised, int purged)
+    {
+        Assert.Null(ProjectIgnoreCopy.Reconciliation("api", promised, purged));
+    }
+
+    [Fact]
+    public void ReconciliationNamesBothCountsWhenTheyMoved()
+    {
+        Assert.Equal(
+            "Ignored api. The queue changed while you were deciding: "
+                + "5 waiting traces were removed, not 3.",
+            ProjectIgnoreCopy.Reconciliation("api", 3, 5));
+        Assert.Equal(
+            "Ignored api. The queue changed while you were deciding: "
+                + "1 waiting trace was removed, not 3.",
+            ProjectIgnoreCopy.Reconciliation("api", 3, 1));
     }
 
     [Fact]

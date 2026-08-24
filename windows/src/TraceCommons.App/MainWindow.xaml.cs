@@ -796,12 +796,30 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Close,
         };
 
-        if (await DialogGuard.ShowOnceAsync(dialog) != ContentDialogResult.Primary)
+        // Three outcomes, not two. Primary is a yes; Close (and Escape) is a
+        // no and needs nothing said, because the person who cancelled knows
+        // they cancelled. None means the dialog never appeared -- see
+        // DialogGuard -- and folding that into the cancel branch leaves a
+        // contributor who pressed a button with no dialog, no change, and no
+        // word about either. The quit path can fold them, because there the
+        // safe reading is "do not quit" and the window is still there to
+        // press again; here the only feedback surface is Notice.
+        ContentDialogResult outcome = await DialogGuard.ShowOnceAsync(dialog);
+        if (outcome == ContentDialogResult.None)
+        {
+            ViewModel.ShowNotice("That couldn't be asked just now. Nothing has changed.");
+            return;
+        }
+
+        if (outcome != ContentDialogResult.Primary)
         {
             return;
         }
 
-        await ViewModel.IgnoreProjectAsync(group.ProjectId);
+        await ViewModel.IgnoreProjectAsync(
+            group.ProjectId,
+            group.ProjectLabel,
+            group.PendingCount);
     }
 
     /// <summary>

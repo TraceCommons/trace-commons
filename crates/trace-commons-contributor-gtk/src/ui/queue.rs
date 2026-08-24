@@ -891,11 +891,9 @@ fn project_header(
                             // An older daemon does not send the field at all.
                             // Silence is not a disagreement.
                             if let Some(purged) = purged {
-                                if let Some(line) = copy::ignore_project_reconciled(
-                                    &label,
-                                    pending_count,
-                                    purged,
-                                ) {
+                                if let Some(line) =
+                                    copy::ignore_project_reconciled(&label, pending_count, purged)
+                                {
                                     app.toast(&line);
                                 }
                             }
