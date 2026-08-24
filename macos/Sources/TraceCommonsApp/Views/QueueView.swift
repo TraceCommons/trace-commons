@@ -74,6 +74,11 @@ struct QueueContent: View {
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
             }
+            if let notice = model.lastActionNotice {
+                Text(notice)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
 
             if model.awaitingDecision.isEmpty {
                 CenteredNotice(
@@ -127,7 +132,13 @@ struct QueueContent: View {
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
-                        onIgnoreProject: { model.ignoreProject(id: group.id, label: group.label) },
+                        onIgnoreProject: {
+                            model.ignoreProject(
+                                id: group.id,
+                                label: group.label,
+                                promised: group.count
+                            )
+                        },
                         onAppear: { entry in
                             model.requestPreview(for: entry)
                             visibleRowIDs.insert(entry.entryID)
@@ -204,7 +215,7 @@ private struct ProjectQueueGroup: View {
                 // uploads the very traces this removes, and two adjacent
                 // actions that do opposite things must not look alike.
                 Button(ProjectIgnoreCopy.buttonLabel) { confirmingIgnore = true }
-                    .help("Stops this project being offered and clears what it has waiting.")
+                    .help(ProjectIgnoreCopy.tooltip)
             }
             .confirmationDialog(
                 ProjectIgnoreCopy.confirmationTitle(project: group.label),

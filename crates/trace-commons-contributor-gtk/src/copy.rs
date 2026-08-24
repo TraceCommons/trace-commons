@@ -146,6 +146,10 @@ pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this p
 /// its primary-action styling -- the two buttons take a contributor's queue
 /// in opposite directions.
 pub const IGNORE_PROJECT: &str = "Ignore project";
+///
+/// Word for word what macOS and Windows put on the same button. Three
+/// shells drift, and a tooltip nobody tests drifts first: this one is
+/// `ProjectIgnoreCopy.tooltip` there.
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
@@ -153,9 +157,14 @@ pub fn ignore_project_title(project: &str) -> String {
     format!("Ignore {project}?")
 }
 
-/// The removal clause is dropped when nothing is waiting: a group can render
-/// with every card approved or uploading, and "removes 0 waiting traces"
-/// would be both wrong and alarming.
+/// The removal clause is dropped when nothing is waiting.
+///
+/// No group renders that way today: all three shells build their groups
+/// from the pending list alone, so a group that renders has at least one
+/// waiting session in it. The branch is kept because this function is
+/// handed a number and must be right about whatever number it is handed --
+/// "removes 0 waiting traces" would be both wrong and alarming -- not
+/// because a caller is known to produce zero.
 pub fn ignore_project_body(pending: usize) -> String {
     let tail = "Nothing already submitted is affected. You can undo this in Settings.";
     if pending == 0 {
@@ -163,6 +172,32 @@ pub fn ignore_project_body(pending: usize) -> String {
     }
     let noun = if pending == 1 { "trace" } else { "traces" };
     format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
+}
+
+/// What is said afterwards when the daemon removed a different number than
+/// the confirmation named.
+///
+/// The dialog has to state a count before the call is made, so it states
+/// the one this shell can see. The queue is live: a poll between the render
+/// and the click adds waiting sessions, an approval elsewhere removes one,
+/// and the daemon acts on what is there when it gets the message. `purged`
+/// is that number and it is the authority; the promise was an estimate.
+///
+/// `None` when the two agree, which is the ordinary case -- a line that
+/// appears every time to say nothing happened is noise, and noise is how a
+/// line that matters gets skipped.
+pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
+    if purged == promised as u64 {
+        return None;
+    }
+    let clause = if purged == 1 {
+        "1 waiting trace was removed".to_string()
+    } else {
+        format!("{purged} waiting traces were removed")
+    };
+    Some(format!(
+        "Ignored {project}. The queue changed while you were deciding: {clause}, not {promised}."
+    ))
 }
 
 /// A project group's header line: the label and how many are waiting under
@@ -2304,6 +2339,18 @@ mod tests {
                 "n={n}"
             );
         }
+    }
+
+    #[test]
+    fn the_ignore_reconciliation_speaks_only_when_the_count_moved() {
+        assert_eq!(ignore_project_reconciled("api", 3, 3), None);
+        assert_eq!(ignore_project_reconciled("api", 0, 0), None);
+        let line = ignore_project_reconciled("api", 3, 5).expect("a moved count is said out loud");
+        assert!(line.contains("5 waiting traces"), "{line}");
+        assert!(line.contains("not 3"), "{line}");
+        let one = ignore_project_reconciled("api", 3, 1).expect("fewer is still a moved count");
+        assert!(one.contains("1 waiting trace was removed"), "{one}");
+        assert!(!one.contains("traces"), "{one}");
     }
 
     #[test]

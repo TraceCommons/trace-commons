@@ -863,20 +863,43 @@ fn project_header(
 
         let app = Rc::clone(&app_for_ignore);
         let project_id = project_id_for_ignore.clone();
+        let project_label_for_response = project_label_for_ignore.clone();
         dialog.connect_response(None, move |dialog, response| {
             dialog.close();
             if response != "ignore" {
                 return;
             }
             // Mirrors `set_mode` in `ui/settings.rs`.
+            //
+            // `purged` is read back rather than assumed: the dialog had to
+            // name a count before the call, so it named the one this shell
+            // could see, and the queue can move between the render and the
+            // click. The daemon's number is the authority, and when the two
+            // disagree the contributor is told -- see
+            // `copy::ignore_project_reconciled`.
+            let label = project_label_for_response.clone();
             app.call(
                 "set_project_mode",
                 serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
-                |app, result| {
-                    if result.is_err() {
-                        app.toast(
+                move |app, result| {
+                    match result {
+                        Err(_) => app.toast(
                             "That couldn't be changed just now. Nothing else changed either.",
-                        );
+                        ),
+                        Ok(value) => {
+                            let purged = value.get("purged").and_then(|v| v.as_u64());
+                            // An older daemon does not send the field at all.
+                            // Silence is not a disagreement.
+                            if let Some(purged) = purged {
+                                if let Some(line) = copy::ignore_project_reconciled(
+                                    &label,
+                                    pending_count,
+                                    purged,
+                                ) {
+                                    app.toast(&line);
+                                }
+                            }
+                        }
                     }
                     app.refresh();
                 },
