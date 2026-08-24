@@ -449,6 +449,18 @@ const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
 const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
+/// How long to let in-flight requests drain after SIGTERM before the shutdown
+/// flush runs anyway. Kept well under systemd's default `TimeoutStopSec=90s`
+/// so the flush always gets its turn before SIGKILL.
+const TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS: &str = "TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS";
+const TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS: usize = 20;
+/// Periodic vector-index flush cadence, in seconds. `0` disables the timer,
+/// which leaves the corpus durable only at `FLUSH_EVERY` boundaries, on LRU
+/// eviction, and on a graceful shutdown — a hard kill then loses everything
+/// written since the last of those. Do not set it to 0 in production.
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS";
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
 #[allow(dead_code)]
@@ -464,6 +476,9 @@ const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
+/// Matches the A4 design spec's "or on a periodic timer (every 60 s)".
+#[allow(dead_code)]
+const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS: u64 = 60;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
 #[allow(dead_code)]
@@ -1222,9 +1237,132 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
     tracing::info!(%addr, "Trace Commons ingestion service listening");
-    axum::serve(listener, app(state))
-        .await
-        .context("trace commons ingestion service failed")
+    let shutdown_grace_seconds = parse_usize_env(
+        TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
+        TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    )? as u64;
+    let shutdown_state = Arc::clone(&state);
+    let result = serve_ingest_with_graceful_shutdown(
+        listener,
+        app(state),
+        shutdown_grace_seconds,
+        wait_for_shutdown_signal(),
+    )
+    .await;
+    // Runs on the way out of BOTH a clean drain and an aborted one: the
+    // novelty corpus is the gate's memory of what "duplicate" means, and a
+    // restart that drops it silently re-scores every subsequent trace against
+    // an emptier corpus.
+    flush_vector_indexes_on_shutdown(&shutdown_state);
+    result
+}
+
+/// Wait for SIGTERM (systemd's stop signal) or Ctrl-C.
+///
+/// Without this, the process has no signal handler at all, so SIGTERM's
+/// default disposition terminates it immediately: no unwinding, no `Drop`, and
+/// therefore no drop-time vector-index flush.
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+/// Serve until `signal` fires, then drain in-flight requests for at most
+/// `shutdown_grace_seconds` before dropping them. Mirrors the upload-claim
+/// issuer's shape so both binaries behave the same under systemd.
+async fn serve_ingest_with_graceful_shutdown(
+    listener: TcpListener,
+    router: axum::Router,
+    shutdown_grace_seconds: u64,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    use std::future::IntoFuture;
+
+    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        signal.await;
+        tracing::info!(
+            graceful_shutdown_secs = shutdown_grace_seconds,
+            "trace commons ingestion service shutdown signaled"
+        );
+        let _ = signal_tx.send(());
+    };
+
+    let serve_handle = tokio::spawn(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .into_future(),
+    );
+    let abort_handle = serve_handle.abort_handle();
+    let watchdog = tokio::spawn(async move {
+        if signal_rx.await.is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(shutdown_grace_seconds)).await;
+        if !abort_handle.is_finished() {
+            tracing::warn!(
+                graceful_shutdown_secs = shutdown_grace_seconds,
+                "trace commons ingestion shutdown grace exceeded; dropping in-flight requests"
+            );
+            abort_handle.abort();
+        }
+    });
+
+    let outcome = match serve_handle.await {
+        Ok(result) => result.context("trace commons ingestion service failed"),
+        // Aborted by the watchdog: the drain window expired. Not an error —
+        // shutdown was requested and we are proceeding to the flush.
+        Err(join_err) if join_err.is_cancelled() => Ok(()),
+        Err(join_err) => {
+            Err(anyhow::Error::new(join_err)).context("trace commons ingestion serve task panicked")
+        }
+    };
+    watchdog.abort();
+    outcome
+}
+
+/// Persist every vector index the process owns. Hash-only logging: counts and
+/// stable labels, never a path or a tenant.
+fn flush_vector_indexes_on_shutdown(state: &AppState) {
+    match state.gate_service.flush_vector_index() {
+        Ok(()) => tracing::info!(index = "novelty", "vector index flushed on shutdown"),
+        Err(error) => tracing::warn!(
+            error_class = "VectorIndexShutdownFlushFailed",
+            index = "novelty",
+            error_hash = %safe_display_error_hash(&error),
+            "vector index shutdown flush failed; recent corpus writes may be lost"
+        ),
+    }
+    #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
+    if let Some(dedup) = state.dedup_vector_index.as_ref() {
+        match dedup.flush() {
+            Ok(()) => tracing::info!(index = "dedup", "vector index flushed on shutdown"),
+            Err(error) => tracing::warn!(
+                error_class = "VectorIndexShutdownFlushFailed",
+                index = "dedup",
+                error_hash = %safe_display_error_hash(&error),
+                "vector index shutdown flush failed; recent corpus writes may be lost"
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -4948,7 +5086,9 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
 {
     use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
     use trace_commons_gate_enclave::perplexity_local::{CandleDeviceKind, LocalPerplexityScorer};
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::vector_index_usearch::{
+        UsearchVectorIndex, UsearchVectorIndexConfig,
+    };
     use trace_commons_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
 
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
@@ -5086,14 +5226,18 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
         TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
         TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
     )?;
+    let vector_index_flush_interval = vector_index_flush_interval_from_env()?;
     let vector_index = UsearchVectorIndex::try_new(
         &vector_index_root,
-        vector_index_dim,
-        vector_index_hnsw_m,
-        vector_index_ef_construction,
-        vector_index_ef_search,
-        vector_index_max_open,
-        vector_index_flush_every,
+        UsearchVectorIndexConfig {
+            dim: vector_index_dim,
+            hnsw_m: vector_index_hnsw_m,
+            ef_construction: vector_index_ef_construction,
+            ef_search: vector_index_ef_search,
+            max_open: vector_index_max_open,
+            flush_every: vector_index_flush_every,
+            flush_interval: vector_index_flush_interval,
+        },
     )
     .with_context(|| {
         format!(
@@ -5208,7 +5352,9 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 {
     use std::time::Duration as StdDuration;
     use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::vector_index_usearch::{
+        UsearchVectorIndex, UsearchVectorIndexConfig,
+    };
     use trace_commons_gate_enclave::{
         EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, NearAiPerplexityScorer,
         NearAiScorerConfig,
@@ -5361,14 +5507,18 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
         TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
     )?;
+    let vector_index_flush_interval = vector_index_flush_interval_from_env()?;
     let vector_index = UsearchVectorIndex::try_new(
         &vector_index_root,
-        vector_index_dim,
-        vector_index_hnsw_m,
-        vector_index_ef_construction,
-        vector_index_ef_search,
-        vector_index_max_open,
-        vector_index_flush_every,
+        UsearchVectorIndexConfig {
+            dim: vector_index_dim,
+            hnsw_m: vector_index_hnsw_m,
+            ef_construction: vector_index_ef_construction,
+            ef_search: vector_index_ef_search,
+            max_open: vector_index_max_open,
+            flush_every: vector_index_flush_every,
+            flush_interval: vector_index_flush_interval,
+        },
     )
     .with_context(|| {
         format!(
@@ -5475,7 +5625,9 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::vector_index_usearch::{
+        UsearchVectorIndex, UsearchVectorIndexConfig,
+    };
 
     let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
         .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
@@ -5509,12 +5661,15 @@ fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_encl
         )?;
         UsearchVectorIndex::try_new(
             &dedup_root,
-            dim,
-            hnsw_m,
-            ef_construction,
-            ef_search,
-            max_open,
-            flush_every,
+            UsearchVectorIndexConfig {
+                dim,
+                hnsw_m,
+                ef_construction,
+                ef_search,
+                max_open,
+                flush_every,
+                flush_interval: vector_index_flush_interval_from_env()?,
+            },
         )
         .with_context(|| format!("failed to initialize dedup UsearchVectorIndex (dim={dim})"))
     })();
@@ -5715,6 +5870,36 @@ fn compute_gate_version_hash(
     let mut h = Sha256::new();
     h.update(canonical.as_bytes());
     format!("sha256:{:x}", h.finalize())
+}
+
+/// Resolve the periodic vector-index flush cadence.
+///
+/// Unset → the spec default (60 s). `0` → `None`, which disables the
+/// background flusher entirely; that is a deliberate operator escape hatch,
+/// not a routine setting, because it makes a signal-killed process lose every
+/// corpus write since the last inline flush.
+#[allow(dead_code)]
+fn vector_index_flush_interval_from_env() -> anyhow::Result<Option<std::time::Duration>> {
+    let seconds = match std::env::var(TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS
+            } else {
+                trimmed.parse::<u64>().with_context(|| {
+                    format!(
+                        "{TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS} must be a non-negative integer"
+                    )
+                })?
+            }
+        }
+        Err(_) => TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS,
+    };
+    Ok(if seconds == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(seconds))
+    })
 }
 
 /// Parse `T = usize` from an env var with a default fallback. Trim + strict

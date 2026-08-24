@@ -12,10 +12,12 @@ the production runbook; the setup doc is the pre-rehearsal checklist.
 
 ## When to use this
 
-- The per-tenant `.usearch` file is corrupted (e.g. unclean shutdown
-  before the next inline flush — extremely rare; usearch flushes on
-  `Drop`, eviction, and every `flush_every` writes — but possible if
-  the underlying disk had a hardware fault).
+- The per-tenant `.usearch` file is corrupted or stale (e.g. a hard kill
+  between flushes). The index flushes every `flush_every` writes, on LRU
+  eviction, every `TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS`, and
+  on a graceful (SIGTERM) shutdown. Note that `Drop` alone is NOT a
+  durability guarantee: a signal-killed process does not unwind, so
+  anything written since the last of those triggers is gone.
 - The host's vector-index volume was lost and there is no SSD snapshot
   to restore from.
 - The tenant's index drifted out of sync with `trace_vector_entries`

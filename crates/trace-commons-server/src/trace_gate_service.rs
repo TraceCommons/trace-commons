@@ -196,6 +196,17 @@ pub trait TraceGateService: Send + Sync {
 
     /// Return observable status suitable for logs / health endpoints.
     fn safe_status(&self) -> GateServiceStatus;
+
+    /// Make the novelty corpus durable before the process exits.
+    ///
+    /// Backends whose index is purely in-memory (the deterministic and mock
+    /// services) keep the no-op default. `EnclaveGateService` overrides it so a
+    /// graceful shutdown persists whatever the periodic flush has not written
+    /// yet — without this, a restart silently changes what "duplicate" means
+    /// for every trace scored after it.
+    fn flush_vector_index(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +726,10 @@ where
         Ok(())
     }
 
+    fn flush_vector_index(&self) -> anyhow::Result<()> {
+        self.orchestrator.flush_vector_index()
+    }
+
     fn safe_status(&self) -> GateServiceStatus {
         let cfg = self.orchestrator.config();
         GateServiceStatus {
@@ -916,6 +931,55 @@ mod enclave_gate_service_tests {
             "novelty must be high again after deletion, got {}",
             second.novelty_score_micros
         );
+    }
+
+    /// The shutdown path calls `TraceGateService::flush_vector_index`; it has
+    /// to reach the index the orchestrator actually holds, or a graceful
+    /// restart quietly loses the novelty corpus.
+    #[test]
+    fn enclave_gate_service_flush_reaches_the_vector_index() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use trace_commons_gate_enclave::{EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig};
+
+        #[derive(Default)]
+        struct CountingIndex {
+            flushes: Arc<AtomicUsize>,
+        }
+        impl VectorIndex for CountingIndex {
+            fn insert(&self, _: Uuid, _: &str, _: &[f32]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn nearest(
+                &self,
+                _: &str,
+                _: &[f32],
+                _: usize,
+            ) -> anyhow::Result<Vec<trace_commons_gate_enclave::NearestNeighbor>> {
+                Ok(Vec::new())
+            }
+            fn delete(&self, _: &str, _: Uuid) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn flush(&self) -> anyhow::Result<()> {
+                self.flushes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let orchestrator = EnclaveGateOrchestrator::new(
+            MockPerplexityScorer::new(),
+            trace_commons_gate_enclave::MockEmbedder::new(),
+            CountingIndex {
+                flushes: Arc::clone(&flushes),
+            },
+            EnclaveGateOrchestratorConfig::mock_default(),
+        );
+        let svc = EnclaveGateService::new(orchestrator, fixture_decryptor(), "enclave_test_flush");
+
+        assert_eq!(flushes.load(Ordering::SeqCst), 0);
+        svc.flush_vector_index().expect("flush");
+        assert_eq!(flushes.load(Ordering::SeqCst), 1);
     }
 
     /// Phase A audit fix: an embedder inference failure MUST propagate as an

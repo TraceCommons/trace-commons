@@ -25,7 +25,9 @@ use uuid::Uuid;
 use trace_commons_gate_enclave::embedder::Embedder;
 use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
 use trace_commons_gate_enclave::vector_index::VectorIndex;
-use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+use trace_commons_gate_enclave::vector_index_usearch::{
+    UsearchVectorIndex, UsearchVectorIndexConfig,
+};
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::Database;
 use trace_commons_server::db::postgres::PgBackend;
@@ -482,12 +484,19 @@ async fn run_replay(args: ReplayArgs) -> Result<ReplaySummary> {
     );
     let vector_index = UsearchVectorIndex::try_new(
         &vector_index_root,
-        vector_index_dim,
-        vector_index_hnsw_m,
-        vector_index_ef_construction,
-        vector_index_ef_search,
-        vector_index_max_open,
-        vector_index_flush_every,
+        UsearchVectorIndexConfig {
+            dim: vector_index_dim,
+            hnsw_m: vector_index_hnsw_m,
+            ef_construction: vector_index_ef_construction,
+            ef_search: vector_index_ef_search,
+            max_open: vector_index_max_open,
+            flush_every: vector_index_flush_every,
+            // No periodic flusher: this CLI is one bounded operation that
+            // flushes explicitly before it returns (see the flush_all below),
+            // and a background thread writing the same tenant file
+            // concurrently with a --fresh rebuild would only add a race.
+            flush_interval: None,
+        },
     )
     .with_context(|| {
         format!(
