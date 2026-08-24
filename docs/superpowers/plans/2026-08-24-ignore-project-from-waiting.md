@@ -541,7 +541,7 @@ git commit -m "Offer Ignore project on the macOS Waiting screen"
 
 **Interfaces:**
 - Consumes: Task 2's purge
-- Produces: `copy::IGNORE_PROJECT`, `copy::IGNORE_PROJECT_TOOLTIP`, `copy::ignore_project_title(project: &str) -> String`, `copy::ignore_project_body(project: &str, pending: usize) -> String`
+- Produces: `copy::IGNORE_PROJECT`, `copy::IGNORE_PROJECT_TOOLTIP`, `copy::ignore_project_title(project: &str) -> String`, `copy::ignore_project_body(pending: usize) -> String`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -550,14 +550,14 @@ Add to `mod tests` in `copy.rs`:
 ```rust
 #[test]
 fn the_ignore_confirmation_counts_in_words_a_person_can_read() {
-    assert!(ignore_project_body("api", 1).contains("1 waiting trace."));
-    assert!(!ignore_project_body("api", 1).contains("traces"));
-    assert!(ignore_project_body("api", 12).contains("12 waiting traces"));
+    assert!(ignore_project_body(1).contains("1 waiting trace."));
+    assert!(!ignore_project_body(1).contains("traces"));
+    assert!(ignore_project_body(12).contains("12 waiting traces"));
 }
 
 #[test]
 fn the_ignore_confirmation_says_nothing_about_zero() {
-    let body = ignore_project_body("api", 0);
+    let body = ignore_project_body(0);
     assert!(!body.contains('0'), "{body}");
     assert!(!body.to_lowercase().contains("removes"), "{body}");
     assert!(body.contains("Stops this project being offered."), "{body}");
@@ -566,7 +566,7 @@ fn the_ignore_confirmation_says_nothing_about_zero() {
 #[test]
 fn the_ignore_confirmation_always_names_the_way_back() {
     for n in [0usize, 1, 7] {
-        let body = ignore_project_body("api", n);
+        let body = ignore_project_body(n);
         assert!(body.contains("undo this in Settings"), "n={n}: {body}");
         assert!(body.contains("Nothing already submitted is affected."), "n={n}");
     }
@@ -603,8 +603,7 @@ pub fn ignore_project_title(project: &str) -> String {
 /// The removal clause is dropped when nothing is waiting: a group can render
 /// with every card approved or uploading, and "removes 0 waiting traces"
 /// would be both wrong and alarming.
-pub fn ignore_project_body(project: &str, pending: usize) -> String {
-    let _ = project;
+pub fn ignore_project_body(pending: usize) -> String {
     let tail = "Nothing already submitted is affected. You can undo this in Settings.";
     if pending == 0 {
         return format!("Stops this project being offered. {tail}");
@@ -648,7 +647,7 @@ which is this crate's established `adw::MessageDialog` pattern:
         let dialog = adw::MessageDialog::new(
             Some(&app_for_ignore.window),
             Some(&copy::ignore_project_title(&project_label_for_ignore)),
-            Some(&copy::ignore_project_body(&project_label_for_ignore, pending_count)),
+            Some(&copy::ignore_project_body(pending_count)),
         );
         dialog.add_responses(&[("cancel", "Cancel"), ("ignore", copy::IGNORE_PROJECT)]);
         dialog.set_close_response("cancel");
