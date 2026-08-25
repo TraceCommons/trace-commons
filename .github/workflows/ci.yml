@@ -251,6 +251,45 @@ jobs:
       - name: Run operator-binaries smoke
         run: bash scripts/operator/operator-smoke.sh
 
+  macos-app-tests:
+    name: macOS app tests
+    # macos-26, not macos-14: macos/Package.swift declares
+    # swift-tools-version:6.0 and the 14 image ships Swift 5.10. This is the
+    # same image release-apps.yml builds the signed DMG on, so a green test
+    # run and a shipped build agree about the toolchain.
+    #
+    # This is the only thing that runs the Swift suite. Before it existed,
+    # `macos/` was covered by `swift build` in the release workflow and
+    # nothing else -- the tests were real, ran locally, and gated nothing.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-macos-app-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-macos-app-tests-
+      # The Swift package links the contributor FFI dylib
+      # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
+      # defaults to ../target/debug), so the dylib has to exist before
+      # `swift test` can link anything. Debug profile, to match that default.
+      - name: Build the FFI dylib
+        run: cargo build -p trace-commons-contributor-ffi
+      # Both language modes and every target in the package, not a filter:
+      # TCShellCore, TCUpdates, TCBridge and the app target all carry tests,
+      # and a per-target list is how a new one joins untested -- the same
+      # trap the cargo-test-default job records.
+      - name: swift test
+        working-directory: macos
+        run: swift test
+
   windows-pipe-acl:
     name: windows named-pipe ACL
     runs-on: windows-latest
