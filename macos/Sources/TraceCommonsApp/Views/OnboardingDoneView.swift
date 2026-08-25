@@ -10,7 +10,7 @@ import SwiftUI
 /// screen: the first thing this app ever does is nothing. Do not soften or
 /// reorder it out of the first line.
 struct OnboardingDoneView: View {
-    var onFinish: () -> Void = {}
+    var onFinish: () -> Void
 
     var body: some View {
         ScrollView {
@@ -28,7 +28,7 @@ struct OnboardingDoneView: View {
 /// fires a button tap, so rendering this for a screenshot only ever reads
 /// `LoginItemManager.currentState` -- it cannot trigger `register()`.
 struct OnboardingDoneContent: View {
-    var onFinish: () -> Void = {}
+    var onFinish: () -> Void
 
     @State private var offerDismissed = false
     @State private var registerOutcome: LoginItemManager.RegisterOutcome?

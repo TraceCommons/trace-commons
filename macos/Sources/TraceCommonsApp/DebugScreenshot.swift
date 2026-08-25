@@ -41,7 +41,7 @@ enum DebugScreenshot {
                 size: CGSize(width: 380, height: 330)
             )
             render(
-                ConsentScopesContent().environmentObject(model),
+                ConsentScopesContent(onContinue: { _ in }).environmentObject(model),
                 to: directory + "/macos-shell-consent-scopes.png",
                 size: CGSize(width: 660, height: 760)
             )
@@ -53,22 +53,23 @@ enum DebugScreenshot {
             // the shipping window opens at 940 and always gets the globe.
             // Capture the screen a contributor actually sees.
             render(
-                OnboardingWelcomeContent(),
+                OnboardingWelcomeContent(onGetStarted: {}, onWhatGetsRemoved: {}),
                 to: directory + "/macos-shell-onboarding-welcome.png",
                 size: CGSize(width: 900, height: 560)
             )
             render(
-                OnboardingProjectsContent().environmentObject(model),
+                OnboardingProjectsContent(onContinue: {}).environmentObject(model),
                 to: directory + "/macos-shell-onboarding-projects.png",
                 size: CGSize(width: 660, height: 520)
             )
             render(
-                OnboardingDoneContent(),
+                OnboardingDoneContent(onFinish: {}),
                 to: directory + "/macos-shell-onboarding-done.png",
                 size: CGSize(width: 660, height: 360)
             )
             render(
                 OnboardingConnectContent(
+                    onEnrolled: {},
                     previewPhase: .resolved(InviteLink(
                         raw: "https://issuer.tracecommons.ai/onboard#SAMPLECODE",
                         issuerHost: "issuer.tracecommons.ai"
@@ -79,6 +80,7 @@ enum DebugScreenshot {
             )
             render(
                 OnboardingConnectContent(
+                    onEnrolled: {},
                     previewPhase: .deadInvite,
                     previewText: "https://issuer.tracecommons.ai/onboard#EXPIRED"
                 ),
@@ -101,7 +103,7 @@ enum DebugScreenshot {
                 size: CGSize(width: 860, height: 620)
             )
             render(
-                OnboardingPrivacyScanContent(),
+                OnboardingPrivacyScanContent(onContinue: {}),
                 to: directory + "/macos-shell-onboarding-privacy-scan.png",
                 size: CGSize(width: 660, height: 560)
             )

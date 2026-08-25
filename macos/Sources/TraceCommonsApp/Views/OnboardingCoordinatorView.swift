@@ -62,7 +62,7 @@ struct OnboardingCoordinatorView: View {
     /// this view) is responsible for calling `AppModel.markOnboardingComplete()`
     /// and for whatever transition follows -- this view has no opinion on
     /// what replaces it.
-    var onComplete: () -> Void = {}
+    var onComplete: () -> Void
 
     enum Step: Equatable {
         case welcome
@@ -84,7 +84,7 @@ struct OnboardingCoordinatorView: View {
     /// with one decision each.
     @State private var showingWhatGetsRemoved = false
 
-    init(startAt: Step = .welcome, onComplete: @escaping () -> Void = {}) {
+    init(startAt: Step = .welcome, onComplete: @escaping () -> Void) {
         self.startAt = startAt
         self.onComplete = onComplete
         _step = State(initialValue: startAt)
@@ -127,6 +127,8 @@ struct OnboardingCoordinatorView: View {
         case .welcome:
             // `onWhatGetsRemoved` used to be left at its `= {}` default here,
             // so the link on that screen was live, clickable and did nothing.
+            // None of these callbacks carry a default any more -- omitting
+            // one is a compile error rather than a silent dead control.
             OnboardingWelcomeView(
                 onGetStarted: { step = .connect },
                 onWhatGetsRemoved: { showingWhatGetsRemoved = true }

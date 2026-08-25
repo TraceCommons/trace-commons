@@ -12,8 +12,8 @@ import SwiftUI
 /// it before they ask is what makes every later claim in this app credible.
 /// Do not reword it, and do not cut it for space.
 struct OnboardingWelcomeView: View {
-    var onGetStarted: () -> Void = {}
-    var onWhatGetsRemoved: () -> Void = {}
+    var onGetStarted: () -> Void
+    var onWhatGetsRemoved: () -> Void
 
     var body: some View {
         ScrollView {
@@ -58,8 +58,8 @@ struct OnboardingWelcomeView: View {
 /// screen, and is not demoted into the small print. It is what makes every
 /// later claim credible.
 struct OnboardingWelcomeContent: View {
-    var onGetStarted: () -> Void = {}
-    var onWhatGetsRemoved: () -> Void = {}
+    var onGetStarted: () -> Void
+    var onWhatGetsRemoved: () -> Void
 
     /// Landing scale, but not fixed: `@ScaledMetric` means the accessibility
     /// text sizes still move it, which a hardcoded 50 would not.
@@ -447,7 +447,7 @@ private struct SignalArc: Shape {
 }
 
 #Preview("Onboarding welcome") {
-    OnboardingWelcomeContent()
+    OnboardingWelcomeContent(onGetStarted: {}, onWhatGetsRemoved: {})
         .frame(width: 860)
         .background(TC.ground)
 }

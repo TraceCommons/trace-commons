@@ -40,7 +40,7 @@ import TCShellCore
 /// it cannot be armed.
 struct OnboardingProjectsView: View {
     @EnvironmentObject private var model: AppModel
-    var onContinue: () -> Void = {}
+    var onContinue: () -> Void
 
     var body: some View {
         ScrollView {
@@ -55,7 +55,7 @@ struct OnboardingProjectsView: View {
 struct OnboardingProjectsContent: View {
     @EnvironmentObject private var model: AppModel
 
-    var onContinue: () -> Void = {}
+    var onContinue: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.xl) {

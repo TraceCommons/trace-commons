@@ -30,7 +30,7 @@ import SwiftUI
 /// to some later settings screen.
 struct OnboardingPrivacyScanView: View {
     @EnvironmentObject private var model: AppModel
-    var onContinue: () -> Void = {}
+    var onContinue: () -> Void
 
     var body: some View {
         // The operator-offers-it gate lives here, in the wrapper, the same
@@ -63,7 +63,7 @@ struct OnboardingPrivacyScanContent: View {
 
     var onContinue: () -> Void
 
-    init(onContinue: @escaping () -> Void = {}, previewChoice: Choice = .localOnly) {
+    init(onContinue: @escaping () -> Void, previewChoice: Choice = .localOnly) {
         self.onContinue = onContinue
         _choice = State(initialValue: previewChoice)
     }
