@@ -570,6 +570,17 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
     }
 
+    #if DEBUG
+    /// Test seam: `status` is `private(set)` and otherwise only ever set
+    /// from a live daemon reply, so there is no other way to exercise the
+    /// tenant-keyed onboarding marker without a running daemon and a real
+    /// enrolment. Debug-only, and deliberately routed through
+    /// `publishIfChanged` so a test observes exactly what the app does.
+    func setStatusForTesting(_ status: DaemonStatus) {
+        publishIfChanged(\.status, status)
+    }
+    #endif
+
     private static func onboardingCompleteKey(_ tenantID: String) -> String {
         "trace_commons.onboarding_complete.\(tenantID)"
     }
