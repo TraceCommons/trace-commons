@@ -551,8 +551,22 @@ final class AppModel: ObservableObject {
         return UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
     }
 
+    /// `isOnboardingComplete` is computed from `UserDefaults`, not from a
+    /// `@Published` property, so writing the key changes nothing SwiftUI is
+    /// watching. Without the explicit `objectWillChange`, pressing Done
+    /// updated the marker and left the contributor sitting on the Done
+    /// screen until some *unrelated* published value happened to change --
+    /// and `publishIfChanged` exists precisely to stop that from happening,
+    /// so on a quiet daemon it never did. Do not remove this send without
+    /// making the marker itself observable.
     func markOnboardingComplete() {
-        guard let tenantID = status.tenantID else { return }
+        guard let tenantID = status.tenantID else {
+            // No tenant to key the marker to yet: the button must not be
+            // inert. Re-ask the daemon so the next press has one.
+            refreshStatus()
+            return
+        }
+        objectWillChange.send()
         UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
     }
 
