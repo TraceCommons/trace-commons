@@ -57,11 +57,17 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // State-directory resolution and the shell's refusal rules. Carved
-        // out for the same reason TCUpdates was: the app target links the
-        // FFI dylib, so nothing in it can be a unit test. The bug this
-        // target exists to prevent -- resolving the state directory from an
-        // environment variable a Finder launch never has -- shipped in a
-        // notarized build precisely because there was nowhere to test it.
+        // out for the same reason TCUpdates was: keep logic that needs
+        // neither the FFI dylib nor AppKit in a target that can be tested
+        // without them. The bug this target exists to prevent -- resolving
+        // the state directory from an environment variable a Finder launch
+        // never has -- shipped in a notarized build precisely because there
+        // was nowhere to test it.
+        //
+        // This is still the first place new logic should go. It is a
+        // preference, not a limit: TraceCommonsAppTests (below) does link
+        // the dylib and test the app target directly, for the things that
+        // only exist there.
         .target(
             name: "TCShellCore",
             swiftSettings: [.swiftLanguageMode(.v6)]
@@ -97,6 +103,26 @@ let package = Package(
             name: "TCBridgeTests",
             dependencies: ["TCBridge", "TCShellCore"],
             swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L", ffiLibDir,
+                    "-ltrace_commons_contributor_ffi",
+                ])
+            ]
+        ),
+        // The app target itself. It links the FFI dylib and Sparkle, so
+        // these are not unit tests in the sense TCShellCore's are -- prefer
+        // that target for anything that does not need `AppModel`.
+        //
+        // What needs to live here is the observable behaviour of the model
+        // the SwiftUI views actually bind to. The Done button shipped
+        // broken because `markOnboardingComplete` mutated state without
+        // publishing it, and no target existed that could observe an
+        // `AppModel` and notice.
+        .testTarget(
+            name: "TraceCommonsAppTests",
+            dependencies: ["TraceCommonsApp"],
+            swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .unsafeFlags([
                     "-L", ffiLibDir,
