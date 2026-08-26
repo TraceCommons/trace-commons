@@ -705,7 +705,9 @@ git show --stat HEAD
 
 ---
 
-### Task 5: Collect the verdict in the macOS and Windows shells
+### Task 5 (SUPERSEDED — split into 5a and 5b; see the correction at the end)
+
+### Task 5 (original): Collect the verdict in the macOS and Windows shells
 
 **Ship this as a separate pull request.** Neither shell compiles in this
 environment; both are verified only by CI (`macOS app tests` runs `swift test`
@@ -905,3 +907,87 @@ git add crates/trace-commons-contributor-gtk/src/ui/queue.rs \
 git commit -m "Offer the verdict on the GTK bulk-approve surface"
 git show --stat HEAD
 ```
+
+---
+
+## Correction: Task 5 splits into 5a and 5b
+
+Task 5 asserted that neither shell compiles in the authoring environment.
+That is wrong for macOS: the host is a Mac, and CI's own recipe
+(`cargo build -p trace-commons-contributor-ffi`, then `swift test` in
+`macos/`) runs locally. Only Windows needs remote hardware.
+
+The two also verify so differently that one review cannot cover both. They
+become separate branches and separate pull requests.
+
+**Both depend on the fix wave (`341d727d`).** Write against the corrected
+contract, not against Task 2's original code:
+
+- The refusal label is the stable kebab `outcome-invalid` (`ipc.rs:183`),
+  NOT the earlier prose sentence. A shell that matches the sentence is the
+  cross-shell drift the final review flagged.
+- `docs/contributor-daemon-ipc-v1_1.md` is the authority: the `approve` row
+  and the section "The `outcome` verdict". Read it first.
+
+### Task 5a: the macOS shell
+
+**Branch:** `macos-verdict-control`, off `gui-contributor-verdict`.
+
+**Files:**
+- Modify: `macos/Sources/TraceCommonsApp/DaemonClient.swift` (the two `approve` methods)
+- Modify: `macos/Sources/TraceCommonsApp/AppModel.swift` (the two `approve` call sites)
+- Modify: the approval view that calls them
+- Test: `macos/Tests/TraceCommonsAppTests`
+
+**Verifiable locally, and must be:**
+
+```bash
+cargo build -p trace-commons-contributor-ffi
+cd macos && swift test
+```
+
+Do not report this task complete without pasting `swift test` output.
+
+Extract the parameter construction as a static function so it is testable
+without a live socket, mirroring the GTK crate's `approve_params`: an absent
+verdict must OMIT the key entirely, never send `null` or `""` — both are
+refused by the daemon.
+
+Three options, no selection by default, the approve control never disabled.
+Reuse the exact question and caption strings from the GTK shell
+(`crates/trace-commons-contributor-gtk/src/copy.rs`: `VERDICT_QUESTION`,
+`VERDICT_WORKED`, `VERDICT_PARTLY`, `VERDICT_FAILED`, `VERDICT_CAPTION`).
+The caption is the contributor-facing disclosure that the outcome fields sit
+outside the "exactly what you were shown" guarantee. Do not reword it.
+
+Bulk parity: if the macOS shell has a bulk/project approve, give it the
+verdict the way Task 6 did for GTK — an opt-in path beside the existing
+one-click control, never a dialog in front of it.
+
+### Task 5b: the Windows shell
+
+**Branch:** `windows-verdict-control`, off `gui-contributor-verdict`.
+
+**Files:**
+- Modify: `windows/src/TraceCommons.Interop/DaemonProtocol.cs` and its `approve` call sites
+- Modify: the approval UI
+- Test: the Windows test project
+
+**Cannot be verified locally.** Build and test on `tc-win-dev` through
+`windows/scripts/win-exec.sh 'powershell command'` (IAP tunnel; the box has
+no external IP). It is already running.
+
+Gotchas that cost time if unknown:
+
+- The checkout at `C:\src\trace-commons-server` is stale (`fdeb02f2d`,
+  weeks old) and has untracked leftovers (`win_lib_test_output*.txt`,
+  `windows/dist/`). Fetch and check out the branch; leave the leftovers.
+- SSH is not enabled by default; `win-enable-ssh.ps1` exists if needed, but
+  `win-exec.sh` is the intended headless path — do not build a new harness.
+- Defender is disabled by policy on this image, so any scan result there is
+  meaningless. Not needed for this task; do not go near it.
+- The box is Windows-licensed and bills while running. It must be stopped
+  when the work is done, and `status=TERMINATED` confirmed via the API.
+
+Same UI contract as 5a: three options, no default selection, approve never
+disabled, the same strings, omission means omission.
