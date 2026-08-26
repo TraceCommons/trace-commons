@@ -112,6 +112,7 @@ async fn build_envelope(
                 content: body.to_string(),
             },
             expected_tool_results: Vec::new(),
+            timestamp: None,
         }],
     };
     let options = RecordedTraceContributionOptions {

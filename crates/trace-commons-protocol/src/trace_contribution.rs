@@ -1634,7 +1634,7 @@ impl RawTraceContribution {
                         event_id: Uuid::new_v4(),
                         parent_event_id: None,
                         event_type: TraceContributionEventType::UserMessage,
-                        timestamp: created_at,
+                        timestamp: step.timestamp.unwrap_or(created_at),
                         content: options.include_message_text.then(|| content.clone()),
                         structured_payload: Value::Null,
                         tool_name: None,
@@ -1655,7 +1655,7 @@ impl RawTraceContribution {
                         event_id: Uuid::new_v4(),
                         parent_event_id: None,
                         event_type: TraceContributionEventType::AssistantMessage,
-                        timestamp: created_at,
+                        timestamp: step.timestamp.unwrap_or(created_at),
                         content: options.include_message_text.then(|| content.clone()),
                         structured_payload: Value::Null,
                         tool_name: None,
@@ -1694,7 +1694,7 @@ impl RawTraceContribution {
                             event_id,
                             parent_event_id: None,
                             event_type: TraceContributionEventType::ToolCall,
-                            timestamp: created_at,
+                            timestamp: step.timestamp.unwrap_or(created_at),
                             content: None,
                             structured_payload,
                             tool_name: Some(tool_call.name.clone()),
@@ -1718,7 +1718,7 @@ impl RawTraceContribution {
                     event_id: Uuid::new_v4(),
                     parent_event_id: call_event_ids.get(expected.tool_call_id.as_str()).copied(),
                     event_type: TraceContributionEventType::ToolResult,
-                    timestamp: created_at,
+                    timestamp: step.timestamp.unwrap_or(created_at),
                     content: options
                         .include_tool_payloads
                         .then(|| expected.content.clone()),
@@ -9756,6 +9756,77 @@ mod tests {
         );
     }
 
+    /// Builds a recorded trace with one `UserInput` step per entry in
+    /// `times`. Each step gets `Some(timestamp)`; pass an empty slice to get
+    /// a trace whose steps carry no timestamp at all (`None`).
+    fn recorded_trace_with_step_times(
+        times: &[chrono::DateTime<chrono::Utc>],
+    ) -> crate::llm::recording::TraceFile {
+        let steps = if times.is_empty() {
+            vec![crate::llm::recording::TraceStep {
+                request_hint: None,
+                response: crate::llm::recording::TraceResponse::UserInput {
+                    content: "hello".to_string(),
+                },
+                expected_tool_results: Vec::new(),
+                timestamp: None,
+            }]
+        } else {
+            times
+                .iter()
+                .map(|t| crate::llm::recording::TraceStep {
+                    request_hint: None,
+                    response: crate::llm::recording::TraceResponse::UserInput {
+                        content: "hello".to_string(),
+                    },
+                    expected_tool_results: Vec::new(),
+                    timestamp: Some(*t),
+                })
+                .collect()
+        };
+        crate::llm::recording::TraceFile {
+            model_name: "claude-fable-5".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps,
+        }
+    }
+
+    #[test]
+    fn a_recorded_step_keeps_its_own_timestamp() {
+        use super::*;
+        // A recorded trace whose steps carry times must not collapse to one
+        // instant. Every event sharing `created_at` is the identical-timestamp
+        // finding in issue #298.
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(5);
+        let trace = recorded_trace_with_step_times(&[t0, t1]);
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions::default(),
+        );
+
+        let stamps: Vec<_> = raw.events.iter().map(|e| e.timestamp).collect();
+        assert!(
+            stamps.windows(2).any(|w| w[0] != w[1]),
+            "steps with distinct times must not collapse to one instant"
+        );
+    }
+
+    /// A source with no times behaves exactly as before. Nothing is invented.
+    #[test]
+    fn a_recorded_step_without_a_timestamp_falls_back() {
+        use super::*;
+        let trace = recorded_trace_with_step_times(&[]);
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions::default(),
+        );
+        let stamps: Vec<_> = raw.events.iter().map(|e| e.timestamp).collect();
+        assert!(stamps.windows(2).all(|w| w[0] == w[1]));
+    }
+
     #[test]
     fn a_recorded_trace_pairs_its_results_with_its_calls() {
         use super::*;
@@ -9781,6 +9852,7 @@ mod tests {
                     name: "shell".to_string(),
                     content: "src".to_string(),
                 }],
+                timestamp: None,
             }],
         };
         let raw = RawTraceContribution::from_recorded_trace(

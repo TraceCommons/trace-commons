@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Top-level trace file - extended format with memory snapshot and HTTP exchanges.
@@ -60,6 +61,16 @@ pub struct TraceStep {
     /// these to verify tool output hasn't changed (regression detection).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_tool_results: Vec<ExpectedToolResult>,
+    /// When this step happened, where the recording knows.
+    ///
+    /// `None` on every recording written before this field existed, and on
+    /// sources that do not carry per-step times. `from_recorded_trace` falls
+    /// back to the envelope's `created_at` in that case rather than
+    /// synthesising an offset: a plausible-looking invented timestamp is
+    /// worse than an absent one, because a consumer cannot tell it apart
+    /// from a real one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// Soft validation hints for matching a step to a request.

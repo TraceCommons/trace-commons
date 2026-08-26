@@ -22,7 +22,7 @@ use trace_commons_protocol::trace_contribution::{
 };
 use uuid::Uuid;
 
-use super::translators::SubmissionDraft;
+use super::translators::{SessionEventRole, SubmissionDraft};
 
 /// Outcome of a single submission attempt. Hash-only fields, no body content.
 #[derive(Debug, Clone)]
@@ -181,25 +181,43 @@ fn submission_uuid(draft_id: &str) -> Result<Uuid> {
     Ok(Uuid::from_bytes(arr))
 }
 
-/// Build a [`TraceContributionEnvelope`] from a translator draft. We construct
-/// a synthetic single-turn `TraceFile` containing the body as a `UserInput`
-/// step, run it through the deterministic redactor (the same pipeline real
+/// Build a [`TraceContributionEnvelope`] from a translator draft. We
+/// construct a synthetic multi-step `TraceFile`, one step per session
+/// event, run it through the deterministic redactor (the same pipeline real
 /// clients use), then override the redactor-generated random ids with our
 /// deterministic content-derived ones so reruns are idempotent.
 pub async fn build_envelope_from_draft(
     draft: &SubmissionDraft,
 ) -> Result<TraceContributionEnvelope> {
+    let steps: Vec<TraceStep> = draft
+        .session_events
+        .iter()
+        .map(|event| TraceStep {
+            request_hint: None,
+            response: match event.role {
+                SessionEventRole::User | SessionEventRole::Other => TraceResponse::UserInput {
+                    content: event.text.clone(),
+                },
+                SessionEventRole::Assistant => TraceResponse::Text {
+                    content: event.text.clone(),
+                    // These corpus-building datasets do not carry real
+                    // per-event token counts. 0 is an explicit "not
+                    // measured", not a fabricated value -- unlike
+                    // `timestamp`, `TraceResponse::Text` has no absent-value
+                    // representation for this field.
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            },
+            expected_tool_results: Vec::new(),
+            timestamp: event.timestamp,
+        })
+        .collect();
     let trace = TraceFile {
         model_name: format!("pilot-bootstrap/{}", draft.source_dataset),
         memory_snapshot: Vec::new(),
         http_exchanges: Vec::new(),
-        steps: vec![TraceStep {
-            request_hint: None,
-            response: TraceResponse::UserInput {
-                content: draft.trace_body.clone(),
-            },
-            expected_tool_results: Vec::new(),
-        }],
+        steps,
     };
     let options = RecordedTraceContributionOptions {
         include_message_text: true,
@@ -234,9 +252,50 @@ mod tests {
             source_dataset: "test/dataset".into(),
             source_row_id: "row-1".into(),
             source_domain_tag: "test".into(),
+            session_events: vec![super::super::translators::SessionEvent {
+                text: "hello world".into(),
+                timestamp: None,
+                role: SessionEventRole::User,
+            }],
         };
         let a = build_envelope_from_draft(&draft).await.unwrap();
         let b = build_envelope_from_draft(&draft).await.unwrap();
         assert_eq!(a.submission_id, b.submission_id);
+    }
+
+    #[tokio::test]
+    async fn a_multi_event_draft_produces_a_multi_event_envelope_with_distinct_timestamps() {
+        // The end-to-end point of the restructure: a session that used to
+        // collapse into one flattened `UserInput` step now reaches the
+        // envelope as multiple events, each keeping its own real time.
+        use chrono::{TimeZone, Utc};
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 5).unwrap();
+        let draft = SubmissionDraft {
+            submission_id: "fedcba9876543210fedcba9876543210".into(),
+            trace_body: "first turn\n\nfirst reply".into(),
+            source_dataset: "test/dataset".into(),
+            source_row_id: "row-2".into(),
+            source_domain_tag: "test".into(),
+            session_events: vec![
+                super::super::translators::SessionEvent {
+                    text: "first turn".into(),
+                    timestamp: Some(t0),
+                    role: SessionEventRole::User,
+                },
+                super::super::translators::SessionEvent {
+                    text: "first reply".into(),
+                    timestamp: Some(t1),
+                    role: SessionEventRole::Assistant,
+                },
+            ],
+        };
+        let envelope = build_envelope_from_draft(&draft).await.unwrap();
+        assert_eq!(envelope.events.len(), 2);
+        let stamps: std::collections::BTreeSet<_> =
+            envelope.events.iter().map(|e| e.timestamp).collect();
+        assert_eq!(stamps.len(), 2, "each event must keep its own timestamp");
+        assert!(stamps.contains(&t0));
+        assert!(stamps.contains(&t1));
     }
 }
