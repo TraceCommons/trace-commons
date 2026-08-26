@@ -53,11 +53,48 @@ daemon ipc.rs::handle_approve
 QueueEntry.approved_verdict: Option<String>      (new, #[serde(default)])
    |
    v
-daemon/mod.rs::drain_approved
-   |  SubmitOptions { verdict: entry.approved_verdict, .. }   (today: None)
+uploader.rs::approved_envelope_for
+   |  load stored envelope; verify digest against previewed_envelope_digest
+   |  THEN apply entry.approved_verdict to envelope.outcome.task_success
    v
-envelope.rs::build_raw_contribution_with_id  ->  OutcomeMetadata
+upload
 ```
+
+### Why not SubmitOptions.verdict
+
+`SubmitOptions.verdict` -- the field PR #421 added -- reaches only envelopes
+a run BUILDS. That is the CLI path.
+
+The daemon does not build at upload time. `approved_envelope` stores the
+redacted envelope the contributor was shown and the uploader sends exactly
+those bytes, because re-deriving under `pii_filter = "near-ai"` returns
+different spans for identical text: the earlier digest-pin design refused
+the entry, cleared the pin, and never completed the primary consent path.
+Redaction is deliberately not re-run in `approved_envelope_for`
+(`uploader.rs:298`).
+
+So a verdict routed through `SubmitOptions` would be silently dropped for
+every GUI submission -- the feature would appear to work and record
+`Unknown`. The verdict is instead applied to the loaded envelope after the
+digest check passes, which is the same kind of post-redaction mutation
+`apply_granted_scopes` (`submit.rs:1026`) already performs.
+
+Both paths are needed and neither is redundant:
+
+- CLI, fresh build: `SubmitOptions.verdict`, already shipped in #421.
+- Daemon, stored envelope: `entry.approved_verdict`, applied after the
+  digest check.
+
+### The digest pin now describes the previewed bytes, not the sent bytes
+
+This is the one deliberate deviation from "the upload sends precisely those
+bytes", and it is bounded to `outcome.task_success`.
+
+`approved_envelope`'s module doc currently states the stronger claim without
+qualification. It must be amended in the same change, or it becomes false.
+The digest re-check stays exactly as it is -- it is a consistency check on
+this crate's own storage, and it must continue to run against the bytes as
+stored, before the verdict is applied.
 
 ### Why not inside the preview
 
@@ -175,6 +212,14 @@ The daemon layer carries the real assertions:
 - A `None` `approved_verdict` on an approved entry still submits. This is the
   test that guards the drift-guard asymmetry above, and it is the one that
   fails if someone later folds the field into `input_fingerprint`.
+- A verdict reaches an entry that uploads a STORED envelope. This is the
+  regression test for the mechanism error this spec originally made: routing
+  the verdict through `SubmitOptions` passes every fresh-build test and drops
+  the verdict on exactly the path the GUI uses. The test must seed a stored
+  approved envelope with a pinned digest, not build one inline.
+- The digest re-check still refuses a stored envelope whose bytes were
+  tampered with, with a verdict present. The verdict must be applied after
+  that check, never before it.
 
 ## Non-goals
 
