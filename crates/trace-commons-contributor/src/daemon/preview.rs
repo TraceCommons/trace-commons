@@ -191,7 +191,15 @@ fn strip_volatile(value: &mut serde_json::Value) {
 /// release bump moves the fingerprint even if nobody remembers to touch
 /// this constant; this exists for the case where the rules move without a
 /// version bump.
-pub const REDACTION_RULESET_VERSION: &str = "1";
+/// Moved to "2" for issue #298: the envelope layout changed for unchanged
+/// input. A tool call's arguments are now named under an `arguments` key
+/// rather than shipped as the payload itself, calls and results carry
+/// `tool_call_id`, a result names its call in `parent_event_id`, and
+/// `replay.replayable` / `required_tools` now describe the transcript
+/// instead of being constants. An armed auto-upload entry approved before
+/// that change would otherwise upload an envelope built to the new layout,
+/// which is exactly the case this constant exists for.
+pub const REDACTION_RULESET_VERSION: &str = "2";
 
 /// Contributor-config fields that are deliberately **not** fingerprinted,
 /// with the reason each one is out.

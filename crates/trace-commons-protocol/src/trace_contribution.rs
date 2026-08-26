@@ -5129,10 +5129,35 @@ fn canonical_event_line(event: &TraceContributionEvent) -> String {
     line
 }
 
+/// Key names only, never values, at a bounded width.
+///
+/// A tool call's arguments sit under an `arguments` key, so summarising only
+/// the top level would render every call in the corpus as `keys(arguments)`
+/// -- identical text for a filesystem read and a calendar write. The argument
+/// key names are most of what distinguishes one call from another in a
+/// payload-redacted corpus, and this text is what the duplicate and novelty
+/// scores are computed over (see #211, where tool-name-only canonical text
+/// already collapsed 330 traces into 236 distinct hashes). Descend through
+/// the wrapper so those names survive, and keep the wrapper visible so the
+/// two shapes cannot be confused.
 fn safe_payload_summary(payload: &Value) -> String {
     match payload {
         Value::Object(map) => {
-            let keys = map.keys().take(8).cloned().collect::<Vec<_>>();
+            let keys = map
+                .iter()
+                .take(8)
+                .map(|(key, value)| match value {
+                    // One level only. Deeper nesting is not more signal, and
+                    // an unbounded walk over an attacker-shaped payload is
+                    // not something this runs.
+                    Value::Object(inner) if REPLAY_ARGUMENT_KEYS.contains(&key.as_str()) => {
+                        let inner_keys =
+                            inner.keys().take(8).map(String::as_str).collect::<Vec<_>>();
+                        format!("{key}:[{}]", inner_keys.join(","))
+                    }
+                    _ => key.clone(),
+                })
+                .collect::<Vec<_>>();
             format!("keys({})", keys.join(","))
         }
         Value::Array(items) => format!("array(len={})", items.len()),
@@ -9335,5 +9360,69 @@ mod tests {
             .expect("a tool result event");
         assert_eq!(call.tool_call_id.as_deref(), Some("call-9"));
         assert_eq!(result.parent_event_id, Some(call.event_id));
+    }
+
+    #[test]
+    fn argument_key_names_survive_the_arguments_wrapper() {
+        use super::*;
+        // The canonical text is what duplicate and novelty scores are
+        // computed over. Arguments live under an `arguments` key, so a
+        // top-level-only summary renders every call in the corpus as
+        // `keys(arguments)` -- a filesystem read and a calendar write
+        // becoming the same string. #211 is already about tool-name-only
+        // canonical text collapsing this corpus; this would have widened it.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("gmail__list_messages"),
+            None,
+            None,
+            serde_json::json!({"arguments": {"label": "UNREAD", "max": 10}}),
+        )];
+        let canonical = canonical_summary_for_embedding(&envelope);
+        assert!(
+            canonical.contains("arguments:[label,max]"),
+            "argument key names must reach the canonical text: {canonical}"
+        );
+    }
+
+    #[test]
+    fn two_calls_with_different_arguments_do_not_canonicalise_alike() {
+        use super::*;
+        let call = |payload| {
+            let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+            envelope.events = vec![replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("builtin__http"),
+                None,
+                None,
+                payload,
+            )];
+            canonical_summary_for_embedding(&envelope)
+        };
+        assert_ne!(
+            call(serde_json::json!({"arguments": {"url": "x"}})),
+            call(serde_json::json!({"arguments": {"method": "POST", "body": "y"}})),
+            "different argument shapes must not produce identical canonical text"
+        );
+    }
+
+    #[test]
+    fn payload_values_never_reach_the_canonical_text() {
+        use super::*;
+        // Key names only, at both levels. This text is stored and embedded.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("gmail__list_messages"),
+            None,
+            None,
+            serde_json::json!({"arguments": {"label": "TOP-SECRET-VALUE"}}),
+        )];
+        let canonical = canonical_summary_for_embedding(&envelope);
+        assert!(
+            !canonical.contains("TOP-SECRET-VALUE"),
+            "a payload value must never be summarised into canonical text: {canonical}"
+        );
     }
 }
