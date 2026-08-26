@@ -131,8 +131,21 @@ A correction is also categorically different from session content. Session
 content is captured incidentally; a correction is composed deliberately, for
 submission, by someone who chooses every word knowing where it goes.
 
-So corrections skip the semantic passes -- path, email and identifier
-replacement -- and their text is stored as written.
+So corrections skip the rewriting passes entirely. Note there are TWO, and
+both are skipped: the deterministic semantic passes (path, email, identifier)
+at `trace_contribution.rs:3671`, and the NEAR AI prose-PII filter at `:3673`,
+which also rewrites. Skipping only the first would leave "stored as written"
+untrue for a correction naming a person.
+
+Implementation note: secret detection lives INSIDE `redact_text_with_state`
+alongside paths and emails, so keeping it while dropping the rest is a
+decomposition of that function, not a skip. Build an explicit correction path
+rather than threading flags through the general one.
+
+The residual case is a correction naming a third party, who has consented to
+nothing and whom the contributor's intent does not speak for. That is carried
+by the prose warning in the published clause and recorded as a counsel
+judgment call -- see `docs/legal-correction-clause-draft.md`.
 
 **Secret detection still runs, and still blocks.** A High or Critical match
 sets `blocked_secret_detected` and refuses the submission, exactly as
