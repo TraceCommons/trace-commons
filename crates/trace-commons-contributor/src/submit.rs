@@ -20,7 +20,7 @@ use trace_commons_protocol::trace_contribution::{
 use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
 use crate::envelope::{
     MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
-    build_preview_raw_contribution, build_raw_contribution, build_redactor_with,
+    build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor_with,
     canary_self_test_async, envelope_has_residual_secret, envelope_size, envelope_size_ok,
     near_ai_settings_from_env, parse_scope_names, parse_use_names, raw_contribution_size,
     raw_contribution_size_ok, redact_to_envelope,
@@ -115,6 +115,17 @@ pub struct SubmitOptions {
     /// `quarantined`. Keeps the same content-addressed `submission_id` and
     /// asks the server to supersede the stored record (#214).
     pub remediate_quarantined: bool,
+    /// How the contributor says these sessions went, applied to every
+    /// envelope this run builds. `None` leaves `task_success` `Unknown`,
+    /// which is what every envelope carried before this existed.
+    ///
+    /// Only reaches envelopes this run BUILDS. An entry uploading previously
+    /// approved bytes sends exactly those bytes, so a verdict cannot be
+    /// applied to it after the fact -- see the note on `SubmitOptions` in
+    /// `daemon::drain_approved` about this struct sitting outside the
+    /// approval fingerprint. Collecting a verdict at approval time is the
+    /// daemon-side half and is deliberately not attempted here.
+    pub verdict: Option<crate::envelope::ContributorVerdict>,
 }
 
 fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
@@ -521,7 +532,12 @@ impl<'a> SubmitContext<'a> {
                 let raw = if opts.unenrolled_preview {
                     build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
                 } else {
-                    build_raw_contribution(&transcript, &self.effective_cfg, now)
+                    build_raw_contribution_with_verdict(
+                        &transcript,
+                        &self.effective_cfg,
+                        now,
+                        opts.verdict,
+                    )
                 };
                 // Skip sessions that already exceed the envelope limit before
                 // the expensive redaction/privacy-filter pass; they would be
@@ -1270,7 +1286,7 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let raw = build_raw_contribution(&transcript, cfg, now);
+        let raw = build_raw_contribution_with_verdict(&transcript, cfg, now, None);
         assert!(raw_contribution_size_ok(&raw).is_ok());
         let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
         stamp_granted_scopes(&mut envelope, cfg, narrow_token);
@@ -1320,7 +1336,7 @@ mod tests {
         let raw = if unenrolled_preview {
             build_preview_raw_contribution(&transcript, cfg, now)
         } else {
-            build_raw_contribution(&transcript, cfg, now)
+            build_raw_contribution_with_verdict(&transcript, cfg, now, None)
         };
         redact_to_envelope(&redactor, raw).await.unwrap()
     }
@@ -1553,6 +1569,7 @@ mod tests {
                 machine_readable: false,
                 unenrolled_preview: false,
                 remediate_quarantined: false,
+                verdict: None,
             };
             submit_sessions(&store, &cfg, fixture_selection(), &opts)
                 .await
@@ -1611,6 +1628,7 @@ mod tests {
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let selection = fixture_selection();
@@ -1657,6 +1675,7 @@ mod tests {
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         // A private copy of the fixture: this test rewrites the session
@@ -1733,6 +1752,7 @@ mod tests {
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let selection = fixture_selection();
@@ -1761,6 +1781,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1813,6 +1834,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -1845,6 +1867,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: true,
+            verdict: None,
         };
         let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
             .await
@@ -1876,9 +1899,7 @@ mod tests {
     /// are not secret-shaped and never trip the guard).
     #[tokio::test]
     async fn residual_secret_guard_flags_survivor_and_passes_clean_envelope() {
-        use crate::envelope::{
-            build_raw_contribution, envelope_has_residual_secret, redact_to_envelope,
-        };
+        use crate::envelope::{envelope_has_residual_secret, redact_to_envelope};
         let root =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code");
         let src = crate::source::claude_code::ClaudeCodeSource::new(root);
@@ -1893,7 +1914,7 @@ mod tests {
         let redactor =
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
                 .unwrap();
-        let raw = build_raw_contribution(&transcript, &cfg, Utc::now());
+        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
         let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
 
         // A properly-redacted envelope has no residual secret shape.
@@ -1936,6 +1957,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         // A minimal transcript whose assistant message carries a
@@ -2002,6 +2024,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -2028,6 +2051,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
             .await
@@ -2087,6 +2111,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(
@@ -2145,6 +2170,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2201,6 +2227,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2232,6 +2259,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2263,6 +2291,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2412,6 +2441,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2521,6 +2551,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
         let outcomes = submit_sessions(
             &store,
@@ -2745,6 +2776,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
@@ -2810,6 +2842,7 @@ mod tests {
             machine_readable: false,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
