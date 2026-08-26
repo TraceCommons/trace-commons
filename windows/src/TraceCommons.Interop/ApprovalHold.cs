@@ -110,6 +110,19 @@ public sealed class ApprovalHold
     /// <summary>Whether an undo may still be offered at <paramref name="now"/>.</summary>
     public bool IsLive(DateTimeOffset now) => RemainingSeconds(now) > 0;
 
+    /// <summary>
+    /// Whether this response is the correction-credential refusal.
+    ///
+    /// Distinguished from every other skip because it is the only one the
+    /// contributor caused and the only one they can fix, and because the
+    /// advice that goes with it -- rotate the credential, it has already
+    /// been typed -- is not advice any other refusal carries. A caller that
+    /// sees this shows <see cref="CorrectionCopy.CredentialHeadline"/> and
+    /// its body instead of the ordinary toast.
+    /// </summary>
+    public bool WasRefusedForACorrectionCredential =>
+        Skipped.Any(skip => skip.ReasonLabel == CorrectionCopy.CredentialRefusalLabel);
+
     /// <summary>The sum of <see cref="Redactions"/>, which is all the toast ever names.</summary>
     public ulong RedactionsTotal => Redactions.Values.Aggregate(0UL, (total, count) => total + count);
 

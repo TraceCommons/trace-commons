@@ -751,12 +751,32 @@ final class AppModel: ObservableObject {
     /// question. It defaults to none, and none is sent as an absent
     /// parameter rather than an empty one -- see
     /// `DaemonClient.approveParams`.
-    func approve(_ entry: QueueEntry, verdict: ContributorVerdict? = nil) {
+    /// `correction` is what the contributor wrote in the correction box.
+    /// Blank or absent sends no key, and the call is then exactly the one
+    /// this model made before the box existed.
+    ///
+    /// `completion` reports whether the daemon refused the submission
+    /// because the correction contains something credential-shaped. That
+    /// refusal gets no toast: the sheet is still on screen, still holding
+    /// the text, and shows its own message instead -- see
+    /// `CorrectionCopy.credentialHeadline`. Every other outcome toasts as
+    /// before and reports `false`.
+    func approve(
+        _ entry: QueueEntry,
+        verdict: ContributorVerdict? = nil,
+        correction: String? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         perform("approve", work: {
-            try $0.approve(entryID: entry.entryID, verdict: verdict)
+            try $0.approve(entryID: entry.entryID, verdict: verdict, correction: correction)
         }) { response in
             self.refreshQueue()
+            if response.wasRefusedForACorrectionCredential {
+                completion?(true)
+                return
+            }
             self.showToast(for: response, attempted: [entry.entryID])
+            completion?(false)
         }
     }
 

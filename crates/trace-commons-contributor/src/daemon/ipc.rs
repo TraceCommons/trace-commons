@@ -181,6 +181,35 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 /// discard the contributor's answer -- the same rule the `--outcome` flag
 /// applies.
 pub const ERR_BAD_VERDICT: &str = "outcome-invalid";
+/// `approve`'s `correction` was not a string.
+pub const ERR_BAD_CORRECTION: &str = "correction-invalid";
+/// `approve` carried a correction without a `partly` or `failed` outcome.
+///
+/// The shells only show the field for those two verdicts, and the same rule
+/// is enforced here rather than trusted to them. A run the contributor has
+/// just called successful has nothing to correct, and refusing the
+/// combination halves the surface for correction-shaped credit farming --
+/// see the S5 design note.
+pub const ERR_CORRECTION_NEEDS_VERDICT: &str = "correction-needs-outcome";
+/// `approve` carried a correction longer than
+/// `envelope::MAX_CORRECTION_CHARS`.
+pub const ERR_CORRECTION_TOO_LONG: &str = "correction-too-long";
+/// `approve` carried a correction with `all` or `project_id`.
+///
+/// A correction is written about one session. Applying one string to a whole
+/// batch would attach an explanation to sessions it was not written about,
+/// and every one of them would carry it into the corpus as the
+/// contributor's own words.
+pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
+/// The label an entry is skipped under when credential detection fired on
+/// the correction the contributor wrote for it.
+///
+/// Nothing is approved and nothing is sent. The contributor is told to
+/// remove the credential and, because it has already been typed, to rotate
+/// it -- masking it and sending it on would leave a live credential
+/// transmitted and its owner unaware. The label names the condition and
+/// never the text or the match.
+pub const REASON_CORRECTION_CREDENTIAL: &str = crate::envelope::REASON_CORRECTION_CREDENTIAL;
 
 /// `quiesce` gave up waiting for in-flight uploads to finish. The caller
 /// leaves the update staged and tries again later; the swap never forces its
@@ -1378,6 +1407,40 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             Some(name.to_string())
         }
     };
+    // Validated in the same place and for the same reason as the verdict:
+    // before anything is approved, before the audit row, and refused rather
+    // than coerced.
+    //
+    // Whitespace is not a correction, so it is normalised away here and the
+    // call proceeds as an ordinary uncorrected approval. Everything else is
+    // a refusal the caller has to see: a correction the daemon silently
+    // dropped is worse than one it declined, because the contributor was
+    // shown a caption promising their words would be stored as written.
+    let correction = match req.params.get("correction") {
+        None => None,
+        Some(v) => {
+            let Some(text) = v.as_str() else {
+                return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_CORRECTION);
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                if text.chars().count() > crate::envelope::MAX_CORRECTION_CHARS {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_TOO_LONG);
+                }
+                Some(text.to_string())
+            }
+        }
+    };
+    if correction.is_some() {
+        if !matches!(verdict.as_deref(), Some("partly") | Some("failed")) {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_VERDICT);
+        }
+        if all || req.params.get("project_id").is_some() {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_ENTRY);
+        }
+    }
     // Read before the queue lock is taken, so the settings lock is
     // never held under it.
     //
@@ -1547,11 +1610,20 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // The build is async and must not run under the queue lock, so the
     // entries are cloned out under a short lock of their own and the lock
     // is retaken for the approve loop below.
+    //
+    // A correction forces a rebuild even for an entry that was previewed:
+    // the pinned artifact was built before the contributor had written
+    // anything, so it carries neither the correction nor the
+    // `correction_included` declaration that enrols it for the PII backstop,
+    // and credential detection has never run over the text. Re-pinning here
+    // is what makes the approval cover the bytes the correction is part of.
+    // `correction` is only ever `Some` for a single `entry_id`, refused
+    // above otherwise, so this rebuilds exactly one entry.
     let unpinned: Vec<(Uuid, super::queue::QueueEntry)> = {
         let queue = shared.queue.lock().expect("queue lock");
         ids.iter()
             .filter_map(|id| queue.all().iter().find(|e| e.entry_id == *id))
-            .filter(|e| e.previewed_envelope_digest.is_none())
+            .filter(|e| e.previewed_envelope_digest.is_none() || correction.is_some())
             .map(|e| (e.entry_id, e.clone()))
             .collect()
     };
@@ -1565,6 +1637,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // nothing here -- its preview response already told the caller this),
     // and how many of those builds carried a PII label. Counts and labels
     // only, per the hash-only rule -- never the text a redaction removed.
+    //
+    // The "already previewed contributes nothing" half of that stops being
+    // true for a corrected entry, which is rebuilt above whatever its pin
+    // said. Its counts are reported again here, and that is the right
+    // answer rather than a double count: the artifact is not the one the
+    // preview described, so what this toast names is what the approval
+    // actually covers.
     let mut redactions: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let mut flagged: u64 = 0;
     // The entries whose refusal has to outlive this response. See the size
@@ -1581,7 +1660,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, "not-enrolled"));
             continue;
         }
-        match build_and_pin_preview(shared, id, &entry, cfg.as_ref()).await {
+        match build_and_pin_preview(shared, id, &entry, cfg.as_ref(), correction.as_deref()).await {
             Ok((summary, _body, _envelope)) => {
                 // `build_preview` does not size-check the raw contribution
                 // (only `submit`'s path does); `approved_envelope::save`
@@ -1705,6 +1784,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             &scopes,
             inputs.as_deref(),
             verdict.as_deref(),
+            correction.as_deref(),
             Some(approved_at),
         ) {
             approved_ids.push(id);
@@ -1996,11 +2076,17 @@ fn handle_preview_cancel(shared: &DaemonShared, req: &Request) -> Response {
 /// `preview::build_preview_card` for why a card load skips both the digest
 /// and the pin. Errors are `(code, fixed label)` -- no path, no entry
 /// content -- and the callers that need a bare label discard the code.
+/// `correction` is the contributor's written correction for this entry, when
+/// the call that is building this artifact carried one. It is folded in
+/// before redaction runs, so the pinned bytes are the ones the correction is
+/// part of -- and so credential detection gets to refuse before anything is
+/// pinned. Only `handle_approve` ever passes one.
 async fn build_and_pin_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
     entry: &super::queue::QueueEntry,
     cfg: Option<&crate::config::ContributorConfig>,
+    correction: Option<&str>,
 ) -> Result<
     (
         super::preview::PreviewSummary,
@@ -2020,10 +2106,26 @@ async fn build_and_pin_preview(
     let sources = crate::source::all_sources(claude_source, codex_source, None);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
-    let (summary, body, envelope) =
-        super::preview::build_preview(&shared.store, cfg, near_ai, source, &session_ref)
-            .await
-            .map_err(|_| (ERR_UNAVAILABLE, "preview-failed"))?;
+    let (summary, body, envelope) = super::preview::build_preview_with_correction(
+        &shared.store,
+        cfg,
+        near_ai,
+        source,
+        &session_ref,
+        correction,
+    )
+    .await
+    .map_err(|e| {
+        // The one refusal a contributor can act on gets its own label so a
+        // shell can say what happened and what to do about it. Compared
+        // against the fixed label `redact_to_envelope` produces, never
+        // rendered from the error, so no text can ride out on this path.
+        if e.to_string() == REASON_CORRECTION_CREDENTIAL {
+            (ERR_BAD_PARAMS, REASON_CORRECTION_CREDENTIAL)
+        } else {
+            (ERR_UNAVAILABLE, "preview-failed")
+        }
+    })?;
     // An unenrolled preview is never pinned: it was built from a placeholder
     // identity, so it is not the artifact any later approval would send.
     if summary.enrolled {
@@ -2058,9 +2160,10 @@ pub async fn open_preview(
     // Same pinning as the socket's `"preview"`: the entry now holds the
     // artifact this caller was shown, so an approval that follows covers
     // that artifact and nothing else.
-    let (summary, body, _envelope) = build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref())
-        .await
-        .map_err(|(_code, label)| label)?;
+    let (summary, body, _envelope) =
+        build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref(), None)
+            .await
+            .map_err(|(_code, label)| label)?;
     Ok((summary, body))
 }
 
@@ -2387,7 +2490,7 @@ async fn resolve_preview_envelope(
         Ok(None) => {
             let cfg = shared.store.load_config().ok().flatten();
             let (summary, _body, envelope) =
-                build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref()).await?;
+                build_and_pin_preview(shared, entry_id, &entry, cfg.as_ref(), None).await?;
             Ok((envelope, summary.envelope_digest, summary.enrolled))
         }
         Err(_) => Err((
@@ -2851,6 +2954,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -2953,6 +3057,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3000,6 +3105,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         // Already pinned, so `handle_approve` does not try to
                         // build a real preview for a path that does not
@@ -3059,6 +3165,7 @@ mod tests {
                             submission_id: None,
                             approved_scopes: None,
                             approved_verdict: None,
+                            approved_correction: None,
                             approved_inputs: None,
                             // Already pinned, for the same reason as the
                             // single-entry test above.
@@ -3116,6 +3223,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3144,6 +3252,163 @@ mod tests {
             QueueState::Pending,
             "a refused call must approve nothing"
         );
+    }
+
+    /// A pinned, pending entry with a path that does not exist. Enough for
+    /// the correction refusals below, every one of which returns before any
+    /// envelope is built.
+    fn seed_pinned_entry(s: &DaemonShared) -> Uuid {
+        let entry_id = Uuid::new_v4();
+        let mut queue = s.queue.lock().unwrap();
+        queue
+            .upsert(
+                super::super::queue::QueueEntry {
+                    entry_id,
+                    session_hash: format!("sha256:{entry_id}"),
+                    source: "claude-code".to_string(),
+                    project_key: "/tmp/p".to_string(),
+                    project_label: "p".to_string(),
+                    path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    state: QueueState::Pending,
+                    reason_label: None,
+                    attempts: 0,
+                    retry_after: None,
+                    submission_id: None,
+                    approved_scopes: None,
+                    approved_verdict: None,
+                    approved_correction: None,
+                    approved_inputs: None,
+                    previewed_envelope_digest: Some("sha256:preview".to_string()),
+                    approved_at: None,
+                    subagent_count: 0,
+                    subagents_dropped: 0,
+                    observed_modified_at: None,
+                },
+                500,
+            )
+            .unwrap();
+        entry_id
+    }
+
+    /// The verdict gate, enforced by the daemon rather than trusted to the
+    /// shells. A run the contributor has just called successful has nothing
+    /// to correct, and the field is not shown for it in any client.
+    #[tokio::test]
+    async fn a_correction_is_refused_without_a_partly_or_failed_outcome() {
+        let s = shared();
+        let entry_id = seed_pinned_entry(&s);
+
+        for outcome in [Some("worked"), None] {
+            let mut params = serde_json::json!({
+                "entry_id": entry_id.to_string(),
+                "correction": "it edited the wrong config file",
+            });
+            if let Some(name) = outcome {
+                params["outcome"] = serde_json::Value::String(name.to_string());
+            }
+            let r = handle_request_async(&s, &req("approve", params)).await;
+            let err = r.error.expect("a correction without a verdict is refused");
+            assert_eq!(err.message, ERR_CORRECTION_NEEDS_VERDICT);
+        }
+
+        let queue = s.queue.lock().unwrap();
+        assert_eq!(queue.get(entry_id).unwrap().state, QueueState::Pending);
+    }
+
+    /// One correction cannot be attached to a batch: it was written about
+    /// one session, and every other session in the batch would carry it into
+    /// the corpus as the contributor's own words about work it does not
+    /// describe.
+    #[tokio::test]
+    async fn a_correction_is_refused_on_a_bulk_selector() {
+        let s = shared();
+        seed_pinned_entry(&s);
+
+        for selector in [
+            serde_json::json!({"all": true}),
+            serde_json::json!({"project_id": "some-project"}),
+        ] {
+            let mut params = selector;
+            params["outcome"] = serde_json::Value::String("failed".to_string());
+            params["correction"] = serde_json::Value::String("it did the wrong thing".to_string());
+            let r = handle_request_async(&s, &req("approve", params)).await;
+            let err = r.error.expect("a bulk correction is refused");
+            assert_eq!(err.message, ERR_CORRECTION_NEEDS_ENTRY);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_correction_of_the_wrong_type_or_past_the_cap_is_refused() {
+        let s = shared();
+        let entry_id = seed_pinned_entry(&s);
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({
+                    "entry_id": entry_id.to_string(),
+                    "outcome": "failed",
+                    "correction": 7,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.error.expect("a non-string correction is refused").message,
+            ERR_BAD_CORRECTION
+        );
+
+        let too_long = "x".repeat(crate::envelope::MAX_CORRECTION_CHARS + 1);
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({
+                    "entry_id": entry_id.to_string(),
+                    "outcome": "failed",
+                    "correction": too_long,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.error.expect("an oversized correction is refused").message,
+            ERR_CORRECTION_TOO_LONG
+        );
+
+        let queue = s.queue.lock().unwrap();
+        assert_eq!(queue.get(entry_id).unwrap().state, QueueState::Pending);
+    }
+
+    /// Whitespace is not a correction. It is normalised away rather than
+    /// refused, so a contributor who tabbed through the field and typed
+    /// nothing gets exactly the 0.5.0 behaviour: an ordinary approval, no
+    /// correction recorded, and no rebuild of the artifact they were shown.
+    #[tokio::test]
+    async fn a_whitespace_only_correction_approves_as_if_none_was_written() {
+        let s = shared();
+        let entry_id = seed_pinned_entry(&s);
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({
+                    "entry_id": entry_id.to_string(),
+                    "correction": "   \n  ",
+                }),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none(), "should approve: {:?}", r.error);
+
+        let queue = s.queue.lock().unwrap();
+        let e = queue.get(entry_id).unwrap();
+        assert_eq!(e.state, QueueState::Approved);
+        assert_eq!(e.approved_correction, None);
     }
 
     #[test]
@@ -3214,6 +3479,7 @@ mod tests {
                     submission_id: None,
                     approved_scopes: None,
                     approved_verdict: None,
+                    approved_correction: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
@@ -3681,6 +3947,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3760,6 +4027,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3882,6 +4150,7 @@ mod tests {
             submission_id: None,
             approved_scopes: None,
             approved_verdict: None,
+            approved_correction: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -4082,6 +4351,7 @@ mod tests {
             submission_id: None,
             approved_scopes: None,
             approved_verdict: None,
+            approved_correction: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -4126,6 +4396,7 @@ mod tests {
                 submission_id: None,
                 approved_scopes: None,
                 approved_verdict: None,
+                approved_correction: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
                 approved_at: None,
@@ -4215,6 +4486,7 @@ mod tests {
             submission_id: None,
             approved_scopes: None,
             approved_verdict: None,
+            approved_correction: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -4339,6 +4611,7 @@ mod tests {
                     submission_id: None,
                     approved_scopes: None,
                     approved_verdict: None,
+                    approved_correction: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
@@ -4684,6 +4957,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -4729,6 +5003,7 @@ mod tests {
                         submission_id: None,
                         approved_scopes: None,
                         approved_verdict: None,
+                        approved_correction: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,

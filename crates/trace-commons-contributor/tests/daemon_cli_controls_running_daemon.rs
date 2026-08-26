@@ -129,6 +129,7 @@ impl Running {
                     submission_id: None,
                     approved_scopes: None,
                     approved_verdict: None,
+                    approved_correction: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,

@@ -283,7 +283,27 @@ pub struct SkippedEntry {
     pub reason_label: String,
 }
 
+/// The daemon's fixed label for a submission refused because the
+/// contributor's correction contains something credential-shaped.
+///
+/// The wire spelling of `envelope::REASON_CORRECTION_CREDENTIAL` in the
+/// contributor crate. It is matched, never rendered: what a contributor
+/// reads is `copy::CORRECTION_CREDENTIAL_HEADLINE` and its body.
+pub const CORRECTION_CREDENTIAL_REFUSAL: &str = "correction-credential-detected";
+
 impl ApproveResult {
+    /// Whether this response is the correction-credential refusal.
+    ///
+    /// Distinguished from every other skip because it is the only one the
+    /// contributor caused and the only one they can fix, and because the
+    /// advice that goes with it -- rotate the credential, it has already
+    /// been typed -- is not advice any other refusal carries.
+    pub fn was_refused_for_a_correction_credential(&self) -> bool {
+        self.skipped
+            .iter()
+            .any(|s| s.reason_label == CORRECTION_CREDENTIAL_REFUSAL)
+    }
+
     /// The sum of `redactions`, which is what the toast actually renders --
     /// see [`crate::toast::toast`].
     pub fn total_redactions(&self) -> u64 {

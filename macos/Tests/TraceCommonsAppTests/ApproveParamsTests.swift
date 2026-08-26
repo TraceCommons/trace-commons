@@ -78,6 +78,58 @@ final class ApproveParamsTests: XCTestCase {
         XCTAssertFalse(project.keys.contains("all"))
     }
 
+    /// A written correction rides along with the verdict it was written
+    /// under.
+    func testAnApproveCallCarriesAWrittenCorrection() {
+        let params = DaemonClient.approveParams(
+            target: .entry(entryID),
+            verdict: .failed,
+            correction: "it edited the staging config instead of the local one"
+        )
+        XCTAssertEqual(params["outcome"] as? String, "failed")
+        XCTAssertEqual(
+            params["correction"] as? String,
+            "it edited the staging config instead of the local one"
+        )
+    }
+
+    /// An untouched box, and a box holding only whitespace, are the same
+    /// thing: no correction. The assertion is on the KEY, for the same
+    /// reason the verdict's is -- an empty string would declare
+    /// `correction_included` on the envelope for content that is not there.
+    func testABlankCorrectionOmitsTheParameter() throws {
+        for blank in [nil, "", "   ", "\n\t "] as [String?] {
+            let params = DaemonClient.approveParams(
+                target: .entry(entryID),
+                verdict: .failed,
+                correction: blank
+            )
+            XCTAssertFalse(
+                params.keys.contains("correction"),
+                "blank correction must send no key at all: \(String(describing: blank))"
+            )
+            let data = try JSONSerialization.data(withJSONObject: params)
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("correction"))
+        }
+    }
+
+    /// Leading and trailing whitespace goes; the words do not.
+    func testACorrectionIsSentTrimmed() {
+        let params = DaemonClient.approveParams(
+            target: .entry(entryID),
+            verdict: .partly,
+            correction: "  it stopped halfway  "
+        )
+        XCTAssertEqual(params["correction"] as? String, "it stopped halfway")
+    }
+
+    /// The default keeps every existing call site sending exactly what it
+    /// sent before the box existed.
+    func testTheCorrectionDefaultsToAbsent() {
+        let params = DaemonClient.approveParams(target: .entry(entryID), verdict: .worked)
+        XCTAssertFalse(params.keys.contains("correction"))
+    }
+
     /// The wire words are the contract's three, lowercase. The labels the
     /// contributor sees are never what gets sent.
     func testTheWireValuesAreTheContractsThree() {

@@ -476,6 +476,66 @@
                        Foreground="{ThemeResource TcInkTertiaryBrush}"
                        TextWrapping="Wrap" />
 
+            <!--
+                The correction control. Shown only under Partly and Failed:
+                you cannot correct a run you have just called successful,
+                and the gate is a guard as much as it is semantics. It
+                halves the surface for correction-shaped credit farming and
+                puts the field only where a correction means something.
+
+                NOTE for anyone editing the comments in this file: a double
+                hyphen is illegal inside an XML comment, and XamlCompiler.exe
+                answers one by exiting 1 with no diagnostic at all. Where the
+                rest of the repo would write a spaced double hyphen, write a
+                full stop or a semicolon here.
+
+                Optional throughout. Contribute is never gated on it.
+            -->
+            <StackPanel Spacing="6"
+                        Visibility="{x:Bind ViewModel.IsCorrectionOffered, Mode=OneWay}">
+                <TextBlock Text="{x:Bind ViewModel.CorrectionQuestion}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBox PlaceholderText="{x:Bind ViewModel.CorrectionPlaceholder}"
+                         Text="{x:Bind ViewModel.Correction, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="64"
+                         MaxHeight="140"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                <!-- THE disclosure. Everything else on this sheet is
+                     scrubbed here and scrubbed again on the server; a
+                     correction is the one exception, and the published
+                     policy page does not yet say so. Until it does, this
+                     sentence is the whole of what a contributor is told.
+                     Do not shorten it for layout; change the layout. -->
+                <TextBlock Text="{x:Bind ViewModel.CorrectionCaption}"
+                           Style="{StaticResource TcCaptionSmallTextStyle}"
+                           Foreground="{ThemeResource TcInkTertiaryBrush}"
+                           TextWrapping="Wrap" />
+                <!-- The credential refusal, in its own words rather than as
+                     a line in the submit toast: it is the only submit
+                     failure the contributor caused and the only one they
+                     can fix, and it asks for two things: edit the text,
+                     and rotate what was typed. Nothing was sent. -->
+                <Border Visibility="{x:Bind ViewModel.WasRefusedForACorrectionCredential, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceInsetBrush}"
+                        BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="12,10">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="{x:Bind ViewModel.CorrectionRefusalHeadline}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CorrectionRefusalBody}"
+                                   Style="{StaticResource TcCaptionSmallTextStyle}"
+                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
                 <!-- Outlined like Close, never filled: it must not read as a
                      second way to approve. -->

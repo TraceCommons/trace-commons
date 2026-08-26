@@ -200,6 +200,12 @@ public sealed class SubmitToast
             ("envelope-too-large", "too large to send"),
             ("session-file-vanished", "the session file is gone"),
             ("preview-failed", "could not be read"),
+            // Listed so a toast can never render this one as "could not be
+            // prepared", which would be a false account of a refusal the
+            // contributor caused and can fix. The sheet says the rest --
+            // see CorrectionCopy.CredentialHeadline -- and this is what any
+            // other surface reporting the same batch says.
+            ("correction-credential-detected", "your correction contains a credential"),
         };
 
     /// <summary>

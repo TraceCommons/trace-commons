@@ -387,6 +387,50 @@ pub const VERDICT_FAILED: &str = "Failed";
 pub const VERDICT_CAPTION: &str =
     "Optional. This is recorded as the trace outcome; the preview above does not show it.";
 
+/// The correction field's prompt. Shown only under `Partly` and `Failed`:
+/// a run the contributor has just called successful has nothing to correct,
+/// and the field appearing there would invite text written for no reason.
+pub const CORRECTION_QUESTION: &str = "What did it get wrong?";
+
+/// The placeholder inside the box. It says the field is optional in the one
+/// place a contributor is already looking, so the caption below can spend
+/// all of its words on the thing that actually matters.
+pub const CORRECTION_PLACEHOLDER: &str = "Optional";
+
+/// **The disclosure, and the most load-bearing sentence in this file.**
+///
+/// Everything else a contributor writes or captures is scrubbed on this
+/// machine and scrubbed again on the server. A correction is the one
+/// exception: redaction would destroy the thing it exists to carry -- "it
+/// edited /Users/x/proj/config.toml instead of the staging one" is useless
+/// once the path is a placeholder -- so it is stored exactly as typed, with
+/// only credential detection standing between it and the corpus.
+///
+/// The published policy page at <https://tracecommons.ai/legal/> promises
+/// local redaction and a server-side re-application of it, and does not yet
+/// carve this out. Until that clause is published, this sentence is the
+/// ONLY disclosure a contributor gets that their own words are stored
+/// verbatim. Do not shorten it for layout; change the layout.
+///
+/// One line, one escaped literal, for the same reason `GATE_STATEMENT` is:
+/// the macOS and Windows shells are pinned against this exact text, and a
+/// line break in any of the three would defeat the pin.
+pub const CORRECTION_CAPTION: &str = "Stored exactly as you write it. Unlike the rest of the trace, a correction is not scrubbed here or on the server -- so leave out anything you would not want in the corpus: someone else's personal information, employer-confidential material, or anything you are not free to share.";
+
+/// The credential refusal, headline and body.
+///
+/// Its own message rather than a line in the generic failure toast, because
+/// it is the only submit failure the contributor caused and the only one
+/// they can fix -- and because the second half is advice they will not get
+/// anywhere else. A credential that has been typed into a box has been
+/// typed; removing it from the text does not un-type it, so the sentence
+/// says to rotate it.
+///
+/// Neither string quotes the correction, and neither names what matched.
+pub const CORRECTION_CREDENTIAL_HEADLINE: &str =
+    "Nothing was sent. Your correction looks like it contains a credential.";
+pub const CORRECTION_CREDENTIAL_BODY: &str = "A correction is stored as you write it, so this one was refused rather than masked. Take the credential out and submit again -- and rotate it, because it has already been typed here.";
+
 /// The bulk verdict menu beside `Submit all`. The plain button stays a
 /// one-click unanswered submit; this is the opt-in path for answering
 /// once for the whole group.
@@ -1552,13 +1596,22 @@ pub fn submit_scrub_clause(total_redactions: u64) -> String {
 /// human halves belong to the contributor. Nothing here ever shows the
 /// left-hand column, and nothing here shows an entry id: an id in a toast
 /// is noise a contributor cannot act on.
-pub const SUBMIT_SKIP_REASONS: [(&str, &str); 6] = [
+pub const SUBMIT_SKIP_REASONS: [(&str, &str); 7] = [
     ("not-enrolled", "not connected to a commons"),
     ("not-pending", "already decided"),
     ("not-pinned", "could not be prepared"),
     ("envelope-too-large", "too large to send"),
     ("session-file-vanished", "the session file is gone"),
     ("preview-failed", "could not be read"),
+    // Listed so a toast can never render this one as "could not be
+    // prepared", which would be a false account of a refusal the
+    // contributor caused and can fix. The sheet says the rest -- see
+    // `CORRECTION_CREDENTIAL_HEADLINE` -- and this is what any other
+    // surface reporting the same batch says.
+    (
+        "correction-credential-detected",
+        "your correction contains a credential",
+    ),
 ];
 
 /// What an unrecognised wire label is called instead of itself.
@@ -1759,6 +1812,129 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// The correction disclosure, character for character, and then in the
+    /// other two shells' actual sources.
+    ///
+    /// Same mechanism as the consent statement above, and load-bearing for
+    /// a stronger reason. The published policy page says redaction happens
+    /// locally and is re-applied on the server; a correction is the one
+    /// exception and the page does not yet say so. Until it does, this
+    /// sentence is the whole of what a contributor is told, so a shell that
+    /// shortens it for layout is shipping the exception undisclosed.
+    #[test]
+    fn the_correction_disclosure_is_intact_in_all_three_shells() {
+        assert_eq!(
+            CORRECTION_CAPTION,
+            "Stored exactly as you write it. Unlike the rest of the trace, a correction is not scrubbed here or on the server -- so leave out anything you would not want in the corpus: someone else's personal information, employer-confidential material, or anything you are not free to share."
+        );
+        // The two halves that must never quietly drop out: what is
+        // different about a correction, and what not to put in one.
+        assert!(CORRECTION_CAPTION.contains("Stored exactly as you write it"));
+        assert!(CORRECTION_CAPTION.contains("not scrubbed here or on the server"));
+        assert!(CORRECTION_CAPTION.contains("personal information"));
+        assert!(CORRECTION_CAPTION.contains("employer-confidential"));
+        assert!(CORRECTION_CAPTION.contains("not free to share"));
+        // The refusal says both things it has to: nothing was sent, and
+        // the credential still has to be rotated because it has been typed.
+        assert!(CORRECTION_CREDENTIAL_HEADLINE.starts_with("Nothing was sent."));
+        assert!(CORRECTION_CREDENTIAL_BODY.contains("rotate it"));
+        assert!(CORRECTION_CREDENTIAL_BODY.contains("already been typed"));
+
+        for relative in [
+            "../../macos/Sources/TCShellCore/CorrectionCopy.swift",
+            "../../windows/src/TraceCommons.Interop/CorrectionCopy.cs",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+            for needle in [
+                CORRECTION_CAPTION,
+                CORRECTION_QUESTION,
+                CORRECTION_PLACEHOLDER,
+                CORRECTION_CREDENTIAL_HEADLINE,
+                CORRECTION_CREDENTIAL_BODY,
+            ] {
+                assert!(
+                    source.contains(needle),
+                    "{} does not print {needle:?} verbatim",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// No XAML comment in the Windows shell may contain a double hyphen.
+    ///
+    /// XML forbids `--` inside a comment, and `XamlCompiler.exe` answers one
+    /// by **exiting 1 with no diagnostic**: MSBuild reports only `MSB3073`
+    /// naming the command line, and the compiler's own `output.json` carries
+    /// no error entry at all. There is nothing to read, so the only way to
+    /// find it is to bisect the markup on a Windows box.
+    ///
+    /// This slice cost exactly that, because the repo's prose style writes a
+    /// spaced double hyphen everywhere and three of those went into XAML
+    /// comments. Checked from the Rust side because these tests already read
+    /// the Windows sources for the copy pins, and because this runs on every
+    /// platform -- so the mistake fails on a contributor's Mac in
+    /// milliseconds instead of on the one CI job that can compile XAML.
+    #[test]
+    fn no_windows_xaml_comment_contains_a_double_hyphen() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../windows/src");
+        let mut checked = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()));
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("xaml") {
+                    continue;
+                }
+                checked += 1;
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+                let mut rest = source.as_str();
+                while let Some(open) = rest.find("<!--") {
+                    let after = &rest[open + 4..];
+                    let Some(close) = after.find("-->") else {
+                        break;
+                    };
+                    if after[..close].contains("--") {
+                        offenders.push(path.display().to_string());
+                    }
+                    rest = &after[close + 3..];
+                }
+            }
+        }
+        assert!(checked > 0, "{} held no .xaml files", root.display());
+        assert!(
+            offenders.is_empty(),
+            "XAML comments with a double hyphen (XamlCompiler exits 1 silently \
+             on these -- write a full stop or a semicolon instead): {offenders:?}"
+        );
+    }
+
+    /// The wire label the shells match on is the one the daemon sends. Two
+    /// spellings of it would make the refusal render as a generic skip.
+    #[test]
+    fn the_correction_refusal_label_is_the_daemons_own() {
+        let (wire, _human) = SUBMIT_SKIP_REASONS
+            .iter()
+            .find(|(wire, _)| *wire == "correction-credential-detected")
+            .expect("the correction refusal must be a known skip reason");
+        assert_eq!(*wire, crate::model::CORRECTION_CREDENTIAL_REFUSAL);
+        assert_ne!(
+            submit_skip_reason_label(wire),
+            SUBMIT_SKIP_REASON_UNKNOWN,
+            "the refusal the contributor can fix must not degrade to \"could not be prepared\""
+        );
     }
 
     #[test]

@@ -382,7 +382,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
@@ -955,6 +955,42 @@ refused with `bad_params` (`outcome-invalid`) and approves nothing. A value
 supplied alongside `all` or `project_id` applies to every entry that
 approval covers, not just one.
 
+### The `correction` parameter
+
+`approve` also accepts an optional `correction`: what the contributor wrote
+about what the run got wrong, stored **as they typed it**.
+
+- **String, optional.** Blank or whitespace-only is treated as absent, and
+  the approval proceeds exactly as an uncorrected one. Anything but a string
+  is refused with `bad_params` (`correction-invalid`).
+- **Only with `partly` or `failed`.** A correction sent with `worked`, or
+  with no `outcome` at all, is refused with `correction-needs-outcome` and
+  approves nothing. You cannot correct a run you have just called
+  successful; the gate is a guard as much as it is semantics.
+- **Only with `entry_id`.** Sent with `all` or `project_id` it is refused
+  with `correction-needs-entry-id`: a correction is written about one
+  session, and applying one string to a batch would attach an explanation to
+  sessions it does not describe.
+- **Capped** at 2000 characters (`envelope::MAX_CORRECTION_CHARS`); longer is
+  refused with `correction-too-long`. Clients should cap at the keyboard so
+  the refusal lands where the person can shorten what they wrote.
+
+A correction is folded into the envelope **before redaction runs**, not
+stamped on afterwards like `outcome`. That is what puts it in front of
+credential detection and what makes `consent.correction_included` describe
+the envelope. Consequently an entry carrying a correction is **rebuilt and
+re-pinned** by this call even if it was already previewed: the pinned
+artifact was built before the contributor had written anything.
+
+A correction is **not scrubbed** -- neither the deterministic semantic passes
+nor the prose-PII filter runs over it, because redaction would destroy the
+explanation it exists to give. Credential detection still runs and still
+blocks: a High or Critical match refuses that entry with the skip
+`reason_label` `correction-credential-detected`, approves nothing for it, and
+leaves it `Pending`. Clients must surface that refusal distinctly from other
+skips -- the contributor needs to remove the credential *and* rotate it --
+and must never echo the correction text or the detected value.
+
 ### What `approve` reports
 
 `approve` returns:
@@ -1006,6 +1042,7 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `preview-failed` | The redaction pipeline itself failed | May be transient |
   | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded. The entry is moved to `refused` with this same string as its `reason_label`, so it stops being offered | **Never** succeeds for this entry -- do not offer retry |
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
+  | `correction-credential-detected` | The `correction` sent with this call contains something credential-shaped. Nothing was built, pinned or sent; the entry stays `pending` | Retry succeeds once the credential is out of the text. Surface this distinctly and tell the contributor to rotate it -- never echo the correction or the match |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
 
   Only `envelope-too-large` changes the entry's state; every other label

@@ -54,7 +54,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, ContributorConfig};
 use crate::envelope::{
-    NearAiSettings, build_raw_contribution, build_redactor_with, envelope_size, redact_to_envelope,
+    NearAiSettings, build_raw_contribution_with_correction, build_redactor_with, envelope_size,
+    redact_to_envelope,
 };
 use crate::source::{SessionRef, TraceSource};
 use trace_commons_protocol::trace_contribution::{
@@ -463,7 +464,31 @@ pub async fn build_preview(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
-    let (core, envelope) = build_preview_core(cfg, near_ai, source, session_ref).await?;
+    build_preview_with_correction(_store, cfg, near_ai, source, session_ref, None).await
+}
+
+/// [`build_preview`], with the contributor's written correction folded into
+/// the envelope before redaction runs.
+///
+/// Only the approval path passes one, and only for an entry the contributor
+/// is approving right now: a correction is typed at the moment of consent,
+/// so there is no earlier build to have carried it. Building it in rather
+/// than stamping it on afterwards is what puts it in front of credential
+/// detection and what makes `consent.correction_included` describe the
+/// envelope -- see `envelope::build_raw_contribution_with_correction`.
+///
+/// A credential in the correction surfaces here as an `Err`, which is the
+/// refusal: nothing is pinned, so nothing can be approved.
+pub async fn build_preview_with_correction(
+    _store: &ConfigStore,
+    cfg: Option<&ContributorConfig>,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    correction: Option<&str>,
+) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    let (core, envelope) =
+        build_preview_core(cfg, near_ai, source, session_ref, correction).await?;
     // Digested here, at exactly the point `submit_loaded` takes over the
     // envelope it is about to send: after redaction, before the granted
     // scopes the issuer echoes back are stamped on. This identifies the
@@ -516,7 +541,7 @@ pub async fn build_preview_card(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<PreviewCardSummary> {
-    let (core, _envelope) = build_preview_core(cfg, near_ai, source, session_ref).await?;
+    let (core, _envelope) = build_preview_core(cfg, near_ai, source, session_ref, None).await?;
     Ok(core)
 }
 
@@ -529,6 +554,7 @@ async fn build_preview_core(
     near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
+    correction: Option<&str>,
 ) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
     let transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
@@ -550,9 +576,14 @@ async fn build_preview_core(
         (
             build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
                 .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?,
-            build_raw_contribution(&transcript, cfg, Utc::now()),
+            build_raw_contribution_with_correction(&transcript, cfg, Utc::now(), None, correction),
         )
     } else {
+        // An unenrolled build is a placeholder-identity artifact that is
+        // never pinned and never sent, and the only caller that supplies a
+        // correction (`handle_approve`) refuses an unenrolled entry before
+        // it gets here. So there is deliberately no correction on this
+        // branch rather than one that would never be examined.
         (
             crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref()),
             crate::envelope::build_preview_raw_contribution(&transcript, cfg, Utc::now()),
@@ -802,6 +833,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope::build_raw_contribution;
     use crate::source::claude_code::ClaudeCodeSource;
 
     fn sample_cfg(store: &ConfigStore) -> ContributorConfig {
