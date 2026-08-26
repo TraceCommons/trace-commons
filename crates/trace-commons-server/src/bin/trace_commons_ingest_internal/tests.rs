@@ -80619,12 +80619,18 @@ fn pii_backstop_tick_summary_defaults_and_tallies() {
     assert_eq!(summary.done, 0);
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.exhausted, 0);
+    assert_eq!(summary.transient, 0);
+    assert!(!summary.breaker_tripped);
     summary.done += 2;
     summary.failed += 1;
     summary.exhausted += 1;
+    summary.transient += 3;
+    summary.breaker_tripped = true;
     assert_eq!(summary.done, 2);
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.exhausted, 1);
+    assert_eq!(summary.transient, 3);
+    assert!(summary.breaker_tripped);
 }
 
 // =======================================================================
@@ -81031,14 +81037,27 @@ fn backstop_driver_state(
 
 // --- NEAR AI `/privacy/classify` wiremock harness -----------------------
 
+/// Substring that marks a seeded submission as the one `FailPoisonedPermanent`
+/// rejects. Part of the PII marker text, so it reaches the classifier inside
+/// the submission's own event content.
+const POISON_MARKER_NEEDLE: &str = "poison-me";
+
 #[derive(Clone, Copy)]
 enum ClassifierMode {
     /// Span every known needle in every window -> canary healthy, submission
     /// PII redacted.
     Healthy,
     /// Canary windows are spanned healthy, but any non-canary window (the real
-    /// submission) returns 500 after the adapter's own retries exhaust.
+    /// submission) returns 500 after the adapter's own retries exhaust. This is
+    /// the shape of the 2026-08-26 incident: a TRANSIENT upstream failure.
     FailSubmission,
+    /// Canary windows are spanned healthy, but any non-canary window returns
+    /// 400 -- a PERMANENT failure, about the request rather than the vendor.
+    FailSubmissionPermanent,
+    /// Canary windows are spanned healthy; a non-canary window returns 400 only
+    /// when it contains `POISON_MARKER_NEEDLE`, so a batch can mix failing and
+    /// succeeding submissions in a controlled order.
+    FailPoisonedPermanent,
     /// Return no spans for anything, so the canary's raw values survive and the
     /// filter reports unhealthy -> the tick aborts before touching submissions.
     UnhealthyCanary,
@@ -81084,6 +81103,16 @@ fn near_ai_classify_response(
             .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
         ClassifierMode::FailSubmission if !is_canary => wiremock::ResponseTemplate::new(500)
             .set_body_json(serde_json::json!({"error": "synthetic upstream failure"})),
+        ClassifierMode::FailSubmissionPermanent if !is_canary => {
+            wiremock::ResponseTemplate::new(400)
+                .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
+        }
+        ClassifierMode::FailPoisonedPermanent
+            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
+        {
+            wiremock::ResponseTemplate::new(400)
+                .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
+        }
         _ => {
             let mut needles = canary_values;
             needles.push(marker.to_string());
@@ -81428,11 +81457,13 @@ async fn pii_backstop_driver_tick_releases_held_submission() {
 
 // --- (b) tick fail path bumps the attempt counter and keeps the hold ----
 
-/// (b) The canary passes but the submission's classify returns 5xx (after the
-/// adapter's retries exhaust): the tick tallies a failure, the submission stays
-/// `AwaitingPiiBackstop`, and its attempt counter is bumped.
+/// (b) The canary passes but the submission's classify returns 4xx -- a
+/// PERMANENT failure, about the request rather than the vendor: the tick
+/// tallies a failure, the submission stays `AwaitingPiiBackstop`, and its
+/// attempt counter is bumped. This is the behaviour a permanent failure has
+/// always had and must keep.
 #[tokio::test]
-async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
+async fn pii_backstop_driver_tick_holds_and_bumps_on_permanent_classifier_failure() {
     let _env = near_ai_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
@@ -81446,7 +81477,7 @@ async fn pii_backstop_driver_tick_holds_and_bumps_on_classifier_failure() {
     db.seed_awaiting("tenant-a", submission_id);
 
     let server = wiremock::MockServer::start().await;
-    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
     let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
@@ -81492,7 +81523,7 @@ async fn pii_backstop_driver_tick_below_threshold_still_holds_and_retries() {
     db.seed_pii_attempts("tenant-a", submission_id, config.max_attempts - 2);
 
     let server = wiremock::MockServer::start().await;
-    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
     let summary = run_pii_backstop_driver_tick(state.clone(), &config)
@@ -81555,7 +81586,7 @@ async fn pii_backstop_driver_tick_quarantines_on_attempt_exhaustion() {
     db.seed_pii_attempts("tenant-a", submission_id, config.max_attempts - 1);
 
     let server = wiremock::MockServer::start().await;
-    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
     let summary = run_pii_backstop_driver_tick(state.clone(), &config)
@@ -81611,6 +81642,224 @@ async fn pii_backstop_driver_tick_quarantines_on_attempt_exhaustion() {
         record.status,
         TraceCorpusStatus::Quarantined,
         "the on-disk record must be mirrored to Quarantined"
+    );
+}
+
+// --- (b3) transient upstream failures must not condemn a trace ----------
+//
+// The 2026-08-26 incident: NEAR AI returned 502s for twenty minutes and 16
+// held traces hit `attempts=5` and were permanently excluded from the
+// `AwaitingPiiBackstop` backlog. Nothing was wrong with any of them.
+
+/// A 5xx that survives the adapter's own retries is the vendor's failure, not
+/// the trace's: the submission stays held and its attempt counter is NOT
+/// bumped, so a later tick still enumerates it.
+#[tokio::test]
+async fn pii_backstop_driver_tick_transient_failure_does_not_bump() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
+        .await
+        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    assert_eq!(
+        (
+            summary.done,
+            summary.failed,
+            summary.exhausted,
+            summary.transient
+        ),
+        (0, 0, 0, 1),
+        "an upstream 5xx must tally as transient, never as a charged failure: {summary:?}"
+    );
+    assert_eq!(
+        db.pii_attempts_of("tenant-a", submission_id),
+        None,
+        "a transient upstream failure must not spend the trace's attempt budget"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the submission must stay held for a later tick"
+    );
+    assert!(
+        db.status_transitions_of("tenant-a", submission_id)
+            .is_empty(),
+        "no status transition may be written for a transient failure"
+    );
+}
+
+/// The incident property itself: however many ticks a dead upstream produces,
+/// a trace is never excluded from the backlog by transient failures alone. The
+/// tick's own enumeration is the oracle -- the submission is still returned
+/// after every round.
+#[tokio::test]
+async fn pii_backstop_transient_failures_never_exhaust_a_trace() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    // More rounds than `max_attempts` (5): under the pre-fix accounting the
+    // trace would have been excluded before this loop finished.
+    let config = backstop_driver_config();
+    for round in 1..=(config.max_attempts + 2) {
+        let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+            .await
+            .expect("tick itself succeeds");
+        assert_eq!(
+            summary.transient, 1,
+            "round {round} must still find and attempt the held trace: {summary:?}"
+        );
+        assert_eq!(
+            db.pii_attempts_of("tenant-a", submission_id),
+            None,
+            "round {round} must leave the attempt budget untouched"
+        );
+    }
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "the trace must still be held, not quarantined as exhausted"
+    );
+}
+
+// --- (b4) consecutive-failure circuit breaker ---------------------------
+
+/// Transient failures cost nothing, so a dead upstream would otherwise be
+/// hammered for the whole batch every tick. After
+/// `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES` consecutive per-item failures the
+/// tick aborts and leaves the rest of the batch untouched -- no classify call,
+/// no bump, no status change.
+#[tokio::test]
+async fn pii_backstop_driver_tick_breaker_aborts_after_consecutive_failures() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let mut ids = Vec::new();
+    for _ in 0..(MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES + 2) {
+        let id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+        db.seed_awaiting("tenant-a", id);
+        ids.push(id);
+    }
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let mut config = backstop_driver_config();
+    config.batch_size = ids.len() as i64;
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert!(
+        summary.breaker_tripped,
+        "the breaker must be visible in the summary, not look like a short batch: {summary:?}"
+    );
+    assert_eq!(
+        summary.failed, MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES,
+        "exactly N items may be attempted before the tick aborts: {summary:?}"
+    );
+
+    let (attempted, untouched) = ids.split_at(MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES);
+    for id in attempted {
+        assert_eq!(
+            db.pii_attempts_of("tenant-a", *id),
+            Some(1),
+            "an attempted permanent failure must be charged"
+        );
+    }
+    for id in untouched {
+        assert_eq!(
+            db.pii_attempts_of("tenant-a", *id),
+            None,
+            "the remainder of the batch must be left completely untouched"
+        );
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+            "the remainder of the batch must stay held"
+        );
+    }
+}
+
+/// Failures below the breaker threshold do not abort anything: a success
+/// resets the consecutive count and the rest of the batch is processed
+/// normally.
+#[tokio::test]
+async fn pii_backstop_driver_tick_below_breaker_processes_rest_of_batch() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    // One short of the breaker threshold, so the batch survives.
+    let poison_marker = format!("{POISON_MARKER_NEEDLE}@example.com");
+    let mut poisoned = Vec::new();
+    for _ in 0..(MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES - 1) {
+        let id = seed_held_backstop_submission(&state, "tenant-a", &poison_marker).await;
+        db.seed_awaiting("tenant-a", id);
+        poisoned.push(id);
+    }
+    let marker = "jane.doe@example.com";
+    let clean_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", clean_id);
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailPoisonedPermanent).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let mut config = backstop_driver_config();
+    config.batch_size = (poisoned.len() + 1) as i64;
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert!(
+        !summary.breaker_tripped,
+        "failures below the threshold must not trip the breaker: {summary:?}"
+    );
+    assert_eq!(
+        (summary.done, summary.failed),
+        (1, MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES - 1),
+        "the item after the failures must still be processed: {summary:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", clean_id),
+        Some(StorageTraceCorpusStatus::Accepted),
+        "the last item in the batch must have been released"
     );
 }
 

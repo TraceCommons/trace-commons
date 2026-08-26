@@ -1748,15 +1748,21 @@ struct PiiBackstopDriverConfig {
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
 /// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
 /// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
-/// counts submissions that stayed held on `AwaitingPiiBackstop` after an
-/// adapter/redaction error and had their attempt counter bumped;
-/// `exhausted` counts submissions whose bump reached `max_attempts` and were
-/// therefore quarantined instead of being left held forever.
+/// counts submissions that stayed held on `AwaitingPiiBackstop` after a
+/// PERMANENT adapter/redaction error and had their attempt counter bumped;
+/// `transient` counts submissions held after an upstream failure that was NOT
+/// charged to the trace; `exhausted` counts submissions whose bump reached
+/// `max_attempts` and were therefore quarantined instead of being left held
+/// forever. `breaker_tripped` records that the tick stopped early on
+/// `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES` consecutive failures, so a short
+/// tally is distinguishable from a short batch.
 #[derive(Debug, Default, Clone, Copy)]
 struct PiiBackstopDriverTickSummary {
     done: usize,
     failed: usize,
+    transient: usize,
     exhausted: usize,
+    breaker_tripped: bool,
 }
 
 #[derive(Clone)]
@@ -9243,7 +9249,9 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     tracing::info!(
                         done = summary.done,
                         failed = summary.failed,
+                        transient = summary.transient,
                         exhausted = summary.exhausted,
+                        breaker_tripped = summary.breaker_tripped,
                         "Trace Commons PII backstop driver tick completed"
                     );
                 }
@@ -39225,6 +39233,34 @@ const PII_BACKSTOP_REDACTION_LABEL: &str = "near-ai-pii-backstop-v1";
 /// Label-only: never the adapter's error text and never envelope content.
 const PII_BACKSTOP_EXHAUSTED_REASON: &str = "pii_backstop_attempts_exhausted";
 
+/// How many consecutive per-item failures end a PII-backstop tick early.
+///
+/// Transient upstream failures deliberately do not spend a trace's attempt
+/// budget, so without this a dead classifier would be re-hit for every item of
+/// every batch, forever. Three is below the default batch size
+/// (`TRACE_PII_BACKSTOP_DEFAULT_BATCH_SIZE` = 5) so the breaker can actually
+/// fire on a default-configured host, and high enough that a couple of
+/// unrelated bad traces in a row do not stall an otherwise healthy backlog.
+/// The remainder of the batch is left completely untouched and is re-enumerated
+/// on the next tick.
+const MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES: usize = 3;
+
+/// True when `error` carries the protocol layer's typed transient marker: the
+/// upstream privacy filter was unavailable (transport error, timeout, or a 5xx
+/// that survived the adapter's retries) rather than anything being wrong with
+/// the trace.
+///
+/// The classification is read off the error's TYPE, never parsed out of its
+/// message. `rescrub_envelope_prose_pii_with` returns the adapter's
+/// `TraceContributionError` unchanged and `process_one_pii_backstop` lets it
+/// through `?` into `anyhow::Error`, which preserves the concrete type for
+/// this downcast (and keeps preserving it under any later `.context()`).
+fn is_transient_pii_backstop_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<trace_commons_protocol::trace_contribution::TraceContributionError>()
+        .is_some_and(|err| err.is_transient())
+}
+
 /// Task 6: one pass of the in-process server-side NEAR AI PII-backstop driver.
 ///
 /// Fail-closed by construction. The whole tick refuses to touch any submission
@@ -39268,14 +39304,43 @@ async fn run_pii_backstop_driver_tick(
         .await?;
 
     let mut summary = PiiBackstopDriverTickSummary::default();
+    // Consecutive per-item failures, reset by any success. See
+    // `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES`.
+    let mut consecutive_failures = 0usize;
     for item in &items {
         match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
-            Ok(()) => summary.done += 1,
+            Ok(()) => {
+                summary.done += 1;
+                consecutive_failures = 0;
+            }
             Err(error) => {
+                consecutive_failures += 1;
+                let error_label = safe_runtime_error_hash(&error);
+
+                // A transient upstream failure is the classifier's, not the
+                // trace's: log it hash-only and leave the attempt counter
+                // alone, so the submission is re-enumerated on a later tick.
+                // Only a permanent failure -- 4xx, malformed body, oversized
+                // input, or anything else about the trace itself -- may spend
+                // the trace's budget and eventually exclude it.
+                if is_transient_pii_backstop_failure(&error) {
+                    tracing::warn!(
+                        error_hash = %error_label,
+                        submission_id = %item.submission_id,
+                        "Trace Commons PII backstop upstream unavailable; \
+                         submission held, attempt not charged"
+                    );
+                    summary.transient += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES {
+                        summary.breaker_tripped = true;
+                        break;
+                    }
+                    continue;
+                }
+
                 // Bump the attempt counter with a hash-only error label. A bump
                 // failure is itself logged hash-only; the trace still stays
                 // held either way.
-                let error_label = safe_runtime_error_hash(&error);
                 let attempts = match db
                     .bump_pii_backstop_attempt(
                         &item.tenant_id,
@@ -39314,6 +39379,10 @@ async fn run_pii_backstop_driver_tick(
                                 "Trace Commons PII backstop retries exhausted; submission quarantined"
                             );
                             summary.exhausted += 1;
+                            if consecutive_failures >= MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES {
+                                summary.breaker_tripped = true;
+                                break;
+                            }
                             continue;
                         }
                         Err(quarantine_error) => {
@@ -39335,8 +39404,21 @@ async fn run_pii_backstop_driver_tick(
                     "Trace Commons PII backstop re-redaction failed; submission held"
                 );
                 summary.failed += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES {
+                    summary.breaker_tripped = true;
+                    break;
+                }
             }
         }
+    }
+    if summary.breaker_tripped {
+        tracing::warn!(
+            consecutive_failures,
+            batch_size = items.len(),
+            processed = summary.done + summary.failed + summary.transient + summary.exhausted,
+            "Trace Commons PII backstop driver tick aborted on consecutive failures; \
+             remainder of the batch left untouched"
+        );
     }
     Ok(summary)
 }
