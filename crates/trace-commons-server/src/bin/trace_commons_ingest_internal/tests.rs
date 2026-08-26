@@ -80172,7 +80172,7 @@ fn pii_backstop_target_status_follows_post_backstop_risk() {
 
 /// Consent declaring exactly the content flags named, and nothing else that
 /// the hold decision reads.
-fn backstop_consent(message_text: bool, tool_payloads: bool) -> ConsentMetadata {
+fn backstop_consent(message_text: bool, tool_payloads: bool, correction: bool) -> ConsentMetadata {
     ConsentMetadata {
         policy_version:
             trace_commons_protocol::trace_contribution::TRACE_CONTRIBUTION_POLICY_VERSION
@@ -80180,6 +80180,7 @@ fn backstop_consent(message_text: bool, tool_payloads: bool) -> ConsentMetadata 
         scopes: vec![ConsentScope::DebuggingEvaluation],
         message_text_included: message_text,
         tool_payloads_included: tool_payloads,
+        correction_included: correction,
         revocable: true,
     }
 }
@@ -80196,7 +80197,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
     assert_eq!(
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
-            &backstop_consent(true, false),
+            &backstop_consent(true, false, false),
             true
         ),
         TraceCorpusStatus::AwaitingPiiBackstop
@@ -80205,7 +80206,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
     assert_eq!(
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
-            &backstop_consent(true, false),
+            &backstop_consent(true, false, false),
             false
         ),
         TraceCorpusStatus::Accepted
@@ -80215,7 +80216,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
     assert_eq!(
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
-            &backstop_consent(false, false),
+            &backstop_consent(false, false, false),
             true
         ),
         TraceCorpusStatus::Accepted
@@ -80225,7 +80226,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
     assert_eq!(
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Quarantined,
-            &backstop_consent(true, false),
+            &backstop_consent(true, false, false),
             true
         ),
         TraceCorpusStatus::Quarantined
@@ -80243,7 +80244,7 @@ fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
     assert_eq!(
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
-            &backstop_consent(false, true),
+            &backstop_consent(false, true, false),
             true
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
@@ -80251,27 +80252,52 @@ fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
     );
 }
 
-// Either flag alone is sufficient, and both together do not double-count
-// into some other state. Pinned as a table so a future third content flag
-// has an obvious place to go.
+// Any content flag alone is sufficient, and combinations do not double-count
+// into some other state. The table the earlier version left a place for now
+// has a third column: `correction_included` (S5). Only the all-false row is
+// unheld.
 #[test]
-fn either_content_flag_alone_is_enough_to_hold() {
-    for (message_text, tool_payloads, expected) in [
-        (false, false, TraceCorpusStatus::Accepted),
-        (true, false, TraceCorpusStatus::AwaitingPiiBackstop),
-        (false, true, TraceCorpusStatus::AwaitingPiiBackstop),
-        (true, true, TraceCorpusStatus::AwaitingPiiBackstop),
+fn any_content_flag_alone_is_enough_to_hold() {
+    for (message_text, tool_payloads, correction, expected) in [
+        (false, false, false, TraceCorpusStatus::Accepted),
+        (true, false, false, TraceCorpusStatus::AwaitingPiiBackstop),
+        (false, true, false, TraceCorpusStatus::AwaitingPiiBackstop),
+        (false, false, true, TraceCorpusStatus::AwaitingPiiBackstop),
+        (true, true, false, TraceCorpusStatus::AwaitingPiiBackstop),
+        (true, false, true, TraceCorpusStatus::AwaitingPiiBackstop),
+        (false, true, true, TraceCorpusStatus::AwaitingPiiBackstop),
+        (true, true, true, TraceCorpusStatus::AwaitingPiiBackstop),
     ] {
         assert_eq!(
             corpus_status_with_pii_backstop_hold(
                 TraceCorpusStatus::Accepted,
-                &backstop_consent(message_text, tool_payloads),
+                &backstop_consent(message_text, tool_payloads, correction),
                 true
             ),
             expected,
-            "message_text={message_text} tool_payloads={tool_payloads}"
+            "message_text={message_text} tool_payloads={tool_payloads} \
+             correction={correction}"
         );
     }
+}
+
+// The gap S5 must not reopen. A correction is contributor prose that reaches
+// the corpus with the semantic redaction passes deliberately skipped, so it is
+// the content class the backstop classifier is most needed for. With neither
+// other flag set -- which is the shape of a trace whose only content is the
+// correction -- the hold must still fire. Before `correction_included` existed
+// this envelope declared no content at all and went straight into the corpus.
+#[test]
+fn pii_backstop_holds_a_correction_bearing_trace_with_no_other_content() {
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &backstop_consent(false, false, true),
+            true
+        ),
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "an unredacted correction must be re-examined before the corpus"
+    );
 }
 
 // Task 6: the per-tick tally starts empty and counts released vs. held items

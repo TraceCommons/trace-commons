@@ -1207,9 +1207,16 @@ mod tests {
         // carries `conversation_id`, populated from the fixture session's own
         // file stem (its `sessionId`, `11111111-1111-1111-1111-111111111111`).
         // Attribution only, inside the hashed bytes like every other field.
+        //
+        // Moved again, deliberately, for issue #298 S5: `ConsentMetadata`
+        // gained `correction_included`, a third content-class declaration, and
+        // it serialises unconditionally like the two flags beside it. This
+        // fixture carries no correction, so the new key is `false` -- the move
+        // is one added key, not a change to what the envelope declares. The
+        // risk tier asserted above is unchanged, which is what says so.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:aea751bfae64957c5f8091031a548b61eb1402043b45df3503aa9d6ef4fe2e45",
+            "sha256:fa70626c3239550f22ea4329368de407ab47d2c3d8bdd34b58fec9ca65bcf427",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

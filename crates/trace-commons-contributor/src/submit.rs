@@ -13,7 +13,7 @@ use uuid::Uuid;
 use std::collections::BTreeMap;
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
-    ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
+    ConsentMetadata, ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
     TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
 };
 
@@ -160,20 +160,27 @@ fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
 ///
 /// Labels and counts only. This runs over other people's private traces, so
 /// no matched text, no path, no content ever reaches the output.
+///
+/// Takes the whole `ConsentMetadata` rather than a bool per flag, for the same
+/// reason the ingest backstop-hold predicate does: passing them individually is
+/// what lets a new content flag be forgotten, and an explanation that omits the
+/// flag which raised the floor contradicts the number it explains.
 fn residual_risk_explanation(
-    message_text_included: bool,
-    tool_payloads_included: bool,
+    consent: &ConsentMetadata,
     redaction_counts: &BTreeMap<String, u32>,
     pii_labels_present: &[String],
 ) -> String {
     let mut causes: Vec<String> = Vec::new();
 
     let mut consent_flags: Vec<&str> = Vec::new();
-    if message_text_included {
+    if consent.message_text_included {
         consent_flags.push("message_text_included");
     }
-    if tool_payloads_included {
+    if consent.tool_payloads_included {
         consent_flags.push("tool_payloads_included");
+    }
+    if consent.correction_included {
+        consent_flags.push("correction_included");
     }
     if !consent_flags.is_empty() {
         causes.push(format!("consent flags: {}", consent_flags.join(", ")));
@@ -597,8 +604,7 @@ impl<'a> SubmitContext<'a> {
                     println!(
                         "dry-run: why={}",
                         residual_risk_explanation(
-                            envelope.consent.message_text_included,
-                            envelope.consent.tool_payloads_included,
+                            &envelope.consent,
                             &envelope.privacy.redaction_counts,
                             &envelope.privacy.pii_labels_present,
                         )
@@ -1462,7 +1468,8 @@ mod tests {
         let counts = BTreeMap::from([("secret:aws_access_key".to_string(), 2u32)]);
         let labels = vec!["email".to_string()];
 
-        let why = residual_risk_explanation(true, false, &counts, &labels);
+        let why =
+            residual_risk_explanation(&explanation_consent(true, false, false), &counts, &labels);
 
         assert!(why.contains("message_text_included"));
         assert!(why.contains("2 secret:aws_access_key"));
@@ -1474,8 +1481,48 @@ mod tests {
 
     #[test]
     fn a_clean_envelope_says_so_rather_than_listing_nothing() {
-        let why = residual_risk_explanation(false, false, &BTreeMap::new(), &[]);
+        let why = residual_risk_explanation(
+            &explanation_consent(false, false, false),
+            &BTreeMap::new(),
+            &[],
+        );
         assert_eq!(why, "nothing in this envelope raised the floor");
+    }
+
+    /// Consent declaring exactly the content flags named.
+    fn explanation_consent(
+        message_text: bool,
+        tool_payloads: bool,
+        correction: bool,
+    ) -> ConsentMetadata {
+        use trace_commons_protocol::trace_contribution::{
+            ConsentScope, TRACE_CONTRIBUTION_POLICY_VERSION,
+        };
+        ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: message_text,
+            tool_payloads_included: tool_payloads,
+            correction_included: correction,
+            revocable: true,
+        }
+    }
+
+    // A correction raises the floor to Medium, so the explanation of that
+    // number has to name it. Before the flag existed, a correction-bearing
+    // envelope explained its own Medium as "nothing raised the floor".
+    #[test]
+    fn the_explanation_names_a_correction_as_a_cause() {
+        let why = residual_risk_explanation(
+            &explanation_consent(false, false, true),
+            &BTreeMap::new(),
+            &[],
+        );
+
+        assert!(
+            why.contains("correction_included"),
+            "the flag that raised the floor must appear: {why}"
+        );
     }
 
     #[test]
