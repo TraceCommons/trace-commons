@@ -845,6 +845,62 @@ fn project_header(
                 candidates,
             );
         });
+
+        // The opt-in path for answering the verdict question once for the
+        // whole group. `Submit all` above is untouched and still sends no
+        // `outcome` -- this is a separate control beside it, not a
+        // confirmation step in front of it, so the common one-click path
+        // never gets slower. See `copy::SUBMIT_ALL_AS`.
+        let submit_all_as = gtk::MenuButton::builder()
+            .label(copy::SUBMIT_ALL_AS)
+            .tooltip_text(copy::SUBMIT_ALL_AS_TOOLTIP)
+            .build();
+        submit_all_as.add_css_class("tc-chip");
+
+        let verdict_popover_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XXS)
+            .build();
+        for (label, verdict) in [
+            (copy::VERDICT_WORKED, "worked"),
+            (copy::VERDICT_PARTLY, "partly"),
+            (copy::VERDICT_FAILED, "failed"),
+        ] {
+            let item = gtk::Button::with_label(label);
+            item.add_css_class("flat");
+            verdict_popover_box.append(&item);
+
+            let app_for_item = Rc::clone(app);
+            let project_id_for_item = project_id.to_string();
+            let project_label_for_item = project_label.to_string();
+            let submit_all_as_for_item = submit_all_as.clone();
+            item.connect_clicked(move |_| {
+                // Read fresh at click time, independently of the plain
+                // `Submit all` handler above -- see that handler's comment
+                // for why: the queue can change between a render and a
+                // click, and each handler needs its own fresh read.
+                let candidates: Vec<String> = app_for_item
+                    .entries
+                    .borrow()
+                    .iter()
+                    .filter(|e| e.state == "pending" && e.project_id == project_id_for_item)
+                    .map(|e| e.entry_id.clone())
+                    .collect();
+                submit_all_as_for_item.popdown();
+                submit_and_toast(
+                    &app_for_item,
+                    approve_params(
+                        ApproveTarget::Project(project_id_for_item.clone()),
+                        Some(verdict),
+                    ),
+                    project_label_for_item.clone(),
+                    candidates,
+                );
+            });
+        }
+        let verdict_popover = gtk::Popover::builder().child(&verdict_popover_box).build();
+        submit_all_as.set_popover(Some(&verdict_popover));
+        bar.append(&submit_all_as);
     }
 
     let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);
@@ -1094,6 +1150,21 @@ mod tests {
     #[test]
     fn an_approve_call_with_no_verdict_omits_the_parameter() {
         let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID), None);
+        assert!(params.get("outcome").is_none());
+    }
+
+    #[test]
+    fn a_bulk_approve_can_carry_a_verdict() {
+        let params = approve_params(ApproveTarget::Project("proj-1".to_string()), Some("failed"));
+        assert_eq!(params["project_id"], "proj-1");
+        assert_eq!(params["outcome"], "failed");
+    }
+
+    /// Plain `Submit all` stays a one-click, unanswered submit.
+    #[test]
+    fn a_bulk_approve_without_a_verdict_omits_the_parameter() {
+        let params = approve_params(ApproveTarget::Project("proj-1".to_string()), None);
+        assert_eq!(params["project_id"], "proj-1");
         assert!(params.get("outcome").is_none());
     }
 }

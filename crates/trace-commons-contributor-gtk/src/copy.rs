@@ -387,6 +387,12 @@ pub const VERDICT_FAILED: &str = "Failed";
 pub const VERDICT_CAPTION: &str =
     "Optional. This is recorded as the trace outcome; the preview above does not show it.";
 
+/// The bulk verdict menu beside `Submit all`. The plain button stays a
+/// one-click unanswered submit; this is the opt-in path for answering
+/// once for the whole group.
+pub const SUBMIT_ALL_AS: &str = "Submit all as...";
+pub const SUBMIT_ALL_AS_TOOLTIP: &str = "Record the same outcome for every session in this group.";
+
 pub const CLOSE: &str = "Close";
 
 // --- Approving ---------------------------------------------------------
