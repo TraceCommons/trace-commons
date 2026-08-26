@@ -40,11 +40,13 @@ use sha2::{Digest, Sha256};
 /// request body limit. Long sessions get truncated rather than dropped.
 pub const SESSION_BODY_CAP: usize = 16_000;
 
+pub const SESSION_TOOL_PAYLOAD_CAP: usize = 1_000_000;
+
 /// Translator-neutral hand-off to the submitter. The deterministic
 /// `submission_id` is the idempotency anchor — re-running against the same
 /// dataset yields the same id, so the ingest server's
 /// `read_submission_record` path collapses the retry to a no-op.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubmissionDraft {
     pub submission_id: String,
     /// The whole session flattened to one string, in event order. Still
@@ -81,12 +83,54 @@ pub enum SessionEventRole {
 }
 
 /// One classified session event: its flattened text, its own real
-/// timestamp if the source line carried one, and its role.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// timestamp if the source line carried one, its role, and the tool
+/// activity the record carried, if any.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionEvent {
     pub text: String,
     pub timestamp: Option<DateTime<Utc>>,
     pub role: SessionEventRole,
+    /// Tool calls or tool results parsed out of this record. `None` for a
+    /// plain prose record, and also for a tool-shaped record we could not
+    /// read unambiguously -- an unclassified event is better than a
+    /// misclassified one, and either way the record still reaches the
+    /// envelope through `text`.
+    pub tool: Option<SessionEventTool>,
+}
+
+/// The tool activity one session record carried.
+///
+/// A record carries calls or results, never both -- confirmed across 36 real
+/// sessions from all three target datasets. If one ever did, calls win and
+/// the results stay in the catch-all rather than being split across a shape
+/// we have never seen.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionEventTool {
+    Calls(Vec<SessionToolCall>),
+    Results(Vec<SessionToolResult>),
+}
+
+/// One tool call, in the shape `TraceToolCall` needs.
+///
+/// Both dataset families give a call a real id -- swival's `tool_use.id` and
+/// pi-mono/DeepSeek's `toolCall.id` -- which is what lets a result name the
+/// call it answers instead of being paired by array position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// One tool result, in the shape `ExpectedToolResult` needs. `name` is the
+/// tool that produced it: read off the record where the source carries it
+/// (pi-mono/DeepSeek `toolName`), or resolved from the call the result's id
+/// names (swival, whose `tool_result` chunks carry no name).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionToolResult {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
 }
 
 /// Per-dataset translator contract. Translators are intentionally small and
@@ -155,6 +199,152 @@ fn extract_event_text(event: &Value) -> Vec<String> {
     parts
 }
 
+/// Join a chunk list's `text` fields the same way [`extract_event_text`]
+/// joins them, so a tool-result record's parsed content and its extracted
+/// text are the same string and the submitter can recognize the one as the
+/// other instead of emitting both.
+fn join_chunk_text(content: &Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.trim().to_string();
+    }
+    let Some(arr) = content.as_array() else {
+        return String::new();
+    };
+    arr.iter()
+        .filter_map(|chunk| chunk.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Pull the tool activity out of one event row.
+///
+/// Two shapes, both confirmed against real downloaded sessions rather than
+/// fixtures:
+///
+/// - swival: `{"type":"tool_use","id":..,"name":..,"input":{..}}` chunks on
+///   an assistant record, answered by
+///   `{"type":"tool_result","tool_use_id":..,"content":..}` chunks on a user
+///   record. The result chunk carries no tool name.
+/// - pi-mono and DeepSeek: `{"type":"toolCall","id":..,"name":..,
+///   "arguments":{..}}` chunks on an assistant record, answered by a whole
+///   record whose `message.role` is `"toolResult"` and which carries
+///   `toolCallId` and `toolName`.
+///
+/// Anything that does not match one of those exactly returns `None` and
+/// keeps the existing catch-all. A record missing the id that pairs it is
+/// ambiguous by definition and is left unclassified.
+fn extract_event_tool(event: &Value) -> Option<SessionEventTool> {
+    let msg = event.get("message")?;
+
+    // pi-mono / DeepSeek: the whole record is one tool result.
+    if msg.get("role").and_then(Value::as_str) == Some("toolResult") {
+        let tool_call_id = non_empty(msg.get("toolCallId"))?;
+        let name = non_empty(msg.get("toolName"))?;
+        let content = msg.get("content").map(join_chunk_text).unwrap_or_default();
+        return Some(SessionEventTool::Results(vec![SessionToolResult {
+            tool_call_id,
+            name,
+            content,
+        }]));
+    }
+
+    let chunks = msg.get("content")?.as_array()?;
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for chunk in chunks {
+        match chunk.get("type").and_then(Value::as_str) {
+            Some("tool_use") | Some("toolCall") => {
+                let Some(id) = non_empty(chunk.get("id")) else {
+                    continue;
+                };
+                let Some(name) = non_empty(chunk.get("name")) else {
+                    continue;
+                };
+                let arguments = chunk
+                    .get("input")
+                    .or_else(|| chunk.get("arguments"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                calls.push(SessionToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+            Some("tool_result") | Some("toolResult") => {
+                let Some(tool_call_id) =
+                    non_empty(chunk.get("tool_use_id").or_else(|| chunk.get("toolCallId")))
+                else {
+                    continue;
+                };
+                results.push(SessionToolResult {
+                    tool_call_id,
+                    // Filled in by `resolve_result_names` from the call this
+                    // result answers; an unresolvable one is dropped there.
+                    name: String::new(),
+                    content: chunk
+                        .get("content")
+                        .map(join_chunk_text)
+                        .unwrap_or_default(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if !calls.is_empty() {
+        Some(SessionEventTool::Calls(calls))
+    } else if !results.is_empty() {
+        Some(SessionEventTool::Results(results))
+    } else {
+        None
+    }
+}
+
+/// Read a JSON field as a non-empty string.
+fn non_empty(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Give every result the name of the call it answers, pairing by id.
+///
+/// Pairing by array position is the failure mode issue #298 called out, and
+/// both dataset families carry a real call id, so we never need it. A result
+/// whose id names no call in the session cannot be attributed to a tool at
+/// all: its whole `SessionEventTool` is cleared so the record falls back to
+/// the catch-all it had before, rather than being labelled with a guess.
+fn resolve_result_names(events: &mut [SessionEvent]) {
+    let mut names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for event in events.iter() {
+        if let Some(SessionEventTool::Calls(calls)) = &event.tool {
+            for call in calls {
+                names.insert(call.id.clone(), call.name.clone());
+            }
+        }
+    }
+    for event in events.iter_mut() {
+        let Some(SessionEventTool::Results(results)) = &mut event.tool else {
+            continue;
+        };
+        for result in results.iter_mut() {
+            if result.name.is_empty() {
+                if let Some(name) = names.get(&result.tool_call_id) {
+                    result.name = name.clone();
+                }
+            }
+        }
+        if results.iter().any(|r| r.name.is_empty()) {
+            event.tool = None;
+        }
+    }
+}
+
 /// Parse every event in a session into a [`SessionEvent`]. An event whose
 /// text extracts to nothing contributes no event, matching the previous
 /// flatten's behavior exactly (such an event contributed nothing to the
@@ -196,7 +386,8 @@ fn flatten_session(session_bytes: &[u8]) -> (Vec<SessionEvent>, Option<String>) 
             }
         }
         let text = extract_event_text(&event).join("\n\n");
-        if text.is_empty() {
+        let tool = extract_event_tool(&event);
+        if text.is_empty() && tool.is_none() {
             continue;
         }
         let timestamp = event
@@ -217,9 +408,11 @@ fn flatten_session(session_bytes: &[u8]) -> (Vec<SessionEvent>, Option<String>) 
             text,
             timestamp,
             role,
+            tool,
         });
     }
 
+    resolve_result_names(&mut events);
     (events, session_id)
 }
 
@@ -246,8 +439,18 @@ fn truncate_chars(s: &str, cap: usize) -> String {
 fn cap_events(events: Vec<SessionEvent>, cap: usize) -> Vec<SessionEvent> {
     let mut out = Vec::new();
     let mut used = 0usize;
-    for (i, mut event) in events.into_iter().enumerate() {
-        let sep = if i == 0 { 0 } else { 2 };
+    let mut emitted_text = false;
+    for mut event in events.into_iter() {
+        // A record that carried only tool activity contributes nothing to
+        // the flattened body, so it spends nothing from the text budget --
+        // admitting tool events must not displace prose that reached the
+        // envelope before tool events existed. `cap_tool_payloads` bounds
+        // these instead.
+        if event.text.is_empty() {
+            out.push(event);
+            continue;
+        }
+        let sep = if emitted_text { 2 } else { 0 };
         if used + sep >= cap {
             break;
         }
@@ -255,6 +458,7 @@ fn cap_events(events: Vec<SessionEvent>, cap: usize) -> Vec<SessionEvent> {
         let len = event.text.chars().count();
         if len <= remaining {
             used += sep + len;
+            emitted_text = true;
             out.push(event);
         } else {
             event.text = truncate_chars(&event.text, remaining);
@@ -265,6 +469,50 @@ fn cap_events(events: Vec<SessionEvent>, cap: usize) -> Vec<SessionEvent> {
         }
     }
     out
+}
+
+/// Bound the tool-call arguments and tool-result content one session carries,
+/// against a budget separate from the text one.
+///
+/// Nothing is dropped: a tool event past the budget keeps its call id and
+/// tool name, which is what makes the trace legible as a sequence of tool
+/// invocations, and loses only the payload that would not fit. Result
+/// content is a string and is truncated in place; call arguments are
+/// structured and cannot be cut mid-value, so an over-budget argument object
+/// is withheld whole (`Value::Null`) rather than mangled into invalid JSON.
+fn cap_tool_payloads(events: Vec<SessionEvent>, cap: usize) -> Vec<SessionEvent> {
+    let mut used = 0usize;
+    events
+        .into_iter()
+        .map(|mut event| {
+            match &mut event.tool {
+                Some(SessionEventTool::Calls(calls)) => {
+                    for call in calls.iter_mut() {
+                        let len = call.arguments.to_string().chars().count();
+                        if used + len <= cap {
+                            used += len;
+                        } else {
+                            call.arguments = Value::Null;
+                        }
+                    }
+                }
+                Some(SessionEventTool::Results(results)) => {
+                    for result in results.iter_mut() {
+                        let len = result.content.chars().count();
+                        if used + len <= cap {
+                            used += len;
+                        } else {
+                            let remaining = cap.saturating_sub(used);
+                            result.content = truncate_chars(&result.content, remaining);
+                            used = cap;
+                        }
+                    }
+                }
+                None => {}
+            }
+            event
+        })
+        .collect()
 }
 
 /// Strip a trailing `.jsonl` (or `.json`) suffix and any leading path
@@ -298,15 +546,22 @@ impl SessionConcatTranslator {
         if events.is_empty() {
             anyhow::bail!("session yielded no textual content");
         }
+        // Tool-only records carry no text and contribute nothing here, so
+        // `trace_body` -- and therefore `submission_id` -- is exactly what it
+        // was before tool events were recognized.
         let raw_body = events
             .iter()
             .map(|e| e.text.as_str())
+            .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
         let body = truncate_chars(&raw_body, SESSION_BODY_CAP);
         let id = submission_id_from_body(&body);
         let row_id = session_id.unwrap_or_else(|| row_id_from_sibling(session_name));
-        let session_events = cap_events(events, SESSION_BODY_CAP);
+        let session_events = cap_tool_payloads(
+            cap_events(events, SESSION_BODY_CAP),
+            SESSION_TOOL_PAYLOAD_CAP,
+        );
         Ok(SubmissionDraft {
             submission_id: id,
             trace_body: body,
@@ -664,5 +919,166 @@ mod tests {
         assert!(passes_word_filter("a b c", 1, 3));
         assert!(!passes_word_filter("a b c d", 1, 3));
         assert!(!passes_word_filter("", 1, 3));
+    }
+}
+
+#[cfg(test)]
+mod tool_event_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_session(events: &[serde_json::Value]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for e in events {
+            out.extend_from_slice(e.to_string().as_bytes());
+            out.push(b'\n');
+        }
+        out
+    }
+
+    /// Swival shape, confirmed against real downloaded sessions:
+    /// `tool_use` chunks on an assistant record, `tool_result` chunks on a
+    /// user record, paired by `id` / `tool_use_id`. The result chunk carries
+    /// no tool name, so the name has to come from the call it answers.
+    #[test]
+    fn swival_tool_use_and_tool_result_chunks_become_tool_events() {
+        let bytes = make_session(&[
+            json!({"type":"session","id":"s"}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"call_1","name":"read_file",
+                 "input":{"file_path":"a.c","offset":10}}
+            ]}}),
+            json!({"type":"user","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"call_1","content":"file body here"}
+            ]}}),
+        ]);
+        let (events, _) = flatten_session(&bytes);
+        assert_eq!(events.len(), 2, "call and result records both survive");
+        match &events[0].tool {
+            Some(SessionEventTool::Calls(calls)) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[0].name, "read_file");
+                assert_eq!(calls[0].arguments["file_path"], json!("a.c"));
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        match &events[1].tool {
+            Some(SessionEventTool::Results(results)) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].tool_call_id, "call_1");
+                assert_eq!(
+                    results[0].name, "read_file",
+                    "the result's name comes from the call it answers, by id"
+                );
+                assert_eq!(results[0].content, "file body here");
+            }
+            other => panic!("expected tool results, got {other:?}"),
+        }
+    }
+
+    /// pi-mono / DeepSeek shape, confirmed against real downloaded sessions:
+    /// `toolCall` chunks on an assistant record, and a whole record whose
+    /// `message.role` is `toolResult` carrying `toolCallId` and `toolName`.
+    #[test]
+    fn pi_mono_tool_call_chunks_and_tool_result_records_become_tool_events() {
+        let bytes = make_session(&[
+            json!({"type":"session","id":"s"}),
+            json!({"type":"message","message":{"role":"assistant","content":[
+                {"type":"toolCall","id":"toolu_1","name":"bash",
+                 "arguments":{"command":"ls"}}
+            ]}}),
+            json!({"type":"message","message":{"role":"toolResult",
+                "toolCallId":"toolu_1","toolName":"bash","isError":false,
+                "content":[{"type":"text","text":"a.txt"}]}}),
+        ]);
+        let (events, _) = flatten_session(&bytes);
+        assert_eq!(events.len(), 2);
+        match &events[0].tool {
+            Some(SessionEventTool::Calls(calls)) => {
+                assert_eq!(calls[0].id, "toolu_1");
+                assert_eq!(calls[0].name, "bash");
+                assert_eq!(calls[0].arguments["command"], json!("ls"));
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        match &events[1].tool {
+            Some(SessionEventTool::Results(results)) => {
+                assert_eq!(results[0].tool_call_id, "toolu_1");
+                assert_eq!(results[0].name, "bash");
+                assert_eq!(results[0].content, "a.txt");
+            }
+            other => panic!("expected tool results, got {other:?}"),
+        }
+    }
+
+    /// The dominant real shape in pi-mono and DeepSeek: one assistant record
+    /// carries prose AND tool calls. Neither may be lost.
+    #[test]
+    fn a_record_carrying_both_prose_and_tool_calls_keeps_both() {
+        let bytes = make_session(&[json!({"type":"message","message":{
+        "role":"assistant","content":[
+            {"type":"text","text":"let me look"},
+            {"type":"toolCall","id":"t1","name":"bash","arguments":{"command":"ls"}}
+        ]}})]);
+        let (events, _) = flatten_session(&bytes);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "let me look");
+        assert!(matches!(events[0].tool, Some(SessionEventTool::Calls(_))));
+    }
+
+    /// A result naming a call this session never made is genuinely
+    /// ambiguous -- we cannot say which tool produced it. It keeps the
+    /// existing catch-all rather than being misclassified, and it is not
+    /// dropped.
+    #[test]
+    fn a_tool_result_with_no_matching_call_keeps_the_catch_all() {
+        let bytes = make_session(&[json!({"type":"user","message":{
+        "role":"user","content":[
+            {"type":"tool_result","tool_use_id":"unknown","content":"orphan output"}
+        ]}})]);
+        let (events, _) = flatten_session(&bytes);
+        assert_eq!(events.len(), 1, "the record is not dropped");
+        assert!(
+            events[0].tool.is_none(),
+            "an unpairable result stays unclassified rather than being guessed at"
+        );
+    }
+
+    /// Tool payloads get their own budget so a tool-heavy session cannot
+    /// blow the envelope, and the text budget is untouched by them.
+    #[test]
+    fn tool_payloads_are_bounded_by_their_own_budget() {
+        let big = "x".repeat(5_000);
+        let mut records = vec![json!({"type":"session","id":"s"})];
+        for i in 0..10 {
+            records.push(
+                json!({"type":"message","message":{"role":"assistant","content":[
+                    {"type":"toolCall","id":format!("t{i}"),"name":"bash",
+                     "arguments":{"command":big}}
+                ]}}),
+            );
+        }
+        let bytes = make_session(&records);
+        let (events, _) = flatten_session(&bytes);
+        let capped = cap_tool_payloads(events, 12_000);
+        assert_eq!(capped.len(), 10, "no tool record is dropped by the budget");
+        let total: usize = capped
+            .iter()
+            .map(|e| match &e.tool {
+                Some(SessionEventTool::Calls(c)) => c
+                    .iter()
+                    .map(|c| c.arguments.to_string().chars().count())
+                    .sum(),
+                Some(SessionEventTool::Results(r)) => {
+                    r.iter().map(|r| r.content.chars().count()).sum()
+                }
+                None => 0,
+            })
+            .sum();
+        assert!(
+            total <= 12_000,
+            "tool payloads must stay inside their budget, got {total}"
+        );
     }
 }
