@@ -580,6 +580,13 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private string ApproveParams() =>
         SubmitParams.ForEntry(Entry.EntryId, SelectedVerdict);
 
+    /// <summary>
+    /// This sheet's entry, named alone. What <c>dismiss</c> sends -- and it
+    /// takes no verdict: a session that is never sent has no outcome to
+    /// record, and the daemon has no parameter for one here.
+    /// </summary>
+    private string EntryParams() => SubmitParams.ForEntry(Entry.EntryId);
+
     private void FillManifest(PreviewSummary summary)
     {
         RedactionRows.Clear();
