@@ -624,14 +624,14 @@ sh install.sh</code></pre>
     </section>
 
     <section class="section-band">
-      <p class="eyebrow">New in 0.5.0</p>
-      <h1>You can say whether it worked.</h1>
-      <p class="lede">When you approve a session, the app now asks one question: did it do what you asked? Worked, partly, or failed. Nothing in a transcript answers that -- an agent that stops has not thereby succeeded, and a run that logged no error has not thereby done the job. Only you know, so you are asked rather than guessed at.</p>
+      <p class="eyebrow">New in 0.6.0</p>
+      <h1>You can say what went wrong.</h1>
+      <p class="lede">0.5.0 let you mark a session worked, partly worked, or failed. Now, when you say it did not go well, you can add a short note explaining what happened. Nothing else in a trace can carry that: the transcript records what the agent did, not what you expected instead.</p>
     </section>
 
     <section class="about-grid">
-      <div class="panel"><h2>Answering is optional</h2><p class="lede">Skipping the question is a normal answer, not a missing one, and it never blocks the approve button. An unanswered session is recorded as unknown, which is exactly what every session before this release recorded.</p></div>
-      <div class="panel"><h2>One question, one fact</h2><p class="lede">The answer records whether the task was finished. It is not a rating and it is not a thumbs up: those are a different question, and a run can finish the job by a route you disliked, or fail while doing the right thing. Your answer is not shown in the preview above it, and the preview says so.</p></div>
+      <div class="panel"><h2>Stored as you wrote it</h2><p class="lede">Everywhere else, file paths and email addresses in your session are replaced with placeholders before upload. Your note is not: replacing the details would remove the explanation. Treat it as writing about your own work, and leave out anything you would not want in the corpus.</p></div>
+      <div class="panel"><h2>Still optional, still yours</h2><p class="lede">The note only appears when you say a session went badly, and skipping it changes nothing. If it looks like it contains an API key or a token, the upload is refused and you are asked to remove it rather than having it quietly masked.</p></div>
       <div class="panel"><h2>Paths are never shown</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered anywhere in the app.</p></div>
       <div class="panel"><h2>The tray cannot send</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
     </section>
