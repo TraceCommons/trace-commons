@@ -118,6 +118,13 @@ struct Sheet {
     /// `approve`'s `outcome` parameter, omitted entirely when `None`; see
     /// `ApproveTarget` in `ui::queue`.
     verdict: RefCell<Option<&'static str>>,
+    /// The correction control: prompt, box and disclosure caption, held
+    /// together so the verdict handler can show and hide all three as one
+    /// thing. Hidden under `Worked` and under no answer at all.
+    correction_group: gtk::Box,
+    /// The box itself, held separately so `load` can empty it and
+    /// `approve_current` can read it.
+    correction_view: gtk::TextView,
 }
 
 /// One tab of the preview strip: the stack child it shows, its label, and
@@ -475,6 +482,61 @@ impl Sheet {
         verdict_caption.add_css_class("tc-caveat");
         verdict_caption.add_css_class("tc-tertiary");
 
+        // The correction control. Shown only under `Partly` and `Failed`:
+        // you cannot correct a run you have just called successful, and the
+        // gate is a guard as much as it is semantics -- it halves the
+        // surface for correction-shaped credit farming and puts the field
+        // only where a correction means something.
+        //
+        // Optional throughout. `Contribute` is never gated on it; see
+        // `sync_contribute`, which does not read it.
+        let correction_question = gtk::Label::builder()
+            .label(copy::CORRECTION_QUESTION)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        correction_question.add_css_class("tc-caveat");
+
+        let correction_view = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .top_margin(space::XS)
+            .bottom_margin(space::XS)
+            .left_margin(space::XS)
+            .right_margin(space::XS)
+            .build();
+        correction_view.set_tooltip_text(Some(copy::CORRECTION_PLACEHOLDER));
+        let correction_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(72)
+            .max_content_height(160)
+            .child(&correction_view)
+            .build();
+        correction_scroll.add_css_class("tc-field");
+
+        // The disclosure, in full and never abbreviated for layout -- see
+        // `copy::CORRECTION_CAPTION`. Until the published policy page
+        // carves the correction out of its "redacted locally, re-applied
+        // on the server" promise, this label is the only place a
+        // contributor is told their own words are stored as typed.
+        let correction_caption = gtk::Label::builder()
+            .label(copy::CORRECTION_CAPTION)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        correction_caption.add_css_class("tc-caveat");
+        correction_caption.add_css_class("tc-tertiary");
+
+        let correction_group = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XS)
+            .build();
+        correction_group.append(&correction_question);
+        correction_group.append(&correction_scroll);
+        correction_group.append(&correction_caption);
+        correction_group.set_visible(false);
+
         let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
         skip.add_css_class("tc-quiet");
         skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
@@ -521,6 +583,7 @@ impl Sheet {
         footer.append(&verdict_question);
         footer.append(&verdict_track);
         footer.append(&verdict_caption);
+        footer.append(&correction_group);
         footer.append(&actions);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -558,6 +621,8 @@ impl Sheet {
             body: RefCell::new(None),
             verdict_buttons: verdict_buttons.clone(),
             verdict: RefCell::new(None),
+            correction_group: correction_group.clone(),
+            correction_view: correction_view.clone(),
         });
 
         for (button, name) in verdict_buttons.iter().zip(["worked", "partly", "failed"]) {
@@ -575,6 +640,9 @@ impl Sheet {
                 } else if *v == Some(name) {
                     *v = None;
                 }
+                let shown = matches!(*v, Some("partly") | Some("failed"));
+                drop(v);
+                s.set_correction_visible(shown);
             });
         }
 
@@ -679,6 +747,7 @@ impl Sheet {
             button.set_active(false);
         }
         *self.verdict.borrow_mut() = None;
+        self.set_correction_visible(false);
         self.count_whats_in_it.set_text("");
         self.count_permissions.set_text("");
         self.search_summary.set_text("");
@@ -1056,21 +1125,99 @@ impl Sheet {
         // No selection is a valid, expected answer -- `approve_params`
         // omits `outcome` entirely rather than sending `null` or `""`, both
         // of which the daemon refuses. See `ApproveTarget` in `ui::queue`.
+        //
+        // The correction goes the same way: omitted entirely when the box
+        // is empty or was never shown, so an unanswered sheet sends exactly
+        // the call it sent before this control existed.
+        let correction = self.correction_text();
         let params = super::queue::approve_params(
             super::queue::ApproveTarget::Entry(entry_id.clone()),
             *self.verdict.borrow(),
+            correction.as_deref(),
         );
         self.app.call("approve", params, move |app, result| {
             match result {
                 Ok(value) => {
                     let approve: ApproveResult = serde_json::from_value(value).unwrap_or_default();
+                    // The one refusal the contributor caused and can fix.
+                    // It gets its own dialog rather than a line in the
+                    // submit toast, and the sheet stays on this entry with
+                    // the text still in the box, because the next thing
+                    // they have to do is edit it. Advancing would take the
+                    // correction away from them along with the chance to
+                    // act on the advice.
+                    if approve.was_refused_for_a_correction_credential() {
+                        sheet.contribute.set_sensitive(true);
+                        sheet.show_correction_credential_refusal();
+                        app.refresh();
+                        return;
+                    }
                     app.render_submit_response(&approve, vec![entry_id.clone()], &project_label);
                 }
+                // A top-level refusal, which for this call means the
+                // parameters themselves were rejected -- an oversized or
+                // ill-formed correction among them. The label is fixed by
+                // contract and is not echoed.
                 Err(_) => app.toast(copy::SUBMIT_FAILED),
             }
             app.refresh();
             sheet.advance();
         });
+    }
+
+    /// The credential refusal, as its own dialog.
+    ///
+    /// A dialog rather than a toast because it is the one submit failure
+    /// that asks the contributor to do two things -- edit the text, and
+    /// rotate what they typed -- and a toast that disappears on a timer is
+    /// not where either instruction belongs. Parented to the sheet, which
+    /// is the window still holding the correction.
+    ///
+    /// Neither string is derived from the response: the daemon sends a
+    /// fixed label and this shows fixed copy, so no correction text and no
+    /// detected value can reach the screen a second time or a log at all.
+    fn show_correction_credential_refusal(self: &Rc<Self>) {
+        let dialog = adw::MessageDialog::new(
+            Some(&self.window),
+            Some(copy::CORRECTION_CREDENTIAL_HEADLINE),
+            Some(copy::CORRECTION_CREDENTIAL_BODY),
+        );
+        dialog.add_responses(&[("close", copy::CLOSE)]);
+        dialog.set_close_response("close");
+        dialog.connect_response(None, |dialog, _| dialog.close());
+        dialog.present();
+    }
+
+    /// Show or hide the correction control, and empty it on the way out.
+    ///
+    /// Emptying matters: a contributor who wrote a correction under
+    /// `Failed` and then changed their answer to `Worked` has withdrawn it,
+    /// and text left in a hidden box would ride along on the next approval
+    /// they made without ever being on screen again.
+    fn set_correction_visible(&self, visible: bool) {
+        if !visible {
+            self.correction_view.buffer().set_text("");
+        }
+        self.correction_group.set_visible(visible);
+    }
+
+    /// What is in the correction box, or `None` when the control is hidden
+    /// or holds nothing but whitespace.
+    ///
+    /// The visibility check is deliberate rather than redundant. The box is
+    /// emptied when it is hidden, so this would answer `None` anyway; the
+    /// check states the rule -- a hidden control contributes nothing -- so
+    /// it survives a future change that stops emptying on hide.
+    fn correction_text(&self) -> Option<String> {
+        if !self.correction_group.is_visible() {
+            return None;
+        }
+        let buffer = self.correction_view.buffer();
+        let text = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        let trimmed = text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 
     /// `Contribute` advances to the next entry in the sheet, so three

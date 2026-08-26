@@ -25,7 +25,7 @@ use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
     RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TaskSuccess,
-    TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope,
+    TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope, TraceContributionError,
     TraceContributionEventType, TraceRedactor, ValueMetadata, run_privacy_filter_canary,
     synthetic_privacy_filter_canary_text, synthetic_privacy_filter_canary_values,
 };
@@ -213,16 +213,36 @@ pub async fn canary_self_test_async(redactor: &DeterministicTraceRedactor) -> Re
     Ok(())
 }
 
+/// The one refusal from the redaction pipeline this crate reports under its
+/// own name rather than the generic label.
+///
+/// It is the only pipeline refusal a contributor can act on: their
+/// correction contains something credential-shaped, and what they should do
+/// is remove it and rotate it. Every other failure is a condition of the
+/// machine, not of anything they wrote, so it stays behind
+/// `trace-redaction-failed`. The string is a fixed label and names neither
+/// the text nor the match.
+pub const REASON_CORRECTION_CREDENTIAL: &str = "correction-credential-detected";
+
 /// Run `raw` through `redactor`, mapping any failure to a label-only error
 /// (never trace content).
 pub async fn redact_to_envelope(
     redactor: &DeterministicTraceRedactor,
     raw: RawTraceContribution,
 ) -> Result<TraceContributionEnvelope> {
-    redactor
-        .redact_trace(raw)
-        .await
-        .map_err(|_| anyhow::anyhow!("trace-redaction-failed"))
+    redactor.redact_trace(raw).await.map_err(|error| {
+        // Matched on the pipeline's own label, so this cannot widen: any
+        // reason but this exact one still collapses to the generic label
+        // that every caller has always seen.
+        match &error {
+            TraceContributionError::RedactionFailed { reason }
+                if reason == REASON_CORRECTION_CREDENTIAL =>
+            {
+                anyhow::anyhow!("{REASON_CORRECTION_CREDENTIAL}")
+            }
+            _ => anyhow::anyhow!("trace-redaction-failed"),
+        }
+    })
 }
 
 /// Re-scan the *finished* envelope with the secret detector and report
@@ -383,8 +403,17 @@ pub fn build_raw_contribution(
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
 ) -> RawTraceContribution {
-    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash), None)
+    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash), None, None)
 }
+
+/// The longest correction the client will accept, in characters.
+///
+/// A correction is an explanation of what a run got wrong, not a document.
+/// The cap exists so a refusal happens at the keyboard, where the person can
+/// see it and shorten what they wrote, rather than as an oversized-envelope
+/// refusal after the fact. Characters rather than bytes so the limit means
+/// the same thing in every script.
+pub const MAX_CORRECTION_CHARS: usize = 2_000;
 
 /// The same, carrying a verdict the contributor supplied for this session.
 pub fn build_raw_contribution_with_verdict(
@@ -393,7 +422,44 @@ pub fn build_raw_contribution_with_verdict(
     now: DateTime<Utc>,
     verdict: Option<ContributorVerdict>,
 ) -> RawTraceContribution {
-    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash), verdict)
+    build_raw_contribution_with_id(
+        t,
+        cfg,
+        now,
+        submission_id_for(&t.session_hash),
+        verdict,
+        None,
+    )
+}
+
+/// The same again, carrying the contributor's written correction.
+///
+/// A correction has to be present when the redaction pipeline runs, which is
+/// why it is a build-time input rather than a post-redaction stamp like
+/// [`apply_verdict`]. Two things depend on it being there:
+///
+/// - credential detection, which refuses the whole submission on a High or
+///   Critical match rather than masking it (`detect_correction_credentials`),
+/// - `ConsentMetadata::correction_included`, which is derived from the
+///   outcome this builds and is what enrols the envelope for the PII
+///   backstop hold and floors its residual risk at Medium.
+///
+/// Stamping a correction onto an already-redacted envelope would skip both.
+pub fn build_raw_contribution_with_correction(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    verdict: Option<ContributorVerdict>,
+    correction: Option<&str>,
+) -> RawTraceContribution {
+    build_raw_contribution_with_id(
+        t,
+        cfg,
+        now,
+        submission_id_for(&t.session_hash),
+        verdict,
+        correction,
+    )
 }
 
 /// Build the same raw contribution shape with a disjoint preview id.
@@ -408,6 +474,7 @@ pub fn build_preview_raw_contribution(
         now,
         preview_submission_id_for(&t.session_hash),
         None,
+        None,
     )
 }
 
@@ -417,6 +484,7 @@ fn build_raw_contribution_with_id(
     now: DateTime<Utc>,
     submission_id: Uuid,
     verdict: Option<ContributorVerdict>,
+    correction: Option<&str>,
 ) -> RawTraceContribution {
     let mut feature_flags = BTreeMap::new();
     feature_flags.insert("agent".to_string(), t.source.to_string());
@@ -476,9 +544,17 @@ fn build_raw_contribution_with_id(
     let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
     // Built before the consent block so the declaration can describe it. A
     // correction is its own content class, not message text: see
-    // `ConsentMetadata::correction_included`. No verdict path sets one yet, so
-    // this is `false` on every envelope this client currently produces.
-    let outcome = verdict.map(ContributorVerdict::outcome).unwrap_or_default();
+    // `ConsentMetadata::correction_included`. `false` unless the caller
+    // supplied a correction, which only the approval path does.
+    let mut outcome = verdict.map(ContributorVerdict::outcome).unwrap_or_default();
+    // Whitespace is not a correction. Normalising here rather than at the
+    // callers means every path -- the socket, the C ABI, a future CLI flag --
+    // gets the same answer for "  ", and the declaration below cannot end up
+    // true for an envelope carrying nothing a reader could use.
+    outcome.human_correction = correction
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     let correction_included = outcome
         .human_correction
         .as_ref()
@@ -1549,6 +1625,74 @@ mod tests {
             scored.coverage_bonus > 0.0,
             "a transcript that calls tools covers tools"
         );
+    }
+
+    /// A correction reaches the outcome AND the declaration, which is the
+    /// pair that matters: `correction_included` is what makes unredacted
+    /// contributor prose visible to residual-risk derivation and to the PII
+    /// backstop hold. An envelope carrying the text with the flag false is
+    /// exactly the gap S5 exists to avoid reopening.
+    #[test]
+    fn a_correction_reaches_the_outcome_and_the_declaration() {
+        let cfg = test_config();
+        let t = fixture_transcript();
+
+        let corrected = build_raw_contribution_with_correction(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Failed),
+            Some("it edited /Users/x/proj/config.toml instead of the staging one"),
+        );
+        assert_eq!(
+            corrected.outcome.human_correction.as_deref(),
+            Some("it edited /Users/x/proj/config.toml instead of the staging one"),
+            "stored as written -- the path is the point"
+        );
+        assert!(corrected.consent.correction_included);
+    }
+
+    /// Whitespace is not a correction, and the declaration must not claim it
+    /// is: normalised in the builder so every caller gets the same answer.
+    #[test]
+    fn a_blank_correction_declares_nothing() {
+        let cfg = test_config();
+        let t = fixture_transcript();
+
+        for blank in [None, Some(""), Some("   \n\t ")] {
+            let raw = build_raw_contribution_with_correction(
+                &t,
+                &cfg,
+                chrono::Utc::now(),
+                Some(ContributorVerdict::Failed),
+                blank,
+            );
+            assert_eq!(raw.outcome.human_correction, None, "blank: {blank:?}");
+            assert!(!raw.consent.correction_included, "blank: {blank:?}");
+        }
+    }
+
+    /// The credential refusal keeps its own label all the way out of
+    /// `redact_to_envelope`, because it is the one pipeline refusal a
+    /// contributor can act on -- remove it, and rotate it. Everything else
+    /// stays behind the generic label.
+    #[tokio::test]
+    async fn a_credential_in_a_correction_refuses_under_its_own_label() {
+        let cfg = test_config();
+        let t = fixture_transcript();
+        let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
+
+        let raw = build_raw_contribution_with_correction(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Failed),
+            Some("it used the key AKIAIOSFODNN7EXAMPLE and blew up"),
+        );
+        let err = redact_to_envelope(&redactor, raw)
+            .await
+            .expect_err("a credential in a correction refuses the submission");
+        assert_eq!(err.to_string(), REASON_CORRECTION_CREDENTIAL);
     }
 
     /// `task_success` was `Unknown` on every envelope this client has ever

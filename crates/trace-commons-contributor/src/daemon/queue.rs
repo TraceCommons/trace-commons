@@ -108,6 +108,28 @@ pub struct QueueEntry {
     /// type's serialisation.
     #[serde(default)]
     pub approved_verdict: Option<String>,
+    /// The correction the contributor wrote when they approved this entry,
+    /// as they typed it. `None` means they wrote nothing, which is the
+    /// ordinary case and behaves exactly as it did before the field existed.
+    ///
+    /// Like `approved_verdict` this is an OUTPUT of the approval act rather
+    /// than a drift guard, so `None` is not fail-closed here and it must not
+    /// be folded into `preview::input_fingerprint`.
+    ///
+    /// Unlike `approved_verdict` it is not merely recorded: the correction
+    /// is built into the envelope this approval pins, because credential
+    /// detection and `consent.correction_included` both have to see it while
+    /// the redaction pipeline runs. What is stored here is the record of
+    /// what was approved, not the thing the uploader stamps on -- see
+    /// `uploader::approved_envelope_for`, which deliberately does not touch
+    /// it.
+    ///
+    /// This is contributor-authored text on the contributor's own machine,
+    /// held exactly as the queued session bodies beside it are. It never
+    /// reaches an audit row, a log line, or a notification -- the hash-only
+    /// rule applies to it with no exception.
+    #[serde(default)]
+    pub approved_correction: Option<String>,
     /// The fingerprint of everything outside the session file that
     /// determines the envelope, as of the moment this entry was approved
     /// (`preview::input_fingerprint`).
@@ -324,6 +346,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // that was shown -- do not.
         approved_scopes: None,
         approved_verdict: None,
+        approved_correction: None,
         approved_inputs: None,
         approved_at: None,
         previewed_envelope_digest: None,
@@ -592,6 +615,7 @@ impl Queue {
         scopes: &[String],
         inputs: Option<&str>,
         verdict: Option<&str>,
+        correction: Option<&str>,
         approved_at: Option<DateTime<Utc>>,
     ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
@@ -605,6 +629,7 @@ impl Queue {
         e.approved_scopes = Some(scopes.to_vec());
         e.approved_inputs = inputs.map(str::to_string);
         e.approved_verdict = verdict.map(str::to_string);
+        e.approved_correction = correction.map(str::to_string);
         e.approved_at = approved_at;
         true
     }
@@ -707,6 +732,7 @@ impl Queue {
         e.reason_label = Some(reason_label.to_string());
         e.approved_scopes = None;
         e.approved_verdict = None;
+        e.approved_correction = None;
         e.approved_inputs = None;
         e.approved_at = None;
         // The artifact the contributor was shown is no longer the one that
@@ -969,6 +995,7 @@ impl Queue {
         e.reason_label = None;
         e.approved_scopes = None;
         e.approved_verdict = None;
+        e.approved_correction = None;
         e.approved_inputs = None;
         e.approved_at = None;
         // The pin goes with the approval, exactly as in `revoke_approval`.
@@ -1083,6 +1110,7 @@ mod tests {
             submission_id: None,
             approved_scopes: None,
             approved_verdict: None,
+            approved_correction: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -1708,7 +1736,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
-        assert!(q.approve(id, &[], None, None, Some(at)));
+        assert!(q.approve(id, &[], None, None, None, Some(at)));
 
         let e = q.get(id).unwrap();
         assert_eq!(e.approved_at, Some(at));
@@ -1728,7 +1756,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.approve(id, &[], None, None, None));
+        assert!(q.approve(id, &[], None, None, None, None));
         let e = q.get(id).unwrap();
         assert_eq!(e.hold_until(10), None);
         assert!(!e.hold_active(at("2026-08-08T12:00:00Z"), 10));
@@ -1744,7 +1772,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
-        assert!(q.approve(id, &[], None, None, Some(at)));
+        assert!(q.approve(id, &[], None, None, None, Some(at)));
         assert_eq!(q.get(id).unwrap().hold_until(0), None);
         assert!(!q.get(id).unwrap().hold_active(at, 0));
     }
@@ -1759,11 +1787,11 @@ mod tests {
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
 
-        assert!(q.approve(id, &[], None, None, Some(at)));
+        assert!(q.approve(id, &[], None, None, None, Some(at)));
         q.cancel(id).unwrap();
         assert!(q.get(id).unwrap().approved_at.is_none());
 
-        assert!(q.approve(id, &[], None, None, Some(at)));
+        assert!(q.approve(id, &[], None, None, None, Some(at)));
         q.revoke_approval(id, "approval-inputs-changed");
         assert!(q.get(id).unwrap().approved_at.is_none());
     }
@@ -1780,11 +1808,40 @@ mod tests {
             &["debugging_evaluation".to_string()],
             None,
             Some("failed"),
+            None,
             None
         ));
 
         let e = q.get(id).expect("entry");
         assert_eq!(e.approved_verdict.as_deref(), Some("failed"));
+    }
+
+    /// The correction is recorded beside the verdict it came with, and a
+    /// re-offer drops it exactly as it drops the verdict: the next approval
+    /// is a fresh decision, and a correction written for a superseded
+    /// artifact must not ride along with it.
+    #[test]
+    fn an_approval_records_the_correction_it_was_given_and_a_re_offer_drops_it() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        assert!(q.approve(
+            id,
+            &["debugging_evaluation".to_string()],
+            None,
+            Some("failed"),
+            Some("it edited the wrong config file"),
+            None
+        ));
+        assert_eq!(
+            q.get(id).unwrap().approved_correction.as_deref(),
+            Some("it edited the wrong config file")
+        );
+
+        q.cancel(id).unwrap();
+        assert_eq!(q.get(id).unwrap().approved_correction, None);
     }
 
     /// Absence is not failure. An approval with no verdict leaves the field
@@ -1802,7 +1859,14 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
 
-        assert!(q.approve(id, &["debugging_evaluation".to_string()], None, None, None));
+        assert!(q.approve(
+            id,
+            &["debugging_evaluation".to_string()],
+            None,
+            None,
+            None,
+            None
+        ));
 
         let e = q.get(id).expect("entry");
         assert_eq!(e.approved_verdict, None);
@@ -1833,7 +1897,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         assert!(q.record_previewed_envelope(id, "sha256:envelope"));
-        assert!(q.approve(id, &[], None, None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(q.approve(id, &[], None, None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
             "the fixture must actually pin something, or this proves nothing"

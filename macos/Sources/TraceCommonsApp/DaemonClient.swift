@@ -211,7 +211,8 @@ final class DaemonClient {
     /// `crates/trace-commons-contributor-gtk/src/ui/queue.rs`.
     static func approveParams(
         target: ApproveTarget,
-        verdict: ContributorVerdict?
+        verdict: ContributorVerdict?,
+        correction: String? = nil
     ) -> [String: Any] {
         var params: [String: Any]
         switch target {
@@ -224,6 +225,21 @@ final class DaemonClient {
         }
         if let verdict {
             params["outcome"] = verdict.rawValue
+        }
+        // Omitted on the same rule as `outcome`, and for a sharper reason:
+        // an empty string is not the absence of a correction. Sending one
+        // would declare `correction_included` on the envelope for content
+        // that is not there, which is the declaration/payload disagreement
+        // the consent flags exist to prevent. `CorrectionCopy.toSend`
+        // trims and answers `nil` for a box that holds nothing.
+        //
+        // The daemon refuses a correction sent with anything but `partly`
+        // or `failed`, and refuses one sent with `all` or `project_id`.
+        // Neither rule is re-implemented here -- the sheet does not offer
+        // the field in those cases -- so a correction arriving with the
+        // wrong companions surfaces as a refusal rather than being dropped.
+        if let correction, let text = CorrectionCopy.toSend(correction) {
+            params["correction"] = text
         }
         return params
     }
@@ -239,11 +255,24 @@ final class DaemonClient {
     /// `verdict` is the contributor's answer to the preview sheet's outcome
     /// question, and defaults to none: unanswered is the expected state and
     /// never an error.
+    ///
+    /// `correction` is what the contributor wrote in the correction box,
+    /// which the sheet only offers under `partly` and `failed`. Blank or
+    /// absent sends no key at all, and the call is then byte-identical to
+    /// the one this shell made before the box existed.
     @discardableResult
-    func approve(entryID: String, verdict: ContributorVerdict? = nil) throws -> ApproveResponse {
+    func approve(
+        entryID: String,
+        verdict: ContributorVerdict? = nil,
+        correction: String? = nil
+    ) throws -> ApproveResponse {
         try call(
             "approve",
-            params: Self.approveParams(target: .entry(entryID), verdict: verdict),
+            params: Self.approveParams(
+                target: .entry(entryID),
+                verdict: verdict,
+                correction: correction
+            ),
             as: ApproveResponse.self
         )
     }

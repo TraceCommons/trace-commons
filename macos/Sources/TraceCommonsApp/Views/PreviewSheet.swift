@@ -67,6 +67,24 @@ struct PreviewSheet: View {
     /// rebuilt per entry, so no verdict can carry into the next.
     @State private var verdict: ContributorVerdict?
 
+    /// What the contributor wrote in the correction box.
+    ///
+    /// Shown only under `.partly` and `.failed` -- you cannot correct a run
+    /// you have just called successful, and that gate is a guard as much as
+    /// it is semantics: it halves the surface for correction-shaped credit
+    /// farming and puts the field only where a correction means something.
+    ///
+    /// Optional throughout, and it never gates `Contribute`. Emptied when
+    /// the answer moves off those two, because text left in a hidden box
+    /// would ride along on an approval without ever being on screen again.
+    @State private var correction: String = ""
+
+    /// Set when the daemon refused this submission because the correction
+    /// contains something credential-shaped. The sheet stays open with the
+    /// text still in the box: the next thing the contributor has to do is
+    /// edit it.
+    @State private var correctionRefused = false
+
     // MARK: - The read gate
     //
     // There is no longer a read gate. `Contribute` used to wait on the
@@ -126,6 +144,20 @@ struct PreviewSheet: View {
             await load()
         }
         .onDisappear { closePreview() }
+        // The credential refusal, as its own alert rather than a line in
+        // the submit toast: it is the one submit failure the contributor
+        // caused and the only one they can fix, and it asks them to do two
+        // things -- edit the text, and rotate what they typed. Neither
+        // string is derived from the response, so no correction text and no
+        // detected value can reach the screen a second time.
+        .alert(
+            CorrectionCopy.credentialHeadline,
+            isPresented: $correctionRefused
+        ) {
+            Button("Close", role: .cancel) {}
+        } message: {
+            Text(CorrectionCopy.credentialBody)
+        }
     }
 
     // MARK: - Chrome
@@ -345,6 +377,9 @@ struct PreviewSheet: View {
             ScrubbingCaveatAtCommit()
             gateStatement
             verdictQuestion
+            if correctionIsOffered {
+                correctionField
+            }
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a
                 // second way to approve.
@@ -362,14 +397,7 @@ struct PreviewSheet: View {
                 // `.defaultAction`, which put an irreversible send one
                 // Return away from a hand resting on the keyboard.
                 Button("Contribute") {
-                    model.approve(entry, verdict: verdict)
-                    // Back to the queue, never on to the next session. The
-                    // sheet used to load the next entry with the button
-                    // under the same pixels, so a second keystroke or a
-                    // second click sent a transcript nobody had looked at --
-                    // and it did it with the recovery bar stranded behind
-                    // the sheet. One sheet, one session, one decision.
-                    dismiss()
+                    contribute()
                 }
                 .tcPrimaryAction()
                 .disabled(!canContribute)
@@ -413,6 +441,89 @@ struct PreviewSheet: View {
     /// discloses that these fields sit outside its "exactly what would be
     /// sent" guarantee, which is the one thing on this sheet the preview
     /// cannot show.
+    /// Whether the correction control is on screen: only under `Partly`
+    /// and `Failed`.
+    private var correctionIsOffered: Bool {
+        verdict == .partly || verdict == .failed
+    }
+
+    /// What would actually be sent, or `nil` for a box that is hidden or
+    /// holds nothing but whitespace.
+    ///
+    /// The visibility check is deliberate rather than redundant. The box is
+    /// emptied when it is hidden, so this would answer `nil` anyway; the
+    /// check states the rule -- a hidden control contributes nothing -- so
+    /// it survives a future change that stops emptying on hide.
+    private var correctionToSend: String? {
+        guard correctionIsOffered else { return nil }
+        return CorrectionCopy.toSend(correction)
+    }
+
+    /// Approve, and decide when the sheet goes away.
+    ///
+    /// With no correction, this is exactly what it was before the box
+    /// existed: fire and dismiss. Back to the queue, never on to the next
+    /// session -- the sheet used to load the next entry with the button
+    /// under the same pixels, so a second keystroke or a second click sent
+    /// a transcript nobody had looked at, with the recovery bar stranded
+    /// behind the sheet. One sheet, one session, one decision.
+    ///
+    /// With a correction, the dismiss waits for the answer, because one of
+    /// the answers is "that correction contains a credential" and the
+    /// contributor needs the text still in front of them to act on it.
+    private func contribute() {
+        guard let text = correctionToSend else {
+            model.approve(entry, verdict: verdict)
+            dismiss()
+            return
+        }
+        model.approve(entry, verdict: verdict, correction: text) { refused in
+            if refused {
+                correctionRefused = true
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    /// The correction box and the disclosure under it.
+    ///
+    /// `CorrectionCopy.caption` is printed verbatim and in full. Until the
+    /// published policy page carves a correction out of its "redacted
+    /// locally, re-applied on the server" promise, that sentence is the
+    /// only place a contributor is told their own words are stored as they
+    /// typed them. It is not shortened for layout.
+    private var correctionField: some View {
+        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+            Text(CorrectionCopy.question)
+                .font(TC.Font_.captionSmall)
+                .foregroundStyle(TC.inkSecondary)
+            TextEditor(text: $correction)
+                .font(TC.Font_.caption)
+                .frame(minHeight: 64, maxHeight: 140)
+                .scrollContentBackground(.hidden)
+                .padding(TC.Space.xxs)
+                .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.card))
+                .accessibilityLabel(CorrectionCopy.question)
+                .accessibilityHint(CorrectionCopy.placeholder)
+                // Capped where the person can see it, so an over-long
+                // correction is shortened at the keyboard rather than
+                // refused as `correction-too-long` after the click.
+                .onChange(of: correction) { _, latest in
+                    if latest.count > CorrectionCopy.maxCharacters {
+                        correction = String(latest.prefix(CorrectionCopy.maxCharacters))
+                    }
+                }
+            Text(CorrectionCopy.caption)
+                .font(TC.Font_.captionSmall)
+                .foregroundStyle(TC.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var verdictQuestion: some View {
         VStack(alignment: .leading, spacing: TC.Space.xxs) {
             Text(VerdictCopy.question)
@@ -443,6 +554,13 @@ struct PreviewSheet: View {
         let selected = verdict == option
         return Button {
             verdict = selected ? nil : option
+            // A contributor who wrote a correction under `Failed` and then
+            // answered `Worked` has withdrawn it. Clearing it here is what
+            // stops text nobody can see any more from riding along on the
+            // approval.
+            if !correctionIsOffered {
+                correction = ""
+            }
         } label: {
             Text(option.label)
                 .font(TC.Font_.caption.weight(selected ? .bold : .regular))

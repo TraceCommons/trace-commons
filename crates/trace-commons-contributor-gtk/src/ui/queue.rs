@@ -773,7 +773,7 @@ fn manifest_block(
         // lives in the preview sheet -- so this call always omits `outcome`.
         submit_and_toast(
             &app_for_submit,
-            approve_params(ApproveTarget::Entry(entry_id.clone()), None),
+            approve_params(ApproveTarget::Entry(entry_id.clone()), None, None),
             project_label.clone(),
             vec![entry_id.clone()],
         );
@@ -837,7 +837,11 @@ fn project_header(
             // this call always omits `outcome` too.
             submit_and_toast(
                 &app_for_submit,
-                approve_params(ApproveTarget::Project(project_id_for_submit.clone()), None),
+                approve_params(
+                    ApproveTarget::Project(project_id_for_submit.clone()),
+                    None,
+                    None,
+                ),
                 project_label_for_submit.clone(),
                 candidates,
             );
@@ -889,6 +893,11 @@ fn project_header(
                     approve_params(
                         ApproveTarget::Project(project_id_for_item.clone()),
                         Some(verdict),
+                        // A bulk verdict never carries a correction: one
+                        // written for a group would describe sessions it was
+                        // not written about, and the daemon refuses the
+                        // combination outright.
+                        None,
                     ),
                     project_label_for_item.clone(),
                     candidates,
@@ -1117,7 +1126,25 @@ pub(crate) enum ApproveTarget {
 /// Build the `approve` parameters. `verdict` is omitted entirely when the
 /// contributor did not answer: the daemon distinguishes an absent parameter
 /// (`TaskSuccess::Unknown`) from an unrecognised one (refused).
-pub(crate) fn approve_params(target: ApproveTarget, verdict: Option<&str>) -> serde_json::Value {
+///
+/// `correction` is omitted on the same rule, and a box the contributor
+/// tabbed through without typing counts as no correction rather than as an
+/// empty one. An empty string is not the absence of a correction: it would
+/// declare `correction_included` on the envelope for content that is not
+/// there, which is the declaration/payload disagreement the consent flags
+/// exist to prevent.
+///
+/// The daemon refuses a correction sent with anything but `partly` or
+/// `failed`, and refuses one sent with `all` or `project_id`. Neither rule
+/// is re-implemented here -- the UI simply does not offer the field in
+/// those cases -- so a `correction` reaching this function with the wrong
+/// companions is a bug that should surface as a refusal rather than be
+/// silently dropped.
+pub(crate) fn approve_params(
+    target: ApproveTarget,
+    verdict: Option<&str>,
+    correction: Option<&str>,
+) -> serde_json::Value {
     let mut params = match target {
         ApproveTarget::All => serde_json::json!({"all": true}),
         ApproveTarget::Project(key) => serde_json::json!({"project_id": key}),
@@ -1125,6 +1152,9 @@ pub(crate) fn approve_params(target: ApproveTarget, verdict: Option<&str>) -> se
     };
     if let Some(name) = verdict {
         params["outcome"] = serde_json::Value::String(name.to_string());
+    }
+    if let Some(text) = correction.map(str::trim).filter(|t| !t.is_empty()) {
+        params["correction"] = serde_json::Value::String(text.to_string());
     }
     params
 }
@@ -1140,6 +1170,7 @@ mod tests {
         let params = approve_params(
             ApproveTarget::Entry(TEST_ENTRY_ID.to_string()),
             Some("partly"),
+            None,
         );
         assert_eq!(params["entry_id"], TEST_ENTRY_ID);
         assert_eq!(params["outcome"], "partly");
@@ -1149,21 +1180,71 @@ mod tests {
     /// empty string. The daemon distinguishes absent from unrecognised.
     #[test]
     fn an_approve_call_with_no_verdict_omits_the_parameter() {
-        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID.to_string()), None);
+        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID.to_string()), None, None);
         assert!(params.get("outcome").is_none());
     }
 
     #[test]
     fn a_bulk_approve_can_carry_a_verdict() {
-        let params = approve_params(ApproveTarget::Project("proj-1".to_string()), Some("failed"));
+        let params = approve_params(
+            ApproveTarget::Project("proj-1".to_string()),
+            Some("failed"),
+            None,
+        );
         assert_eq!(params["project_id"], "proj-1");
         assert_eq!(params["outcome"], "failed");
+    }
+
+    /// A written correction rides along with the verdict it was written
+    /// under.
+    #[test]
+    fn an_approve_call_carries_a_written_correction() {
+        let params = approve_params(
+            ApproveTarget::Entry(TEST_ENTRY_ID.to_string()),
+            Some("failed"),
+            Some("it edited the staging config instead of the local one"),
+        );
+        assert_eq!(params["outcome"], "failed");
+        assert_eq!(
+            params["correction"],
+            "it edited the staging config instead of the local one"
+        );
+    }
+
+    /// An untouched box, and a box holding only whitespace, are both the
+    /// same thing: no correction. The key is absent rather than empty, so
+    /// nothing declares `correction_included` for content that is not there.
+    #[test]
+    fn an_empty_or_blank_correction_omits_the_parameter() {
+        for blank in [None, Some(""), Some("   \n\t ")] {
+            let params = approve_params(
+                ApproveTarget::Entry(TEST_ENTRY_ID.to_string()),
+                Some("failed"),
+                blank,
+            );
+            assert!(
+                params.get("correction").is_none(),
+                "blank correction must send no key at all: {blank:?}"
+            );
+            assert!(!params.to_string().contains("correction"));
+        }
+    }
+
+    /// Leading and trailing whitespace goes; the words do not.
+    #[test]
+    fn a_correction_is_sent_trimmed() {
+        let params = approve_params(
+            ApproveTarget::Entry(TEST_ENTRY_ID.to_string()),
+            Some("partly"),
+            Some("  it stopped halfway  "),
+        );
+        assert_eq!(params["correction"], "it stopped halfway");
     }
 
     /// Plain `Submit all` stays a one-click, unanswered submit.
     #[test]
     fn a_bulk_approve_without_a_verdict_omits_the_parameter() {
-        let params = approve_params(ApproveTarget::Project("proj-1".to_string()), None);
+        let params = approve_params(ApproveTarget::Project("proj-1".to_string()), None, None);
         assert_eq!(params["project_id"], "proj-1");
         assert!(params.get("outcome").is_none());
     }
