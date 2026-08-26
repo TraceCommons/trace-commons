@@ -27,13 +27,13 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
-    ConsentScope, EmbeddingAnalysisMetadata, PrivacyFilterBackendTag, ProcessEvalRating,
-    ProcessEvaluationLabels, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PrivacyFilterBackendTag,
+    ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -12544,7 +12544,7 @@ async fn submit_trace_handler(
         envelope.value_card.user_visible_explanation = envelope.value.explanation.clone();
     }
 
-    // PII-backstop hold: an Accepted, message-text-bearing trace is held on
+    // PII-backstop hold: an Accepted, content-bearing trace is held on
     // `AwaitingPiiBackstop` (not the corpus) until the driver re-redacts it,
     // whenever the backstop driver is configured. The credit-zeroing block above
     // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
@@ -12554,7 +12554,7 @@ async fn submit_trace_handler(
     // enrolment (the driver enumeration tolerates an absent bookkeeping row).
     let corpus_status = corpus_status_with_pii_backstop_hold(
         corpus_status,
-        envelope.consent.message_text_included,
+        &envelope.consent,
         state.pii_backstop_driver.is_some(),
     );
 
@@ -18894,7 +18894,7 @@ async fn operator_rescrub_quarantined_submission(
     );
     let target_status = corpus_status_with_pii_backstop_hold(
         target_status,
-        envelope.consent.message_text_included,
+        &envelope.consent,
         state.pii_backstop_driver.is_some(),
     );
     let changed = target_status != prior_status
@@ -54134,22 +54134,56 @@ fn status_for_risk(
 
 /// Decide the stored corpus status for a freshly-submitted trace, applying the
 /// PII-backstop hold. When the risk-derived status is `Accepted`, the trace
-/// carries raw message text, and the backstop driver is enabled, the trace is
+/// carries raw content, and the backstop driver is enabled, the trace is
 /// held on `AwaitingPiiBackstop` until the driver re-redacts it through the
-/// NEAR AI prose PII filter and releases the hold. Every other case
-/// (non-Accepted risk, no message text, or backstop disabled) is returned
-/// unchanged so those paths behave exactly as before the backstop existed.
+/// NEAR AI PII filter and releases the hold. Every other case (non-Accepted
+/// risk, no raw content, or backstop disabled) is returned unchanged so those
+/// paths behave exactly as before the backstop existed.
+///
+/// "Raw content" is either content flag, not message text alone. It keyed on
+/// `message_text_included` only, which left a payload-bearing trace that
+/// carries no prose entirely outside the hold -- and that combination is not
+/// a corner case, it is the structure-preserving mode: tool arguments and
+/// results with message text withheld, which is exactly the shape a consumer
+/// rebuilding traces as runnable tasks asks for (issue #298). The gap was
+/// invisible because nothing has ever set `include_tool_payloads`, so no
+/// payload-bearing, prose-free trace has been submitted yet.
+///
+/// The driver was never the gap: `rescrub_envelope_prose_pii_with` already
+/// classifies every string leaf and object key of each `structured_payload`,
+/// and fails closed to High via `coverage_incomplete` when it cannot finish.
+/// Only enrolment ignored payloads.
+///
+/// Two things this deliberately does NOT do. It does not make tool payloads
+/// safe to turn on: a held trace is released by the driver to whatever
+/// `status_for_risk` says about the POST-backstop risk, and `residual_risk`
+/// returns `Medium` for any envelope declaring either content flag, so on a
+/// deployment that does not accept medium risk the release is to
+/// `Quarantined`. Enabling payloads therefore feeds the quarantine queue and
+/// depends on that queue being worked. And it does not change behaviour for
+/// any trace submitted today: every existing content-bearing envelope also
+/// carries message text, so it was already held.
+///
+/// Takes the whole `ConsentMetadata` rather than a bool per flag. Passing
+/// them individually is what let one be forgotten, and a third content flag
+/// should not be able to reintroduce the same gap.
 ///
 /// The `awaiting_pii_backstop` status IS the enrolment: the driver's
 /// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
 /// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
 /// bookkeeping row on first failure. No explicit enrol write is required here.
+///
+/// Callers must pass consent that has already been through
+/// `reconcile_consent_declarations` (both call sites run
+/// `rescrub_trace_envelope` first, which does it), or an under-reported flag
+/// skips the hold -- the case that function's own comment exists to prevent.
 fn corpus_status_with_pii_backstop_hold(
     risk_status: TraceCorpusStatus,
-    message_text_included: bool,
+    consent: &ConsentMetadata,
     backstop_enabled: bool,
 ) -> TraceCorpusStatus {
-    if risk_status == TraceCorpusStatus::Accepted && message_text_included && backstop_enabled {
+    let carries_raw_content = consent.message_text_included || consent.tool_payloads_included;
+    if risk_status == TraceCorpusStatus::Accepted && carries_raw_content && backstop_enabled {
         TraceCorpusStatus::AwaitingPiiBackstop
     } else {
         risk_status
