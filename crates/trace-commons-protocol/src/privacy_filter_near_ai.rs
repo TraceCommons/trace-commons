@@ -264,7 +264,9 @@ impl NearAiPrivacyFilterAdapter {
                         backoff(attempt).await;
                         continue;
                     }
-                    return Err(TraceContributionError::RedactionFailed {
+                    // Retries are spent and the request never reached the
+                    // classifier: the upstream is down, the trace is fine.
+                    return Err(TraceContributionError::TransientRedactionFailed {
                         reason: format!("near-ai privacy classifier transport error: {}", err),
                     });
                 }
@@ -282,13 +284,19 @@ impl NearAiPrivacyFilterAdapter {
                     "sha256:{}",
                     hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body_bytes))
                 );
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: format!(
-                        "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
-                        status.as_u16(),
-                        body_hash,
-                        body_bytes.len()
-                    ),
+                // Same split the retry decision above makes, carried out to
+                // the caller: a 5xx that outlived our retries is the vendor's
+                // problem, anything else (4xx) is ours or the trace's.
+                let reason = format!(
+                    "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
+                    status.as_u16(),
+                    body_hash,
+                    body_bytes.len()
+                );
+                return Err(if status.is_server_error() {
+                    TraceContributionError::TransientRedactionFailed { reason }
+                } else {
+                    TraceContributionError::RedactionFailed { reason }
                 });
             }
 

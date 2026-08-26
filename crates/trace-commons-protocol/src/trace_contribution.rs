@@ -2374,8 +2374,35 @@ fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TraceContributionError {
+    /// The redaction failed for a reason that will not go away on its own:
+    /// a 4xx from the privacy filter, a malformed or empty response body, an
+    /// oversized input, or anything else about the trace or the request we
+    /// sent. Retrying it costs the caller its attempt budget for nothing.
     #[error("trace contribution redaction failed: {reason}")]
     RedactionFailed { reason: String },
+    /// The redaction failed because the upstream privacy filter was
+    /// unavailable -- a transport error, a timeout, or a 5xx status that
+    /// survived the adapter's own retries. Nothing is wrong with the trace.
+    ///
+    /// Callers that keep a per-trace attempt budget MUST NOT charge this to
+    /// the trace; test it with [`TraceContributionError::is_transient`], never
+    /// by inspecting `reason`.
+    #[error("trace contribution redaction failed (transient upstream): {reason}")]
+    TransientRedactionFailed { reason: String },
+}
+
+impl TraceContributionError {
+    /// True when the failure was the upstream filter's, not the trace's.
+    ///
+    /// This is the adapter's own retry decision carried out as structured
+    /// data: the NEAR AI adapter classifies at the point it chooses whether
+    /// to retry (transport/5xx yes, 4xx and body-shape no) and records the
+    /// answer in the variant. Deciding it here, rather than by matching text
+    /// out of `reason`, means an edit to an error string can never silently
+    /// change a caller's retry policy.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::TransientRedactionFailed { .. })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -6483,6 +6510,29 @@ mod tests {
         }
     }
 
+    /// The transient/permanent split is carried as a variant, not as text
+    /// inside `reason`. A caller must never have to parse an error string to
+    /// decide whether a failure is the trace's fault.
+    #[test]
+    fn redaction_failure_transience_is_typed_not_parsed() {
+        use super::TraceContributionError;
+        let transient = TraceContributionError::TransientRedactionFailed {
+            reason: "near-ai privacy classifier returned non-2xx: status=502".to_string(),
+        };
+        let permanent = TraceContributionError::RedactionFailed {
+            reason: "near-ai privacy classifier returned non-2xx: status=502".to_string(),
+        };
+        assert!(transient.is_transient());
+        assert!(!permanent.is_transient());
+        // Identical `reason` text on both: the classification cannot be
+        // recovered from the message, only from the variant.
+        assert_ne!(
+            transient.is_transient(),
+            permanent.is_transient(),
+            "the same reason text must be able to carry either classification"
+        );
+    }
+
     #[test]
     fn privacy_filter_config_error_messages_are_stable() {
         use super::PrivacyFilterConfigError;
@@ -6638,6 +6688,7 @@ mod tests {
                 );
             }
             Ok(text) => panic!("expected error; got Ok({text:?})"),
+            Err(other) => panic!("expected a permanent RedactionFailed; got {other:?}"),
         }
         // No fallback warning or counter should be emitted in fail-closed
         // mode.

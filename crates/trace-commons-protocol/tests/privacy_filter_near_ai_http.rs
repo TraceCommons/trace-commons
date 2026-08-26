@@ -312,3 +312,117 @@ async fn canary_run_against_mock_returns_healthy() {
         report.failures
     );
 }
+
+// --- typed transient/permanent classification ---------------------------
+//
+// The adapter already decides transient-vs-permanent when it chooses whether
+// to retry. These tests pin that decision as TYPED data on the returned
+// error, so a caller that keeps a per-trace attempt budget can act on it
+// without parsing an error string.
+
+#[tokio::test]
+async fn http_5xx_is_typed_transient() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("Please try again later."))
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello world")
+        .await
+        .expect_err("5xx must error");
+    assert!(
+        err.is_transient(),
+        "an upstream 5xx is about the vendor, not the trace: {err}"
+    );
+}
+
+#[tokio::test]
+async fn http_4xx_is_typed_permanent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello world")
+        .await
+        .expect_err("4xx must error");
+    assert!(
+        !err.is_transient(),
+        "a 4xx is about the request we sent and must stay permanent: {err}"
+    );
+}
+
+#[tokio::test]
+async fn transport_timeout_is_typed_transient() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_millis(200),
+        1_000_000,
+    )
+    .expect("adapter builds");
+
+    let err = adapter
+        .redact_text("hello world")
+        .await
+        .expect_err("timeout must error");
+    assert!(
+        err.is_transient(),
+        "a transport timeout is transient: {err}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_body_is_typed_permanent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text("hello world")
+        .await
+        .expect_err("empty data array must error");
+    assert!(
+        !err.is_transient(),
+        "a body-shape failure is not retryable and must stay permanent: {err}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_input_is_typed_permanent() {
+    // Nothing was sent upstream at all: the input itself is the problem.
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        "https://near-ai.example.com",
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        16,
+    )
+    .expect("adapter builds");
+
+    let err = adapter
+        .redact_text(&"x".repeat(64))
+        .await
+        .expect_err("oversized input must error");
+    assert!(
+        !err.is_transient(),
+        "an oversized input is about the trace and must stay permanent: {err}"
+    );
+}
