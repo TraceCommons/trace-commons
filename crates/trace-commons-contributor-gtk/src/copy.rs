@@ -372,6 +372,27 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 /// text, and a line break in any of the three would defeat it.
 pub const GATE_STATEMENT: &str = "\"Exactly what would be sent\" is the exact text that would leave this machine. Pattern-based scrubbing may have missed something in it, and nothing here checks that you looked.";
 
+/// The verdict control's question. Answering it is optional and never
+/// gates `Contribute` -- see [`VERDICT_CAPTION`] for the disclosure that
+/// makes the exemption explicit.
+pub const VERDICT_QUESTION: &str = "Did this session do what you asked?";
+pub const VERDICT_WORKED: &str = "Worked";
+pub const VERDICT_PARTLY: &str = "Partly";
+pub const VERDICT_FAILED: &str = "Failed";
+
+/// Load-bearing, not decoration: the spec exempts the outcome fields from
+/// the "the preview above is exactly what would be sent" guarantee, and
+/// this sentence is where that exemption is disclosed to the contributor.
+/// Do not drop or soften it.
+pub const VERDICT_CAPTION: &str =
+    "Optional. This is recorded as the trace outcome; the preview above does not show it.";
+
+/// The bulk verdict menu beside `Submit all`. The plain button stays a
+/// one-click unanswered submit; this is the opt-in path for answering
+/// once for the whole group.
+pub const SUBMIT_ALL_AS: &str = "Submit all as...";
+pub const SUBMIT_ALL_AS_TOOLTIP: &str = "Record the same outcome for every session in this group.";
+
 pub const CLOSE: &str = "Close";
 
 // --- Approving ---------------------------------------------------------

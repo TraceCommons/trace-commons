@@ -85,6 +85,29 @@ pub struct QueueEntry {
     /// treated as "unknown, so re-ask": fail-closed.
     #[serde(default)]
     pub approved_scopes: Option<Vec<String>>,
+    /// The verdict the contributor gave when they approved this entry:
+    /// `worked`, `partly`, or `failed`. `None` means they did not answer.
+    ///
+    /// Read the neighbours carefully before changing this. `approved_scopes`
+    /// and `approved_inputs` are DRIFT GUARDS: they record ambient inputs as
+    /// of approval so the uploader can refuse if either moved before it
+    /// sent, and `None` on an approved entry means "unknown, so re-ask" and
+    /// fails closed.
+    ///
+    /// This field is the opposite kind of thing. It is an OUTPUT of the
+    /// approval act, not configuration that could change underneath it, so
+    /// it cannot drift between approval and send. `None` means the
+    /// contributor did not answer, which is `TaskSuccess::Unknown`, and the
+    /// entry submits normally.
+    ///
+    /// It must NOT be folded into `preview::input_fingerprint`. Doing so
+    /// would fail-close every approval made before this field existed.
+    ///
+    /// Stored as the wire name rather than an enum, matching
+    /// `approved_scopes`, so the on-disk queue does not depend on a Rust
+    /// type's serialisation.
+    #[serde(default)]
+    pub approved_verdict: Option<String>,
     /// The fingerprint of everything outside the session file that
     /// determines the envelope, as of the moment this entry was approved
     /// (`preview::input_fingerprint`).
@@ -300,6 +323,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // under -- scopes, envelope-determining inputs, and the artifact
         // that was shown -- do not.
         approved_scopes: None,
+        approved_verdict: None,
         approved_inputs: None,
         approved_at: None,
         previewed_envelope_digest: None,
@@ -567,6 +591,7 @@ impl Queue {
         entry_id: Uuid,
         scopes: &[String],
         inputs: Option<&str>,
+        verdict: Option<&str>,
         approved_at: Option<DateTime<Utc>>,
     ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
@@ -579,6 +604,7 @@ impl Queue {
         e.reason_label = None;
         e.approved_scopes = Some(scopes.to_vec());
         e.approved_inputs = inputs.map(str::to_string);
+        e.approved_verdict = verdict.map(str::to_string);
         e.approved_at = approved_at;
         true
     }
@@ -680,6 +706,7 @@ impl Queue {
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
         e.approved_scopes = None;
+        e.approved_verdict = None;
         e.approved_inputs = None;
         e.approved_at = None;
         // The artifact the contributor was shown is no longer the one that
@@ -941,6 +968,7 @@ impl Queue {
         e.state = QueueState::Pending;
         e.reason_label = None;
         e.approved_scopes = None;
+        e.approved_verdict = None;
         e.approved_inputs = None;
         e.approved_at = None;
         // The pin goes with the approval, exactly as in `revoke_approval`.
@@ -1054,6 +1082,7 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_verdict: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -1679,7 +1708,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
-        assert!(q.approve(id, &[], None, Some(at)));
+        assert!(q.approve(id, &[], None, None, Some(at)));
 
         let e = q.get(id).unwrap();
         assert_eq!(e.approved_at, Some(at));
@@ -1699,7 +1728,7 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
             .unwrap();
         let id = entry_id_for("sha256:aa");
-        assert!(q.approve(id, &[], None, None));
+        assert!(q.approve(id, &[], None, None, None));
         let e = q.get(id).unwrap();
         assert_eq!(e.hold_until(10), None);
         assert!(!e.hold_active(at("2026-08-08T12:00:00Z"), 10));
@@ -1715,7 +1744,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
-        assert!(q.approve(id, &[], None, Some(at)));
+        assert!(q.approve(id, &[], None, None, Some(at)));
         assert_eq!(q.get(id).unwrap().hold_until(0), None);
         assert!(!q.get(id).unwrap().hold_active(at, 0));
     }
@@ -1730,13 +1759,54 @@ mod tests {
         let id = entry_id_for("sha256:aa");
         let at = at("2026-08-08T12:00:00Z");
 
-        assert!(q.approve(id, &[], None, Some(at)));
+        assert!(q.approve(id, &[], None, None, Some(at)));
         q.cancel(id).unwrap();
         assert!(q.get(id).unwrap().approved_at.is_none());
 
-        assert!(q.approve(id, &[], None, Some(at)));
+        assert!(q.approve(id, &[], None, None, Some(at)));
         q.revoke_approval(id, "approval-inputs-changed");
         assert!(q.get(id).unwrap().approved_at.is_none());
+    }
+
+    #[test]
+    fn an_approval_records_the_verdict_it_was_given() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        assert!(q.approve(
+            id,
+            &["debugging_evaluation".to_string()],
+            None,
+            Some("failed"),
+            None
+        ));
+
+        let e = q.get(id).expect("entry");
+        assert_eq!(e.approved_verdict.as_deref(), Some("failed"));
+    }
+
+    /// Absence is not failure. An approval with no verdict leaves the field
+    /// `None`, which the uploader reads as `TaskSuccess::Unknown` and submits
+    /// normally.
+    ///
+    /// This is deliberately NOT the fail-closed reading its neighbours get.
+    /// `approved_scopes` and `approved_inputs` are drift guards, and `None`
+    /// on either means "unknown, so re-ask". `approved_verdict` cannot
+    /// drift, because approving is what produces it.
+    #[test]
+    fn an_approval_without_a_verdict_records_none_and_still_approves() {
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+
+        assert!(q.approve(id, &["debugging_evaluation".to_string()], None, None, None));
+
+        let e = q.get(id).expect("entry");
+        assert_eq!(e.approved_verdict, None);
+        assert_eq!(e.state, QueueState::Approved);
     }
 
     #[test]
@@ -1763,7 +1833,7 @@ mod tests {
             .unwrap();
         let id = entry_id_for("sha256:aa");
         assert!(q.record_previewed_envelope(id, "sha256:envelope"));
-        assert!(q.approve(id, &[], None, Some(at("2026-08-08T12:00:00Z"))));
+        assert!(q.approve(id, &[], None, None, Some(at("2026-08-08T12:00:00Z"))));
         assert!(
             q.get(id).unwrap().previewed_envelope_digest.is_some(),
             "the fixture must actually pin something, or this proves nothing"

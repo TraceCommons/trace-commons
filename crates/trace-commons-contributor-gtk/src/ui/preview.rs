@@ -106,6 +106,18 @@ struct Sheet {
     /// The redacted body for the entry currently shown, when this
     /// deployment can serve one. See `backend`.
     body: RefCell<Option<String>>,
+
+    /// The verdict toggle group, in `Worked` / `Partly` / `Failed` order --
+    /// held so `load` can clear the selection when a new entry replaces
+    /// the one this sheet was showing.
+    verdict_buttons: Vec<gtk::ToggleButton>,
+    /// The contributor's answer to `copy::VERDICT_QUESTION`, one of
+    /// `worked` / `partly` / `failed`, or `None` when they have not
+    /// answered. Reset to `None` on every `load` -- a new entry is a new
+    /// decision, and no previous verdict may carry into it. Sent as
+    /// `approve`'s `outcome` parameter, omitted entirely when `None`; see
+    /// `ApproveTarget` in `ui::queue`.
+    verdict: RefCell<Option<&'static str>>,
 }
 
 /// One tab of the preview strip: the stack child it shows, its label, and
@@ -418,6 +430,51 @@ impl Sheet {
             .build();
         residual_risk.add_css_class("tc-caveat");
 
+        // The verdict question: entirely optional, and it never gates
+        // `Contribute` -- a contributor who does not answer is
+        // `TaskSuccess::Unknown`, a valid outcome the daemon expects to
+        // see. Reuses the tab strip's segmented-control styling
+        // (`.tc-tab-track` / `.tc-tab`) rather than a new one, so this
+        // stays the same brand rather than borrowing the GNOME accent.
+        let verdict_question = gtk::Label::builder()
+            .label(copy::VERDICT_QUESTION)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        verdict_question.add_css_class("tc-caveat");
+
+        let verdict_track = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(space::XXS)
+            .halign(gtk::Align::Start)
+            .build();
+        verdict_track.add_css_class("tc-tab-track");
+
+        let mut verdict_buttons: Vec<gtk::ToggleButton> = Vec::with_capacity(3);
+        for label in [
+            copy::VERDICT_WORKED,
+            copy::VERDICT_PARTLY,
+            copy::VERDICT_FAILED,
+        ] {
+            let button = gtk::ToggleButton::with_label(label);
+            button.add_css_class("tc-tab");
+            if let Some(first) = verdict_buttons.first() {
+                button.set_group(Some(first));
+            }
+            verdict_track.append(&button);
+            verdict_buttons.push(button);
+        }
+
+        // Load-bearing, not decoration -- see `copy::VERDICT_CAPTION`: this
+        // is where the shown-bytes guarantee's one exemption is disclosed.
+        let verdict_caption = gtk::Label::builder()
+            .label(copy::VERDICT_CAPTION)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        verdict_caption.add_css_class("tc-caveat");
+        verdict_caption.add_css_class("tc-tertiary");
+
         let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
         skip.add_css_class("tc-quiet");
         skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
@@ -461,6 +518,9 @@ impl Sheet {
             .build();
         footer.append(&residual_risk);
         footer.append(&gate_statement);
+        footer.append(&verdict_question);
+        footer.append(&verdict_track);
+        footer.append(&verdict_caption);
         footer.append(&actions);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -496,7 +556,27 @@ impl Sheet {
             pinned: Cell::new(false),
             contribute: contribute.clone(),
             body: RefCell::new(None),
+            verdict_buttons: verdict_buttons.clone(),
+            verdict: RefCell::new(None),
         });
+
+        for (button, name) in verdict_buttons.iter().zip(["worked", "partly", "failed"]) {
+            let s = Rc::clone(&sheet);
+            button.connect_toggled(move |button| {
+                // Written as a total match on `is_active()`, not an `if`:
+                // GTK 4 grouped `ToggleButton`s do not universally behave as
+                // strict radios, and a click that clears the group (leaving
+                // nothing visibly selected) must also clear `verdict` --
+                // otherwise the approval would carry a verdict the
+                // contributor just visibly withdrew.
+                let mut v = s.verdict.borrow_mut();
+                if button.is_active() {
+                    *v = Some(name);
+                } else if *v == Some(name) {
+                    *v = None;
+                }
+            });
+        }
 
         let s = Rc::clone(&sheet);
         search_entry.connect_search_changed(move |entry| {
@@ -590,9 +670,15 @@ impl Sheet {
             .set_text(&human_when(entry.discovered_at));
         // A new entry is a new decision, and nothing about the previous
         // one may carry into it: the pin is dropped here and only set again
-        // by a preview that actually came back for THIS entry.
+        // by a preview that actually came back for THIS entry. The verdict
+        // selection is dropped the same way -- a verdict answered for the
+        // last entry must never attach to this one.
         self.pinned.set(false);
         self.sync_contribute();
+        for button in &self.verdict_buttons {
+            button.set_active(false);
+        }
+        *self.verdict.borrow_mut() = None;
         self.count_whats_in_it.set_text("");
         self.count_permissions.set_text("");
         self.search_summary.set_text("");
@@ -967,26 +1053,24 @@ impl Sheet {
         let project_label = entry.project_label.clone();
         self.contribute.set_sensitive(false);
         let sheet = Rc::clone(self);
-        self.app.call(
-            "approve",
-            serde_json::json!({ "entry_id": entry_id }),
-            move |app, result| {
-                match result {
-                    Ok(value) => {
-                        let approve: ApproveResult =
-                            serde_json::from_value(value).unwrap_or_default();
-                        app.render_submit_response(
-                            &approve,
-                            vec![entry_id.clone()],
-                            &project_label,
-                        );
-                    }
-                    Err(_) => app.toast(copy::SUBMIT_FAILED),
-                }
-                app.refresh();
-                sheet.advance();
-            },
+        // No selection is a valid, expected answer -- `approve_params`
+        // omits `outcome` entirely rather than sending `null` or `""`, both
+        // of which the daemon refuses. See `ApproveTarget` in `ui::queue`.
+        let params = super::queue::approve_params(
+            super::queue::ApproveTarget::Entry(entry_id.clone()),
+            *self.verdict.borrow(),
         );
+        self.app.call("approve", params, move |app, result| {
+            match result {
+                Ok(value) => {
+                    let approve: ApproveResult = serde_json::from_value(value).unwrap_or_default();
+                    app.render_submit_response(&approve, vec![entry_id.clone()], &project_label);
+                }
+                Err(_) => app.toast(copy::SUBMIT_FAILED),
+            }
+            app.refresh();
+            sheet.advance();
+        });
     }
 
     /// `Contribute` advances to the next entry in the sheet, so three

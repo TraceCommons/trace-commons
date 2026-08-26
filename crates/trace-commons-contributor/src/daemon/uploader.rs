@@ -310,6 +310,25 @@ impl Uploader<'_, '_> {
         if actual != pinned {
             return Err(super::preview::REASON_APPROVED_ENVELOPE_UNAVAILABLE.to_string());
         }
+        // AFTER the digest check, never before it. The check is a
+        // consistency check on this crate's own storage and has to run
+        // against the bytes as stored; applying the verdict first would make
+        // a truncated or crossed-over file pass.
+        //
+        // This is the one deliberate divergence from "the upload sends
+        // precisely the stored bytes", and it is bounded to
+        // `outcome.task_success`. See this module's doc note.
+        //
+        // An unparseable stored verdict is ignored rather than refused: the
+        // IPC boundary already validates, so a bad value here means a
+        // hand-edited queue file, and refusing the upload would strand the
+        // entry.
+        let mut stored = stored;
+        if let Some(name) = entry.approved_verdict.as_deref() {
+            if let Some(verdict) = crate::envelope::ContributorVerdict::parse(name) {
+                crate::envelope::apply_verdict(&mut stored, verdict);
+            }
+        }
         Ok(Some(stored))
     }
 
@@ -509,6 +528,7 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_verdict: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -787,6 +807,7 @@ mod tests {
                 retry_after: None,
                 submission_id: None,
                 approved_scopes: None,
+                approved_verdict: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
                 approved_at: None,
@@ -1461,5 +1482,178 @@ mod tests {
             health.last_error_label.as_deref(),
             Some(LABEL_DAILY_CAP_REACHED)
         );
+    }
+
+    /// The setup the stored-envelope tests above build inline: a previewed
+    /// session whose redacted envelope is on disk and pinned by its entry.
+    async fn seeded_stored_envelope(
+        session: &GrowingSession,
+        store: &ConfigStore,
+        cfg: &crate::config::ContributorConfig,
+    ) -> (QueueEntry, TraceContributionEnvelope) {
+        let (summary, _body, envelope) = crate::daemon::preview::build_preview(
+            store,
+            Some(cfg),
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .unwrap();
+        let entry = QueueEntry {
+            previewed_envelope_digest: Some(summary.envelope_digest.clone()),
+            ..session.entry_for(&session.current_hash(), cfg)
+        };
+        crate::daemon::approved_envelope::save(store, entry.entry_id, &envelope).unwrap();
+        (entry, envelope)
+    }
+
+    /// The verdict must reach the envelope that is actually sent.
+    ///
+    /// The daemon does not rebuild at upload time -- it sends the stored
+    /// bytes -- so a verdict routed through `SubmitOptions` would pass every
+    /// fresh-build test and be dropped on exactly this path. That was the
+    /// original design error; this test is its regression guard.
+    #[tokio::test]
+    async fn a_verdict_reaches_a_stored_envelope() {
+        use trace_commons_protocol::trace_contribution::TaskSuccess;
+
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let (mut entry, _envelope) = seeded_stored_envelope(&session, &store, &cfg).await;
+        entry.approved_verdict = Some("failed".to_string());
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let sent = up
+            .approved_envelope_for(&entry)
+            .expect("load succeeds")
+            .expect("an envelope is stored");
+
+        assert_eq!(sent.outcome.task_success, TaskSuccess::Failure);
+
+        // The stored bytes themselves are untouched -- the verdict is
+        // stamped on the loaded copy, not written back.
+        let on_disk = crate::daemon::approved_envelope::load(&store, entry.entry_id)
+            .unwrap()
+            .expect("an envelope is stored");
+        assert_eq!(on_disk.outcome.task_success, TaskSuccess::Unknown);
+    }
+
+    #[tokio::test]
+    async fn no_verdict_leaves_a_stored_envelope_unknown() {
+        use trace_commons_protocol::trace_contribution::TaskSuccess;
+
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let (entry, _envelope) = seeded_stored_envelope(&session, &store, &cfg).await;
+        assert_eq!(entry.approved_verdict, None);
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let sent = up
+            .approved_envelope_for(&entry)
+            .expect("load succeeds")
+            .expect("an envelope is stored");
+
+        assert_eq!(sent.outcome.task_success, TaskSuccess::Unknown);
+    }
+
+    /// A verdict is a judgement about the task, not content, so it must not
+    /// move either consent declaration. #421 pins this for the build path
+    /// (`a_verdict_declares_no_content`); this extends it to the daemon
+    /// path, where the verdict is stamped onto an already-redacted envelope
+    /// and could otherwise disturb flags that were derived before it
+    /// arrived.
+    #[tokio::test]
+    async fn a_verdict_moves_neither_consent_flag_on_a_stored_envelope() {
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let (mut entry, stored) = seeded_stored_envelope(&session, &store, &cfg).await;
+        let before = (
+            stored.consent.message_text_included,
+            stored.consent.tool_payloads_included,
+        );
+        entry.approved_verdict = Some("failed".to_string());
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let sent = up
+            .approved_envelope_for(&entry)
+            .expect("load succeeds")
+            .expect("an envelope is stored");
+
+        assert_eq!(
+            (
+                sent.consent.message_text_included,
+                sent.consent.tool_payloads_included
+            ),
+            before,
+            "a verdict is not content and must not move a consent declaration"
+        );
+    }
+
+    /// The digest check guards this crate's own storage and must keep
+    /// running against the bytes AS STORED. A verdict applied before it
+    /// would make a tampered file pass.
+    #[tokio::test]
+    async fn a_tampered_stored_envelope_is_still_refused_with_a_verdict_present() {
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+        let (mut entry, _envelope) = seeded_stored_envelope(&session, &store, &cfg).await;
+        entry.approved_verdict = Some("worked".to_string());
+        entry.previewed_envelope_digest = Some("0".repeat(64));
+
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        assert!(up.approved_envelope_for(&entry).is_err());
     }
 }
