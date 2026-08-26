@@ -180,7 +180,7 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 /// `failed`. Refused, not coerced to `Unknown`, so a typo does not silently
 /// discard the contributor's answer -- the same rule the `--outcome` flag
 /// applies.
-const ERR_BAD_VERDICT: &str = "outcome must be worked, partly or failed";
+pub const ERR_BAD_VERDICT: &str = "outcome-invalid";
 
 /// `quiesce` gave up waiting for in-flight uploads to finish. The caller
 /// leaves the update staged and tries again later; the swap never forces its

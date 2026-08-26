@@ -771,12 +771,9 @@ fn manifest_block(
     submit.connect_clicked(move |_| {
         // A queue row's `Submit` never asked the verdict question -- that
         // lives in the preview sheet -- so this call always omits `outcome`.
-        let Ok(id) = entry_id.parse() else {
-            return;
-        };
         submit_and_toast(
             &app_for_submit,
-            approve_params(ApproveTarget::Entry(id), None),
+            approve_params(ApproveTarget::Entry(entry_id.clone()), None),
             project_label.clone(),
             vec![entry_id.clone()],
         );
@@ -1114,7 +1111,7 @@ pub(crate) enum ApproveTarget {
     #[allow(dead_code)]
     All,
     Project(String),
-    Entry(uuid::Uuid),
+    Entry(String),
 }
 
 /// Build the `approve` parameters. `verdict` is omitted entirely when the
@@ -1124,7 +1121,7 @@ pub(crate) fn approve_params(target: ApproveTarget, verdict: Option<&str>) -> se
     let mut params = match target {
         ApproveTarget::All => serde_json::json!({"all": true}),
         ApproveTarget::Project(key) => serde_json::json!({"project_id": key}),
-        ApproveTarget::Entry(id) => serde_json::json!({"entry_id": id.to_string()}),
+        ApproveTarget::Entry(id) => serde_json::json!({"entry_id": id}),
     };
     if let Some(name) = verdict {
         params["outcome"] = serde_json::Value::String(name.to_string());
@@ -1136,12 +1133,15 @@ pub(crate) fn approve_params(target: ApproveTarget, verdict: Option<&str>) -> se
 mod tests {
     use super::*;
 
-    const TEST_ENTRY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
+    const TEST_ENTRY_ID: &str = "test-entry-id";
 
     #[test]
     fn an_approve_call_carries_the_selected_verdict() {
-        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID), Some("partly"));
-        assert_eq!(params["entry_id"], TEST_ENTRY_ID.to_string());
+        let params = approve_params(
+            ApproveTarget::Entry(TEST_ENTRY_ID.to_string()),
+            Some("partly"),
+        );
+        assert_eq!(params["entry_id"], TEST_ENTRY_ID);
         assert_eq!(params["outcome"], "partly");
     }
 
@@ -1149,7 +1149,7 @@ mod tests {
     /// empty string. The daemon distinguishes absent from unrecognised.
     #[test]
     fn an_approve_call_with_no_verdict_omits_the_parameter() {
-        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID), None);
+        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID.to_string()), None);
         assert!(params.get("outcome").is_none());
     }
 

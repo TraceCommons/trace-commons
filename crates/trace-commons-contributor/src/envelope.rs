@@ -338,6 +338,18 @@ impl ContributorVerdict {
         }
     }
 
+    /// The `TaskSuccess` this verdict maps to. Shared by `outcome` (below)
+    /// and `apply_verdict`, which cannot delegate to `outcome` itself --
+    /// assigning a whole `OutcomeMetadata` there would clobber the stored
+    /// envelope's other outcome fields with defaults.
+    fn task_success(self) -> TaskSuccess {
+        match self {
+            Self::Worked => TaskSuccess::Success,
+            Self::Partly => TaskSuccess::Partial,
+            Self::Failed => TaskSuccess::Failure,
+        }
+    }
+
     /// Writes `task_success` and nothing else.
     ///
     /// `user_feedback` is deliberately left `None`. It is a different
@@ -355,13 +367,8 @@ impl ContributorVerdict {
     /// (redaction already scrubs `human_correction`; what is missing is the
     /// consent decision and the UI, not the pipeline).
     fn outcome(self) -> OutcomeMetadata {
-        let task_success = match self {
-            Self::Worked => TaskSuccess::Success,
-            Self::Partly => TaskSuccess::Partial,
-            Self::Failed => TaskSuccess::Failure,
-        };
         OutcomeMetadata {
-            task_success,
+            task_success: self.task_success(),
             ..OutcomeMetadata::default()
         }
     }
@@ -591,11 +598,7 @@ pub fn apply_granted_scopes(
 /// satisfaction rather than completion -- and is deliberately left alone;
 /// see `ContributorVerdict::outcome`.
 pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: ContributorVerdict) {
-    envelope.outcome.task_success = match verdict {
-        ContributorVerdict::Worked => TaskSuccess::Success,
-        ContributorVerdict::Partly => TaskSuccess::Partial,
-        ContributorVerdict::Failed => TaskSuccess::Failure,
-    };
+    envelope.outcome.task_success = verdict.task_success();
 }
 
 /// Whether the built events actually carry message text / tool payloads.

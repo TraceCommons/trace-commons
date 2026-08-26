@@ -563,8 +563,17 @@ impl Sheet {
         for (button, name) in verdict_buttons.iter().zip(["worked", "partly", "failed"]) {
             let s = Rc::clone(&sheet);
             button.connect_toggled(move |button| {
+                // Written as a total match on `is_active()`, not an `if`:
+                // GTK 4 grouped `ToggleButton`s do not universally behave as
+                // strict radios, and a click that clears the group (leaving
+                // nothing visibly selected) must also clear `verdict` --
+                // otherwise the approval would carry a verdict the
+                // contributor just visibly withdrew.
+                let mut v = s.verdict.borrow_mut();
                 if button.is_active() {
-                    *s.verdict.borrow_mut() = Some(name);
+                    *v = Some(name);
+                } else if *v == Some(name) {
+                    *v = None;
                 }
             });
         }
@@ -1047,12 +1056,8 @@ impl Sheet {
         // No selection is a valid, expected answer -- `approve_params`
         // omits `outcome` entirely rather than sending `null` or `""`, both
         // of which the daemon refuses. See `ApproveTarget` in `ui::queue`.
-        let Ok(id) = entry_id.parse() else {
-            self.contribute.set_sensitive(true);
-            return;
-        };
         let params = super::queue::approve_params(
-            super::queue::ApproveTarget::Entry(id),
+            super::queue::ApproveTarget::Entry(entry_id.clone()),
             *self.verdict.borrow(),
         );
         self.app.call("approve", params, move |app, result| {
