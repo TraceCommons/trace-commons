@@ -2963,11 +2963,23 @@ fn token_shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
+/// Cue words that gate the contextual-entropy sweep, matched against the end
+/// of the [`CUE_WINDOW`]-byte window preceding a candidate.
+///
+/// The `[A-Za-z0-9_-]*` between the cue word and the separator class lets a
+/// cue word that sits partway through a longer identifier still gate the
+/// sweep. Conventional naming glues qualifiers onto both ends of a cue word,
+/// and without this the trailing qualifier keeps the separator out of reach
+/// of the anchor, so the cue never fires. Matching the cue word itself is
+/// already unanchored on the left, so this only makes the two sides
+/// symmetric. It cannot on its own cause a redaction: everything the cue
+/// admits still has to clear the length, allowlist, and entropy gates in
+/// [`is_cued_secret`], so a low-entropy value after a cue stays untouched.
 fn secret_cue_regex() -> &'static Regex {
     static SECRET_CUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
         Regex::new(
-            r"(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[\x22'`:=\s]{1,6}$",
+            r"(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$",
         )
         .expect("hardcoded secret cue regex must compile")
     });
@@ -6920,6 +6932,77 @@ mod tests {
             "cue-dense candidate with no real secret took {elapsed:?}; entropy is likely being \
              recomputed from scratch per `=` instead of via a cached per-candidate profile"
         );
+    }
+
+    #[test]
+    fn contextual_entropy_fires_when_the_cue_word_is_embedded_in_a_longer_name() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        // The cue word is followed by further identifier characters before the
+        // separator, so the cue only reaches the separator if trailing
+        // identifier characters are allowed between them.
+        let (out, rep) = r.redact_text(&format!("export ACME_SECRET_KEY_V2={value}"));
+        assert!(
+            !out.contains(value),
+            "value after an embedded cue survived: {out}"
+        );
+        assert!(rep.blocked_secret_detected);
+        assert!(
+            out.contains("ACME_SECRET_KEY_V2="),
+            "cue name was consumed with the value: {out}"
+        );
+    }
+
+    #[test]
+    fn contextual_entropy_fires_for_an_embedded_cue_passed_as_a_command_line_argument() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        let (out, rep) = r.redact_text(&format!("acmectl --acme-secret-key-v2 {value}"));
+        assert!(
+            !out.contains(value),
+            "argument value after an embedded cue survived: {out}"
+        );
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn contextual_entropy_leaves_a_low_entropy_value_after_an_embedded_cue_alone() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // Same cue shape as above; only the entropy of the value differs, so
+        // this proves the entropy gate still governs after the widened cue.
+        let flat = "aaaaaaaaaaaaaaaaaaaaaaaa";
+        let text = format!("export ACME_SECRET_KEY_V2={flat}");
+        let (out, rep) = r.redact_text(&text);
+        assert_eq!(out, text, "low-entropy value after a cue was redacted");
+        assert!(!rep.blocked_secret_detected);
+    }
+
+    #[test]
+    fn contextual_entropy_still_fires_for_bare_cues_and_named_prefixes() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let value = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
+        for text in [
+            format!("secret: {value}"),
+            format!("token = {value}"),
+            format!("api_key={value}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(value), "bare cue stopped firing: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
+        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        for text in [
+            "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_ne!(out, text, "named-prefix pattern stopped firing: {out}");
+            assert!(rep.blocked_secret_detected);
+        }
     }
 
     #[test]
