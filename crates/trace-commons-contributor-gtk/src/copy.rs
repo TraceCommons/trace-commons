@@ -1865,6 +1865,62 @@ mod tests {
         }
     }
 
+    /// No XAML comment in the Windows shell may contain a double hyphen.
+    ///
+    /// XML forbids `--` inside a comment, and `XamlCompiler.exe` answers one
+    /// by **exiting 1 with no diagnostic**: MSBuild reports only `MSB3073`
+    /// naming the command line, and the compiler's own `output.json` carries
+    /// no error entry at all. There is nothing to read, so the only way to
+    /// find it is to bisect the markup on a Windows box.
+    ///
+    /// This slice cost exactly that, because the repo's prose style writes a
+    /// spaced double hyphen everywhere and three of those went into XAML
+    /// comments. Checked from the Rust side because these tests already read
+    /// the Windows sources for the copy pins, and because this runs on every
+    /// platform -- so the mistake fails on a contributor's Mac in
+    /// milliseconds instead of on the one CI job that can compile XAML.
+    #[test]
+    fn no_windows_xaml_comment_contains_a_double_hyphen() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../windows/src");
+        let mut checked = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()));
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("xaml") {
+                    continue;
+                }
+                checked += 1;
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+                let mut rest = source.as_str();
+                while let Some(open) = rest.find("<!--") {
+                    let after = &rest[open + 4..];
+                    let Some(close) = after.find("-->") else {
+                        break;
+                    };
+                    if after[..close].contains("--") {
+                        offenders.push(path.display().to_string());
+                    }
+                    rest = &after[close + 3..];
+                }
+            }
+        }
+        assert!(checked > 0, "{} held no .xaml files", root.display());
+        assert!(
+            offenders.is_empty(),
+            "XAML comments with a double hyphen (XamlCompiler exits 1 silently \
+             on these -- write a full stop or a semicolon instead): {offenders:?}"
+        );
+    }
+
     /// The wire label the shells match on is the one the daemon sends. Two
     /// spellings of it would make the refusal render as a generic skip.
     #[test]
