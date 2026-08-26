@@ -769,9 +769,14 @@ fn manifest_block(
     let entry_id = entry.entry_id.clone();
     let project_label = entry.project_label.clone();
     submit.connect_clicked(move |_| {
+        // A queue row's `Submit` never asked the verdict question -- that
+        // lives in the preview sheet -- so this call always omits `outcome`.
+        let Ok(id) = entry_id.parse() else {
+            return;
+        };
         submit_and_toast(
             &app_for_submit,
-            serde_json::json!({ "entry_id": entry_id }),
+            approve_params(ApproveTarget::Entry(id), None),
             project_label.clone(),
             vec![entry_id.clone()],
         );
@@ -831,9 +836,11 @@ fn project_header(
                 .filter(|e| e.state == "pending" && e.project_id == project_id_for_submit)
                 .map(|e| e.entry_id.clone())
                 .collect();
+            // `Submit all` never asked the verdict question either -- so
+            // this call always omits `outcome` too.
             submit_and_toast(
                 &app_for_submit,
-                serde_json::json!({ "project_id": project_id_for_submit }),
+                approve_params(ApproveTarget::Project(project_id_for_submit.clone()), None),
                 project_label_for_submit.clone(),
                 candidates,
             );
@@ -1039,5 +1046,54 @@ fn first_line(prompt: &str) -> String {
 fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
+    }
+}
+
+/// What an `approve` call selects: one row's `Submit`, a project group's
+/// `Submit all`, or (not yet wired to any call site here) everything.
+pub(crate) enum ApproveTarget {
+    /// No call site in this crate builds this today; kept because the
+    /// `approve` method itself accepts `all`, and the next caller that
+    /// needs it should not have to touch `approve_params` to get it.
+    #[allow(dead_code)]
+    All,
+    Project(String),
+    Entry(uuid::Uuid),
+}
+
+/// Build the `approve` parameters. `verdict` is omitted entirely when the
+/// contributor did not answer: the daemon distinguishes an absent parameter
+/// (`TaskSuccess::Unknown`) from an unrecognised one (refused).
+pub(crate) fn approve_params(target: ApproveTarget, verdict: Option<&str>) -> serde_json::Value {
+    let mut params = match target {
+        ApproveTarget::All => serde_json::json!({"all": true}),
+        ApproveTarget::Project(key) => serde_json::json!({"project_id": key}),
+        ApproveTarget::Entry(id) => serde_json::json!({"entry_id": id.to_string()}),
+    };
+    if let Some(name) = verdict {
+        params["outcome"] = serde_json::Value::String(name.to_string());
+    }
+    params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_ENTRY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
+
+    #[test]
+    fn an_approve_call_carries_the_selected_verdict() {
+        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID), Some("partly"));
+        assert_eq!(params["entry_id"], TEST_ENTRY_ID.to_string());
+        assert_eq!(params["outcome"], "partly");
+    }
+
+    /// No selection sends no parameter at all, rather than a null or an
+    /// empty string. The daemon distinguishes absent from unrecognised.
+    #[test]
+    fn an_approve_call_with_no_verdict_omits_the_parameter() {
+        let params = approve_params(ApproveTarget::Entry(TEST_ENTRY_ID), None);
+        assert!(params.get("outcome").is_none());
     }
 }
