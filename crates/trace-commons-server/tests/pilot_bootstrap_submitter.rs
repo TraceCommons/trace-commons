@@ -37,6 +37,7 @@ fn draft(seed: u8) -> SubmissionDraft {
             text: trace_body,
             timestamp: None,
             role: SessionEventRole::User,
+            tool: None,
         }],
     }
 }

@@ -22,10 +22,40 @@ as an ops calibration utility.
   redactor, and POSTs the resulting `trace-commons-protocol` envelope to
   `/v1/traces` at a configurable rate.
 - Idempotent: re-running against the same dataset is safe — the
-  ingest server collapses duplicate submission ids to no-ops.
+  ingest server collapses duplicate submission ids to no-ops. **The
+  submission id is content-addressed from the trace body**, so anything
+  that changes the body changes the id and breaks that property for the
+  affected sessions. See "Body cap changes break idempotency" below.
 - **Not** a multi-tenant load tester. **Not** adversarial input. **Not**
   a daemon. **Not** a credit-issuing path (run with the existing
   zero-credit calibration semantics).
+
+## Body cap changes break idempotency
+
+`SESSION_BODY_CAP` in `crates/trace-commons-server/src/bin/pilot_bootstrap/translators.rs`
+bounds how much of a session's text reaches the trace body. Because
+`submission_id` is a SHA-256 prefix of that body, raising or lowering the
+cap gives every previously-truncated session a **different** submission id.
+Re-running the loader over a dataset that was ingested under a different cap
+therefore submits those sessions again as new traces rather than collapsing
+them to no-ops, producing near-duplicates of exactly the long, rich sessions
+the corpus most wants.
+
+The cap was raised from 16,000 to 1,000,000 characters. Measured on 35 real
+sessions sampled from the three target datasets, 15 of 35 (43%) exceeded the
+old cap and so have new ids under the new one; the other 20 are unchanged.
+
+Before re-running over an already-ingested dataset:
+
+1. Prefer **not** re-running it. The cap change only needs to apply to
+   sessions not yet loaded; the old, truncated traces stay valid corpus.
+2. If you do re-run it, expect one new trace per previously-truncated
+   session and run the cross-trace dedup pass afterwards
+   (`/v1/admin/recluster-dedup`) so the near-duplicate pairs are clustered
+   rather than double-counted for credit.
+3. `submission_id_is_stable_across_runs` does **not** guard this. It
+   compares two runs of the same code, so it stays green across a cap
+   change. It is not evidence that ids did not shift.
 
 ## Prerequisites
 
