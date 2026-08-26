@@ -135,6 +135,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     structured: Value::Null,
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: None,
+                    success: None,
                 });
             }
             "assistant" => {
@@ -159,7 +161,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             // meaningless: a later `tool` record would pair
                             // against the wrong call. The schema gives ids
                             // per call, so a repeat is a malformed file.
-                            if !seen_call_ids.insert(id) {
+                            if !seen_call_ids.insert(id.clone()) {
                                 bail!("duplicate_tool_call_id");
                             }
                             events.push(SessionEvent {
@@ -169,6 +171,10 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                                 structured,
                                 tool_name: Some(name),
                                 token_counts: None,
+                                // The id the orphan check above already
+                                // relies on; it was validated and discarded.
+                                tool_call_id: Some(id),
+                                success: None,
                             });
                         }
                     }
@@ -187,6 +193,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             structured: Value::Null,
                             tool_name: None,
                             token_counts: None,
+                            tool_call_id: None,
+                            success: None,
                         });
                     }
                 }
@@ -203,6 +211,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     structured: Value::Null,
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: Some(id),
+                    success: None,
                 });
             }
             _ => bail!("unknown_record"),
@@ -776,5 +786,35 @@ mod tests {
             entries.len(),
             covered.len()
         );
+    }
+
+    #[test]
+    fn tool_call_ids_reach_the_events() {
+        // This parser already validated these ids -- duplicate calls and
+        // orphaned results are both rejection reasons -- and then dropped
+        // them, so nothing downstream could use what had just been checked.
+        let file = concat!(
+            "{\"role\":\"meta\",\"source\":\"openhands\",\"model\":\"m\"}\n",
+            "{\"role\":\"user\",\"content\":\"list the files\",",
+            "\"timestamp\":\"2026-08-08T10:00:00Z\"}\n",
+            "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"t1\",",
+            "\"name\":\"shell\",\"args\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}],",
+            "\"timestamp\":\"2026-08-08T10:00:01Z\"}\n",
+            "{\"role\":\"tool\",\"tool_call_id\":\"t1\",\"content\":\"src\",",
+            "\"timestamp\":\"2026-08-08T10:00:02Z\"}\n",
+        );
+        let parsed = super::parse_trajectory(file.as_bytes()).expect("fixture parses");
+        let call = parsed
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolCall)
+            .expect("a tool call");
+        let result = parsed
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolResult)
+            .expect("a tool result");
+        assert_eq!(call.tool_call_id.as_deref(), Some("t1"));
+        assert_eq!(result.tool_call_id.as_deref(), Some("t1"));
     }
 }

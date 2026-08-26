@@ -86,6 +86,13 @@ use trace_commons_protocol::trace_contribution::{
 const VOLATILE_ENVELOPE_FIELDS: &[&str] = &[
     "trace_id",
     "event_id",
+    // A reference to an `event_id`, so it is volatile for exactly the same
+    // reason and has to come off with it. Left in, a transcript with a
+    // paired tool call and result would digest differently on every build,
+    // which the `fixture_session` transcript (one user message, no tool
+    // calls) is not shaped to notice --
+    // `a_paired_call_and_result_digests_identically` is.
+    "parent_event_id",
     "revocation_handle",
     "created_at",
     "timestamp",
@@ -1084,6 +1091,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_paired_call_and_result_digests_identically() {
+        // `two_builds_of_the_same_envelope_digest_identically` above uses a
+        // transcript of one user message, so it cannot see a field that is
+        // only populated when a result is paired with its call.
+        // `parent_event_id` is exactly that: it holds the call's `event_id`,
+        // which is a fresh v4 UUID per build. Without it on the volatile
+        // list this transcript digests differently every time -- and the
+        // failure would land not here but in the field, as previewed
+        // entries that never match their own stored bytes.
+        let (_d, src, r) = tool_call_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let t = src.load(&r).unwrap();
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.kind == crate::source::SessionEventKind::ToolResult
+                    && e.tool_call_id.is_some()),
+            "this fixture has to carry a result that names its call, or the \
+             test proves nothing"
+        );
+        let redactor = build_redactor_with(&cfg, t.cwd.as_deref(), None).unwrap();
+        let a = redact_to_envelope(&redactor, build_raw_contribution(&t, &cfg, Utc::now()))
+            .await
+            .unwrap();
+        let b = redact_to_envelope(&redactor, build_raw_contribution(&t, &cfg, Utc::now()))
+            .await
+            .unwrap();
+        assert_eq!(
+            envelope_digest(&a).unwrap(),
+            envelope_digest(&b).unwrap(),
+            "a paired call and result must not make the digest volatile"
+        );
+    }
+
+    /// A session whose tool result names the call it answers, so
+    /// `parent_event_id` is actually populated.
+    fn tool_call_session() -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+                 \"content\":\"read the config\"},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\
+                 \"uuid\":\"a1\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\
+                 \"content\":[{\"type\":\"tool_use\",\"id\":\"tu_1\",\
+                 \"name\":\"Read\",\"input\":{\"file_path\":\"cfg.toml\"}}]},\
+                 \"timestamp\":\"2026-08-08T10:00:01Z\",\"version\":\"2.0.1\",\
+                 \"uuid\":\"a2\"}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+                 \"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tu_1\",\
+                 \"content\":\"port = 8080\"}]},\
+                 \"timestamp\":\"2026-08-08T10:00:02Z\",\"version\":\"2.0.1\",\
+                 \"uuid\":\"a3\"}\n",
+            ),
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    #[tokio::test]
     async fn a_known_envelope_pins_a_known_digest() {
         // `envelope_digest` now hashes the canonical bytes as
         // `serde_json::to_writer` produces them, rather than collecting
@@ -1111,9 +1188,15 @@ mod tests {
             "a fixture whose only finding is a successfully scrubbed secret \
              must be Medium, not High"
         );
+        // Moved again, deliberately, for issue #298: `replay.replayable` is
+        // no longer hardcoded `false` on this path, the replay note it ships
+        // with changed, and `required_tools` is now derived from the events.
+        // All three are inside the hashed bytes. The risk tier above is
+        // unchanged, which is what says this was a shape change and not a
+        // redaction change.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:0dcabcd492bfd9a6f6ca9c5c66ecd4299f6a3e9f3902627612cc4935deb4d745",
+            "sha256:4a461ec38c7e259b2dfdea48d0bb4ea2bcc536ac82ebbf72457846baf804eef9",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

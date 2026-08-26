@@ -931,6 +931,8 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             }),
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
     }
     for (index, (_, bytes)) in members.iter().enumerate() {
@@ -947,6 +949,8 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             structured: json!({ "record_type": "subagent_transcript", "index": index }),
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let member = parse_session(bytes);
         unparseable += member.unparseable;
@@ -1049,6 +1053,8 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
                     structured: json!({ "record_type": other }),
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: None,
+                    success: None,
                 });
             }
         }
@@ -1079,6 +1085,8 @@ fn map_user_record(
                 structured: Value::Null,
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: None,
+                success: None,
             });
         }
         Some(Value::Array(blocks)) => {
@@ -1099,6 +1107,13 @@ fn map_user_record(
                             structured: Value::Null,
                             tool_name: None,
                             token_counts: None,
+                            tool_call_id: block
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            // `is_error` is the transcript's own verdict on
+                            // the call. Absent, the harness did not say.
+                            success: block.get("is_error").and_then(|v| v.as_bool()).map(|e| !e),
                         });
                     }
                     _ => {}
@@ -1112,6 +1127,8 @@ fn map_user_record(
                     structured: Value::Null,
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: None,
+                    success: None,
                 });
             }
         }
@@ -1182,6 +1199,8 @@ fn map_assistant_record(
                     structured: Value::Null,
                     tool_name: None,
                     token_counts: token_counts_unused.take(),
+                    tool_call_id: None,
+                    success: None,
                 });
                 texts.clear();
             }
@@ -1208,6 +1227,11 @@ fn map_assistant_record(
                     structured: input,
                     tool_name: name,
                     token_counts: None,
+                    tool_call_id: block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    success: None,
                 });
             }
             Some("thinking") => {
@@ -1223,6 +1247,8 @@ fn map_assistant_record(
                             structured: Value::Null,
                             tool_name: None,
                             token_counts: None,
+                            tool_call_id: None,
+                            success: None,
                         });
                     }
                 }
@@ -2564,5 +2590,58 @@ mod tests {
                     && e.content.as_deref() == Some("secret reasoning")),
             "reasoning is now captured as a first-class event"
         );
+    }
+
+    #[test]
+    fn a_call_and_its_result_carry_the_same_id() {
+        // The transcript names both halves of a call with `tu_1`, and this
+        // adapter read the block and dropped the id, leaving array order as
+        // the only way to tell which result answered which call.
+        let src = ClaudeCodeSource::new(fixture_root());
+        let r = &src.discover().unwrap()[0];
+        let t = src.load(r).unwrap();
+        let call = t
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolCall)
+            .expect("a tool call");
+        let result = t
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolResult)
+            .expect("a tool result");
+        assert_eq!(call.tool_call_id.as_deref(), Some("tu_1"));
+        assert_eq!(result.tool_call_id.as_deref(), Some("tu_1"));
+    }
+
+    #[test]
+    fn an_errored_tool_result_says_so() {
+        // `is_error` is the transcript's own verdict, and it was read by
+        // nothing. It is the cheapest signal there is for the failed traces
+        // that reported no error at all.
+        let record = json!({
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_9",
+                 "is_error": true, "content": "permission denied"}
+            ]}
+        });
+        let mut events = Vec::new();
+        super::map_user_record(&record, None, &mut events);
+        assert_eq!(events[0].success, Some(false));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tu_9"));
+    }
+
+    #[test]
+    fn a_tool_result_with_no_verdict_claims_none() {
+        // Absent `is_error`, the harness did not say. `None` is not success
+        // and it is not failure.
+        let record = json!({
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_9", "content": "ok"}
+            ]}
+        });
+        let mut events = Vec::new();
+        super::map_user_record(&record, None, &mut events);
+        assert_eq!(events[0].success, None);
     }
 }
