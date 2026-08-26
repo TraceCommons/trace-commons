@@ -176,6 +176,11 @@ pub const ERR_BODY_DIGEST_REQUIRED: &str = "body-digest-required";
 /// back under. Identical to `preview`'s, deliberately: the two must not be
 /// distinguishable.
 pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
+/// `approve`'s `outcome` named something other than `worked`, `partly` or
+/// `failed`. Refused, not coerced to `Unknown`, so a typo does not silently
+/// discard the contributor's answer -- the same rule the `--outcome` flag
+/// applies.
+const ERR_BAD_VERDICT: &str = "outcome must be worked, partly or failed";
 
 /// `quiesce` gave up waiting for in-flight uploads to finish. The caller
 /// leaves the update staged and tries again later; the swap never forces its
@@ -1354,6 +1359,25 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         .get("all")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Validated up front, before anything is approved and before the
+    // bulk-approval audit row is written. A refused call must approve
+    // nothing and leave no record of a batch that did not happen.
+    //
+    // Refused rather than ignored: a contributor who answered meant to say
+    // something, and coercing a typo to `Unknown` would silently discard
+    // the answer. Same rule the `--outcome` flag applies.
+    let verdict = match req.params.get("outcome") {
+        None => None,
+        Some(v) => {
+            let Some(name) = v.as_str() else {
+                return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_VERDICT);
+            };
+            if crate::envelope::ContributorVerdict::parse(name).is_none() {
+                return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_VERDICT);
+            }
+            Some(name.to_string())
+        }
+    };
     // Read before the queue lock is taken, so the settings lock is
     // never held under it.
     //
@@ -1676,7 +1700,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, label));
             continue;
         }
-        if queue.approve(id, &scopes, inputs.as_deref(), None, Some(approved_at)) {
+        if queue.approve(
+            id,
+            &scopes,
+            inputs.as_deref(),
+            verdict.as_deref(),
+            Some(approved_at),
+        ) {
             approved_ids.push(id);
         } else {
             // `Queue::approve` refuses anything not `Pending`, and this
@@ -2944,6 +2974,176 @@ mod tests {
         .await;
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(audit::load(&s.store).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_approval_carries_its_verdict_to_the_entry() {
+        let s = shared();
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_verdict: None,
+                        approved_inputs: None,
+                        // Already pinned, so `handle_approve` does not try to
+                        // build a real preview for a path that does not
+                        // exist -- this test is about the verdict, not the
+                        // envelope pipeline.
+                        previewed_envelope_digest: Some("sha256:preview".to_string()),
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                        observed_modified_at: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({"entry_id": entry_id.to_string(), "outcome": "partly"}),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none(), "approve should succeed: {:?}", r.error);
+
+        let queue = s.queue.lock().unwrap();
+        assert_eq!(
+            queue.get(entry_id).unwrap().approved_verdict.as_deref(),
+            Some("partly")
+        );
+    }
+
+    /// A bulk approval applies one verdict to every entry it covers. This is a
+    /// coverage-over-precision tradeoff taken deliberately; see the spec.
+    #[tokio::test]
+    async fn a_bulk_approval_applies_its_verdict_to_every_entry() {
+        let s = shared();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            for n in 0..2u8 {
+                queue
+                    .upsert(
+                        super::super::queue::QueueEntry {
+                            entry_id: uuid::Uuid::new_v4(),
+                            session_hash: format!("sha256:seed{n}"),
+                            source: "claude-code".to_string(),
+                            project_key: "/tmp/p".to_string(),
+                            project_label: "p".to_string(),
+                            path: std::path::PathBuf::from(format!("/tmp/seed{n}.jsonl")),
+                            size_bytes: 1,
+                            discovered_at: Utc::now(),
+                            state: QueueState::Pending,
+                            reason_label: None,
+                            attempts: 0,
+                            retry_after: None,
+                            submission_id: None,
+                            approved_scopes: None,
+                            approved_verdict: None,
+                            approved_inputs: None,
+                            // Already pinned, for the same reason as the
+                            // single-entry test above.
+                            previewed_envelope_digest: Some(format!("sha256:preview{n}")),
+                            approved_at: None,
+                            subagent_count: 0,
+                            subagents_dropped: 0,
+                            observed_modified_at: None,
+                        },
+                        500,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({"all": true, "outcome": "worked"}),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let queue = s.queue.lock().unwrap();
+        for e in queue.all() {
+            assert_eq!(e.approved_verdict.as_deref(), Some("worked"));
+        }
+    }
+
+    /// A typo must not silently submit the run as `Unknown`. Same rule the
+    /// `--outcome` flag applies, at the IPC boundary.
+    #[tokio::test]
+    async fn an_unrecognised_verdict_is_refused_and_approves_nothing() {
+        let s = shared();
+        let entry_id = uuid::Uuid::new_v4();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue
+                .upsert(
+                    super::super::queue::QueueEntry {
+                        entry_id,
+                        session_hash: "sha256:seed".to_string(),
+                        source: "claude-code".to_string(),
+                        project_key: "/tmp/p".to_string(),
+                        project_label: "p".to_string(),
+                        path: std::path::PathBuf::from("/tmp/seed.jsonl"),
+                        size_bytes: 1,
+                        discovered_at: Utc::now(),
+                        state: QueueState::Pending,
+                        reason_label: None,
+                        attempts: 0,
+                        retry_after: None,
+                        submission_id: None,
+                        approved_scopes: None,
+                        approved_verdict: None,
+                        approved_inputs: None,
+                        previewed_envelope_digest: None,
+                        approved_at: None,
+                        subagent_count: 0,
+                        subagents_dropped: 0,
+                        observed_modified_at: None,
+                    },
+                    500,
+                )
+                .unwrap();
+        }
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({"entry_id": entry_id.to_string(), "outcome": "sucess"}),
+            ),
+        )
+        .await;
+
+        assert!(r.error.is_some(), "an unknown verdict must be refused");
+        let queue = s.queue.lock().unwrap();
+        assert_eq!(
+            queue.get(entry_id).unwrap().state,
+            QueueState::Pending,
+            "a refused call must approve nothing"
+        );
     }
 
     #[test]
