@@ -96,6 +96,10 @@ enum Command {
         /// same submission_id so the server can supersede the stored envelope
         #[arg(long)]
         remediate_quarantined: bool,
+        /// How these sessions went: worked | failed. Recorded as the trace
+        /// outcome, which nothing else in a transcript can answer.
+        #[arg(long)]
+        outcome: Option<String>,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -351,6 +355,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             trajectory,
             no_reasoning,
             remediate_quarantined,
+            outcome,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -365,6 +370,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 json: cli.json,
                 no_reasoning,
                 remediate_quarantined,
+                verdict: outcome.as_deref(),
             };
             commands::submit(&store, &sel).await
         }

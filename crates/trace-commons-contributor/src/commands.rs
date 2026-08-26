@@ -782,6 +782,10 @@ pub struct SubmitSelection<'a> {
     /// Re-submit corrected envelopes for locally-known quarantined sessions
     /// under the same submission_id (server supersedes; see #214).
     pub remediate_quarantined: bool,
+    /// How the contributor says these sessions went: `worked` or `failed`.
+    /// Absent leaves `task_success` `Unknown`, as every envelope this client
+    /// has ever sent carried.
+    pub verdict: Option<&'a str>,
 }
 
 /// Drop reasoning events before envelope construction. Reasoning is captured
@@ -873,6 +877,16 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         })
         .collect::<Result<_>>()?;
 
+    // Refuse an unrecognised verdict rather than silently submitting the
+    // whole run as `Unknown`: a contributor who typed it meant to say
+    // something, and a typo must not quietly discard the answer.
+    let verdict =
+        match sel.verdict {
+            None => None,
+            Some(name) => Some(crate::envelope::ContributorVerdict::parse(name).ok_or_else(
+                || anyhow::anyhow!("unknown --outcome '{name}': use worked or failed"),
+            )?),
+        };
     let opts = SubmitOptions {
         dry_run: sel.dry_run,
         pii_filter: sel.pii_filter.map(str::to_string),
@@ -880,6 +894,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         machine_readable: sel.json,
         unenrolled_preview,
         remediate_quarantined: sel.remediate_quarantined,
+        verdict,
     };
     let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
 
@@ -1584,6 +1599,7 @@ mod project_filter_tests {
             json: false,
             no_reasoning: false,
             remediate_quarantined: false,
+            verdict: None,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");

@@ -24,9 +24,10 @@ use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, ContributorMetadata, DeterministicTraceRedactor,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
-    RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TokenCounts,
-    TraceAllowedUse, TraceChannel, TraceContributionEnvelope, TraceContributionEventType,
-    TraceRedactor, ValueMetadata, run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
+    RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TaskSuccess,
+    TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope,
+    TraceContributionEventType, TraceRedactor, UserFeedback, ValueMetadata,
+    run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
     synthetic_privacy_filter_canary_values,
 };
 
@@ -308,6 +309,47 @@ impl std::io::Write for ByteCounter {
     }
 }
 
+/// What the contributor said about how the session went.
+///
+/// `OutcomeMetadata` has modelled an outcome since v1 and this client wrote
+/// `default()` on every envelope, so `task_success` was `Unknown` on every
+/// trace it has ever sent. Nothing in a transcript answers the question:
+/// an agent that stops has not thereby succeeded, and a harness that records
+/// no error has not thereby done what was asked. Only the person who asked
+/// knows, so it is asked rather than inferred (issue #298).
+///
+/// Two states on purpose. A verdict is a judgement about the task, not text,
+/// so it carries no PII and needs no consent decision -- which is exactly
+/// what a free-text correction would need, and why that is not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContributorVerdict {
+    Worked,
+    Failed,
+}
+
+impl ContributorVerdict {
+    /// Wire name, so a CLI flag and an IPC parameter cannot drift apart.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "worked" => Some(Self::Worked),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn outcome(self) -> OutcomeMetadata {
+        let (task_success, user_feedback) = match self {
+            Self::Worked => (TaskSuccess::Success, UserFeedback::ThumbsUp),
+            Self::Failed => (TaskSuccess::Failure, UserFeedback::ThumbsDown),
+        };
+        OutcomeMetadata {
+            task_success,
+            user_feedback,
+            ..OutcomeMetadata::default()
+        }
+    }
+}
+
 /// Map a locally discovered transcript into a `RawTraceContribution` ready
 /// for redaction. See the field-mapping table in the task brief for the
 /// exact provenance of every field.
@@ -316,7 +358,17 @@ pub fn build_raw_contribution(
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
 ) -> RawTraceContribution {
-    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash))
+    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash), None)
+}
+
+/// The same, carrying a verdict the contributor supplied for this session.
+pub fn build_raw_contribution_with_verdict(
+    t: &SessionTranscript,
+    cfg: &ContributorConfig,
+    now: DateTime<Utc>,
+    verdict: Option<ContributorVerdict>,
+) -> RawTraceContribution {
+    build_raw_contribution_with_id(t, cfg, now, submission_id_for(&t.session_hash), verdict)
 }
 
 /// Build the same raw contribution shape with a disjoint preview id.
@@ -325,7 +377,13 @@ pub fn build_preview_raw_contribution(
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
 ) -> RawTraceContribution {
-    build_raw_contribution_with_id(t, cfg, now, preview_submission_id_for(&t.session_hash))
+    build_raw_contribution_with_id(
+        t,
+        cfg,
+        now,
+        preview_submission_id_for(&t.session_hash),
+        None,
+    )
 }
 
 fn build_raw_contribution_with_id(
@@ -333,6 +391,7 @@ fn build_raw_contribution_with_id(
     cfg: &ContributorConfig,
     now: DateTime<Utc>,
     submission_id: Uuid,
+    verdict: Option<ContributorVerdict>,
 ) -> RawTraceContribution {
     let mut feature_flags = BTreeMap::new();
     feature_flags.insert("agent".to_string(), t.source.to_string());
@@ -426,7 +485,7 @@ fn build_raw_contribution_with_id(
             revocation_handle: Uuid::new_v4(),
         },
         events,
-        outcome: OutcomeMetadata::default(),
+        outcome: verdict.map(ContributorVerdict::outcome).unwrap_or_default(),
         replay: ReplayMetadata {
             // This said `false` unconditionally, and the scorecard reads it as
             // authoritative: sufficiency can only lower a score, never raise
@@ -1407,5 +1466,123 @@ mod tests {
             scored.coverage_bonus > 0.0,
             "a transcript that calls tools covers tools"
         );
+    }
+
+    /// `task_success` was `Unknown` on every envelope this client has ever
+    /// sent, because `OutcomeMetadata::default()` was written unconditionally.
+    /// Nothing in a transcript answers the question -- an agent that stops has
+    /// not thereby succeeded -- so the contributor is asked.
+    #[test]
+    fn a_verdict_reaches_the_outcome() {
+        use trace_commons_protocol::trace_contribution::{TaskSuccess, UserFeedback};
+
+        let cfg = test_config();
+        let t = fixture_transcript();
+
+        let worked = build_raw_contribution_with_verdict(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Worked),
+        );
+        assert_eq!(worked.outcome.task_success, TaskSuccess::Success);
+        assert_eq!(worked.outcome.user_feedback, UserFeedback::ThumbsUp);
+
+        let failed = build_raw_contribution_with_verdict(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Failed),
+        );
+        assert_eq!(failed.outcome.task_success, TaskSuccess::Failure);
+        assert_eq!(failed.outcome.user_feedback, UserFeedback::ThumbsDown);
+    }
+
+    /// No verdict means unknown, not success. Silence is not a claim.
+    #[test]
+    fn no_verdict_leaves_the_outcome_unknown() {
+        use trace_commons_protocol::trace_contribution::{TaskSuccess, UserFeedback};
+
+        let cfg = test_config();
+        let t = fixture_transcript();
+        let raw = build_raw_contribution_with_verdict(&t, &cfg, chrono::Utc::now(), None);
+
+        assert_eq!(raw.outcome.task_success, TaskSuccess::Unknown);
+        assert_eq!(raw.outcome.user_feedback, UserFeedback::None);
+        assert_eq!(
+            raw.outcome,
+            trace_commons_protocol::trace_contribution::OutcomeMetadata::default(),
+            "the no-verdict envelope must be byte-identical to the old behaviour"
+        );
+    }
+
+    /// A verdict is a judgement, not text. It must not move either content
+    /// declaration, or a two-button answer would start gating consent.
+    #[test]
+    fn a_verdict_declares_no_content() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events.clear();
+
+        let raw = build_raw_contribution_with_verdict(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Failed),
+        );
+
+        assert!(!raw.consent.message_text_included);
+        assert!(!raw.consent.tool_payloads_included);
+    }
+
+    /// A failed verdict is what makes a trace score as difficult, which is
+    /// the whole reason to collect it: `difficulty` is 0.65 for a failure
+    /// against 0.35 otherwise.
+    #[tokio::test]
+    async fn a_failed_verdict_scores_as_difficult() {
+        use trace_commons_protocol::trace_contribution::compute_value_scorecard;
+
+        let cfg = test_config();
+        let t = fixture_transcript();
+        let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
+
+        let unknown = redact_to_envelope(
+            &redactor,
+            build_raw_contribution_with_verdict(&t, &cfg, chrono::Utc::now(), None),
+        )
+        .await
+        .expect("redaction succeeds");
+        let failed = redact_to_envelope(
+            &redactor,
+            build_raw_contribution_with_verdict(
+                &t,
+                &cfg,
+                chrono::Utc::now(),
+                Some(ContributorVerdict::Failed),
+            ),
+        )
+        .await
+        .expect("redaction succeeds");
+
+        assert!(
+            compute_value_scorecard(&failed).difficulty
+                > compute_value_scorecard(&unknown).difficulty,
+            "a known failure is worth more than an unknown outcome"
+        );
+    }
+
+    #[test]
+    fn verdict_names_are_the_wire_names() {
+        assert_eq!(
+            ContributorVerdict::parse("worked"),
+            Some(ContributorVerdict::Worked)
+        );
+        assert_eq!(
+            ContributorVerdict::parse("failed"),
+            Some(ContributorVerdict::Failed)
+        );
+        // A typo must not silently become "unknown": the caller refuses.
+        assert_eq!(ContributorVerdict::parse("Worked"), None);
+        assert_eq!(ContributorVerdict::parse("success"), None);
     }
 }

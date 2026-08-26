@@ -805,6 +805,7 @@ mod tests {
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
+            verdict: None,
         }
     }
 

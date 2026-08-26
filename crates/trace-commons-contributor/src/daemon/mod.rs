@@ -515,6 +515,12 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         machine_readable: true,
         unenrolled_preview: false,
         remediate_quarantined: false,
+        // The daemon does not collect a verdict. Doing so belongs at approval
+        // time, where the contributor is actually looking at the trace, and
+        // that needs a queue field plus an `approve` parameter -- see the
+        // note on `SubmitOptions` about this struct sitting outside the
+        // approval fingerprint. Left for that change rather than guessed at.
+        verdict: None,
     };
     // Both of these hit the filesystem synchronously with no `.await` of
     // their own -- `ConfigStore::open` creates/permissions the state dir,
