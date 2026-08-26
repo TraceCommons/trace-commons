@@ -90,23 +90,47 @@ published policy at <https://tracecommons.ai/legal/>.
 It does not cover content flags. It pins the `ConsentScope` variants and
 `TRACE_CONTRIBUTION_POLICY_VERSION`, and has no reference to
 `message_text_included` or `tool_payloads_included`. So adding
-`correction_included` would pass it silently -- even though a new content
-class is exactly the kind of consent-surface change the pin was written to
-catch.
+`correction_included` passes it silently.
 
-That is a gap in the guard, not a reason to skip the policy work. This slice
-must:
+Extend the pin to cover the content flags, with the same compiler-enforced
+exhaustiveness the scopes get -- a `match` over a struct-literal destructure
+of `ConsentMetadata`, so a fourth flag added later fails to compile until
+someone has decided what to say about it.
 
-1. Extend the pin to cover the content flags, with the same
-   compiler-enforced exhaustiveness the scopes get -- a `match` over a
-   struct-literal destructure of `ConsentMetadata`, so a fourth flag added
-   later fails to compile until someone writes the policy paragraph.
-2. Publish the policy text describing what a correction is and what it is
-   not, and bump `TRACE_CONTRIBUTION_POLICY_VERSION` with it.
+### Publishing the clause does NOT gate the code
 
-Bumping the version without publishing the text, or extending the pin to
-assert whatever the code already does, both defeat the guard. If the policy
-text is not ready, the correction flag does not ship.
+An earlier draft of this spec made the correction flag conditional on
+publishing policy text first. That was too strong, and it conflated two
+different things.
+
+**Consent to include is not in question.** A correction is composed
+deliberately, for submission, by someone who knows where it goes. No new
+consent scope is added, so nothing changes about what the corpus may be used
+for. Requiring fresh consent machinery for content the contributor
+deliberately wrote for the corpus would be ceremony.
+
+**What is real is narrower: a disclosure that would otherwise be wrong.** The
+published document asserts that redaction happens locally before upload and
+is re-applied server-side. A correction is the one exception. A contributor
+reading the current page would reasonably believe their correction is
+redacted, and it is not.
+
+That is fixed at the point where it matters, not on a legal page:
+
+**The caption on the correction control is load-bearing.** It is the
+disclosure, not decoration. It must say plainly that the correction is stored
+as written and that it should not contain anything the contributor would not
+want in the corpus. A sentence at the moment of writing reaches someone a
+terms page does not. Task F must treat that string with the same care as the
+consent flag itself, and it must not be shortened for layout.
+
+The published clause (`docs/legal-correction-clause-draft.md`) should follow
+so the page stops being wrong, but it is a follow-up rather than a gate.
+
+The one item still worth counsel's eye whenever the clause is published is the
+THIRD-PARTY case: a correction naming someone who has consented to nothing,
+whom the contributor's own intent does not speak for. That is carried by the
+caption's wording in the meantime.
 
 ### Collection
 

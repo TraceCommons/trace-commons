@@ -344,10 +344,17 @@ Medium for it; `corpus_status_with_pii_backstop_hold` becoming "any content
 flag"; extending `consent_policy_pin.rs` to cover content flags with
 compiler-enforced exhaustiveness.
 
-**Hard gate:** the policy text at <https://tracecommons.ai/legal/> must be
-published and `TRACE_CONTRIBUTION_POLICY_VERSION` bumped with it. If the text
-is not ready, this task stops after the pin extension and does not add the
-flag. Do not edit the pin to assert whatever the code does.
+**Not gated on publishing policy text.** An earlier draft of this plan made
+it so; that was too strong. Consent to include is not in question -- a
+correction is deliberately written for submission and adds no new scope. What
+is real is that the published page currently promises redaction that a
+correction does not get, and that is carried by the caption on the control
+(Task F), which is the disclosure and must not be shortened for layout.
+Publishing the clause in `docs/legal-correction-clause-draft.md` is a
+follow-up so the page stops being wrong.
+
+Do extend the pin as described. Do not edit it to assert whatever the code
+already does -- that would defeat the guard #390 exists to provide.
 
 ### Task E: corrections are not scrubbed
 
