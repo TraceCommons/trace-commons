@@ -16,7 +16,8 @@ pub use decision::{
 };
 pub use embedder::{Embedder, MOCK_EMBEDDING_DIM};
 pub use perplexity::{
-    ChunkPerplexity, PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer,
+    ChunkPerplexity, PerplexityResult, PerplexityScorer, ScorerFailure, TokenRarityResult,
+    TokenRarityScorer, scorer_status_is_transient,
 };
 pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
 pub use vector_index::{NearestNeighbor, VectorIndex};

@@ -45,6 +45,7 @@ use crate::perplexity_local::{aggregate_perplexity_metrics, per_token_rarity_mic
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use trace_commons_gate_api::{ScorerFailure, scorer_status_is_transient};
 
 /// Static configuration for the NEAR AI scorer.
 ///
@@ -215,20 +216,43 @@ impl NearAiPerplexityScorer {
             .bearer_auth(&self.cfg.api_key)
             .json(&req)
             .send()
-            .map_err(|e| anyhow!("NearAiScorerHttpSendFailed: {}", e.without_url()))?;
+            .map_err(|e| {
+                // The request never reached the model: a connect failure, a
+                // TLS failure, or the client timeout expiring. Nothing about
+                // the trace produced this, and the scorer has no retries of
+                // its own, so it must not cost the trace its budget.
+                ScorerFailure::TransientScorerFailed {
+                    reason: format!("NearAiScorerHttpSendFailed: {}", e.without_url()),
+                }
+            })?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .map_err(|e| anyhow!("NearAiScorerHttpBodyReadFailed: {}", e.without_url()))?;
+        let body = resp.text().map_err(|e| {
+            // A response that started and then died mid-body is the same
+            // class of upstream failure as never connecting at all.
+            ScorerFailure::TransientScorerFailed {
+                reason: format!("NearAiScorerHttpBodyReadFailed: {}", e.without_url()),
+            }
+        })?;
         if !status.is_success() {
             // Body may contain a vLLM validation message; surface its
             // length only, not its content (provider strings are not
             // hash-only audit material).
-            return Err(anyhow!(
+            //
+            // `scorer_status_is_transient` decides whether the caller may
+            // charge this to the trace. The label text is identical either
+            // way -- the classification travels in the variant, never in the
+            // string -- so attempt labels already recorded in production stay
+            // byte-comparable with new ones.
+            let reason = format!(
                 "NearAiScorerHttpStatusError status={} body_len={}",
                 status.as_u16(),
                 body.len()
-            ));
+            );
+            return Err(if scorer_status_is_transient(status.as_u16()) {
+                ScorerFailure::TransientScorerFailed { reason }.into()
+            } else {
+                ScorerFailure::ScorerFailed { reason }.into()
+            });
         }
 
         let parsed: CompletionsResponse =

@@ -67157,6 +67157,307 @@ async fn perplexity_score_driver_tick_drains_backlog_then_reports_empty() {
     );
 }
 
+/// Test-only gate service whose scoring failure is TRANSIENT: the upstream
+/// backend was unavailable. Returns the same typed `ScorerFailure` the NEAR AI
+/// scorer returns for a 502 / 402 / timeout, wrapped the way the real chain
+/// wraps it -- `anyhow::Error::new(..)` under the orchestrator's
+/// `.context("PerplexityScorerInferenceFailed")` -- so the driver's downcast
+/// is exercised through a real context layer and not against a bare error.
+struct TransientFailingGateService;
+
+impl TraceGateService for TransientFailingGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        use anyhow::Context as _;
+        Err(anyhow::Error::new(
+            trace_commons_gate_enclave::ScorerFailure::TransientScorerFailed {
+                reason: "NearAiScorerHttpStatusError status=502 body_len=17".to_string(),
+            },
+        ))
+        .context("PerplexityScorerInferenceFailed")
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "transient_failing".into(),
+            gate_policy_version: "transient_failing".into(),
+            gate_version_hash: "sha256:transient_failing".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Sibling of `TransientFailingGateService` carrying the PERMANENT variant of
+/// the same typed error, with BYTE-IDENTICAL `reason` text. The pair proves
+/// the driver reads the classification off the variant and not out of the
+/// message: swap one for the other and only the variant changes.
+struct PermanentTypedFailingGateService;
+
+impl TraceGateService for PermanentTypedFailingGateService {
+    fn evaluate_trace(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        use anyhow::Context as _;
+        Err(anyhow::Error::new(
+            trace_commons_gate_enclave::ScorerFailure::ScorerFailed {
+                reason: "NearAiScorerHttpStatusError status=502 body_len=17".to_string(),
+            },
+        ))
+        .context("PerplexityScorerInferenceFailed")
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "permanent_typed_failing".into(),
+            gate_policy_version: "permanent_typed_failing".into(),
+            gate_version_hash: "sha256:permanent_typed_failing".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Build the driver test state used by the transient-policy tests below.
+fn transient_policy_driver_state(
+    temp: &std::path::Path,
+    db_mirror: Arc<dyn Database>,
+    artifact_store: ConfiguredTraceArtifactStore,
+    gate_service: Arc<dyn TraceGateService>,
+) -> Arc<AppState> {
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service = gate_service;
+    state
+}
+
+/// A transient upstream scoring failure must NOT spend the submission's
+/// attempt budget. `max_attempts: 1` is the sharpest possible setting: under
+/// the old behaviour this single failure bumped attempts to 1, which is the
+/// ceiling, and migration V36's `MAX_ATTEMPTS` filter would then have dropped
+/// the submission from `list_submissions_needing_gate_decision` forever. The
+/// assertion that the attempt row was never created at all is what stops that.
+#[tokio::test]
+async fn score_one_submission_transient_scorer_failure_does_not_bump_attempt_count() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let item = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission");
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = transient_policy_driver_state(
+        temp.path(),
+        db_mirror,
+        artifact_store,
+        Arc::new(TransientFailingGateService),
+    );
+
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 1,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::TransientFailed { label } = outcome else {
+        panic!("expected GateOutcome::TransientFailed, got {outcome:?}");
+    };
+    assert!(!label.is_empty(), "expected a non-empty failure label");
+
+    assert_eq!(
+        db.gate_evaluation_attempts_for(&item.tenant_id, item.submission_id),
+        None,
+        "a transient upstream failure must not touch the attempt counter"
+    );
+    assert!(
+        db.gate_decision_for(&item.tenant_id, item.submission_id)
+            .is_none(),
+        "no gate decision row written on a transient scorer failure"
+    );
+
+    // The submission is still enumerable at the same ceiling that would have
+    // excluded it: it was not charged, so it comes back on a later tick.
+    let still_pending = db
+        .list_submissions_needing_gate_decision(Utc::now(), knobs.max_attempts, 0, 10)
+        .await
+        .expect("re-enumerate backlog");
+    assert_eq!(
+        still_pending.len(),
+        1,
+        "the submission must remain in the scoring backlog"
+    );
+}
+
+/// The permanent twin of the test above. Same typed error, same `reason`
+/// text, different variant -- and this one DOES spend the budget. Without
+/// both halves, a fix that simply stopped bumping for every typed error would
+/// pass.
+#[tokio::test]
+async fn score_one_submission_permanent_typed_scorer_failure_bumps_attempt_count() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let item = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission");
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = transient_policy_driver_state(
+        temp.path(),
+        db_mirror,
+        artifact_store,
+        Arc::new(PermanentTypedFailingGateService),
+    );
+
+    let knobs = PerplexityDriverKnobs {
+        skip_duplicates: false,
+        skip_duplicate_threshold_micros: 900_000,
+        max_attempts: 1,
+    };
+
+    let outcome = score_one_submission(state.as_ref(), &item, &knobs).await;
+    let GateOutcome::Failed { .. } = outcome else {
+        panic!("expected GateOutcome::Failed, got {outcome:?}");
+    };
+
+    assert_eq!(
+        db.gate_evaluation_attempts_for(&item.tenant_id, item.submission_id),
+        Some(1),
+        "a permanent scorer failure must still be charged to the trace"
+    );
+}
+
+/// Tick-level payoff: an upstream outage must not drain the backlog. Five
+/// seeded submissions, a ceiling of 1, and a backend that only ever returns
+/// transient failures. The breaker stops the tick after three, nothing is
+/// charged, and all five submissions are still enumerable afterwards.
+///
+/// This is the production incident in miniature: 58 submissions reached
+/// `attempts >= 5` during a 402 outage and left the scoring set permanently.
+#[tokio::test]
+async fn perplexity_score_driver_tick_transient_outage_excludes_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, "tenant-a", 5);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = transient_policy_driver_state(
+        temp.path(),
+        db_mirror,
+        artifact_store,
+        Arc::new(TransientFailingGateService),
+    );
+
+    let config = PerplexityScoreDriverConfig {
+        interval: StdDuration::from_secs(45),
+        batch_size: 5,
+        knobs: PerplexityDriverKnobs {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+            max_attempts: 1,
+        },
+        backoff_base_seconds: 0,
+    };
+
+    let summary = run_perplexity_score_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick succeeds even though every item fails upstream");
+
+    assert_eq!(
+        summary.transient, MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES,
+        "the breaker must end the tick after {MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES} \
+         consecutive transient failures: {summary:?}"
+    );
+    assert!(
+        summary.breaker_tripped,
+        "a short tick must be distinguishable from a short batch: {summary:?}"
+    );
+    assert_eq!(
+        (
+            summary.scored,
+            summary.skipped_duplicate,
+            summary.cached,
+            summary.failed
+        ),
+        (0, 0, 0, 0),
+        "nothing scored and nothing charged during an upstream outage: {summary:?}"
+    );
+    assert_eq!(
+        db.gate_decision_count(),
+        0,
+        "no gate decision rows written during an upstream outage"
+    );
+
+    let still_pending = db
+        .list_submissions_needing_gate_decision(Utc::now(), config.knobs.max_attempts, 0, 10)
+        .await
+        .expect("re-enumerate backlog");
+    assert_eq!(
+        still_pending.len(),
+        5,
+        "every submission must still be scoreable after the outage"
+    );
+}
+
 /// Test-only gate service that reuses the deterministic in-memory builder for
 /// every hash/version field but overrides the perplexity/peak/novelty
 /// signals with fixed values, so a caller can assert an exact downstream

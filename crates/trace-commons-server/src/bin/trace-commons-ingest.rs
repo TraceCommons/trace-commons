@@ -1723,13 +1723,21 @@ struct PerplexityScoreDriverConfig {
 }
 
 /// Per-tick outcome tally returned by `run_perplexity_score_driver_tick` and
-/// logged by `spawn_perplexity_score_driver_task`.
+/// logged by `spawn_perplexity_score_driver_task`. `failed` counts
+/// submissions that failed PERMANENTLY and had their attempt counter bumped;
+/// `transient` counts submissions whose scoring failed upstream and were NOT
+/// charged for it, so they stay in the backlog for a later tick.
+/// `breaker_tripped` records that the tick stopped early on
+/// `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES` consecutive failures, so a short
+/// tally is distinguishable from a short batch.
 #[derive(Debug, Default, Clone, Copy)]
 struct PerplexityDriverTickSummary {
     scored: usize,
     skipped_duplicate: usize,
     cached: usize,
     failed: usize,
+    transient: usize,
+    breaker_tripped: bool,
 }
 
 /// In-process PII-backstop driver loop config (server-side NEAR AI PII
@@ -9208,6 +9216,8 @@ fn spawn_perplexity_score_driver_task(
                         skipped_duplicate = summary.skipped_duplicate,
                         cached = summary.cached,
                         failed = summary.failed,
+                        transient = summary.transient,
+                        breaker_tripped = summary.breaker_tripped,
                         "Trace Commons perplexity score driver tick completed"
                     );
                 }
@@ -39212,15 +39222,82 @@ async fn run_perplexity_score_driver_tick(
         )
         .await?;
     let mut summary = PerplexityDriverTickSummary::default();
+    // Consecutive per-item failures, reset by any success. See
+    // `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`.
+    let mut consecutive_failures = 0usize;
     for item in &items {
         match score_one_submission(state.as_ref(), item, &config.knobs).await {
-            GateOutcome::Scored { .. } => summary.scored += 1,
-            GateOutcome::SkippedDuplicate { .. } => summary.skipped_duplicate += 1,
-            GateOutcome::Cached { .. } => summary.cached += 1,
-            GateOutcome::Failed { .. } => summary.failed += 1,
+            GateOutcome::Scored { .. } => {
+                summary.scored += 1;
+                consecutive_failures = 0;
+            }
+            GateOutcome::SkippedDuplicate { .. } => {
+                summary.skipped_duplicate += 1;
+                consecutive_failures = 0;
+            }
+            GateOutcome::Cached { .. } => {
+                summary.cached += 1;
+                consecutive_failures = 0;
+            }
+            GateOutcome::TransientFailed { .. } => {
+                summary.transient += 1;
+                consecutive_failures += 1;
+            }
+            GateOutcome::Failed { .. } => {
+                summary.failed += 1;
+                consecutive_failures += 1;
+            }
+        }
+        if consecutive_failures >= MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES {
+            summary.breaker_tripped = true;
+            break;
         }
     }
+    if summary.breaker_tripped {
+        tracing::warn!(
+            consecutive_failures,
+            batch_size = items.len(),
+            processed = summary.scored
+                + summary.skipped_duplicate
+                + summary.cached
+                + summary.failed
+                + summary.transient,
+            "Trace Commons perplexity score driver tick aborted on consecutive failures; \
+             remainder of the batch left untouched"
+        );
+    }
     Ok(summary)
+}
+
+/// How many consecutive per-item failures end a perplexity-scoring tick early.
+///
+/// Transient upstream failures deliberately do not spend a submission's
+/// attempt budget, so without this a dead scoring backend would be re-hit for
+/// every item of every batch, forever -- and unlike the PII backstop, every
+/// one of those hits is a paid inference call. Three matches
+/// `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES` and is below any sane batch size,
+/// so the breaker can actually fire, while staying high enough that a couple
+/// of unrelated bad traces in a row do not stall a healthy backlog. The
+/// remainder of the batch is left completely untouched and is re-enumerated on
+/// the next tick.
+const MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES: usize = 3;
+
+/// True when `error` carries the gate layer's typed transient marker: the
+/// upstream scoring backend was unavailable (transport error, timeout, 5xx, or
+/// an account/rate condition) rather than anything being wrong with the trace.
+///
+/// The classification is read off the error's TYPE, never parsed out of its
+/// message. `NearAiPerplexityScorer` returns a `ScorerFailure`, the
+/// orchestrator adds `.context("PerplexityScorerInferenceFailed")`, and
+/// `evaluate_and_record_gate` lets the whole chain through `?` -- anyhow
+/// preserves the concrete type underneath every context layer, so this
+/// downcast still finds it. A miss is treated as permanent, which preserves
+/// the pre-existing behaviour for every error that is not the scorer's HTTP
+/// boundary.
+fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<trace_commons_gate_enclave::ScorerFailure>()
+        .is_some_and(|err| err.is_transient())
 }
 
 /// Audit actor label recorded for status transitions the PII-backstop driver
@@ -48949,7 +49026,16 @@ enum GateOutcome {
     Cached {
         decision_id: Uuid,
     },
+    /// A permanent failure: the submission's attempt counter was bumped and
+    /// it moves one step closer to `max_attempts`, past which the enumeration
+    /// query stops returning it.
     Failed {
+        label: String,
+    },
+    /// An upstream scoring failure that was NOT charged to the submission.
+    /// Produced only by `score_one_submission`; `evaluate_and_record_gate`
+    /// never returns it. The submission stays in the backlog untouched.
+    TransientFailed {
         label: String,
     },
 }
@@ -50065,11 +50151,20 @@ async fn bump_gate_evaluation_attempt_and_log_exhaustion(
 
 /// Applies the perplexity-scoring driver's per-submission cost controls
 /// (skip-duplicate short-circuit, then cross-submission cache) before
-/// delegating to `evaluate_and_record_gate`. On any hard failure — including
-/// a scoring failure from the delegated call — bumps the submission's
+/// delegating to `evaluate_and_record_gate`. On a hard failure — including a
+/// scoring failure from the delegated call — bumps the submission's
 /// `trace_gate_evaluation_attempts` row so the enumeration query's
 /// exponential backoff (migration V36) can pace retries, logging
 /// `gate_scoring_exhausted` (hash-only) once the attempt ceiling is reached.
+///
+/// The one exception is a TRANSIENT scoring failure — the upstream backend was
+/// unavailable, so nothing is wrong with the trace. That returns
+/// `GateOutcome::TransientFailed` WITHOUT bumping, because a bump there walks
+/// a perfectly good submission to `max_attempts` and out of the enumeration
+/// query for good (see
+/// docs/superpowers/specs/2026-08-26-scoring-driver-transient-policy-design.md).
+/// The remaining bump sites on this path are `db_mirror` failures, which are
+/// left charging the trace as before.
 #[allow(dead_code)]
 async fn score_one_submission(
     state: &AppState,
@@ -50258,6 +50353,24 @@ async fn score_one_submission(
             // leaf errors on this path are hash-only by construction (reqwest
             // URLs are stripped at the scorer).
             let label = format!("{err:#}");
+
+            // A transient upstream failure is the scoring backend's, not the
+            // trace's: log it hash-only and leave the attempt counter alone,
+            // so the submission is re-enumerated on a later tick. Only a
+            // permanent failure -- a request this trace can never satisfy, or
+            // anything else about the trace itself -- may spend the trace's
+            // budget and eventually exclude it from scoring for good.
+            if is_transient_gate_scoring_failure(&err) {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&err),
+                    submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+                    tenant_hash = %sha256_prefixed(&item.tenant_id),
+                    "Trace Commons gate scoring upstream unavailable; \
+                     submission left in backlog, attempt not charged"
+                );
+                return GateOutcome::TransientFailed { label };
+            }
+
             bump_gate_evaluation_attempt_and_log_exhaustion(
                 db,
                 &item.tenant_id,
@@ -50335,7 +50448,9 @@ async fn gate_evaluate_worker_handler(
         GateOutcome::Failed { label } => {
             return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
         }
-        GateOutcome::SkippedDuplicate { .. } | GateOutcome::Cached { .. } => {
+        GateOutcome::SkippedDuplicate { .. }
+        | GateOutcome::Cached { .. }
+        | GateOutcome::TransientFailed { .. } => {
             // evaluate_and_record_gate never produces these variants; the
             // cost-control wrapper that would is not yet wired into this
             // HTTP handler.

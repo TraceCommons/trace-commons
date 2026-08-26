@@ -108,9 +108,165 @@ pub trait TokenRarityScorer: Send + Sync {
     fn score_rarity(&self, plaintext: &[u8], k: usize) -> anyhow::Result<TokenRarityResult>;
 }
 
+/// A scoring failure that carries whether the trace was at fault.
+///
+/// The remote scoring backends this crate's `PerplexityScorer`
+/// implementations talk to can fail for two very different reasons, and
+/// callers that keep a per-trace attempt budget need to tell them apart: a
+/// backend that rejected *this request* will reject it again, while a backend
+/// that was simply unavailable says nothing about the trace at all. Charging
+/// the second kind to a trace's budget eventually excludes a perfectly good
+/// trace from scoring forever.
+///
+/// The split is carried as a variant, never as text inside `reason` -- test it
+/// with [`ScorerFailure::is_transient`]. `Display` is `reason` verbatim so the
+/// hash-only error labels a host records stay byte-identical to the labels the
+/// scorer produced before this type existed.
+///
+/// Mirrors `TraceContributionError` in `trace-commons-protocol`, which does
+/// the same job for the redaction path. That type is not reachable from here:
+/// scoring backends depend on this crate, not on the protocol crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScorerFailure {
+    /// The backend objected to this trace or to the request built from it: a
+    /// prompt that does not fit, a malformed request, a response body whose
+    /// shape is wrong. Retrying spends the caller's budget for nothing.
+    ScorerFailed { reason: String },
+    /// The backend was unavailable -- a transport error, a timeout, a 5xx, or
+    /// an account/rate condition. Nothing is wrong with the trace.
+    ///
+    /// Callers that keep a per-trace attempt budget MUST NOT charge this to
+    /// the trace.
+    TransientScorerFailed { reason: String },
+}
+
+impl ScorerFailure {
+    /// True when the failure was the backend's, not the trace's.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::TransientScorerFailed { .. })
+    }
+
+    /// The hash-safe failure label. Never contains trace content, a URL, or a
+    /// credential -- backends are required to strip those before constructing
+    /// this error.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::ScorerFailed { reason } | Self::TransientScorerFailed { reason } => reason,
+        }
+    }
+}
+
+impl std::fmt::Display for ScorerFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for ScorerFailure {}
+
+/// Whether an HTTP status from a remote scoring backend may be charged to the
+/// trace that provoked it.
+///
+/// The question is not "was this a server error" but "is the trace what the
+/// backend objected to". Only three statuses describe the request we built
+/// from the trace:
+///
+/// * `400 Bad Request` -- malformed, or a prompt past the context window.
+/// * `413 Payload Too Large`
+/// * `422 Unprocessable Entity`
+///
+/// Everything else is transient. That includes every `5xx`, and also `401`,
+/// `402`, `403`, `404`, `408`, and `429`: a revoked key, an exhausted account
+/// balance, a rate limit, or a misconfigured endpoint is a deployment
+/// condition, and a deployment in that state must stall its queue visibly
+/// rather than quietly excluding every trace it touches. `402` in particular
+/// is the status that emptied a scoring backlog in production on 2026-08-26.
+///
+/// Callers bound the cost of the generous default with a consecutive-failure
+/// circuit breaker, not by charging traces.
+pub fn scorer_status_is_transient(status: u16) -> bool {
+    !matches!(status, 400 | 413 | 422)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transient/permanent split is carried by the variant, not by text
+    /// inside `reason`. A caller must never have to parse an error string to
+    /// decide whether a failure is the trace's fault.
+    #[test]
+    fn scorer_failure_transience_is_typed_not_parsed() {
+        let transient = ScorerFailure::TransientScorerFailed {
+            reason: "NearAiScorerHttpStatusError status=502 body_len=17".to_string(),
+        };
+        let permanent = ScorerFailure::ScorerFailed {
+            reason: "NearAiScorerHttpStatusError status=502 body_len=17".to_string(),
+        };
+        assert!(transient.is_transient());
+        assert!(!permanent.is_transient());
+        // Identical `reason` text on both: the classification cannot be
+        // recovered from the message, only from the variant.
+        assert_eq!(transient.to_string(), permanent.to_string());
+        assert_ne!(
+            transient.is_transient(),
+            permanent.is_transient(),
+            "the same reason text must be able to carry either classification"
+        );
+    }
+
+    /// `Display` is the reason verbatim, so a host that records
+    /// `format!("{err}")` as a hash-only attempt label keeps writing exactly
+    /// the labels it wrote before this type existed.
+    #[test]
+    fn scorer_failure_display_is_the_reason_verbatim() {
+        let err = ScorerFailure::TransientScorerFailed {
+            reason: "NearAiScorerHttpSendFailed: operation timed out".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "NearAiScorerHttpSendFailed: operation timed out"
+        );
+        assert_eq!(err.reason(), err.to_string());
+    }
+
+    /// The typed error survives an `anyhow` wrap and a `.context()` layer, so
+    /// a driver several call frames above the scorer can still read the
+    /// classification off the type.
+    #[test]
+    fn scorer_failure_survives_anyhow_context_for_downcast() {
+        use anyhow::Context;
+        let err: anyhow::Error = anyhow::Error::new(ScorerFailure::TransientScorerFailed {
+            reason: "NearAiScorerHttpStatusError status=502 body_len=17".to_string(),
+        });
+        let wrapped = Err::<(), _>(err)
+            .context("PerplexityScorerInferenceFailed")
+            .context("TraceGateEvaluationFailed")
+            .unwrap_err();
+        let found = wrapped
+            .downcast_ref::<ScorerFailure>()
+            .expect("the concrete error must survive two context layers");
+        assert!(found.is_transient());
+    }
+
+    /// Only the three statuses that describe the request built from the trace
+    /// are chargeable. Everything else -- including the 402 that emptied a
+    /// production backlog -- is the backend's problem.
+    #[test]
+    fn only_trace_attributable_statuses_are_permanent() {
+        for permanent in [400u16, 413, 422] {
+            assert!(
+                !scorer_status_is_transient(permanent),
+                "status {permanent} must be chargeable to the trace"
+            );
+        }
+        for transient in [401u16, 402, 403, 404, 408, 429, 500, 502, 503, 504] {
+            assert!(
+                scorer_status_is_transient(transient),
+                "status {transient} must not be chargeable to the trace"
+            );
+        }
+    }
     use sha2::{Digest, Sha256};
 
     /// Local hash-derived fixture standing in for the enclave crate's

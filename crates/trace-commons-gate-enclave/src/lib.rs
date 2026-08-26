@@ -30,7 +30,8 @@ pub mod vector_index_usearch;
 pub use trace_commons_gate_api::{
     ChunkPerplexity, Embedder, EnclaveGateOrchestratorConfig, InsertedChunkEntry,
     MOCK_EMBEDDING_DIM, NearestNeighbor, OrchestrationDecision, PerplexityOnlyOutcome,
-    PerplexityResult, PerplexityScorer, TokenRarityResult, TokenRarityScorer, VectorIndex,
+    PerplexityResult, PerplexityScorer, ScorerFailure, TokenRarityResult, TokenRarityScorer,
+    VectorIndex, scorer_status_is_transient,
 };
 
 pub use embedder::MockEmbedder;
