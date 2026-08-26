@@ -1080,19 +1080,68 @@ fn replay_value_is_populated(value: &Value) -> bool {
 /// a trace that carries payloads while declaring it does not would take the
 /// Low-risk acceptance path and skip the PII backstop entirely.
 ///
+/// Object KEYS count as content too, and are decided by an ALLOW-LIST rather
+/// than an exclusion list. A key is as free-form as the string beside it --
+/// `{"someone@example.com": true}` has nothing but booleans for values -- and
+/// the rescrub driver already classifies keys (`redact_envelope_side_channels`
+/// rewrites them, and the prose backstop reads them), so ignoring keys here
+/// meant the one component that would catch key-borne content never got
+/// enrolled: enrolment is what this predicate decides.
+///
+/// The allow-list is what makes that safe. An exclusion list of "harmless"
+/// key names would be exactly the guess this function must not make, because
+/// an emitter can put content under a key name nobody excluded. An allow-list
+/// inverts it: `EMITTER_LITERAL_PAYLOAD_KEYS` holds the key strings this
+/// workspace's own emitters write, which are fixed source literals and
+/// therefore provably not content, and every other non-blank key counts. A new emitter
+/// that hides content in a key is not on the list, so it is declared --
+/// fail-closed by construction.
+///
 /// That leaves known over-declaration in place rather than guessing: an
-/// opaque provenance marker (`{"record_type": "system"}`), a bare
-/// `{"tool_call_id": ...}`, and the capture path's `{"state": "Completed"}`
-/// all still count, because excluding them means judging particular key names
-/// and a key name is exactly what an emitter could put content under.
+/// opaque provenance marker (`{"record_type": "system"}`) and a bare
+/// `{"tool_call_id": ...}` still count.
 pub fn payload_carries_readable_content(payload: &Value) -> bool {
     match payload {
         Value::Null | Value::Bool(_) => false,
         Value::Number(_) => true,
         Value::String(text) => !text.trim().is_empty(),
         Value::Array(items) => items.iter().any(payload_carries_readable_content),
-        Value::Object(fields) => fields.values().any(payload_carries_readable_content),
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            key_carries_readable_content(key) || payload_carries_readable_content(value)
+        }),
     }
+}
+
+/// The object keys the trace builders write as fixed source literals.
+///
+/// Read off the emitters, not guessed:
+///
+/// - `has_arguments` / `has_result` / `has_error` are the withheld-payload
+///   markers `RawTraceContribution::from_capture_turns` emits on `ToolCall`
+///   and `ToolResult` when `include_tool_payloads` is false.
+/// - `state` is the turn-state key the same function writes on every user
+///   message; its value is `null` on a turn that recorded no state.
+/// - `arguments` / `rationale` are the wrapper keys under which the payload
+///   itself travels -- written by `from_capture_turns` when payloads ARE
+///   included, and by the contributor crate's `raw_event_for`, which names an
+///   adapter's argument object so replay-sufficiency can find it.
+///
+/// Every entry is a literal in this workspace's source, which is what makes
+/// exempting it safe: a literal cannot be contributor content, so exempting
+/// one cannot hide anything. Values are still inspected in every case, so a
+/// wrapper key that actually wraps something still declares a payload.
+const EMITTER_LITERAL_PAYLOAD_KEYS: [&str; 6] = [
+    "has_arguments",
+    "has_result",
+    "has_error",
+    "state",
+    "arguments",
+    "rationale",
+];
+
+fn key_carries_readable_content(key: &str) -> bool {
+    let key = key.trim();
+    !key.is_empty() && !EMITTER_LITERAL_PAYLOAD_KEYS.contains(&key)
 }
 
 fn payload_carries_any(payload: &Value, keys: &[&str]) -> bool {
@@ -4558,6 +4607,42 @@ pub fn derive_envelope_content_presence(
 /// Only moves flags from `false` → `true`. Over-reporting (true flags on an
 /// empty payload) is left alone: that is a stricter declaration and does not
 /// open an acceptance path the payload did not earn.
+///
+/// # Why not a downward correction
+///
+/// The asymmetry has a real cost, and it is worth stating rather than
+/// leaving to be rediscovered. `docs/trace-spec.md` defines these flags as a
+/// factual declaration of what the envelope contains, so on the face of it
+/// clearing a flag the payload does not support is as justified as setting
+/// one. It would also fix already-deployed clients immediately: a client that
+/// declares `tool_payloads_included: true` for a withheld-payload marker
+/// stays at Medium residual risk and keeps being quarantined until it is
+/// upgraded, and the server half of that fix reaches nobody in the field.
+///
+/// It is still not done, for two reasons that are about this predicate rather
+/// than about the flags:
+///
+/// 1. The two directions are not symmetric in what a mistake costs. Nothing
+///    consumes these flags as PERMISSION -- authorization lives in
+///    `consent.scopes` -- but both consumers are protective controls:
+///    [`residual_risk`] floors a declaring envelope at Medium, and the
+///    ingest PII-backstop hold enrols on either flag. An upward correction
+///    that fires wrongly costs a needless quarantine; a downward correction
+///    that fires wrongly removes the backstop hold and the Medium floor from
+///    a trace that does carry content. `derive_envelope_content_presence` is
+///    deliberately heuristic and deliberately incomplete, which is safe only
+///    while its false negatives merely fail to ADD a control.
+/// 2. It has already been wrong in exactly that direction. Until this
+///    predicate learned to read object keys, `{"someone@example.com": true}`
+///    derived as no content at all. Under a downward correction that
+///    envelope's flags would have been cleared and it would have taken the
+///    Low-risk acceptance path. The envelope carries no signal for which
+///    client rule produced a declaration, so the server cannot tell a stale
+///    over-declaration from an honest one.
+///
+/// Fielded clients are therefore corrected by upgrading the client (which is
+/// where the declaration is derived) or by an operator re-decision, not by
+/// the server clearing the contributor's own statement about their data.
 ///
 /// Returns the presence that was derived, so callers can log or assert.
 pub fn reconcile_consent_declarations(
@@ -9311,13 +9396,75 @@ mod tests {
     }
 
     #[test]
+    fn a_content_bearing_key_is_content() {
+        use super::*;
+        // Values were the only thing inspected, so an emitter that put the
+        // content in the KEY declared nothing: all-boolean values, no
+        // payload, no PII-backstop hold, Low-risk acceptance. The rescrub
+        // driver classifies keys, so the component that would catch this
+        // never got enrolled -- enrolment is what this predicate decides.
+        for payload in [
+            serde_json::json!({"someone@example.com": true}),
+            serde_json::json!({"/Users/someone/notes.txt": null}),
+            serde_json::json!({"has_result": {"someone@example.com": true}}),
+            serde_json::json!([{"someone@example.com": false}]),
+        ] {
+            assert!(
+                payload_carries_readable_content(&payload),
+                "a key is content: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_borne_payload_is_declared() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(marker_event(
+            serde_json::json!({"someone@example.com": true}),
+        ));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.tool_payloads);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn every_literal_key_the_emitters_write_stays_a_marker() {
+        use super::*;
+        // The allow-list is exactly what `from_capture_turns` and the
+        // contributor crate's `raw_event_for` write as source literals.
+        // Anything else is content by default.
+        for payload in [
+            serde_json::json!({
+                "has_arguments": false,
+                "has_result": true,
+                "has_error": false,
+            }),
+            serde_json::json!({"has_result": true, "has_error": false}),
+            serde_json::json!({"state": null}),
+            // The payload wrapper keys, wrapping nothing readable. A real
+            // argument NAME is not on the list and does declare a payload --
+            // covered by `a_content_bearing_key_is_content`.
+            serde_json::json!({"arguments": {"has_result": true}}),
+            serde_json::json!({"arguments": {}, "rationale": ""}),
+        ] {
+            assert!(
+                !payload_carries_readable_content(&payload),
+                "an emitter's own literal key is not a payload: {payload}"
+            );
+        }
+    }
+
+    #[test]
     fn a_nested_marker_is_still_a_marker() {
         use super::*;
         // Containers are walked: an object whose every leaf is a boolean
         // carries nothing, however deeply it is wrapped.
         assert!(!payload_carries_readable_content(&serde_json::json!({
-            "outer": {"inner": [true, false]},
-            "flag": null,
+            "has_result": {"has_error": [true, false]},
+            "has_arguments": null,
         })));
     }
 
@@ -9344,8 +9491,8 @@ mod tests {
             serde_json::json!(true),
             serde_json::json!({}),
             serde_json::json!([]),
-            serde_json::json!({"s": ""}),
-            serde_json::json!({"s": "   "}),
+            serde_json::json!({"has_result": ""}),
+            serde_json::json!({"has_result": "   "}),
         ] {
             assert!(
                 !payload_carries_readable_content(&payload),

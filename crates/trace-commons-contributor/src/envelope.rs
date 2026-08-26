@@ -542,9 +542,12 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
         // A structured payload is tool-call content regardless of event kind.
         // A bare `tool_name` deliberately does NOT count: the name is metadata
         // about which tool ran, not the payload the flag declares. Neither
-        // does a marker whose every value is a boolean or null -- the same
-        // rule the server half applies, from the same function, because the
-        // two derivations are required to agree.
+        // does the capture path's withheld-payload marker -- an object whose
+        // keys are all fixed marker names and whose values are all booleans
+        // or nulls. Any other non-blank key IS content, because a key is as
+        // free-form as the string beside it. All of that is the same rule the
+        // server half applies, from the same function, because the two
+        // derivations are required to agree.
         if trace_commons_protocol::trace_contribution::payload_carries_readable_content(
             &event.structured_payload,
         ) {
@@ -1462,6 +1465,34 @@ mod tests {
         assert!(
             !raw.consent.tool_payloads_included,
             "a payload of booleans carries nothing to declare"
+        );
+    }
+
+    /// A payload can carry its content in the KEY. Values were the only
+    /// thing the declaration inspected, so `{"someone@example.com": true}`
+    /// declared nothing, took the Low-risk acceptance path, and skipped the
+    /// server-side PII backstop -- which does classify keys.
+    #[test]
+    fn a_content_bearing_key_is_declared_as_a_tool_payload() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::json!({"someone@example.com": true}),
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+            tool_call_id: None,
+            success: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            raw.consent.tool_payloads_included,
+            "a key is as free-form as the string beside it, and must be \
+             declared"
         );
     }
 
