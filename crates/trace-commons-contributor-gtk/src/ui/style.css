@@ -440,3 +440,21 @@ row:selected {
 .tc-empty {
   background-color: @tc_bg;
 }
+
+/* --- The correction box -------------------------------------------
+   The one place in this window a contributor types text that is stored
+   as they write it. It is drawn as an ordinary field -- surface fill,
+   hairline, the same 8px radius as `.tc-card` -- rather than as anything
+   that reads as emphasis: the disclosure under it does the persuading,
+   and a box shouting for attention would compete with it. */
+
+.tc-field {
+  background-color: @tc_surface;
+  border: 1px solid @tc_line;
+  border-radius: 8px;
+}
+
+.tc-field text {
+  background-color: @tc_surface;
+  color: @tc_ink;
+}

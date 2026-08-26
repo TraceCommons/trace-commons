@@ -114,6 +114,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private bool _failed;
     private bool _deciding;
     private string? _verdict;
+    private string _correction = string.Empty;
+    private bool _correctionRefused;
     private PreviewTab _tab = PreviewTab.Search;
 
     public PreviewSheetViewModel(DaemonHost host, QueueEntryViewModel entry)
@@ -345,6 +347,75 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     public string VerdictCaption => VerdictCopy.Caption;
 
+    /// <summary>
+    /// What the contributor wrote in the correction box.
+    /// </summary>
+    /// <remarks>
+    /// Optional throughout and never part of <see cref="CanContribute"/>,
+    /// for the same reason the verdict is not: an approval that refused to
+    /// proceed until something was typed would be asking for an explanation
+    /// under duress.
+    ///
+    /// Capped at <see cref="CorrectionCopy.MaxCharacters"/> here, where the
+    /// person can see it happen, rather than letting the daemon refuse the
+    /// submission as <c>correction-too-long</c> after the click.
+    /// </remarks>
+    public string Correction
+    {
+        get => _correction;
+        set
+        {
+            string clipped = value ?? string.Empty;
+            if (clipped.Length > CorrectionCopy.MaxCharacters)
+            {
+                clipped = clipped[..CorrectionCopy.MaxCharacters];
+            }
+
+            Set(ref _correction, clipped);
+        }
+    }
+
+    /// <summary>
+    /// Whether the correction control is on screen: only under
+    /// <c>partly</c> and <c>failed</c>.
+    /// </summary>
+    /// <remarks>
+    /// A guard, not only semantics. You cannot correct a run you have just
+    /// called successful, so the surface for correction-shaped credit
+    /// farming is halved and the field appears only where a correction is
+    /// meaningful. The daemon enforces the same rule
+    /// (<c>correction-needs-outcome</c>) rather than trusting this.
+    /// </remarks>
+    public bool IsCorrectionOffered =>
+        _verdict is Verdict.Partly or Verdict.Failed;
+
+    public string CorrectionQuestion => CorrectionCopy.Question;
+
+    public string CorrectionPlaceholder => CorrectionCopy.Placeholder;
+
+    /// <summary>
+    /// The disclosure under the correction box, printed in full.
+    ///
+    /// Load-bearing in the strongest sense on this sheet. Everything else
+    /// here is scrubbed locally and scrubbed again on the server; a
+    /// correction is the one exception, and the published policy page does
+    /// not yet say so. Until it does, this sentence is the whole of what a
+    /// contributor is told. Do not shorten it for layout.
+    /// </summary>
+    public string CorrectionCaption => CorrectionCopy.Caption;
+
+    /// <summary>
+    /// Set when the daemon refused this submission because the correction
+    /// contains something credential-shaped. The sheet stays open with the
+    /// text still in the box: the next thing the contributor has to do is
+    /// edit it.
+    /// </summary>
+    public bool WasRefusedForACorrectionCredential => _correctionRefused;
+
+    public string CorrectionRefusalHeadline => CorrectionCopy.CredentialHeadline;
+
+    public string CorrectionRefusalBody => CorrectionCopy.CredentialBody;
+
     public bool IsWorkedSelected => _verdict == Verdict.Worked;
 
     public bool IsPartlySelected => _verdict == Verdict.Partly;
@@ -367,10 +438,22 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         _verdict = _verdict == Verdict.Require(outcome) ? null : outcome;
 
+        // A contributor who wrote a correction under "Failed" and then
+        // answered "Worked" has withdrawn it. Clearing it here is what stops
+        // text nobody can see any more from riding along on the approval.
+        if (!IsCorrectionOffered)
+        {
+            _correction = string.Empty;
+            _correctionRefused = false;
+            Raise(nameof(Correction));
+            Raise(nameof(WasRefusedForACorrectionCredential));
+        }
+
         Raise(nameof(SelectedVerdict));
         Raise(nameof(IsWorkedSelected));
         Raise(nameof(IsPartlySelected));
         Raise(nameof(IsFailedSelected));
+        Raise(nameof(IsCorrectionOffered));
     }
 
     /// <summary>
@@ -532,6 +615,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        _correctionRefused = false;
+        Raise(nameof(WasRefusedForACorrectionCredential));
+
         SetDeciding(true);
 
         DaemonResponse response = await _host
@@ -548,7 +634,22 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        Decided?.Invoke(PreviewDecision.Approved(ApprovalHold.Parse(response)));
+        ApprovalHold? hold = ApprovalHold.Parse(response);
+
+        // The one refusal the contributor caused and can fix. The sheet
+        // stays open -- no `Decided` -- with the correction still in the
+        // box, because the next thing they have to do is edit it, and it
+        // says so in its own words rather than as a line in the submit
+        // toast. Nothing here is derived from the response beyond the fixed
+        // label, so no correction text can reach the screen a second time.
+        if (hold?.WasRefusedForACorrectionCredential == true)
+        {
+            _correctionRefused = true;
+            Raise(nameof(WasRefusedForACorrectionCredential));
+            return;
+        }
+
+        Decided?.Invoke(PreviewDecision.Approved(hold));
     }
 
     /// <summary>
@@ -578,7 +679,31 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// <c>outcome-invalid</c>, and a refusal approves nothing.
     /// </remarks>
     private string ApproveParams() =>
-        SubmitParams.ForEntry(Entry.EntryId, SelectedVerdict);
+        SubmitParams.ForEntry(Entry.EntryId, SelectedVerdict, CorrectionToSend);
+
+    /// <summary>
+    /// What would actually be sent for the correction box, or null for a box
+    /// that is hidden or holds nothing but whitespace.
+    /// </summary>
+    /// <remarks>
+    /// The visibility check is deliberate rather than redundant. The box is
+    /// emptied when it is hidden, so this would answer null anyway; the
+    /// check states the rule -- a hidden control contributes nothing -- so
+    /// it survives a future change that stops emptying on hide.
+    /// </remarks>
+    private string? CorrectionToSend
+    {
+        get
+        {
+            if (!IsCorrectionOffered)
+            {
+                return null;
+            }
+
+            string written = _correction.Trim();
+            return written.Length == 0 ? null : written;
+        }
+    }
 
     /// <summary>
     /// This sheet's entry, named alone. What <c>dismiss</c> sends -- and it

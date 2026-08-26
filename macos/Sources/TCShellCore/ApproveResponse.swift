@@ -65,6 +65,18 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case holdUntil = "hold_until"
     }
 
+    /// Whether this response is the correction-credential refusal.
+    ///
+    /// Distinguished from every other skip because it is the only one the
+    /// contributor caused and the only one they can fix, and because the
+    /// advice that goes with it -- rotate the credential, it has already
+    /// been typed -- is not advice any other refusal carries. A caller that
+    /// sees this shows `CorrectionCopy.credentialHeadline` and its body
+    /// instead of the ordinary toast.
+    public var wasRefusedForACorrectionCredential: Bool {
+        skipped.contains { $0.reasonLabel == CorrectionCopy.credentialRefusalLabel }
+    }
+
     /// The sum of the `redactions` map -- what `SubmitToast` names, never a
     /// category.
     public var totalRedactions: UInt64 {
