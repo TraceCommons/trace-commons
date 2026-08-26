@@ -75,38 +75,34 @@ The code must not ship before the text is published.
 
 ---
 
-## OPEN QUESTION -- this clause cannot be published until it is settled
+## RESOLVED: neither pass rewrites a correction
 
-Writing this draft exposed a decision the design did not make.
+A correction is rewritten by two passes today
+(`trace_contribution.rs:3671` and `:3673`): the deterministic pass, and the
+NEAR AI prose-PII filter. The earlier decision addressed only the first, which
+would have left "stored exactly as you write it" untrue.
 
-A correction is rewritten by **two** passes today, not one
-(`trace_contribution.rs:3671` and `:3673`):
+**Decision: neither rewrites it.** A correction reaches the corpus as typed,
+with credential detection the only control.
 
-1. `redact_text_with_state` -- the deterministic passes: secrets, paths,
-   emails, the cue-gated entropy sweep.
-2. `apply_privacy_filter_to_text` -- the NEAR AI prose-PII filter, which
-   rewrites the text it is given.
+The reasoning is that a correction is an intentional contribution rather than
+incidental capture. Everything else in a trace is recorded as a side effect of
+working; a correction is composed deliberately, for submission, by someone who
+knows where it goes and chooses every word. Treating deliberate authorship
+with the same suspicion as incidental capture would remove the value it exists
+to add.
 
-The decision recorded so far was "skip the semantic passes, keep secret
-detection". That addressed only the first. If the second still runs, a
-correction naming a person is still rewritten, and **"stored exactly as you
-write it" is not true** -- the clause above would be misleading as drafted.
+The clause above therefore stands as drafted.
 
-Two coherent positions, and the clause text differs between them:
+Implementation consequence: secret detection is inside
+`redact_text_with_state` along with paths and emails, so this is a
+decomposition of that function rather than a skip. It should be an explicit
+correction path, not flags threaded through the general one.
 
-- **Neither pass rewrites.** The correction reaches the corpus as typed, with
-  credential detection the only control. Maximum fidelity, and the clause
-  above stands as written. It also means contributor prose is the least
-  reviewed content in the corpus, which is a strange place to end up.
-- **The prose filter still runs.** Personal information is removed, paths and
-  identifiers survive. The clause must then say the correction may be
-  modified to remove personal information, not that it is kept as written.
-
-An implementation note that bears on the choice: secret detection is inside
-`redact_text_with_state` along with paths and emails. "Keep secrets, drop the
-rest" is therefore not a skip but a decomposition of that function, and
-whichever position is taken should be implemented as an explicit correction
-path rather than by threading flags through the general one.
+The residual case is a correction naming a THIRD party, who has consented to
+nothing. The contributor's own intent does not speak for them. That is handled
+by the prose warning in the clause and is listed above as a counsel judgment
+call -- it is the one part of this that a lawyer may want to overrule.
 
 ## What is NOT claimed, deliberately
 
