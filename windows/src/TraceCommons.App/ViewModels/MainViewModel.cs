@@ -529,8 +529,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// call, not after: <c>approve</c> can move entries out of the pending
     /// state by the time it returns, and Undo needs to know which of today's
     /// ids to recall, not tomorrow's.
+    ///
+    /// <paramref name="outcome"/> is the contributor's verdict, and it is
+    /// <c>null</c> for the plain one-click "Submit all" -- that button never
+    /// asked the question, so its call must omit the key entirely rather than
+    /// send an empty one. A value supplied here applies to every entry this
+    /// approval covers, which is what the "Submit all as..." menu beside the
+    /// button is for. See <see cref="Verdict"/>.
     /// </remarks>
-    public async Task SubmitProjectAsync(string projectId)
+    public async Task SubmitProjectAsync(string projectId, string? outcome = null)
     {
         if (string.IsNullOrWhiteSpace(projectId))
         {
@@ -545,7 +552,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             .ToList();
 
         DaemonResponse response = await _host
-            .CallAsync(DaemonProtocol.Methods.Approve, SubmitParams.ForProject(projectId))
+            .CallAsync(
+                DaemonProtocol.Methods.Approve,
+                SubmitParams.ForProject(projectId, outcome))
             .ConfigureAwait(true);
 
         ApplySubmitOutcome(response, candidateEntryIds);

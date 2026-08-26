@@ -462,6 +462,28 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         await ViewModel.ContributeAsync();
     }
 
+    /// <summary>
+    /// The three verdict toggles. One handler each rather than one handler
+    /// reading a Tag: which of the three was clicked is the whole content of
+    /// the event, and it should not be recoverable only by string comparison.
+    /// </summary>
+    /// <remarks>
+    /// The view model owns the selection, including clearing it when the
+    /// already-selected one is clicked again -- see
+    /// <see cref="PreviewSheetViewModel.ToggleVerdict"/>. These handlers do
+    /// not read <c>IsChecked</c>: the toggles' checked state is bound one-way
+    /// FROM the view model, so it is the answer being rendered, never the
+    /// place the answer is kept.
+    /// </remarks>
+    private void OnVerdictWorked(object sender, RoutedEventArgs e) =>
+        ViewModel.ToggleVerdict(Verdict.Worked);
+
+    private void OnVerdictPartly(object sender, RoutedEventArgs e) =>
+        ViewModel.ToggleVerdict(Verdict.Partly);
+
+    private void OnVerdictFailed(object sender, RoutedEventArgs e) =>
+        ViewModel.ToggleVerdict(Verdict.Failed);
+
     private void OnClose(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
 
     /// <summary>Raised when the sheet is finished with, for any reason.</summary>
