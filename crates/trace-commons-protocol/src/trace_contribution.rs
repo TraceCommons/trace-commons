@@ -7126,7 +7126,15 @@ mod tests {
             assert!(!out.contains(value), "bare cue stopped firing: {out}");
             assert!(rep.blocked_secret_detected);
         }
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // `bare()`, not `new(vec![]).unwrap()`. `new` reads
+        // `TRACE_PRIVACY_FILTER_BACKEND`, and a sibling test in this file
+        // deliberately sets it to `garbage` to prove fail-closed config
+        // handling; run concurrently, `new` returns Err and the unwrap
+        // panics here with no relation to what this test asserts. Nothing
+        // below consults the attached filter -- the named-prefix patterns
+        // come from the leak detector -- so the env-free constructor is
+        // both correct and the precise one. Do not "simplify" it back.
+        let r = DeterministicTraceRedactor::bare();
         for text in [
             "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
             "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
