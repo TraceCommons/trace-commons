@@ -579,6 +579,25 @@ pub fn apply_granted_scopes(
         .unwrap_or(ConsentScope::DebuggingEvaluation);
 }
 
+/// Stamp the contributor's verdict onto an already-redacted envelope.
+///
+/// The daemon path cannot supply a verdict at build time: the envelope is
+/// built for the preview, before the contributor has answered, and the
+/// upload sends those stored bytes rather than rebuilding. So the verdict is
+/// applied here, the same post-redaction mutation `apply_granted_scopes`
+/// performs.
+///
+/// Writes `task_success` only. `user_feedback` is a different question --
+/// satisfaction rather than completion -- and is deliberately left alone;
+/// see `ContributorVerdict::outcome`.
+pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: ContributorVerdict) {
+    envelope.outcome.task_success = match verdict {
+        ContributorVerdict::Worked => TaskSuccess::Success,
+        ContributorVerdict::Partly => TaskSuccess::Partial,
+        ContributorVerdict::Failed => TaskSuccess::Failure,
+    };
+}
+
 /// Whether the built events actually carry message text / tool payloads.
 ///
 /// `docs/trace-spec.md` defines these consent booleans as a FACTUAL

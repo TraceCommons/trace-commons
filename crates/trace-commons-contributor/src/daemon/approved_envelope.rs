@@ -19,6 +19,15 @@
 //! is what was sent" stops being an equality check and becomes literally
 //! true.
 //!
+//! One bounded exception. The uploader stamps the contributor's verdict onto
+//! `outcome.task_success` after loading and digest-checking these bytes, so
+//! the envelope sent differs from the envelope stored by exactly that field.
+//! The verdict is collected at approval time, after the preview was rendered,
+//! and it is an output of the approval rather than an input that existed when
+//! the preview was built. The digest pin therefore describes the previewed
+//! bytes; it is not a claim about the final wire bytes. See
+//! `envelope::apply_verdict`.
+//!
 //! **These files are redacted trace content at rest.** That is the same
 //! deliberate, bounded exemption `preview` already carries (see the
 //! `preview` module doc and the IPC contract's "The preview exemption"):
