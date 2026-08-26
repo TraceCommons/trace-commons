@@ -1107,9 +1107,17 @@ fn has_text(content: Option<&String>) -> bool {
     content.is_some_and(|text| !text.trim().is_empty())
 }
 
+/// Arguments are read from the payload ONLY.
+///
+/// `redacted_content` used to count here as well, which sounded generous and
+/// was actively wrong: on the web-history path a tool call's `content` was the
+/// tool's RESULT, so every call that came back with anything scored as though
+/// it carried the arguments to re-issue it. The arguments third of the replay
+/// measure could be satisfied by never recording an argument at all. Every
+/// emitter in the tree now puts arguments in the payload under one of
+/// [`REPLAY_ARGUMENT_KEYS`], and none of them puts arguments in `content`.
 fn event_carries_arguments(event: &TraceContributionEvent) -> bool {
-    has_text(event.redacted_content.as_ref())
-        || payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
+    payload_carries_any(&event.structured_payload, REPLAY_ARGUMENT_KEYS)
 }
 
 fn event_carries_result(event: &TraceContributionEvent) -> bool {
@@ -1430,17 +1438,44 @@ pub struct RawTraceContribution {
     pub value: ValueMetadata,
 }
 
+/// The pre-redaction event an emitter builds.
+///
+/// This deliberately mirrors [`TraceContributionEvent`] field for field,
+/// minus the ones redaction derives (`tool_category`, `side_effect`) and
+/// minus the redacted text itself. It did not, and the four fields it was
+/// missing -- `parent_event_id`, `tool_call_id`, `success` and
+/// `failure_modes` -- were consequently unreachable for every emitter in the
+/// tree: the envelope modelled them, the conversion below hardcoded them
+/// empty, and no caller had anywhere to put them. That is what made the 86
+/// failed traces in the pilot corpus undiagnosable (issue #298). None of the
+/// four is user content, so none of them depends on a consent decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawTraceContributionEvent {
     pub event_id: Uuid,
+    /// The event this one answers or follows from -- a result naming its
+    /// call, a reasoning step naming what it explains. Makes causal order
+    /// explicit where array order is the only other signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<Uuid>,
     pub event_type: TraceContributionEventType,
     pub timestamp: DateTime<Utc>,
     pub content: Option<String>,
     pub structured_payload: Value,
     pub tool_name: Option<String>,
+    /// The harness's own id for the call, carried so a result can be paired
+    /// with its call without relying on array order. Redaction still accepts
+    /// the older spelling inside `structured_payload` as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     pub latency_ms: Option<u64>,
     pub token_counts: Option<TokenCounts>,
     pub cost_usd: Option<Decimal>,
+    /// Whether this step did what it was asked. `None` means the emitter does
+    /// not know, which is not the same as failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_modes: Vec<TraceFailureMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1460,6 +1495,11 @@ pub struct RawTraceCaptureTurn {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RawTraceCaptureToolCall {
     pub name: String,
+    /// The harness's own id for this call, when it recorded one. Carried so
+    /// the result event below can name the call it answers; absent it, a
+    /// consumer is back to array order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// The arguments the call was issued with.
     ///
     /// A consumer rebuilding a trace as a runnable task needs these: the tool
@@ -1484,6 +1524,11 @@ pub struct RecordedTraceContributionOptions {
     pub consent_scopes: Vec<ConsentScope>,
     pub channel: TraceChannel,
     pub engine_version: Option<String>,
+    /// The model the captured session ran on. `from_recorded_trace` reads it
+    /// off the recording; the capture-turn path has no equivalent, so it has
+    /// to be supplied here -- it was hardcoded `None`, which is why
+    /// `model_name` was present on 3 of 330 envelopes in the pilot corpus.
+    pub model_name: Option<String>,
     pub feature_flags: BTreeMap<String, String>,
     pub pseudonymous_contributor_id: Option<String>,
     pub tenant_scope_ref: Option<String>,
@@ -1498,6 +1543,7 @@ impl Default for RecordedTraceContributionOptions {
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
             channel: TraceChannel::Cli,
             engine_version: None,
+            model_name: None,
             feature_flags: BTreeMap::new(),
             pseudonymous_contributor_id: None,
             tenant_scope_ref: None,
@@ -1514,20 +1560,27 @@ impl RawTraceContribution {
         let created_at = Utc::now();
         let mut events = Vec::new();
         let mut required_tools = BTreeSet::new();
+        // Which event carried each call, so the result that answers it can
+        // name its parent instead of relying on array order.
+        let mut call_event_ids: BTreeMap<&str, Uuid> = BTreeMap::new();
 
         for step in &trace.steps {
             match &step.response {
                 TraceResponse::UserInput { content } => {
                     events.push(RawTraceContributionEvent {
                         event_id: Uuid::new_v4(),
+                        parent_event_id: None,
                         event_type: TraceContributionEventType::UserMessage,
                         timestamp: created_at,
                         content: options.include_message_text.then(|| content.clone()),
                         structured_payload: Value::Null,
                         tool_name: None,
+                        tool_call_id: None,
                         latency_ms: None,
                         token_counts: None,
                         cost_usd: None,
+                        success: None,
+                        failure_modes: Vec::new(),
                     });
                 }
                 TraceResponse::Text {
@@ -1537,17 +1590,21 @@ impl RawTraceContribution {
                 } => {
                     events.push(RawTraceContributionEvent {
                         event_id: Uuid::new_v4(),
+                        parent_event_id: None,
                         event_type: TraceContributionEventType::AssistantMessage,
                         timestamp: created_at,
                         content: options.include_message_text.then(|| content.clone()),
                         structured_payload: Value::Null,
                         tool_name: None,
+                        tool_call_id: None,
                         latency_ms: None,
                         token_counts: Some(TokenCounts {
                             input_tokens: *input_tokens,
                             output_tokens: *output_tokens,
                         }),
                         cost_usd: None,
+                        success: None,
+                        failure_modes: Vec::new(),
                     });
                 }
                 TraceResponse::ToolCalls {
@@ -1568,19 +1625,25 @@ impl RawTraceContribution {
                             })
                         };
 
+                        let event_id = Uuid::new_v4();
+                        call_event_ids.insert(tool_call.id.as_str(), event_id);
                         events.push(RawTraceContributionEvent {
-                            event_id: Uuid::new_v4(),
+                            event_id,
+                            parent_event_id: None,
                             event_type: TraceContributionEventType::ToolCall,
                             timestamp: created_at,
                             content: None,
                             structured_payload,
                             tool_name: Some(tool_call.name.clone()),
+                            tool_call_id: Some(tool_call.id.clone()),
                             latency_ms: None,
                             token_counts: Some(TokenCounts {
                                 input_tokens: *input_tokens,
                                 output_tokens: *output_tokens,
                             }),
                             cost_usd: None,
+                            success: None,
+                            failure_modes: Vec::new(),
                         });
                     }
                 }
@@ -1590,6 +1653,7 @@ impl RawTraceContribution {
                 required_tools.insert(expected.name.clone());
                 events.push(RawTraceContributionEvent {
                     event_id: Uuid::new_v4(),
+                    parent_event_id: call_event_ids.get(expected.tool_call_id.as_str()).copied(),
                     event_type: TraceContributionEventType::ToolResult,
                     timestamp: created_at,
                     content: options
@@ -1599,9 +1663,12 @@ impl RawTraceContribution {
                         "tool_call_id": expected.tool_call_id,
                     }),
                     tool_name: Some(expected.name.clone()),
+                    tool_call_id: Some(expected.tool_call_id.clone()),
                     latency_ms: None,
                     token_counts: None,
                     cost_usd: None,
+                    success: None,
+                    failure_modes: Vec::new(),
                 });
             }
         }
@@ -1633,6 +1700,7 @@ impl RawTraceContribution {
 
             events.push(RawTraceContributionEvent {
                 event_id: Uuid::new_v4(),
+                parent_event_id: None,
                 event_type: TraceContributionEventType::HttpExchange,
                 timestamp: created_at,
                 content: options
@@ -1640,9 +1708,15 @@ impl RawTraceContribution {
                     .then(|| exchange.response.body.clone()),
                 structured_payload,
                 tool_name: Some("http".to_string()),
+                tool_call_id: None,
                 latency_ms: None,
                 token_counts: None,
                 cost_usd: None,
+                // An HTTP status is an outcome the recording already knows,
+                // and it is metadata rather than body content, so it is
+                // reported regardless of the payload consent above.
+                success: Some((200..400).contains(&exchange.response.status)),
+                failure_modes: Vec::new(),
             });
         }
 
@@ -1699,6 +1773,7 @@ impl RawTraceContribution {
             if !turn.user_input.is_empty() {
                 events.push(RawTraceContributionEvent {
                     event_id: Uuid::new_v4(),
+                    parent_event_id: None,
                     event_type: TraceContributionEventType::UserMessage,
                     timestamp: turn.started_at,
                     content: options
@@ -1708,9 +1783,12 @@ impl RawTraceContribution {
                         "state": turn.state,
                     }),
                     tool_name: None,
+                    tool_call_id: None,
                     latency_ms: None,
                     token_counts: None,
                     cost_usd: None,
+                    success: None,
+                    failure_modes: Vec::new(),
                 });
             }
 
@@ -1725,20 +1803,39 @@ impl RawTraceContribution {
                 // message-text consent rather than tool payloads — but the
                 // event itself is emitted regardless, because knowing a
                 // reasoning step happened is shape, not content.
+                let call_event_id = Uuid::new_v4();
+                let timestamp = turn.completed_at.unwrap_or(turn.started_at);
+                // A call that recorded an error failed; one that came back
+                // with a result did not. Either way this is the only place the
+                // corpus says WHICH tool failed -- the turn state said
+                // "Failed" and named nothing -- and a boolean is not content,
+                // so it is set regardless of the payload consent below.
+                let success = match (&tool_call.error, &tool_call.result_preview) {
+                    (Some(_), _) => Some(false),
+                    (None, Some(_)) => Some(true),
+                    (None, None) => None,
+                };
+
                 if tool_call.rationale.is_some() {
                     events.push(RawTraceContributionEvent {
                         event_id: Uuid::new_v4(),
+                        // The call this reasoning explains, which is also the
+                        // event that follows it.
+                        parent_event_id: Some(call_event_id),
                         event_type: TraceContributionEventType::Reasoning,
-                        timestamp: turn.completed_at.unwrap_or(turn.started_at),
+                        timestamp,
                         content: options
                             .include_message_text
                             .then(|| tool_call.rationale.clone())
                             .flatten(),
                         structured_payload: Value::Null,
                         tool_name: Some(tool_call.name.clone()),
+                        tool_call_id: tool_call.id.clone(),
                         latency_ms: None,
                         token_counts: None,
                         cost_usd: None,
+                        success: None,
+                        failure_modes: Vec::new(),
                     });
                 }
 
@@ -1747,18 +1844,15 @@ impl RawTraceContribution {
                     // `arguments` key would claim the payload exists and is
                     // empty, and the replay-sufficiency measure reads these
                     // keys to decide whether a call could be re-issued.
+                    //
+                    // The result and the error used to be written here too,
+                    // on the call. They belong to the result event below: a
+                    // call carries what was asked, a result carries what came
+                    // back, and folding both into the call left a consumer
+                    // unable to tell which of the two it was holding.
                     let mut payload = serde_json::Map::new();
                     if let Some(arguments) = &tool_call.arguments {
                         payload.insert("arguments".to_string(), arguments.clone());
-                    }
-                    if let Some(result_preview) = &tool_call.result_preview {
-                        payload.insert(
-                            "result_preview".to_string(),
-                            Value::String(result_preview.clone()),
-                        );
-                    }
-                    if let Some(error) = &tool_call.error {
-                        payload.insert("error".to_string(), Value::String(error.clone()));
                     }
                     if let Some(rationale) = &tool_call.rationale {
                         payload.insert("rationale".to_string(), Value::String(rationale.clone()));
@@ -1771,29 +1865,66 @@ impl RawTraceContribution {
                         "has_error": tool_call.error.is_some(),
                     })
                 };
-                let content = options
-                    .include_tool_payloads
-                    .then(|| {
-                        tool_call
-                            .result_preview
-                            .as_deref()
-                            .or(tool_call.error.as_deref())
-                            .unwrap_or("")
-                            .to_string()
-                    })
-                    .filter(|content| !content.is_empty());
 
                 events.push(RawTraceContributionEvent {
-                    event_id: Uuid::new_v4(),
+                    event_id: call_event_id,
+                    parent_event_id: None,
                     event_type: TraceContributionEventType::ToolCall,
-                    timestamp: turn.completed_at.unwrap_or(turn.started_at),
-                    content,
+                    timestamp,
+                    // Arguments travel in the payload under their own key, not
+                    // in `content`. Putting the RESULT here (which is what
+                    // this did) made a call look like it carried arguments to
+                    // anything measuring replay sufficiency.
+                    content: None,
                     structured_payload,
                     tool_name: Some(tool_call.name.clone()),
+                    tool_call_id: tool_call.id.clone(),
                     latency_ms: None,
                     token_counts: None,
                     cost_usd: None,
+                    success,
+                    failure_modes: Vec::new(),
                 });
+
+                // `ToolResult` is defined in the schema and was never emitted
+                // on this path: the observation the agent acted on had nowhere
+                // to live, so a consumer had a call with no answer to grade
+                // against. Emit it whenever the capture recorded either a
+                // result or an error. The event itself is shape, so it is
+                // emitted regardless of consent; only its text is gated.
+                if tool_call.result_preview.is_some() || tool_call.error.is_some() {
+                    let result_text = tool_call
+                        .result_preview
+                        .as_deref()
+                        .or(tool_call.error.as_deref())
+                        .unwrap_or_default()
+                        .to_string();
+                    events.push(RawTraceContributionEvent {
+                        event_id: Uuid::new_v4(),
+                        parent_event_id: Some(call_event_id),
+                        event_type: TraceContributionEventType::ToolResult,
+                        timestamp,
+                        content: options
+                            .include_tool_payloads
+                            .then_some(result_text)
+                            .filter(|text| !text.is_empty()),
+                        structured_payload: if options.include_tool_payloads {
+                            Value::Null
+                        } else {
+                            serde_json::json!({
+                                "has_result": tool_call.result_preview.is_some(),
+                                "has_error": tool_call.error.is_some(),
+                            })
+                        },
+                        tool_name: Some(tool_call.name.clone()),
+                        tool_call_id: tool_call.id.clone(),
+                        latency_ms: None,
+                        token_counts: None,
+                        cost_usd: None,
+                        success,
+                        failure_modes: Vec::new(),
+                    });
+                }
             }
 
             if let Some(response) = &turn.response {
@@ -1811,14 +1942,18 @@ impl RawTraceContribution {
                 });
                 events.push(RawTraceContributionEvent {
                     event_id: Uuid::new_v4(),
+                    parent_event_id: None,
                     event_type: TraceContributionEventType::AssistantMessage,
                     timestamp: turn.completed_at.unwrap_or(turn.started_at),
                     content: options.include_message_text.then(|| response.clone()),
                     structured_payload: Value::Null,
                     tool_name: None,
+                    tool_call_id: None,
                     latency_ms,
                     token_counts: None,
                     cost_usd: None,
+                    success: None,
+                    failure_modes: Vec::new(),
                 });
             }
 
@@ -1840,7 +1975,7 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
-                model_name: None,
+                model_name: options.model_name,
             },
             consent: ConsentMetadata {
                 policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
@@ -3450,17 +3585,21 @@ impl TraceRedactor for DeterministicTraceRedactor {
             );
             report.merge(payload_report);
 
-            let tool_call_id = raw_event
-                .structured_payload
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+            // The explicit field wins; the payload key stays a fallback so an
+            // emitter that already wrote `{"tool_call_id": ...}` keeps working.
+            let tool_call_id = raw_event.tool_call_id.clone().or_else(|| {
+                raw_event
+                    .structured_payload
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
             let tool_category = raw_event.tool_name.as_deref().map(tool_category_for);
             let side_effect = side_effect_for(raw_event.event_type, raw_event.tool_name.as_deref());
 
             events.push(TraceContributionEvent {
                 event_id: raw_event.event_id,
-                parent_event_id: None,
+                parent_event_id: raw_event.parent_event_id,
                 event_type: raw_event.event_type,
                 timestamp: raw_event.timestamp,
                 redacted_content,
@@ -3471,8 +3610,8 @@ impl TraceRedactor for DeterministicTraceRedactor {
                 latency_ms: raw_event.latency_ms,
                 token_counts: raw_event.token_counts,
                 cost_usd: raw_event.cost_usd,
-                success: None,
-                failure_modes: Vec::new(),
+                success: raw_event.success,
+                failure_modes: raw_event.failure_modes,
                 side_effect,
             });
         }
@@ -5028,10 +5167,35 @@ fn canonical_event_line(event: &TraceContributionEvent) -> String {
     line
 }
 
+/// Key names only, never values, at a bounded width.
+///
+/// A tool call's arguments sit under an `arguments` key, so summarising only
+/// the top level would render every call in the corpus as `keys(arguments)`
+/// -- identical text for a filesystem read and a calendar write. The argument
+/// key names are most of what distinguishes one call from another in a
+/// payload-redacted corpus, and this text is what the duplicate and novelty
+/// scores are computed over (see #211, where tool-name-only canonical text
+/// already collapsed 330 traces into 236 distinct hashes). Descend through
+/// the wrapper so those names survive, and keep the wrapper visible so the
+/// two shapes cannot be confused.
 fn safe_payload_summary(payload: &Value) -> String {
     match payload {
         Value::Object(map) => {
-            let keys = map.keys().take(8).cloned().collect::<Vec<_>>();
+            let keys = map
+                .iter()
+                .take(8)
+                .map(|(key, value)| match value {
+                    // One level only. Deeper nesting is not more signal, and
+                    // an unbounded walk over an attacker-shaped payload is
+                    // not something this runs.
+                    Value::Object(inner) if REPLAY_ARGUMENT_KEYS.contains(&key.as_str()) => {
+                        let inner_keys =
+                            inner.keys().take(8).map(String::as_str).collect::<Vec<_>>();
+                        format!("{key}:[{}]", inner_keys.join(","))
+                    }
+                    _ => key.clone(),
+                })
+                .collect::<Vec<_>>();
             format!("keys({})", keys.join(","))
         }
         Value::Array(items) => format!("array(len={})", items.len()),
@@ -8629,6 +8793,39 @@ mod tests {
     }
 
     #[test]
+    fn a_result_on_a_call_does_not_pass_for_its_arguments() {
+        use super::*;
+        // The measure read `redacted_content` as evidence of arguments, and
+        // the web-history path put the tool's RESULT in a call's content. So
+        // the arguments third could be earned by a trace that never recorded
+        // a single argument -- the exact cheap satisfaction this metric
+        // exists to refuse. Arguments come from the payload or not at all.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.replay.replayable = true;
+        envelope.events = vec![
+            replay_event(
+                TraceContributionEventType::UserMessage,
+                None,
+                None,
+                Some("summarise my unread mail"),
+                Value::Null,
+            ),
+            replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("gmail__list_messages"),
+                Some("call-1"),
+                Some("2 unread threads"),
+                serde_json::json!({"has_arguments": false}),
+            ),
+        ];
+        let sufficiency = replay_sufficiency(&envelope);
+        assert_eq!(
+            sufficiency.tool_calls_with_arguments, 0,
+            "a result sitting in the call's content is not an argument"
+        );
+    }
+
+    #[test]
     fn an_emitter_declaring_a_trace_unreplayable_is_still_believed() {
         use super::*;
         // Sufficiency can only ever lower the score. An emitter that knows the
@@ -8824,6 +9021,7 @@ mod tests {
             response: Some("you have 2 unread threads".to_string()),
             tool_calls: vec![RawTraceCaptureToolCall {
                 name: "gmail__list_messages".to_string(),
+                id: Some("call-1".to_string()),
                 arguments: Some(serde_json::json!({"label": "UNREAD"})),
                 result_preview: Some("2 unread threads".to_string()),
                 error: None,
@@ -9044,6 +9242,57 @@ mod tests {
         );
     }
 
+    // --- Event metadata the schema modelled and no emitter could reach ---
+    //
+    // `parent_event_id`, `tool_call_id`, `success` and `failure_modes` are all
+    // on the envelope event and were all hardcoded empty in the one place a
+    // raw event becomes an envelope event, because the raw event had nowhere
+    // to carry them. None of the four is user content, which is why they are
+    // the cheapest thing that makes a failed trace diagnosable.
+
+    #[test]
+    fn capture_tool_calls_emit_the_result_they_returned() {
+        use super::*;
+        // `ToolResult` is defined in the schema and this path never emitted
+        // one: the observation the agent acted on was folded into the call,
+        // so a consumer had a call with no answer to grade against.
+        let options = RecordedTraceContributionOptions {
+            include_tool_payloads: true,
+            ..RecordedTraceContributionOptions::default()
+        };
+        let raw =
+            RawTraceContribution::from_capture_turns(&[capture_turn_with_tool_call()], options);
+        let call = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolCall)
+            .expect("a tool call event");
+        let result = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolResult)
+            .expect("a tool result event");
+        assert_eq!(
+            result.content.as_deref(),
+            Some("2 unread threads"),
+            "the result event carries what the tool returned"
+        );
+        assert_eq!(
+            result.parent_event_id,
+            Some(call.event_id),
+            "a result must name the call it answers"
+        );
+        assert_eq!(
+            result.tool_call_id.as_deref(),
+            Some("call-1"),
+            "both halves of a call carry the harness's id for it"
+        );
+        assert_eq!(
+            call.content, None,
+            "the RESULT must not be reported as the call's own content"
+        );
+    }
+
     #[test]
     fn a_payload_carrying_arguments_still_declares_them() {
         use super::*;
@@ -9103,5 +9352,229 @@ mod tests {
                 "must not count as content: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_tool_call_names_itself() {
+        use super::*;
+        // The corpus finding: 86 traces were labelled `failure` and the only
+        // trace of it was `state: "Failed"` on a user message, which named no
+        // tool. `success` is a boolean, not content, so it is set whatever
+        // the payload consent says.
+        let mut turn = capture_turn_with_tool_call();
+        turn.tool_calls[0].result_preview = None;
+        turn.tool_calls[0].error = Some("gmail: 401 unauthorized".to_string());
+        let raw = RawTraceContribution::from_capture_turns(
+            &[turn],
+            RecordedTraceContributionOptions::default(),
+        );
+        let call = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolCall)
+            .expect("a tool call event");
+        assert_eq!(
+            call.success,
+            Some(false),
+            "an errored call must say so, and it is the only thing that names \
+             which tool failed"
+        );
+        assert!(
+            call.content.is_none(),
+            "without payload consent the error text stays off the envelope"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_with_no_recorded_outcome_claims_none() {
+        use super::*;
+        // `None` is not failure. A capture that recorded neither a result nor
+        // an error does not know how the call went, and guessing would put a
+        // fabricated outcome on a real trace.
+        let mut turn = capture_turn_with_tool_call();
+        turn.tool_calls[0].result_preview = None;
+        turn.tool_calls[0].error = None;
+        let raw = RawTraceContribution::from_capture_turns(
+            &[turn],
+            RecordedTraceContributionOptions::default(),
+        );
+        let call = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolCall)
+            .expect("a tool call event");
+        assert_eq!(call.success, None, "an unknown outcome stays unknown");
+        assert!(
+            !raw.events
+                .iter()
+                .any(|event| event.event_type == TraceContributionEventType::ToolResult),
+            "no result was recorded, so no result event may be invented"
+        );
+    }
+
+    #[test]
+    fn capture_turns_carry_the_model_they_ran_on() {
+        use super::*;
+        // Hardcoded `None` before this, which is why `model_name` was present
+        // on 3 of 330 pilot envelopes.
+        let options = RecordedTraceContributionOptions {
+            model_name: Some("gpt-5.2".to_string()),
+            ..RecordedTraceContributionOptions::default()
+        };
+        let raw =
+            RawTraceContribution::from_capture_turns(&[capture_turn_with_tool_call()], options);
+        assert_eq!(raw.ironclaw.model_name.as_deref(), Some("gpt-5.2"));
+    }
+
+    #[tokio::test]
+    async fn redaction_preserves_event_metadata() {
+        use super::*;
+        // The conversion from raw to envelope hardcoded all four of these,
+        // so an emitter that populated them had them silently dropped on the
+        // way through redaction.
+        let options = RecordedTraceContributionOptions {
+            include_tool_payloads: true,
+            ..RecordedTraceContributionOptions::default()
+        };
+        let mut raw =
+            RawTraceContribution::from_capture_turns(&[capture_turn_with_tool_call()], options);
+        let call_event_id = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolCall)
+            .expect("a tool call event")
+            .event_id;
+        // Only an emitter that classified the failure can set this, so plant
+        // one to prove the field survives the trip.
+        for event in raw.events.iter_mut() {
+            if event.event_type == TraceContributionEventType::ToolResult {
+                event.failure_modes = vec![TraceFailureMode::UnrecoverableToolFailure];
+            }
+        }
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect("redaction succeeds");
+        let result = envelope
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolResult)
+            .expect("a tool result event");
+        assert_eq!(result.parent_event_id, Some(call_event_id));
+        assert_eq!(result.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(result.success, Some(true));
+        assert_eq!(
+            result.failure_modes,
+            vec![TraceFailureMode::UnrecoverableToolFailure]
+        );
+    }
+
+    #[test]
+    fn a_recorded_trace_pairs_its_results_with_its_calls() {
+        use super::*;
+        // The recorded-trace path already had ids on both halves and used
+        // them for nothing.
+        let trace = crate::llm::recording::TraceFile {
+            model_name: "claude-fable-5".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: vec![crate::llm::recording::TraceStep {
+                request_hint: None,
+                response: crate::llm::recording::TraceResponse::ToolCalls {
+                    tool_calls: vec![crate::llm::recording::TraceToolCall {
+                        id: "call-9".to_string(),
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                    input_tokens: 10,
+                    output_tokens: 2,
+                },
+                expected_tool_results: vec![crate::llm::recording::ExpectedToolResult {
+                    tool_call_id: "call-9".to_string(),
+                    name: "shell".to_string(),
+                    content: "src".to_string(),
+                }],
+            }],
+        };
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions::default(),
+        );
+        let call = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolCall)
+            .expect("a tool call event");
+        let result = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::ToolResult)
+            .expect("a tool result event");
+        assert_eq!(call.tool_call_id.as_deref(), Some("call-9"));
+        assert_eq!(result.parent_event_id, Some(call.event_id));
+    }
+
+    #[test]
+    fn argument_key_names_survive_the_arguments_wrapper() {
+        use super::*;
+        // The canonical text is what duplicate and novelty scores are
+        // computed over. Arguments live under an `arguments` key, so a
+        // top-level-only summary renders every call in the corpus as
+        // `keys(arguments)` -- a filesystem read and a calendar write
+        // becoming the same string. #211 is already about tool-name-only
+        // canonical text collapsing this corpus; this would have widened it.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("gmail__list_messages"),
+            None,
+            None,
+            serde_json::json!({"arguments": {"label": "UNREAD", "max": 10}}),
+        )];
+        let canonical = canonical_summary_for_embedding(&envelope);
+        assert!(
+            canonical.contains("arguments:[label,max]"),
+            "argument key names must reach the canonical text: {canonical}"
+        );
+    }
+
+    #[test]
+    fn two_calls_with_different_arguments_do_not_canonicalise_alike() {
+        use super::*;
+        let call = |payload| {
+            let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+            envelope.events = vec![replay_event(
+                TraceContributionEventType::ToolCall,
+                Some("builtin__http"),
+                None,
+                None,
+                payload,
+            )];
+            canonical_summary_for_embedding(&envelope)
+        };
+        assert_ne!(
+            call(serde_json::json!({"arguments": {"url": "x"}})),
+            call(serde_json::json!({"arguments": {"method": "POST", "body": "y"}})),
+            "different argument shapes must not produce identical canonical text"
+        );
+    }
+
+    #[test]
+    fn payload_values_never_reach_the_canonical_text() {
+        use super::*;
+        // Key names only, at both levels. This text is stored and embedded.
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::ToolCall,
+            Some("gmail__list_messages"),
+            None,
+            None,
+            serde_json::json!({"arguments": {"label": "TOP-SECRET-VALUE"}}),
+        )];
+        let canonical = canonical_summary_for_embedding(&envelope);
+        assert!(
+            !canonical.contains("TOP-SECRET-VALUE"),
+            "a payload value must never be summarised into canonical text: {canonical}"
+        );
     }
 }

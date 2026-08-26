@@ -10,12 +10,13 @@
 //! backend name), this module refuses to build a redactor rather than
 //! silently falling back to deterministic-only redaction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use uuid::Uuid;
 
 use trace_commons_protocol::onboarding::user_subject_hash;
@@ -374,8 +375,18 @@ fn build_raw_contribution_with_id(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events: Vec<RawTraceContributionEvent> =
-        t.events.iter().map(|e| raw_event_for(e, now)).collect();
+    let events: Vec<RawTraceContributionEvent> = raw_events_for(&t.events, now);
+    // Which tools a replay would have to stand up. The list was empty on every
+    // envelope this client ever sent, which also zeroed the scorecard's
+    // coverage term for a transcript that plainly covered tools.
+    let required_tools: Vec<String> = events
+        .iter()
+        .filter(|event| event.event_type == TraceContributionEventType::ToolCall)
+        .filter_map(|event| event.tool_name.clone())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let replayable = !events.is_empty();
     // The declaration describes the payload above, rather than asserting a
     // constant. See `declared_content_presence`.
     let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
@@ -417,11 +428,27 @@ fn build_raw_contribution_with_id(
         events,
         outcome: OutcomeMetadata::default(),
         replay: ReplayMetadata {
-            replayable: false,
-            required_tools: vec![],
+            // This said `false` unconditionally, and the scorecard reads it as
+            // authoritative: sufficiency can only lower a score, never raise
+            // one past this flag. So the one capture path that carries a
+            // prompt, the arguments of every call and the results they
+            // returned scored 0.20-weighted replayability of zero on every
+            // envelope, while the web-history path -- carrying tool names and
+            // nothing else -- scored full marks (issue #298).
+            //
+            // The flag's job is to let an emitter say a trace is KNOWN to be
+            // unreplayable. A local transcript with events is not that, and
+            // how much of a replay actually survived is measured from the
+            // events by `replay_sufficiency`. State only what is true here and
+            // let the measure do the rest.
+            replayable,
+            required_tools,
             tool_manifest_hashes: BTreeMap::new(),
             expected_assertions: vec![],
-            replay_notes: vec!["imported transcript; not replayable".to_string()],
+            replay_notes: vec![
+                "Captured from a local agent transcript; environment and tool versions are not pinned."
+                    .to_string(),
+            ],
         },
         embedding_analysis: None,
         value: ValueMetadata::default(),
@@ -528,6 +555,34 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
     (message_text, tool_payloads)
 }
 
+/// Map a whole transcript, so a result can name the call it answers.
+///
+/// Pairing needs state across events, which is why this is not simply a `map`
+/// over `raw_event_for`: the call ids the adapters now carry are matched here
+/// into `parent_event_id`. Without it, array order is the only sequence signal
+/// an envelope has -- the finding in issue #298 -- and order is not something
+/// a consumer can verify.
+fn raw_events_for(events: &[SessionEvent], now: DateTime<Utc>) -> Vec<RawTraceContributionEvent> {
+    let mut mapped: Vec<RawTraceContributionEvent> = Vec::with_capacity(events.len());
+    let mut call_event_ids: BTreeMap<&str, Uuid> = BTreeMap::new();
+
+    for event in events {
+        let mut raw = raw_event_for(event, now);
+        match (&event.kind, event.tool_call_id.as_deref()) {
+            (SessionEventKind::ToolCall, Some(call_id)) => {
+                call_event_ids.insert(call_id, raw.event_id);
+            }
+            (SessionEventKind::ToolResult, Some(call_id)) => {
+                raw.parent_event_id = call_event_ids.get(call_id).copied();
+            }
+            _ => {}
+        }
+        mapped.push(raw);
+    }
+
+    mapped
+}
+
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
     let (event_type, content, structured_payload) = match e.kind {
         SessionEventKind::User => (
@@ -545,10 +600,20 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
             e.content.clone(),
             e.structured.clone(),
         ),
+        // The adapters hand over the tool's argument object itself. Name it,
+        // rather than shipping a bare blob: `replay_sufficiency` looks for
+        // arguments under a known key, so a payload of `{"file_path": ...}`
+        // read as "no arguments recorded" even though the arguments were all
+        // there. Absent arguments stay `Null` rather than becoming
+        // `{"arguments": null}`, which would claim an empty payload exists.
         SessionEventKind::ToolCall => (
             TraceContributionEventType::ToolCall,
             e.content.clone(),
-            e.structured.clone(),
+            if e.structured.is_null() {
+                Value::Null
+            } else {
+                serde_json::json!({ "arguments": e.structured.clone() })
+            },
         ),
         SessionEventKind::ToolResult => (
             TraceContributionEventType::ToolResult,
@@ -568,11 +633,15 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
 
     RawTraceContributionEvent {
         event_id: Uuid::new_v4(),
+        // Set by `raw_events_for`, which is the only caller and the only
+        // place that can see more than one event at a time.
+        parent_event_id: None,
         event_type,
         timestamp: e.timestamp.unwrap_or(now),
         content,
         structured_payload,
         tool_name: e.tool_name.clone(),
+        tool_call_id: e.tool_call_id.clone(),
         latency_ms: None,
         token_counts: e
             .token_counts
@@ -581,6 +650,8 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
                 output_tokens,
             }),
         cost_usd: None,
+        success: e.success,
+        failure_modes: Vec::new(),
     }
 }
 
@@ -758,6 +829,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let cfg = test_config();
         let redactor = near_ai_redactor(base);
@@ -829,6 +902,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -858,6 +933,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -893,6 +970,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -920,6 +999,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         let big = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&big).is_err());
@@ -947,6 +1028,8 @@ mod tests {
                 structured: serde_json::Value::Null,
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: None,
+                success: None,
             },
             crate::source::SessionEvent {
                 kind: crate::source::SessionEventKind::Assistant,
@@ -955,6 +1038,8 @@ mod tests {
                 structured: serde_json::Value::Null,
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: None,
+                success: None,
             },
         ];
 
@@ -985,6 +1070,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: Some("read_file".to_string()),
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1013,6 +1100,8 @@ mod tests {
             structured: serde_json::json!({"path": "src/main.rs"}),
             tool_name: Some("read_file".to_string()),
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1033,6 +1122,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1050,6 +1141,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         };
         let raw = super::raw_event_for(&event, chrono::Utc::now());
         assert_eq!(
@@ -1121,6 +1214,206 @@ mod tests {
         );
     }
 
+    /// A result names the call it answers.
+    ///
+    /// Array order was the only sequence signal an envelope carried, and a
+    /// consumer cannot verify order. The adapters read these ids all along.
+    #[test]
+    fn a_result_names_the_call_it_answers() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("port = 8080".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: Some(true),
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(
+            raw.events[1].parent_event_id,
+            Some(raw.events[0].event_id),
+            "the result must point at the call"
+        );
+        assert_eq!(raw.events[1].success, Some(true));
+    }
+
+    /// An unpaired result gets no parent rather than the nearest call.
+    #[test]
+    fn a_result_with_no_matching_call_is_left_unparented() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("port = 8080".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_other".to_string()),
+                success: None,
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(
+            raw.events[1].parent_event_id, None,
+            "guessing a parent is worse than admitting there is none"
+        );
+    }
+
+    /// The arguments an adapter captured have to be recognisable as arguments.
+    ///
+    /// The adapters hand over the tool's argument object itself, so the payload
+    /// was a bare blob like `{"file_path": ...}`. Replay sufficiency looks for
+    /// arguments under a known key, so a fully-populated call read as carrying
+    /// no arguments at all.
+    #[test]
+    fn tool_call_arguments_are_named_in_the_payload() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::json!({"file_path": "cfg.toml"}),
+            tool_name: Some("Read".to_string()),
+            token_counts: None,
+            tool_call_id: None,
+            success: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(
+            raw.events[0].structured_payload,
+            serde_json::json!({"arguments": {"file_path": "cfg.toml"}}),
+        );
+    }
+
+    /// A call with no recorded arguments stays null rather than claiming an
+    /// empty payload exists.
+    #[test]
+    fn a_call_with_no_arguments_names_nothing() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::Value::Null,
+            tool_name: Some("Read".to_string()),
+            token_counts: None,
+            tool_call_id: None,
+            success: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(raw.events[0].structured_payload.is_null());
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "an absent payload must not be declared as one"
+        );
+    }
+
+    /// This path declared every transcript unreplayable, and the scorecard
+    /// reads that flag as authoritative -- so the one capture path carrying a
+    /// prompt, arguments and results scored zero replayability while the
+    /// web-history path carrying tool names alone scored full marks.
+    #[test]
+    fn a_transcript_with_events_is_not_declared_unreplayable() {
+        let cfg = test_config();
+        let t = fixture_transcript();
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(!raw.events.is_empty(), "the fixture has events");
+        assert!(
+            raw.replay.replayable,
+            "a local transcript is not KNOWN to be unreplayable; how much of a              replay survived is for the sufficiency measure to say"
+        );
+        assert_eq!(
+            raw.replay.required_tools,
+            vec!["Read".to_string()],
+            "the tools a replay would have to stand up, derived from the calls"
+        );
+    }
+
+    /// An empty transcript is genuinely unreplayable, and says so.
+    #[test]
+    fn an_empty_transcript_is_still_declared_unreplayable() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = Vec::new();
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(!raw.replay.replayable);
+        assert!(raw.replay.required_tools.is_empty());
+    }
+
+    /// End to end, the finding in issue #298 the other way round: a locally
+    /// captured transcript carries a prompt, the arguments of its call and
+    /// the result that came back, so it must score as replayable. It scored
+    /// exactly zero before -- on all three counts -- while a web-history
+    /// envelope carrying tool names and nothing else scored 1.0.
+    #[tokio::test]
+    async fn a_local_transcript_now_scores_as_replayable() {
+        use trace_commons_protocol::trace_contribution::compute_value_scorecard;
+
+        let cfg = test_config();
+        let t = fixture_transcript();
+        let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
+        let envelope = redact_to_envelope(
+            &redactor,
+            build_raw_contribution(&t, &cfg, chrono::Utc::now()),
+        )
+        .await
+        .expect("redaction succeeds");
+
+        let scored = compute_value_scorecard(&envelope);
+        assert_eq!(
+            scored.replayability, 1.0,
+            "a prompt, arguments on every call and a result per call is \
+             everything replay needs: {:?}",
+            scored.explanation
+        );
+        assert!(
+            scored.coverage_bonus > 0.0,
+            "a transcript that calls tools covers tools"
+        );
+    }
+
     /// The client half must apply the same marker rule as the server, or the
     /// contributor is penalised for declaring honestly: the server corrects
     /// flags upward only, so a client that under-declares gets corrected and
@@ -1136,6 +1429,8 @@ mod tests {
             structured: serde_json::json!({"has_result": true, "has_error": false}),
             tool_name: Some("read_file".to_string()),
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());

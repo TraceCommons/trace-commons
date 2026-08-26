@@ -96,6 +96,16 @@ pub struct SessionEvent {
     pub structured: serde_json::Value, // Value::Null when absent
     pub tool_name: Option<String>,
     pub token_counts: Option<(u32, u32)>, // (input, output)
+    /// The harness's own id for the call: `tool_use.id` in Claude Code,
+    /// `call_id` in Codex, `id`/`tool_call_id` in a trajectory file. Set on
+    /// both halves of a call so a result can be paired with the call it
+    /// answers -- every adapter read these ids and threw them away, which
+    /// left array order as the only pairing signal (issue #298).
+    pub tool_call_id: Option<String>,
+    /// Whether the step did what it was asked, where the transcript says so.
+    /// `None` means the harness did not record an outcome, which is not the
+    /// same as failure.
+    pub success: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

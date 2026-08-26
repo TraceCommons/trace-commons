@@ -206,7 +206,7 @@ The trajectory, and the core trainable substance. Each event:
 | `event_type` | `TraceContributionEventType` | yes | See below. |
 | `timestamp` | datetime | yes | |
 | `redacted_content` | string? | optional | Present only if the relevant consent field was opted in. |
-| `structured_payload` | JSON | optional | Redacted structured data (e.g. tool-call id, arg shape). |
+| `structured_payload` | JSON | optional | Redacted structured data. On a `tool_call`, the arguments the call was issued with go under an `arguments` key — see below. |
 | `tool_name` | string? | optional | For tool events. |
 | `tool_category` | string? | optional | Coarse category (drives `trace_card.tool_categories`). |
 | `tool_call_id` | string? | optional | Correlates a call with its result. |
@@ -217,8 +217,22 @@ The trajectory, and the core trainable substance. Each event:
 | `failure_modes` | `[TraceFailureMode]` | optional | Per-event failure labels. |
 | `side_effect` | `SideEffectLevel` | defaulted | `none`/`read_only`/`local_write`/`external_write`/`credential_use`/`unknown`. |
 
-`TraceContributionEventType`: `user_message`, `assistant_message`, `tool_call`,
-`tool_result`, `routing_decision`, `feedback`, `http_exchange`.
+`TraceContributionEventType`: `user_message`, `assistant_message`, `reasoning`,
+`tool_call`, `tool_result`, `routing_decision`, `feedback`, `http_exchange`.
+
+**Tool-call arguments live under an `arguments` key.** `replayability` is
+measured from what an envelope actually carries (see `replay` below), and the
+measure looks for arguments under one of `arguments`, `args`, `parameters`,
+`params`, `input` at the root of a `tool_call`'s `structured_payload`. An
+emitter that ships the argument object *as* the payload — a bare
+`{"file_path": ...}` — is read as having recorded no arguments at all. A
+marker flag is not a payload: `{"has_arguments": true}` never counts.
+
+**A `tool_result` is its own event.** The observation an agent acted on does
+not belong on the call that produced it; a consumer holding one field cannot
+otherwise tell a request from a response. Where the harness recorded an id,
+both halves carry it in `tool_call_id`, and the result's `parent_event_id`
+names the call's `event_id`.
 
 `TraceFailureMode`: `tool_selection_error`, `tool_argument_error`,
 `tool_ordering_error`, `missing_verification`, `premature_termination`,
@@ -241,11 +255,27 @@ The trajectory, and the core trainable substance. Each event:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `replayable` | bool | yes | Whether the trace can be deterministically replayed. |
+| `replayable` | bool | yes | Whether the emitter knows this trace to be unreplayable. See below — it is a veto, not a score. |
 | `required_tools` | [string] | optional | Tools the replay depends on. |
 | `tool_manifest_hashes` | map<string,string> | optional | Hash-pinned tool versions. |
 | `expected_assertions` | [JSON] | optional | Assertions a replay must satisfy. |
 | `replay_notes` | [string] | optional | Caveats (e.g. omitted tool args). |
+
+`replayable` is a **veto, not a measure**. It says only whether the emitter
+knows the trace cannot be replayed; `false` zeroes `replayability` and the
+emitter keeps the last word. It is not a claim that a replay would succeed,
+and it must not be set from what the emitter wishes were true: how much of a
+replay survived into the envelope is measured server-side from the events
+themselves — an initial `user_message` carrying content, arguments on each
+`tool_call`, and a `tool_result` carrying what came back, in equal thirds with
+partial coverage earning partial credit.
+
+Both halves of that contract have been got wrong in production, in opposite
+directions, and the pair is worth stating plainly: an emitter that asserted
+`replayable: true` while shipping tool names alone scored full marks, and one
+that hardcoded `replayable: false` scored zero while shipping everything a
+replay needs. Declare what is true about the trace and leave the measuring to
+the measure.
 
 ### `value` — `ValueMetadata` (client estimate, server-authored final)
 
