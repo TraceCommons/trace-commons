@@ -559,16 +559,40 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
 /// a consumer can verify.
 fn raw_events_for(events: &[SessionEvent], now: DateTime<Utc>) -> Vec<RawTraceContributionEvent> {
     let mut mapped: Vec<RawTraceContributionEvent> = Vec::with_capacity(events.len());
-    let mut call_event_ids: BTreeMap<&str, Uuid> = BTreeMap::new();
+    // Where each call landed, so a result can both point at it and take from
+    // it what the transcript recorded only once.
+    let mut call_slots: BTreeMap<&str, usize> = BTreeMap::new();
 
     for event in events {
         let mut raw = raw_event_for(event, now);
         match (&event.kind, event.tool_call_id.as_deref()) {
             (SessionEventKind::ToolCall, Some(call_id)) => {
-                call_event_ids.insert(call_id, raw.event_id);
+                call_slots.insert(call_id, mapped.len());
             }
             (SessionEventKind::ToolResult, Some(call_id)) => {
-                raw.parent_event_id = call_event_ids.get(call_id).copied();
+                if let Some(&slot) = call_slots.get(call_id) {
+                    raw.parent_event_id = Some(mapped[slot].event_id);
+                    // A result record names the call it answers and not the
+                    // tool that ran it -- Claude Code's `tool_result` block
+                    // carries only `tool_use_id`, and Codex's output only
+                    // `call_id` -- so every adapter had to leave this `None`.
+                    // The pairing supplies it, which is what gives the result
+                    // a `tool_category` and stops a consumer having to walk
+                    // `parent_event_id` to learn which tool it is holding.
+                    if raw.tool_name.is_none() {
+                        raw.tool_name = mapped[slot].tool_name.clone();
+                    }
+                    // The verdict travels the other way. `is_error` sits on
+                    // the result, but "which tool failed" is a question about
+                    // the call, and a consumer scanning calls should not have
+                    // to join to results to answer it. The capture path
+                    // already sets `success` on both halves; this makes the
+                    // local path agree. Never overwrite a verdict the call
+                    // already carries.
+                    if mapped[slot].success.is_none() {
+                        mapped[slot].success = raw.success;
+                    }
+                }
             }
             _ => {}
         }
@@ -1407,5 +1431,150 @@ mod tests {
             scored.coverage_bonus > 0.0,
             "a transcript that calls tools covers tools"
         );
+    }
+
+    /// A result that names its call should also name its tool.
+    ///
+    /// The transcript records the tool name once, on the call; a result record
+    /// carries only the id. Every adapter therefore left `tool_name` empty on
+    /// results, which left them with no `tool_category` and made a consumer
+    /// walk `parent_event_id` just to learn which tool it was holding.
+    #[test]
+    fn a_paired_result_inherits_the_tool_that_ran() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("port = 8080".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: Some(true),
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(raw.events[1].tool_name.as_deref(), Some("Read"));
+    }
+
+    /// An unpaired result stays anonymous rather than borrowing the nearest
+    /// call's name.
+    #[test]
+    fn an_unpaired_result_names_no_tool() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("port = 8080".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_other".to_string()),
+                success: Some(true),
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(raw.events[1].tool_name, None);
+        assert_eq!(
+            raw.events[0].success, None,
+            "an unpaired verdict must not be attributed to a call"
+        );
+    }
+
+    /// "Which tool failed" is a question about the call, so the result's
+    /// verdict travels back to it. The capture path already sets `success` on
+    /// both halves; this makes the local path agree.
+    #[test]
+    fn a_failed_result_marks_the_call_that_failed() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: None,
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("permission denied".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: Some(false),
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(raw.events[0].success, Some(false));
+        assert_eq!(raw.events[1].success, Some(false));
+    }
+
+    /// A verdict the call already carries is never overwritten by its result.
+    #[test]
+    fn a_calls_own_verdict_wins() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                timestamp: None,
+                content: None,
+                structured: serde_json::json!({"file_path": "cfg.toml"}),
+                tool_name: Some("Read".to_string()),
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: Some(false),
+            },
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolResult,
+                timestamp: None,
+                content: Some("ok".to_string()),
+                structured: serde_json::Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: Some("tu_1".to_string()),
+                success: Some(true),
+            },
+        ];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert_eq!(raw.events[0].success, Some(false));
     }
 }
