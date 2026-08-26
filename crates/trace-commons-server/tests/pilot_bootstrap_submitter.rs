@@ -32,6 +32,7 @@ fn draft(seed: u8) -> SubmissionDraft {
         source_dataset: "test/dataset".into(),
         source_row_id: format!("row-{seed}"),
         source_domain_tag: "test/synthetic".into(),
+        session_timestamp: None,
     }
 }
 

@@ -3100,6 +3100,7 @@ async fn write_redacted_envelope_to_disk(
                 content: "please email alice@example.com about the issue".to_string(),
             },
             expected_tool_results: Vec::new(),
+            timestamp: None,
         }],
     };
     let raw = RawTraceContribution::from_recorded_trace(
@@ -5456,6 +5457,7 @@ async fn sample_envelope_with_user_input(content: &str) -> TraceContributionEnve
                 content: content.to_string(),
             },
             expected_tool_results: Vec::new(),
+            timestamp: None,
         }],
     };
     let raw = trace_commons_protocol::trace_contribution::RawTraceContribution::from_recorded_trace(
@@ -70938,6 +70940,7 @@ async fn stage_account_content_envelope(
                 content: "benign user input with no private data".to_string(),
             },
             expected_tool_results: Vec::new(),
+            timestamp: None,
         }],
     };
     let raw = RawTraceContribution::from_recorded_trace(

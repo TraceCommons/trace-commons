@@ -199,6 +199,7 @@ pub async fn build_envelope_from_draft(
                 content: draft.trace_body.clone(),
             },
             expected_tool_results: Vec::new(),
+            timestamp: draft.session_timestamp,
         }],
     };
     let options = RecordedTraceContributionOptions {
@@ -234,6 +235,7 @@ mod tests {
             source_dataset: "test/dataset".into(),
             source_row_id: "row-1".into(),
             source_domain_tag: "test".into(),
+            session_timestamp: None,
         };
         let a = build_envelope_from_draft(&draft).await.unwrap();
         let b = build_envelope_from_draft(&draft).await.unwrap();

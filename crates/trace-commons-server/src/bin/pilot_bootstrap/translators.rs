@@ -32,6 +32,7 @@
 //! post-mortem of the earlier parquet-shaped loader.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -50,6 +51,13 @@ pub struct SubmissionDraft {
     pub source_dataset: String,
     pub source_row_id: String,
     pub source_domain_tag: String,
+    /// The earliest timestamp found on a session event, if the source
+    /// carried one. Every event in a session gets flattened into a single
+    /// trace body and a single recorded step (see `flatten_session`), so
+    /// this is the one real timestamp available for that step -- never a
+    /// synthesised or interpolated one. `None` when no event in the
+    /// session had a parseable `timestamp` field.
+    pub session_timestamp: Option<DateTime<Utc>>,
 }
 
 /// Per-dataset translator contract. Translators are intentionally small and
@@ -121,11 +129,13 @@ fn extract_event_text(event: &Value) -> Vec<String> {
 /// Concatenate every event's content fields into one trace body. Lines that
 /// fail to parse as JSON are skipped silently (per hash-only logging
 /// convention; malformed event rows do happen in the wild and are not
-/// operator-actionable). Returns the concatenated body and the first
-/// observed `sessionId` (or session `id`) for `source_row_id`, if any.
-fn flatten_session(session_bytes: &[u8]) -> (String, Option<String>) {
+/// operator-actionable). Returns the concatenated body, the first observed
+/// `sessionId` (or session `id`) for `source_row_id`, and the earliest
+/// parseable per-event `timestamp`, if any.
+fn flatten_session(session_bytes: &[u8]) -> (String, Option<String>, Option<DateTime<Utc>>) {
     let mut parts: Vec<String> = Vec::new();
     let mut session_id: Option<String> = None;
+    let mut session_timestamp: Option<DateTime<Utc>> = None;
 
     for line in session_bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -149,10 +159,17 @@ fn flatten_session(session_bytes: &[u8]) -> (String, Option<String>) {
                 }
             }
         }
+        if session_timestamp.is_none() {
+            if let Some(raw) = event.get("timestamp").and_then(Value::as_str) {
+                if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
+                    session_timestamp = Some(parsed.with_timezone(&Utc));
+                }
+            }
+        }
         parts.extend(extract_event_text(&event));
     }
 
-    (parts.join("\n\n"), session_id)
+    (parts.join("\n\n"), session_id, session_timestamp)
 }
 
 /// UTF-8-safe character truncation.
@@ -194,7 +211,7 @@ impl SessionConcatTranslator {
         session_name: &str,
         session_bytes: &[u8],
     ) -> Result<SubmissionDraft> {
-        let (body, session_id) = flatten_session(session_bytes);
+        let (body, session_id, session_timestamp) = flatten_session(session_bytes);
         if body.is_empty() {
             anyhow::bail!("session yielded no textual content");
         }
@@ -207,6 +224,7 @@ impl SessionConcatTranslator {
             source_dataset: self.source_dataset.to_string(),
             source_row_id: row_id,
             source_domain_tag: self.source_domain_tag.to_string(),
+            session_timestamp,
         })
     }
 }
