@@ -973,6 +973,15 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
+    // The top-level session file's own stem, already the identifier
+    // `group_members_for` uses to verify member `sessionId`s against --
+    // see `session_uuid` there. Not invented for this purpose; it is the
+    // address this session has always been read at.
+    let conversation_id = parent
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
     Ok(SessionTranscript {
         source: Cow::Borrowed(SOURCE_CLAUDE_CODE),
         agent_version: parsed.agent_version,
@@ -981,6 +990,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         cwd,
         started_at: parsed.started_at,
         session_hash: hash,
+        conversation_id,
         events,
         subagent_count: kept,
         subagents_dropped: dropped,

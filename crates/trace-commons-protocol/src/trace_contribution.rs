@@ -132,6 +132,16 @@ pub struct TraceContributionEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_analysis: Option<EmbeddingAnalysisMetadata>,
     pub value: ValueMetadata,
+    /// The source session this trace belongs to, so a consumer can tell a
+    /// resumed thread from a fresh one. A trace that opens with an
+    /// assistant message is otherwise indistinguishable from a greeting or
+    /// a triggered turn (issue #298).
+    ///
+    /// ATTRIBUTION ONLY. Like every other envelope-declared identifier, this
+    /// is what the emitter says, not something the server verified. It must
+    /// never reach a gate, a scoring input, or a tenant-scoping decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     #[serde(default)]
     pub trace_card: TraceCard,
     #[serde(default)]
@@ -1485,6 +1495,10 @@ pub struct RawTraceContribution {
     pub replay: ReplayMetadata,
     pub embedding_analysis: Option<EmbeddingAnalysisMetadata>,
     pub value: ValueMetadata,
+    /// See [`TraceContributionEnvelope::conversation_id`]. Carried through
+    /// redaction unchanged -- it is metadata, not user content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 /// The pre-redaction event an emitter builds.
@@ -1806,6 +1820,7 @@ impl RawTraceContribution {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
         }
     }
 
@@ -2055,6 +2070,7 @@ impl RawTraceContribution {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
         }
     }
 }
@@ -3722,6 +3738,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             replay: trace.replay,
             embedding_analysis: trace.embedding_analysis,
             value: trace.value,
+            conversation_id: trace.conversation_id,
             trace_card,
             value_card,
             hindsight: None,
@@ -7180,6 +7197,7 @@ mod tests {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -7729,6 +7747,42 @@ mod tests {
         );
     }
 
+    /// 23 traces in the reported corpus open with an assistant_message and
+    /// are indistinguishable from one another: a greeting, a triggered
+    /// turn, and a resumed thread are the same bytes. A conversation id
+    /// separates them.
+    #[test]
+    fn an_envelope_carries_its_conversation_id() {
+        let mut envelope = bare_envelope();
+        envelope.conversation_id = Some("conv-1".to_string());
+        let round_tripped: super::TraceContributionEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).unwrap()).unwrap();
+        assert_eq!(round_tripped.conversation_id.as_deref(), Some("conv-1"));
+    }
+
+    /// An envelope written before this field existed still parses.
+    #[test]
+    fn an_envelope_without_a_conversation_id_still_parses() {
+        let mut value = serde_json::to_value(bare_envelope()).unwrap();
+        value.as_object_mut().unwrap().remove("conversation_id");
+        let parsed: super::TraceContributionEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.conversation_id, None);
+    }
+
+    /// A guard, not a formality: an emitter-declared id that reached a gate
+    /// would be a spoofable input to admission.
+    #[test]
+    fn a_conversation_id_does_not_move_the_score() {
+        use super::compute_value_scorecard;
+        let mut with_id = bare_envelope();
+        with_id.conversation_id = Some("conv-1".to_string());
+        let without_id = bare_envelope();
+        assert_eq!(
+            compute_value_scorecard(&with_id).online_score,
+            compute_value_scorecard(&without_id).online_score
+        );
+    }
+
     fn bare_envelope() -> super::TraceContributionEnvelope {
         use super::*;
         let now = Utc::now();
@@ -7777,6 +7831,7 @@ mod tests {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -8538,6 +8593,7 @@ mod tests {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -8701,6 +8757,7 @@ mod tests {
             },
             embedding_analysis: None,
             value: ValueMetadata::default(),
+            conversation_id: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,

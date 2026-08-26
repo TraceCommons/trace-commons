@@ -122,6 +122,13 @@ pub struct SessionTranscript {
     pub cwd: Option<String>, // full path; used for redactor prefixes + hashing, NEVER serialized
     pub started_at: Option<DateTime<Utc>>,
     pub session_hash: String, // "sha256:<hex>" of raw file bytes
+    /// The source's own identifier for this session -- the on-disk stem
+    /// each adapter already resolves to address the session (the Claude
+    /// Code session uuid, the Codex rollout filename, the trajectory file
+    /// name). Flows unchanged onto the envelope's `conversation_id`:
+    /// attribution only, never a gate or scoring input (issue #298 S4a).
+    /// `None` when a source cannot resolve one.
+    pub conversation_id: Option<String>,
     pub events: Vec<SessionEvent>,
     /// How many delegated transcripts were merged into this one, and how
     /// many were left out because the group exceeded the raw byte budget.
