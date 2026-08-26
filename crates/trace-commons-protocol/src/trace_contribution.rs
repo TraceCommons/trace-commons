@@ -5389,11 +5389,16 @@ fn redact_tool_specific_value(
     field_name: Option<&str>,
     report: &mut RedactionReport,
 ) -> Value {
+    // A `Preserve` rule falls through to the structural walk below, so the
+    // general passes in `redact_json_strings` see the value and any nested
+    // profile rule still fires on the children.
     if let Some(action) = field_name.and_then(|field| tool_redaction_action(profile, field)) {
-        report.increment("tool_sensitive_field");
-        report.increment(format!("tool_sensitive_field:{}", action.label()));
-        report.add_pii_label(action.label());
-        return apply_tool_redaction_action(value, action);
+        if !matches!(action, ToolRedactionAction::Preserve(_)) {
+            report.increment("tool_sensitive_field");
+            report.increment(format!("tool_sensitive_field:{}", action.label()));
+            report.add_pii_label(action.label());
+            return apply_tool_redaction_action(value, action);
+        }
     }
 
     match value {
@@ -5481,6 +5486,22 @@ enum ToolRedactionAction {
     SanitizeUrl(&'static str),
     RedactObjectValues(&'static str),
     SummarizeCollection(&'static str),
+    /// Recognise the field and deliberately hand it to the general
+    /// redaction passes instead of replacing it.
+    ///
+    /// The general passes already remove emails, absolute paths, PEM blocks,
+    /// named secret patterns and high-entropy credential-shaped tokens from
+    /// every string in the payload, and they do it without discarding the
+    /// surrounding text. Wholesale replacement is reserved for fields that
+    /// are sensitive regardless of what they contain -- credentials, cookies,
+    /// auth headers -- and a command, a diff or a compiler error is not one
+    /// of those. Replacing them is what would have made an
+    /// `include_tool_payloads` corpus a corpus of markers.
+    ///
+    /// Deliberately records nothing in the redaction report: nothing was
+    /// redacted here, and any count in `redaction_counts` raises
+    /// `residual_pii_risk` to Medium.
+    Preserve(&'static str),
 }
 
 impl ToolRedactionAction {
@@ -5489,7 +5510,8 @@ impl ToolRedactionAction {
             ToolRedactionAction::Replace(label)
             | ToolRedactionAction::SanitizeUrl(label)
             | ToolRedactionAction::RedactObjectValues(label)
-            | ToolRedactionAction::SummarizeCollection(label) => label,
+            | ToolRedactionAction::SummarizeCollection(label)
+            | ToolRedactionAction::Preserve(label) => label,
         }
     }
 }
@@ -5504,6 +5526,14 @@ struct ToolSensitiveFieldRule {
 enum ToolFieldMatcher {
     Exact(&'static [&'static str]),
     Contains(&'static [&'static str]),
+    /// Exact names, plus an explicit list of suffixes.
+    ///
+    /// `Contains` is a plain substring test, so `profile` matched `file` and
+    /// `file_count` matched `file` -- and a count came out of redaction as
+    /// the string `[REDACTED:local_path]`, changing its JSON type. The
+    /// suffixes carry their own separator so a longer word cannot end in one
+    /// by accident.
+    ExactOrSuffix(&'static [&'static str], &'static [&'static str]),
 }
 
 const EMAIL_RULES: &[ToolSensitiveFieldRule] = &[
@@ -5667,16 +5697,49 @@ const DATABASE_RULES: &[ToolSensitiveFieldRule] = &[
     },
 ];
 
+const FILESYSTEM_PATH_MATCHER: ToolFieldMatcher = ToolFieldMatcher::ExactOrSuffix(
+    &[
+        "path",
+        "paths",
+        "file",
+        "files",
+        "filename",
+        "filepath",
+        "cwd",
+        "dir",
+        "directory",
+        "workdir",
+        "working_directory",
+    ],
+    &[
+        "_path",
+        "_paths",
+        "_file",
+        "_files",
+        "_filename",
+        "_dir",
+        "_directory",
+        "_cwd",
+    ],
+);
+
+/// The filesystem profile preserves by default and redacts narrowly.
+///
+/// Nothing a filesystem or shell tool carries is sensitive regardless of its
+/// content the way a cookie or an auth header is, so nothing here is replaced
+/// wholesale. Both rules are `Preserve`: the general passes handle the
+/// absolute paths, emails and secrets inside these values, and they keep the
+/// rest, which is the part a consumer needs to replay the trace.
 const FILESYSTEM_RULES: &[ToolSensitiveFieldRule] = &[
     ToolSensitiveFieldRule {
-        matcher: ToolFieldMatcher::Contains(&["path", "file", "filename", "cwd", "directory"]),
-        action: ToolRedactionAction::Replace("local_path"),
+        matcher: FILESYSTEM_PATH_MATCHER,
+        action: ToolRedactionAction::Preserve("local_path"),
     },
     ToolSensitiveFieldRule {
         matcher: ToolFieldMatcher::Exact(&[
             "content", "contents", "command", "stdout", "stderr", "diff", "patch",
         ]),
-        action: ToolRedactionAction::Replace("workspace_content"),
+        action: ToolRedactionAction::Preserve("workspace_content"),
     },
 ];
 
@@ -5710,6 +5773,12 @@ fn field_matches(lower_field_name: &str, matcher: ToolFieldMatcher) -> bool {
         ToolFieldMatcher::Contains(fragments) => fragments
             .iter()
             .any(|fragment| lower_field_name.contains(fragment)),
+        ToolFieldMatcher::ExactOrSuffix(names, suffixes) => {
+            names.contains(&lower_field_name)
+                || suffixes
+                    .iter()
+                    .any(|suffix| lower_field_name.ends_with(suffix))
+        }
     }
 }
 
@@ -5719,6 +5788,10 @@ fn apply_tool_redaction_action(value: &Value, action: ToolRedactionAction) -> Va
         ToolRedactionAction::SanitizeUrl(label) => sanitize_url_value(value, label),
         ToolRedactionAction::RedactObjectValues(label) => redact_object_values(value, label),
         ToolRedactionAction::SummarizeCollection(label) => summarize_collection(label, value),
+        // Unreachable in practice: `redact_tool_specific_value` handles
+        // `Preserve` before it gets here, so the structural walk continues
+        // into the value's children. Kept total rather than panicking.
+        ToolRedactionAction::Preserve(_) => value.clone(),
     }
 }
 
@@ -10088,6 +10161,137 @@ mod tests {
         assert!(
             !canonical.contains("TOP-SECRET-VALUE"),
             "a payload value must never be summarised into canonical text: {canonical}"
+        );
+    }
+
+    // S6: the tool payload profiles must preserve what makes a coding trace
+    // replayable. Before this, `command`, `diff`, `patch`, `content`,
+    // `stdout` and `stderr` were replaced wholesale, so enabling
+    // `include_tool_payloads` would have handed a consumer markers instead
+    // of usable traces.
+
+    /// The fields that make a coding trace replayable must survive with
+    /// payloads enabled.
+    ///
+    /// `shell` is Codex's name for the command tool and does select the
+    /// filesystem profile. Claude Code's `Bash` selects no profile at all,
+    /// so a test written against that name would pass vacuously.
+    #[test]
+    fn a_shell_command_survives_payload_redaction() {
+        use super::*;
+        let payload = serde_json::json!({"command": "cargo test -p foo --lib"});
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(Some("shell"), &payload, &mut report);
+        assert!(
+            out.to_string().contains("cargo test"),
+            "the command is the replayable part: {out}"
+        );
+    }
+
+    /// A failing command's output is the evidence a replay is checked
+    /// against; a diff is the change itself.
+    #[test]
+    fn command_output_and_diffs_survive_payload_redaction() {
+        use super::*;
+        let payload = serde_json::json!({
+            "stdout": "test result: FAILED. 411 passed; 1 failed",
+            "stderr": "error[E0308]: mismatched types",
+            "diff": "@@ -1 +1 @@\n-old\n+new",
+            "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs",
+            "content": "fn main() {}",
+            "contents": "fn other() {}",
+        });
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(Some("edit_file"), &payload, &mut report);
+        let rendered = out.to_string();
+        for expected in [
+            "411 passed",
+            "E0308",
+            "-old",
+            "a/src/lib.rs",
+            "fn main",
+            "fn other",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} must survive the filesystem profile: {rendered}"
+            );
+        }
+    }
+
+    /// Narrowed matching: a field is not a path merely because its name
+    /// contains the letters "file". `file_count` is a count, and the plain
+    /// substring test turned the integer 3 into the string
+    /// `[REDACTED:local_path]`.
+    #[test]
+    fn a_field_named_profile_is_not_treated_as_a_path() {
+        use super::*;
+        assert!(!field_matches("profile", FILESYSTEM_PATH_MATCHER));
+        assert!(!field_matches("file_count", FILESYSTEM_PATH_MATCHER));
+        assert!(field_matches("file_path", FILESYSTEM_PATH_MATCHER));
+        assert!(field_matches("path", FILESYSTEM_PATH_MATCHER));
+        assert!(field_matches("cwd", FILESYSTEM_PATH_MATCHER));
+        assert!(field_matches("output_directory", FILESYSTEM_PATH_MATCHER));
+    }
+
+    /// A count must stay a count. The over-matching `Contains` test also
+    /// changed the JSON type of the value it hit.
+    #[test]
+    fn a_payload_count_keeps_its_type_and_value() {
+        use super::*;
+        let payload = serde_json::json!({"file_count": 3, "profile": "release"});
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(Some("read_file"), &payload, &mut report);
+        assert_eq!(out["file_count"], serde_json::json!(3), "{out}");
+        assert_eq!(out["profile"], serde_json::json!("release"), "{out}");
+    }
+
+    /// Unchanged: credentials and auth headers are still replaced wholesale.
+    #[test]
+    fn credentials_are_still_replaced() {
+        use super::*;
+        let payload = serde_json::json!({
+            "headers": {"authorization": "Bearer abc123"},
+            "cookies": {"session": "s3cr3t"},
+        });
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(Some("browser_fetch"), &payload, &mut report);
+        let rendered = out.to_string();
+        assert!(!rendered.contains("abc123"), "{rendered}");
+        assert!(!rendered.contains("s3cr3t"), "{rendered}");
+    }
+
+    /// Preserving the field does not mean preserving a secret inside it:
+    /// the general passes still run over what the profile now leaves alone.
+    #[test]
+    fn a_secret_inside_a_preserved_field_is_still_redacted() {
+        use super::*;
+        let redactor = DeterministicTraceRedactor::deterministic_only(vec![
+            "/Users/example/code/project".to_string(),
+        ]);
+        let payload = serde_json::json!({
+            "command": "OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWx cargo run",
+            "stderr": "auth failed for token Zm9vYmFyYmF6cXV1eGNvcmdlZ3JhdWx0",
+            "cwd": "/Users/example/code/project",
+        });
+        let mut state = RedactionState::default();
+        let (out, _report) = redactor.redact_json_value(Some("shell"), &payload, &mut state);
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("sk-proj-AbCdEfGhIjKlMnOpQrStUvWx"),
+            "a named-pattern secret must not survive: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Zm9vYmFyYmF6cXV1eGNvcmdlZ3JhdWx0"),
+            "a cued high-entropy token must not survive: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/Users/example"),
+            "the absolute path must not survive: {rendered}"
+        );
+        assert!(
+            rendered.contains("cargo run"),
+            "the shape of the command must survive: {rendered}"
         );
     }
 }
