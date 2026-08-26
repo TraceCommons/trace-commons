@@ -493,23 +493,42 @@ jobs:
       # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to
       # TraceCommons/homebrew-tap with contents and pull-request write.
       # github.token cannot reach another repository, which is why this
-      # secret exists. This opens a pull request rather than pushing: a
-      # direct push would auto-publish a bad release to everyone who has
-      # already tapped us, with no gate between a failed verification and
-      # someone's `brew upgrade`.
+      # secret exists. Merging a pull request needs pull-request write and
+      # nothing beyond it, so the same secret covers the auto-merge below.
+      #
+      # This still opens a pull request rather than pushing to the tap's
+      # default branch -- the pull request is the audit trail, and the place
+      # the tap's own checks run -- but it now merges that pull request
+      # itself. Leaving the merge to a human is what left the tap on formula
+      # 0.3.0 while releases kept shipping.
+      #
+      # The verification gate is upstream of this step and unchanged: this
+      # job `needs: build`, so it only runs when the build job that signs,
+      # notarizes and checksums the macOS archives succeeded. The pull
+      # request was never the gate.
       - name: Open a formula bump
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           V="${GITHUB_REF_NAME#contributor-v}"
+          # Both hashes come from THIS run's artifacts in dist/, never from
+          # the tap and never from an existing bump branch.
           ARM="$(awk '{print $1}' dist/aarch64-apple-darwin/trace-commons-contributor-aarch64-apple-darwin.zip.sha256)"
           X86="$(awk '{print $1}' dist/x86_64-apple-darwin/trace-commons-contributor-x86_64-apple-darwin.zip.sha256)"
           # Clone with the token IN the remote URL. `gh repo clone` leaves a
           # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
           # raw `git push` -- which failed on the first real release with
           # "could not read Username for https://github.com".
-          git clone --depth 1 \
+          #
+          # --single-branch --depth 1 fetches the tap's DEFAULT branch and
+          # nothing else. The bump branch is never fetched, checked out or
+          # read, so a re-run rebuilds it from the tap's default branch plus
+          # the two hashes computed above; nothing a previous attempt wrote
+          # can survive into the push. That is what makes the force-push
+          # below safe, and what makes propagating a stale checksum
+          # structurally impossible rather than merely unlikely.
+          git clone --depth 1 --single-branch \
             "https://x-access-token:${GH_TOKEN}@github.com/TraceCommons/homebrew-tap.git" tap
           cd tap
           BRANCH="bump-formula-$V"
@@ -555,12 +574,50 @@ jobs:
           fi
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
+          if git diff --quiet; then
+            echo "the tap already carries version $V with both computed hashes; nothing to bump."
+            exit 0
+          fi
           git commit -am "trace-commons-contributor $V"
-          git push -u origin "$BRANCH"
-          # `--repo` selects the base repository only. Name the already-pushed
-          # branch explicitly so gh does not try to infer it from this
-          # cross-repository workflow checkout.
-          gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH"
+          # --force, not a plain push. `bump-formula-$V` already exists
+          # whenever a tag is deleted and re-cut, and the plain push is
+          # rejected with "! [rejected] (fetch first)" -- which fails this
+          # job after every artifact has already published. Forcing is only
+          # safe because of the clone above: the branch being replaced cannot
+          # have contributed a byte to what is being pushed.
+          git push --force -u origin "$BRANCH"
+          # A re-run finds its own pull request already open, and `gh pr
+          # create` exits non-zero on a duplicate head. The force-push has
+          # already updated that pull request's contents, so reuse it.
+          PR_URL="$(gh pr list --repo TraceCommons/homebrew-tap --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$PR_URL" ]; then
+            # `--repo` selects the base repository only. Name the already-pushed
+            # branch explicitly so gh does not try to infer it from this
+            # cross-repository workflow checkout.
+            PR_URL="$(gh pr create --fill --repo TraceCommons/homebrew-tap --head "$BRANCH")"
+          fi
+          echo "formula bump: $PR_URL"
+          # Deliberately NOT merged here. Auto-merge is disabled on
+          # TraceCommons/homebrew-tap, the default branch carries no branch
+          # protection, and the tap has no CI at all -- so `--auto` would
+          # fail outright and any fallback would be an immediate, ungated
+          # merge straight to what `brew upgrade` serves. That is the direct
+          # push this step exists to avoid, wearing a pull request as a
+          # disguise.
+          #
+          # Automating the merge is wanted, but it needs something to gate
+          # on first: a cask/formula audit workflow on the tap, auto-merge
+          # enabled, and that check required. Until then the merge stays a
+          # human step, and tap-bump-staleness.yml is what stops the queue
+          # growing unnoticed the way it did through 0.4.1-0.4.6.
+          echo "::notice::formula bump open at $PR_URL -- merge it, or brew upgrade keeps serving the previous version"
+          {
+            echo "### formula bump ready to merge"
+            echo
+            echo "[$PR_URL]($PR_URL)"
+            echo
+            echo "Homebrew serves the previous version until this is merged."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   winget-bump:
     name: bump the winget manifest
@@ -576,10 +633,17 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # Opens a pull request rather than pushing, matching the Homebrew
-      # formula bump above: winget-pkgs is a third-party repository with its
-      # own review, and a bad manifest reaches everyone who runs
-      # `winget upgrade`.
+      # Pushes a branch to the fork and stops there. It deliberately does
+      # NOT open the pull request: winget-pkgs is a third-party repository
+      # with its own review, and the token available here cannot create pull
+      # requests against it -- `createPullRequest` returns "Resource not
+      # accessible by personal access token", which failed the whole release
+      # on contributor-v0.4.7 after every artifact had already published.
+      #
+      # The manifest work is the part worth automating; opening the PR is one
+      # click. The step prints the compare URL and writes it to the job
+      # summary so the last manual step is in front of whoever cut the
+      # release rather than buried in a log.
       #
       # No artifact download and no hash argument here: generate-manifests.sh
       # fetches the published asset itself and computes InstallerSha256 from
@@ -593,7 +657,12 @@ jobs:
           V="${GITHUB_REF_NAME#contributor-v}"
           ./scripts/winget/generate-manifests.sh "$V"
           FORK_OWNER="$(gh api user --jq .login)"
-          git clone --depth 1 \
+          # --single-branch: the fork's default branch only. The manifest
+          # branch is never fetched, so a re-run rebuilds it from the fork's
+          # default branch plus the manifests generate-manifests.sh just
+          # wrote from the published asset's own bytes. Nothing a previous
+          # attempt pushed can survive into this branch.
+          git clone --depth 1 --single-branch \
             "https://x-access-token:${GH_TOKEN}@github.com/${FORK_OWNER}/winget-pkgs.git" winget-pkgs
           # The generator already wrote the partitioned path winget-pkgs
           # expects, so copy the tree across rather than individual files.
@@ -604,7 +673,28 @@ jobs:
           git config user.name "trace-commons-release"
           git config user.email "ops@tracecommons.ai"
           git add "manifests/t/TraceCommons/Contributor/$V"
-          git commit -m "New version: TraceCommons.Contributor version $V"
-          git push -u origin "$BRANCH"
-          gh pr create --fill --repo microsoft/winget-pkgs \
-            --head "${FORK_OWNER}:$BRANCH"
+          if git diff --cached --quiet; then
+            echo "the fork already carries the manifests for $V; nothing to push."
+          else
+            git commit -m "New version: TraceCommons.Contributor version $V"
+            # --force, not a plain push. `TraceCommons.Contributor-$V`
+            # already exists whenever a tag is deleted and re-cut, and a
+            # plain push is rejected with "! [rejected] (fetch first)",
+            # failing this job after the release has published. The clone
+            # above is what makes forcing safe: the InstallerSha256 in these
+            # manifests was computed by the generator from the asset it
+            # downloaded during THIS run, so the branch being replaced
+            # cannot contribute a stale hash.
+            git push --force -u origin "$BRANCH"
+          fi
+          URL="https://github.com/microsoft/winget-pkgs/compare/master...${FORK_OWNER}:${BRANCH}?expand=1"
+          echo "Manifest branch pushed. Open the pull request here:"
+          echo "  $URL"
+          {
+            echo "### winget manifest ready for review"
+            echo
+            echo "Branch \`$BRANCH\` is pushed to \`${FORK_OWNER}/winget-pkgs\`."
+            echo "It does not reach winget users until a pull request is opened and merged:"
+            echo
+            echo "[Open the pull request]($URL)"
+          } >> "$GITHUB_STEP_SUMMARY"

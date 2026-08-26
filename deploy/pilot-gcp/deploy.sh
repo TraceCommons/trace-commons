@@ -26,6 +26,18 @@ sudo install -o tracecommons -g tracecommons -m 755 \
   ~/trace-commons-server/target/release/trace-commons-upload-claim-issuer \
   /opt/tracecommons/bin/
 
+# 1b. State directories.
+#
+# Nothing else in this repo creates them; they were made by hand at
+# provisioning, which is how the dedup index came to have no directory at
+# all. `install -d` is idempotent and does not disturb an existing one.
+for d in /var/lib/trace-commons-vector-index \
+         /var/lib/trace-commons-dedup-index \
+         /var/lib/trace-commons-data \
+         /var/cache/trace-commons-embedder; do
+  sudo install -d -o tracecommons -g tracecommons -m 750 "$d"
+done
+
 # 2. Env files + systemd units + Caddy.
 sudo install -o root -g tracecommons -m 640 ~/deploy/ingest.env /etc/tracecommons/ingest.env
 sudo install -o root -g tracecommons -m 640 ~/deploy/issuer.env /etc/tracecommons/issuer.env

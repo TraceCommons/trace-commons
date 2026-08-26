@@ -624,18 +624,16 @@ sh install.sh</code></pre>
     </section>
 
     <section class="section-band">
-      <p class="eyebrow">New on Windows</p>
-      <h1>Pause, Settings, and the tray reached parity.</h1>
-      <p class="lede">The Windows app now carries the same controls the macOS and Linux shells do.</p>
+      <p class="eyebrow">New in 0.4.9</p>
+      <h1>Finishing setup now finishes it.</h1>
+      <p class="lede">On macOS, the last screen of setup had a button that recorded you were done and then left you sitting on that screen, as though it had not been pressed. It now takes you into the app. Windows and Linux never had this.</p>
     </section>
 
     <section class="about-grid">
-      <div class="panel"><h2>Pause and resume</h2><p class="lede">Pause capture from the window or the tray for any of the three shared durations, and resume before it lapses.</p></div>
-      <div class="panel"><h2>Settings</h2><p class="lede">Connection, startup, consent, behavior, per-project, public-profile, and audit surfaces are all present.</p></div>
-      <div class="panel"><h2>Tray</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
-      <div class="panel"><h2>Preview and undo</h2><p class="lede">Approve a trace from the native envelope preview, and undo the approval on the same round trip.</p></div>
-      <div class="panel"><h2>Run at login</h2><p class="lede">The MSIX build registers through the Windows startup-task API. The portable build uses the per-user Run key instead.</p></div>
-      <div class="panel"><h2>Projects</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered.</p></div>
+      <div class="panel"><h2>Only the last screen</h2><p class="lede">The rest of setup worked. Connecting, choosing what you share, and picking projects all took effect as you made them. It was the single button at the end that failed to move you on.</p></div>
+      <div class="panel"><h2>Nothing was lost</h2><p class="lede">If this happened to you, you were already set up -- your choices had been recorded. Quitting and reopening the app was enough to get past it, and after this update the button works the first time.</p></div>
+      <div class="panel"><h2>Paths are never shown</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered anywhere in the app.</p></div>
+      <div class="panel"><h2>The tray cannot send</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
     </section>
 
     <section class="section-band">

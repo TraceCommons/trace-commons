@@ -3749,6 +3749,7 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
                 peak_perplexity_micros: None,
                 peak_novelty_micros: None,
                 chunk_count: None,
+                total_chunk_count: None,
                 chunks_capped: None,
             },
         )
@@ -66846,6 +66847,9 @@ impl Database for PerplexityDriverTestDb {
                     perplexity_micros: row.perplexity_micros,
                     novelty_score_micros: row.novelty_score_micros,
                     gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
                 }
             })
             .collect())
@@ -66905,6 +66909,9 @@ impl Database for PerplexityDriverTestDb {
                         perplexity_micros: row.perplexity_micros,
                         novelty_score_micros: row.novelty_score_micros,
                         gate_passed: row.perplexity_passed && row.novelty_passed,
+                        chunk_count: row.chunk_count,
+                        total_chunk_count: row.total_chunk_count,
+                        chunks_capped: row.chunks_capped,
                     }
                 })
                 .collect();
@@ -67195,6 +67202,7 @@ fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow
         peak_perplexity_micros: Some(444),
         peak_novelty_micros: Some(555_555),
         chunk_count: Some(7),
+        total_chunk_count: Some(19),
         chunks_capped: Some(true),
     }
 }
@@ -69251,137 +69259,311 @@ fn parse_required_u64_env_accepts_zero() {
     unsafe { std::env::remove_var(var) };
 }
 
-#[cfg(feature = "local-gpu-models")]
+/// Reference inputs for the gate-version-hash tests below, threaded through
+/// tuples so the 17-arg call site stays readable. Any change to these values
+/// changes the pinned goldens.
+#[allow(clippy::too_many_arguments)]
+fn reference_gate_version_hash(
+    policy: &str,
+    floors: (u64, u64, u64),
+    top_k: usize,
+    perplexity: (&str, usize, f32),
+    embedder: (&str, usize, Option<usize>),
+    vector_index_dim: usize,
+    chunking: (usize, usize, usize, u64, u64),
+) -> String {
+    compute_gate_version_hash(
+        policy,
+        floors.0,
+        floors.1,
+        floors.2,
+        top_k,
+        perplexity.0,
+        perplexity.1,
+        perplexity.2,
+        embedder.0,
+        embedder.1,
+        embedder.2,
+        vector_index_dim,
+        chunking.0,
+        chunking.1,
+        chunking.2,
+        chunking.3,
+        chunking.4,
+    )
+}
+
+/// The baseline configuration every gate-version-hash test permutes.
+fn base_gate_version_hash() -> String {
+    reference_gate_version_hash(
+        "policy-1",
+        (10, 20, 30),
+        5,
+        ("p-model", 1024, -8.0),
+        ("e-model", 512, Some(256)),
+        1024,
+        (2048, 3072, 16, 64, 50_000),
+    )
+}
+
+/// The gate version hash MUST move when the chunk-SELECTION algorithm
+/// changes, not just when the chunk-packing knobs do.
+///
+/// Before coverage-preserving strided selection, the canonical string ended
+/// at the `chunking=` line and carried nothing identifying which chunks
+/// survive the cap. Prefix truncation and stride selection therefore stamped
+/// identical hashes while producing scores that are not comparable to each
+/// other. The pre-stride golden below is the hash the baseline config
+/// produced then; the current hash must differ from it, and must equal the
+/// post-stride golden so the stamp cannot drift again unnoticed.
+#[test]
+fn gate_version_hash_moved_for_strided_chunk_selection() {
+    /// sha256 of the canonical string WITHOUT a `chunk_selection=` line.
+    const PRE_STRIDE_GOLDEN: &str =
+        "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68";
+    /// sha256 of the canonical string WITH
+    /// `chunk_selection=stride_endpoint_inclusive.v1`.
+    const POST_STRIDE_GOLDEN: &str =
+        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac";
+
+    // The golden is only meaningful while the enclave still names this
+    // algorithm exactly this way; the two are pinned together on purpose.
+    assert_eq!(
+        trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
+        "stride_endpoint_inclusive.v1",
+        "bumping the selection algorithm must also move the golden below"
+    );
+
+    let base = base_gate_version_hash();
+    assert_ne!(
+        base, PRE_STRIDE_GOLDEN,
+        "changing chunk selection MUST break the gate version stamp"
+    );
+    assert_eq!(
+        base, POST_STRIDE_GOLDEN,
+        "gate version hash drifted without a deliberate stamp change"
+    );
+}
+
 #[test]
 fn compute_gate_version_hash_changes_on_any_dimension() {
     // The hash MUST be sensitive to every input: policy, floors, top_k,
-    // model ids, max_tokens, matryoshka dim, vector dim. We assert a
+    // model ids, max_tokens, matryoshka dim, vector dim, and every chunking
+    // dimension including the chunk-selection algorithm. We assert a
     // baseline + permutations differ. Previously the mock_default path
     // stamped every audit row with a fixed `"sha256:enclave_mock_v1"`.
-    let base = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_policy = compute_gate_version_hash(
-        "policy-2",
-        10,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_floor = compute_gate_version_hash(
-        "policy-1",
-        11,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_topk = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        6,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_pmodel = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        5,
-        "p-model-2",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_emodel = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model-2",
-        512,
-        Some(256),
-        1024,
-    );
-    let diff_matry = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(128),
-        1024,
-    );
-    let diff_vdim = compute_gate_version_hash(
-        "policy-1",
-        10,
-        20,
-        30,
-        5,
-        "p-model",
-        1024,
-        -8.0,
-        "e-model",
-        512,
-        Some(256),
-        512,
-    );
+    let base = base_gate_version_hash();
     assert!(base.starts_with("sha256:"));
-    for (label, other) in &[
-        ("policy", &diff_policy),
-        ("floor", &diff_floor),
-        ("top_k", &diff_topk),
-        ("p_model", &diff_pmodel),
-        ("e_model", &diff_emodel),
-        ("matryoshka", &diff_matry),
-        ("vector_dim", &diff_vdim),
-    ] {
+
+    let permutations: Vec<(&str, String)> = vec![
+        (
+            "policy",
+            reference_gate_version_hash(
+                "policy-2",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "perplexity_floor",
+            reference_gate_version_hash(
+                "policy-1",
+                (11, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "tail_floor",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 21, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "novelty_floor",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 31),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "top_k",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                6,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "perplexity_model",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model-2", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "perplexity_max_tokens",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 2048, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "tail_cutoff",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -9.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "embedder_model",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model-2", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "embedder_max_tokens",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 256, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "matryoshka",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(128)),
+                1024,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "vector_dim",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                512,
+                (2048, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "chunk_target_tokens",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (1024, 3072, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "chunk_max_tokens",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 4096, 16, 64, 50_000),
+            ),
+        ),
+        (
+            "chunk_cap",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 32, 64, 50_000),
+            ),
+        ),
+        (
+            "chunk_min_tokens",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 128, 50_000),
+            ),
+        ),
+        (
+            "embed_insert_novelty_micros",
+            reference_gate_version_hash(
+                "policy-1",
+                (10, 20, 30),
+                5,
+                ("p-model", 1024, -8.0),
+                ("e-model", 512, Some(256)),
+                1024,
+                (2048, 3072, 16, 64, 60_000),
+            ),
+        ),
+    ];
+    for (label, other) in &permutations {
         assert_ne!(
-            &base, *other,
+            &base, other,
             "gate_version_hash must change when {label} changes"
         );
     }
@@ -69489,7 +69671,9 @@ async fn enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed() {
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
 fn dedup_index_query_finds_near_vector() {
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
+    use trace_commons_gate_enclave::vector_index_usearch::{
+        UsearchVectorIndex, UsearchVectorIndexConfig,
+    };
 
     fn norm(mut v: Vec<f32>) -> Vec<f32> {
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -69503,8 +69687,19 @@ fn dedup_index_query_finds_near_vector() {
 
     let index_temp = tempfile::tempdir().expect("index temp dir");
     let dim = 8;
-    let idx = UsearchVectorIndex::try_new(index_temp.path(), dim, 16, 200, 50, 2, 32)
-        .expect("dedup index ctor");
+    let idx = UsearchVectorIndex::try_new(
+        index_temp.path(),
+        UsearchVectorIndexConfig {
+            dim,
+            hnsw_m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+            max_open: 2,
+            flush_every: 32,
+            flush_interval: None,
+        },
+    )
+    .expect("dedup index ctor");
 
     let state_temp = tempfile::tempdir().expect("state temp dir");
     let mut state = test_state(state_temp.path().to_path_buf());
@@ -82335,6 +82530,21 @@ async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_c
         Some(750_000)
     );
     assert!(decoded.claims.submissions[0].gate_passed);
+    // Schema v2: the signed entry states how much of the trace was scored.
+    // `rescore_test_decision_row` is a capped decision with a persisted
+    // pre-cap total, so the attestation must say 7 of 19 rather than let a
+    // reader assume the whole trace was judged.
+    assert_eq!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::Partial {
+            chunks_scored: 7,
+            chunks_total: 19,
+        }
+    );
+    assert_eq!(
+        decoded.claims.schema_version,
+        "trace_commons.score_attestation.v2"
+    );
 
     // The second contributor's own request returns THEIR OWN scores, never
     // token-a's — the resolution is auth-only, with no parameter through
@@ -84088,5 +84298,69 @@ async fn admin_config_status_reports_an_absent_privacy_filter_as_none() {
     assert_eq!(
         response.privacy_filter_backend, "none",
         "a missing filter must be visible as \"none\", never omitted"
+    );
+}
+
+/// A capped decision recorded before migration V47 has no stored denominator,
+/// and no honest one can be recovered. The v2 attestation must say so — an
+/// unknown total, distinguishable from a fully scored trace and never
+/// estimated (e.g. from envelope byte size).
+#[tokio::test]
+async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_decisions() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal = static_token_principal_ref("token-a");
+
+    let id = Uuid::new_v4();
+    let mut row = rescore_test_decision_row(id);
+    row.perplexity_passed = true;
+    row.novelty_passed = true;
+    row.chunk_count = Some(16);
+    // Pre-V47 shape: the cap fired, but the total was never persisted.
+    row.total_chunk_count = None;
+    row.chunks_capped = Some(true);
+    db.seed_gate_decision("tenant-a", row.clone());
+    db.seed_submission_with_principal("tenant-a", id, &principal);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("configured signing key succeeds");
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    let decoded = jsonwebtoken::decode::<
+        trace_commons_server::trace_score_attestation::ScoreAttestationClaims,
+    >(&response.attestation, &decoding_key, &validation)
+    .expect("attestation verifies against the published key");
+
+    assert_eq!(decoded.claims.submissions.len(), 1);
+    assert_eq!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::PartialUnknownTotal {
+            chunks_scored: 16,
+        },
+        "a decision with no stored denominator must be attested as unknown, never estimated"
+    );
+    assert_ne!(
+        decoded.claims.submissions[0].coverage,
+        trace_commons_server::trace_score_attestation::ScoreAttestationCoverage::Complete {
+            chunks_scored: 16,
+        },
+        "unknown-denominator coverage must not be confusable with a fully scored trace"
     );
 }

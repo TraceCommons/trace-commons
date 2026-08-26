@@ -113,7 +113,7 @@ public static class WithdrawDialog
         _open = true;
         try
         {
-            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+            return await DialogGuard.ShowOnceAsync(dialog) == ContentDialogResult.Primary;
         }
         catch (Exception)
         {

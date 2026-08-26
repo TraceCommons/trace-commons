@@ -858,22 +858,56 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // rather than leaving the queue to lag until the next poll,
             // which would leave two same-basename projects briefly
             // indistinguishable in the one place uploads are approved from.
-            let relabelled = {
+            // Ignoring a project clears what it already has waiting. Doing
+            // it here rather than in the UI means Settings, onboarding and
+            // the CLI all get it: before this, ignoring from Settings left
+            // the contributor staring at the cards they had just declined.
+            //
+            // Pending only. See `refuse_pending_for_project`.
+            //
+            // Leaving `Ignore` undoes exactly that, and only that: see
+            // `clear_project_ignored`, which is what makes the
+            // confirmation's "You can undo this in Settings" true for a
+            // *finished* session -- the ordinary case, and the one the
+            // ignore was aimed at. It is the same arm because the two are
+            // one setting, and every route that can set it (Settings,
+            // onboarding, the CLI, the Waiting screen) must get both halves.
+            //
+            // The policy is already saved at this point, so a `queue.save`
+            // failure below leaves disk disagreeing with memory: the project
+            // is durably `Ignore` while its entries are still durably
+            // `Pending`, and a restart brings the cleared cards back. The
+            // error is reported and the daemon keeps the in-memory truth, so
+            // the contributor sees the right thing until then. Ordering the
+            // two writes the other way does not help -- the relabel below
+            // reads the *new* policy, so the queue cannot be written first --
+            // and a real fix wants both files under one atomic write, which
+            // the store does not offer.
+            let (queue_changed, purged) = {
                 let mut queue = shared.queue.lock().expect("queue lock");
-                if relabel_queue_entries(&policy, &mut queue) {
+                let purged = if mode == ProjectMode::Ignore {
+                    queue.refuse_pending_for_project(&key)
+                } else {
+                    0
+                };
+                let restored = if mode == ProjectMode::Ignore {
+                    0
+                } else {
+                    queue.clear_project_ignored(&key)
+                };
+                let relabelled = relabel_queue_entries(&policy, &mut queue);
+                if relabelled || purged > 0 || restored > 0 {
                     if let Err(_e) = queue.save(&shared.store) {
                         return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
                     }
-                    true
-                } else {
-                    false
                 }
+                (relabelled || restored > 0, purged)
             };
             drop(policy);
-            if relabelled {
+            if queue_changed || purged > 0 {
                 shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             }
-            Response::ok(req.id, serde_json::json!({ "ok": true }))
+            Response::ok(req.id, serde_json::json!({ "ok": true, "purged": purged }))
         }
         "dismiss" => {
             let id = match parse_entry_id(&req.params) {
@@ -890,7 +924,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             queue.set_state(
                 id,
                 QueueState::Refused,
-                Some("dismissed-by-contributor".to_string()),
+                Some(super::queue::REASON_DISMISSED.to_string()),
             );
             if let Err(_e) = queue.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
@@ -1509,6 +1543,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // only, per the hash-only rule -- never the text a redaction removed.
     let mut redactions: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let mut flagged: u64 = 0;
+    // The entries whose refusal has to outlive this response. See the size
+    // check below, and the write under the queue lock further down.
+    let mut too_large: Vec<Uuid> = Vec::new();
     for (id, entry) in unpinned {
         // An unenrolled build is never pinned -- it is a placeholder
         // -identity artifact, not the one an upload would send -- so there
@@ -1533,7 +1570,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                 // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
                 if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
-                    skipped.push((id, "envelope-too-large"));
+                    skipped.push((id, super::queue::REASON_TOO_LARGE));
+                    // Reported *and* recorded. Reporting alone left the
+                    // entry `Pending`, which is the state that means "still
+                    // waiting on the contributor" -- so the watcher kept
+                    // finding a live offer at this path and the card sat
+                    // there for a session no click could ever get past this
+                    // very check. A decision that can never come out
+                    // differently for these bytes is a decision, and it
+                    // belongs on the entry like every other one.
+                    too_large.push(id);
                     continue;
                 }
                 for (category, count) in &summary.redactions {
@@ -1548,6 +1594,33 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     }
     let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
     let mut queue = shared.queue.lock().expect("queue lock");
+    // Written under the same lock that approves, and saved by the same
+    // `queue.save` below, so the refusal and the approvals in this batch
+    // land together or not at all.
+    //
+    // Guarded on `Pending`, which is what `set_state` does not check for
+    // itself: the build ran without the lock held, and an entry that was
+    // cancelled, dismissed or superseded in that window has a newer
+    // decision on it than this one.
+    //
+    // `Refused` is the right terminal state and `REASON_TOO_LARGE` the
+    // right label, but they are deliberately *not* `REASON_DISMISSED`:
+    // `Queue::dismissed_at_path` suppresses a whole conversation forever,
+    // and that is reserved for a contributor saying no. This is the
+    // pipeline's verdict on one envelope built under one set of consent
+    // scopes -- narrower scopes can yield a smaller envelope from the same
+    // conversation -- so it binds to the entry, and a session that has
+    // moved on is offered again exactly as it is after any other pipeline
+    // refusal.
+    for id in &too_large {
+        if queue.get(*id).map(|e| e.state) == Some(QueueState::Pending) {
+            queue.set_state(
+                *id,
+                QueueState::Refused,
+                Some(super::queue::REASON_TOO_LARGE.to_string()),
+            );
+        }
+    }
     let mut approved_ids = Vec::new();
     for id in &ids {
         let id = *id;

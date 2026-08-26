@@ -21,7 +21,7 @@ import SwiftUI
 /// against, so it is reused rather than duplicated.
 struct ConsentScopesView: View {
     @EnvironmentObject private var model: AppModel
-    var onContinue: (Set<String>) -> Void = { _ in }
+    var onContinue: (Set<String>) -> Void
     /// Scopes the contributor had already ticked, when this screen is being
     /// re-entered from later in onboarding (screen 4 or 5) rather than seen
     /// for the first time -- see `OnboardingCoordinatorView`'s back
@@ -49,9 +49,9 @@ struct ConsentScopesContent: View {
     /// was chosen before, via `initialSelection`.
     @State private var selected: Set<String>
 
-    var onContinue: (Set<String>) -> Void = { _ in }
+    var onContinue: (Set<String>) -> Void
 
-    init(onContinue: @escaping (Set<String>) -> Void = { _ in }, initialSelection: Set<String> = []) {
+    init(onContinue: @escaping (Set<String>) -> Void, initialSelection: Set<String> = []) {
         self.onContinue = onContinue
         _selected = State(initialValue: initialSelection)
     }

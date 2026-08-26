@@ -92,6 +92,12 @@ final class AppModel: ObservableObject {
     @Published var undo: Undo?
     @Published var lastActionError: String?
 
+    /// A one-line statement about something that DID happen, as opposed to
+    /// `lastActionError`, which is about something that did not. Kept apart
+    /// so the two never have to be told from each other by their wording:
+    /// the Waiting screen renders this one in its own voice.
+    @Published var lastActionNotice: String?
+
     private var daemon: TCDaemon?
     private var client: DaemonClient?
     private var subscription: TCSubscription?
@@ -237,7 +243,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
-            self.status = status
+            publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
         case .queueChanged:
@@ -316,6 +322,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Publishing
+
+    /// Assign to a `@Published` property only when the value actually
+    /// differs.
+    ///
+    /// Every refresher below re-fetches from the daemon and writes the
+    /// decoded answer straight back. A freshly decoded array is a *new*
+    /// value even when it is byte-identical to the one already held, so a
+    /// plain assignment fires `objectWillChange` regardless -- and one
+    /// `objectWillChange` invalidates every view observing this model,
+    /// which at 500 queue rows is a full view-graph rebuild on the main
+    /// thread. A single `queue_changed` event runs four refreshers and so
+    /// used to publish five or six of them back to back for a queue that
+    /// had not moved.
+    ///
+    /// Comparing first turns "the daemon answered" into "the answer
+    /// changed", which is the thing a view actually needs to redraw for.
+    /// Every model written through here is `Equatable`, and the compare is
+    /// over a few hundred small structs -- orders of magnitude cheaper than
+    /// the rebuild it avoids.
+    private func publishIfChanged<T: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<AppModel, T>,
+        _ value: T
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
+    }
+
     // MARK: - Refresh
 
     func refreshAll() {
@@ -337,11 +371,11 @@ final class AppModel: ObservableObject {
     /// once would show a contributor everything except the change they just
     /// made.
     func refreshAudit() {
-        perform("list_audit", work: { try $0.listAudit() }, onSuccess: { self.audit = $0 })
+        perform("list_audit", work: { try $0.listAudit() }) { self.publishIfChanged(\.audit, $0) }
     }
 
     func refreshStatus() {
-        perform("status", work: { try $0.status() }, onSuccess: { self.status = $0 })
+        perform("status", work: { try $0.status() }) { self.publishIfChanged(\.status, $0) }
     }
 
     func refreshQueue() {
@@ -351,12 +385,16 @@ final class AppModel: ObservableObject {
     }
 
     func refreshHistory() {
-        perform("list_history", work: { try $0.listHistory() }, onSuccess: { self.history = $0 })
-        perform("history_rollup", work: { try $0.historyRollup() }, onSuccess: { self.rollup = $0 })
+        perform("list_history", work: { try $0.listHistory() }) {
+            self.publishIfChanged(\.history, $0)
+        }
+        perform("history_rollup", work: { try $0.historyRollup() }) {
+            self.publishIfChanged(\.rollup, $0)
+        }
     }
 
     func refreshProjects() {
-        perform("list_projects", work: { try $0.listProjects() }, onSuccess: { self.projects = $0 })
+        perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
     }
 
     /// Sets `project`'s mode via the daemon and refreshes `projects` from
@@ -383,8 +421,36 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Decline a whole project from the Waiting screen.
+    ///
+    /// The daemon clears what that project has waiting as part of setting the
+    /// mode, so this refreshes the queue as well as the project list -- the
+    /// cards are expected to disappear in the same round trip.
+    ///
+    /// `promised` is the count the confirmation named, which had to be read
+    /// off this shell's own queue before the call. The daemon's `purged` is
+    /// the authority: the queue is live, and a poll or an approval between
+    /// the render and the click moves it. When the two disagree the
+    /// contributor is told rather than left to notice -- see
+    /// `ProjectIgnoreCopy.reconciliation`.
+    func ignoreProject(id projectID: String, label: String, promised: Int) {
+        perform(
+            "set_project_mode",
+            work: { try $0.setProjectMode(projectID: projectID, mode: .ignore) }
+        ) { purged in
+            self.lastActionNotice = ProjectIgnoreCopy.reconciliation(
+                project: label,
+                promised: promised,
+                purged: purged
+            )
+            self.refreshQueue()
+            self.refreshProjects()
+            self.refreshAudit()
+        }
+    }
+
     func refreshSettings() {
-        perform("get_settings", work: { try $0.settings() }, onSuccess: { self.daemonSettings = $0 })
+        perform("get_settings", work: { try $0.settings() }) { self.publishIfChanged(\.daemonSettings, $0) }
     }
 
     // MARK: - Enrollment
@@ -431,9 +497,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshConsentOptions() {
-        perform("consent_options", work: { try $0.consentOptions() }, onSuccess: {
-            self.consentScopes = $0
-        })
+        perform("consent_options", work: { try $0.consentOptions() }) {
+            self.publishIfChanged(\.consentScopes, $0)
+        }
     }
 
     enum SetScopesOutcome: Equatable {
@@ -485,19 +551,44 @@ final class AppModel: ObservableObject {
         return UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey(tenantID))
     }
 
+    /// `isOnboardingComplete` is computed from `UserDefaults`, not from a
+    /// `@Published` property, so writing the key changes nothing SwiftUI is
+    /// watching. Without the explicit `objectWillChange`, pressing Done
+    /// updated the marker and left the contributor sitting on the Done
+    /// screen until some *unrelated* published value happened to change --
+    /// and `publishIfChanged` exists precisely to stop that from happening,
+    /// so on a quiet daemon it never did. Do not remove this send without
+    /// making the marker itself observable.
     func markOnboardingComplete() {
-        guard let tenantID = status.tenantID else { return }
+        guard let tenantID = status.tenantID else {
+            // No tenant to key the marker to yet: the button must not be
+            // inert. Re-ask the daemon so the next press has one.
+            refreshStatus()
+            return
+        }
+        objectWillChange.send()
         UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
     }
+
+    #if DEBUG
+    /// Test seam: `status` is `private(set)` and otherwise only ever set
+    /// from a live daemon reply, so there is no other way to exercise the
+    /// tenant-keyed onboarding marker without a running daemon and a real
+    /// enrolment. Debug-only, and deliberately routed through
+    /// `publishIfChanged` so a test observes exactly what the app does.
+    func setStatusForTesting(_ status: DaemonStatus) {
+        publishIfChanged(\.status, status)
+    }
+    #endif
 
     private static func onboardingCompleteKey(_ tenantID: String) -> String {
         "trace_commons.onboarding_complete.\(tenantID)"
     }
 
     func refreshOutcomeCounts() {
-        perform("queue_outcome_counts", work: { try $0.queueOutcomeCounts() }, onSuccess: {
-            self.outcomeCounts = $0
-        })
+        perform("queue_outcome_counts", work: { try $0.queueOutcomeCounts() }) {
+            self.publishIfChanged(\.outcomeCounts, $0)
+        }
     }
 
     // MARK: - Preview scheduling
@@ -520,7 +611,7 @@ final class AppModel: ObservableObject {
     /// proportional to what is on screen.
     private func applyPendingUpdate(_ entries: [QueueEntry]) {
         let previousIDs = Set(pending.map(\.entryID))
-        pending = entries
+        publishIfChanged(\.pending, entries)
         let currentIDs = Set(entries.map(\.entryID))
         let vanished = previousIDs.subtracting(currentIDs)
         if !vanished.isEmpty {
@@ -591,16 +682,22 @@ final class AppModel: ObservableObject {
         case .queued, .running:
             break
         case .ready:
-            if let summary = result.summary {
+            if let summary = result.summary, summaries[result.entryID] != summary {
                 summaries[result.entryID] = summary
             }
         case .tooLarge:
-            tooLarge[result.entryID] = PreviewTooLarge(
+            let refusal = PreviewTooLarge(
                 rawSessionBytes: result.rawSessionBytes ?? 0,
                 limitBytes: result.limitBytes ?? 0
             )
+            if tooLarge[result.entryID] != refusal {
+                tooLarge[result.entryID] = refusal
+            }
         case .failed:
-            summaryErrors[result.entryID] = result.label ?? "preview-failed"
+            let label = result.label ?? "preview-failed"
+            if summaryErrors[result.entryID] != label {
+                summaryErrors[result.entryID] = label
+            }
         }
     }
 
@@ -997,7 +1094,12 @@ final class AppModel: ObservableObject {
             discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),
             state: .pending,
             reasonLabel: nil,
-            attempts: 0
+            attempts: 0,
+            // A single-file conversation: no delegated transcripts, none
+            // dropped, so the card's extent line is absent and the capture
+            // shows exactly what it showed before these fields existed.
+            subagentCount: 0,
+            subagentsDropped: 0
         )
         var offsets: [Int] = []
         if !needle.isEmpty {

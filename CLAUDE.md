@@ -73,7 +73,10 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Nine jobs gate every PR (see `.github/workflows/ci.yml`):
+Every job in `.github/workflows/ci.yml` gates every PR. There are sixteen
+as of 2026-08-25; the list below covers the long-standing ones and is not
+a full inventory -- read the workflow for that. (It said "nine" while the
+file held fifteen, so treat any count here as stale until re-checked.)
 
 - `cargo fmt --check` — runs `cargo fmt --all -- --check`. Run `cargo fmt --all`
   before committing.
@@ -92,6 +95,10 @@ Nine jobs gate every PR (see `.github/workflows/ci.yml`):
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path. Do not break it.
 - `operator-binaries smoke`.
+- `macOS app tests` — `swift test` in `macos/`, on `macos-26`. The only
+  thing that runs the Swift suite; before it existed those tests gated
+  nothing. Needs `cargo build -p trace-commons-contributor-ffi` first,
+  because the Swift package links that dylib.
 - `windows named-pipe ACL` — the only `windows-latest` job. Runs
   `scripts/windows/verify-pipe-acl.ps1`, which creates a second,
   non-administrator local account and requires it to be denied when opening

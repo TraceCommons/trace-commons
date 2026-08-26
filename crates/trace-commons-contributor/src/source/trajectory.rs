@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::source::{
     SOURCE_TRAJECTORY, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
-    session_hash,
+    real_file_within_root, session_hash,
 };
 
 const MAX_SOURCE_LEN: usize = 64;
@@ -298,6 +298,35 @@ impl TraceSource for TrajectorySource {
         Ok(sessions)
     }
 
+    /// A changed trajectory file is its own session, on exactly the terms
+    /// `discover` uses: the declared path itself when it names a file, and
+    /// otherwise a `.json`/`.jsonl` file sitting DIRECTLY in the declared
+    /// directory. Trajectory discovery does not recurse, so neither does
+    /// this -- a nested file the walk never sees must not be addressable.
+    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        if self.path.is_file() {
+            // A single declared file is the whole source. Compared rather
+            // than resolved: the contributor named this exact path.
+            return (path == self.path).then(|| self.path.clone());
+        }
+        let path = real_file_within_root(&self.path, path)?;
+        (path.parent() == Some(self.path.as_path()) && is_trajectory_file(&path)).then_some(path)
+    }
+
+    /// The ref for whichever trajectory file a changed path names.
+    ///
+    /// `session_for_path` resolves the address and `session_ref_for`
+    /// describes it -- the same function `discover` uses -- so a scoped
+    /// scan and a full sweep cannot disagree. `session_ref_for` already
+    /// answers `None` for a file it cannot stat, which is what a file
+    /// deleted between the event and this lookup looks like.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        Ok(session_ref_for(address))
+    }
+
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         let bytes = std::fs::read(&r.path).map_err(|_| anyhow!("unreadable_trajectory_file"))?;
         let hash = session_hash(&bytes);
@@ -333,6 +362,121 @@ impl TraceSource for TrajectorySource {
 mod tests {
     use super::*;
     use crate::source::SessionEventKind;
+
+    /// A trajectory file is its own session, on the same terms `discover`
+    /// uses: flat, direct children only, and nothing outside the declared
+    /// path.
+    #[test]
+    fn a_trajectory_file_maps_to_itself_and_nothing_else_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat = dir.path().join("run.jsonl");
+        std::fs::write(&flat, SAMPLE).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("run.jsonl"), SAMPLE).unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("run.jsonl");
+        std::fs::write(&elsewhere, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        assert_eq!(source.session_for_path(&flat), Some(flat.clone()));
+        assert!(source.discover().unwrap().iter().any(|r| r.path == flat));
+
+        for path in [
+            dir.path().join("notes.txt"),
+            // Discovery does not recurse, so a nested file is not a session
+            // this source owns.
+            nested.join("run.jsonl"),
+            nested,
+            dir.path().to_path_buf(),
+            dir.path().join("never-written.jsonl"),
+            elsewhere,
+        ] {
+            assert_eq!(
+                source.session_for_path(&path),
+                None,
+                "{} must not address a session",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_declared_as_one_file_maps_only_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let declared = dir.path().join("run.jsonl");
+        std::fs::write(&declared, SAMPLE).unwrap();
+        let sibling = dir.path().join("other.jsonl");
+        std::fs::write(&sibling, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(declared.clone());
+        assert_eq!(source.session_for_path(&declared), Some(declared));
+        assert_eq!(source.session_for_path(&sibling), None);
+    }
+
+    #[test]
+    fn session_at_describes_a_trajectory_exactly_as_discover_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.jsonl");
+        std::fs::write(&file, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        let scoped = source.session_at(&file).unwrap().expect("a session");
+
+        // `Debug` rather than a hand-listed field set, so a field added
+        // later is covered too.
+        assert_eq!(format!("{scoped:?}"), format!("{:?}", discovered[0]));
+        assert_eq!(scoped.path, file);
+        assert_eq!(scoped.source, SOURCE_TRAJECTORY);
+    }
+
+    #[test]
+    fn a_vanished_or_foreign_trajectory_is_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.jsonl");
+        std::fs::write(&file, SAMPLE).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("run.jsonl");
+        std::fs::write(&elsewhere, SAMPLE).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        assert!(source.session_at(&file).unwrap().is_some());
+        assert!(source.session_at(&elsewhere).unwrap().is_none());
+
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            source.session_at(&file).unwrap().is_none(),
+            "a deleted trajectory must be Ok(None), not an error"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn path_mapping_refuses_symlinks_and_traversal_out_of_the_trajectory_root() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.jsonl");
+        std::fs::write(&secret, SAMPLE).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("run.jsonl");
+        std::fs::write(&real, SAMPLE).unwrap();
+        let linked = dir.path().join("link.jsonl");
+        symlink(&secret, &linked).unwrap();
+
+        let source = TrajectorySource::new(dir.path().to_path_buf());
+        assert_eq!(source.session_for_path(&linked), None);
+        assert_eq!(
+            source.session_for_path(&dir.path().join("..").join("secret.jsonl")),
+            None
+        );
+        assert_eq!(source.session_for_path(&real), Some(real.clone()));
+    }
 
     const SAMPLE: &str = r#"[
       {"role":"meta","source":"openhands","cwd":"/home/dev/proj","model":"gpt-5","git_branch":"main"},

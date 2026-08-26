@@ -22,7 +22,7 @@ import SwiftUI
 /// would tell an onlooker more than it would tell the contributor.
 struct OnboardingConnectView: View {
     @EnvironmentObject private var model: AppModel
-    var onEnrolled: () -> Void = {}
+    var onEnrolled: () -> Void
 
     var body: some View {
         ScrollView {
@@ -63,7 +63,7 @@ struct OnboardingConnectContent: View {
     /// canvas) can render any state of this screen without driving a real
     /// daemon call -- the same accommodation `PreviewSheet.Preloaded` makes
     /// for its screen.
-    init(onEnrolled: @escaping () -> Void = {}, previewPhase: Phase = .idle, previewText: String = "") {
+    init(onEnrolled: @escaping () -> Void, previewPhase: Phase = .idle, previewText: String = "") {
         self.onEnrolled = onEnrolled
         _phase = State(initialValue: previewPhase)
         _inviteText = State(initialValue: previewText)

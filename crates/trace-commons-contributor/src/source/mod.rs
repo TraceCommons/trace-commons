@@ -2,7 +2,7 @@
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::daemon::settings::SourceDeclaration;
 
@@ -13,6 +13,35 @@ pub mod claude_code;
 pub mod codex;
 pub mod discovery;
 pub mod trajectory;
+
+/// A load declined because of what the session *is*, not because of what
+/// the machine happened to be doing when it was asked.
+///
+/// The distinction is the whole point of the type. A source that refuses a
+/// session over its own byte budget will refuse the same session on every
+/// poll for the rest of its life, so the contributor has to be able to find
+/// out; a read that failed because a file was momentarily unreadable will
+/// very likely succeed sixty seconds later, and treating the two alike
+/// means either flagging a healthy daemon over an IO blip or staying silent
+/// about a session that is never going to be offered. The callers that care
+/// downcast for this rather than matching on message text -- see
+/// `daemon::watcher::visit_session`.
+///
+/// `label` is the refusal's existing wire name, carried on the type so the
+/// message a source already emits does not change: `source::codex` says
+/// `rollout-too-large`, and a shell or a log line that recognises that
+/// string keeps recognising it.
+///
+/// Both byte counts describe the contributor's own file against a constant
+/// compiled into this binary. Neither is operator-secret and both are safe
+/// to state; the path is neither, and is deliberately absent.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("{label}: {declared_bytes} bytes exceeds the {budget_bytes}-byte budget")]
+pub struct SessionTooLarge {
+    pub label: &'static str,
+    pub declared_bytes: u64,
+    pub budget_bytes: u64,
+}
 
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
@@ -103,6 +132,126 @@ pub trait TraceSource: Send + Sync {
     fn name(&self) -> &'static str;
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
+
+    /// Which session, if any, a changed filesystem path belongs to.
+    ///
+    /// Event-driven watching learns that *a path* moved and has to turn
+    /// that into *a session* before anything can be scanned. The answer is
+    /// source-specific -- a Codex rollout is its own session, a Claude Code
+    /// transcript under `<uuid>/subagents/` belongs to the parent -- so it
+    /// belongs here, beside `discover`, rather than in the daemon where it
+    /// would have to re-derive each adapter's layout.
+    ///
+    /// Returns the session's stable address: the same `PathBuf` that
+    /// `SessionRef::path` carries, so the queue, the upload state and a
+    /// scoped scan all keep addressing a session by one path. `None` means
+    /// the path is not part of any session this source owns.
+    ///
+    /// **This is fed paths that came from the operating system**, so it is
+    /// an addressing surface, not a convenience. Every implementation must
+    /// refuse a path that is not really inside the declared root -- `..`
+    /// traversal and symlinks included -- and must be at least as strict as
+    /// the adapter's own discovery: a mapping laxer than discovery would be
+    /// a way to name a file the contributor never agreed to watch.
+    ///
+    /// The default answers `None`, which is the correct answer for a source
+    /// that cannot map paths at all: the reconciliation sweep still finds
+    /// its sessions, just on the slow path.
+    fn session_for_path(&self, _path: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// The full `SessionRef` for the session a changed path belongs to.
+    ///
+    /// `session_for_path` answers *which* session; this answers *what it
+    /// looks like right now* -- size, group mtime, cwd -- which is what a
+    /// scoped scan needs before it can judge eligibility. Resolving the
+    /// address and describing the session are separate steps on purpose:
+    /// the address rule is shared with the daemon's bookkeeping, while this
+    /// is the part that touches the disk.
+    ///
+    /// The ref MUST be identical to the one `discover` produces for the
+    /// same session. A scoped scan and a full sweep that disagreed about a
+    /// session's size or group mtime would reach different eligibility
+    /// decisions for the same bytes, which is the drift event-driven
+    /// watching exists to avoid rather than introduce. Implementations
+    /// therefore share one ref-construction function with `discover` rather
+    /// than building a second one.
+    ///
+    /// `Ok(None)` covers both "not a session" and "was a session, is now
+    /// gone": these paths come from filesystem events, so a session
+    /// deleted between the event and this lookup is an ordinary race and
+    /// not a failure. Errors are reserved for I/O failures that are not
+    /// "it is gone".
+    ///
+    /// The default resolves the address and then finds it in `discover`,
+    /// which is correct for any source and costs a full scan -- so a source
+    /// that maps paths should override it, and one that does not
+    /// (`session_for_path` returning `None`) never reaches the scan at all.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        Ok(self
+            .discover()?
+            .into_iter()
+            .find(|candidate| candidate.path == address))
+    }
+}
+
+/// `path` if it is a real file genuinely inside `root`, otherwise `None`.
+///
+/// The one containment check every adapter's `session_for_path` runs
+/// before it applies its own layout rule. Three refusals, and all three
+/// have already happened to this codebase's discovery walks:
+///
+/// - **Not under the root at all**, including anything reachable only by
+///   `..`. Components are inspected rather than the string compared, so
+///   `<root>/proj/../../etc/x.jsonl` is refused even though it is spelled
+///   with the root as a prefix.
+/// - **A symlink anywhere in the chain below the root.** Every intermediate
+///   component must be a real directory and the leaf a real file, checked
+///   with `symlink_metadata`, which does not follow. This is the same rule
+///   `push_group_if_jsonl` and `group_members_for` already enforce with
+///   `DirEntry::file_type` and `symlink_metadata`: a symlink planted under
+///   a session root by any same-user process must not steer collection at
+///   files elsewhere on disk.
+/// - **Anything that is not a regular file**, so a directory event never
+///   becomes a session address.
+///
+/// The root itself is deliberately not required to be a real directory: it
+/// is what the contributor declared, and a declared root that happens to be
+/// a symlink is their choice, made once and explicitly. What must not
+/// happen is a path *below* it leaving it.
+pub(crate) fn real_file_within_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut walked = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    let mut any = false;
+    while let Some(component) = components.next() {
+        let name = match component {
+            Component::Normal(name) => name,
+            // `.` is inert; everything else -- `..`, a root, a Windows
+            // prefix -- means this path does not describe a location under
+            // `root` even though it was spelled with it as a prefix.
+            Component::CurDir => continue,
+            _ => return None,
+        };
+        walked.push(name);
+        let metadata = std::fs::symlink_metadata(&walked).ok()?;
+        let last = components.peek().is_none();
+        if last {
+            if !metadata.is_file() {
+                return None;
+            }
+        } else if !metadata.is_dir() {
+            return None;
+        }
+        any = true;
+    }
+    // An empty relative path means `path` IS the root; a root is not a
+    // session file.
+    any.then_some(walked)
 }
 
 /// Hash raw session bytes as "sha256:<hex>".

@@ -5872,6 +5872,79 @@ mod training_dynamics_tests {
 mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Pins what each consent scope PERMITS, not merely what it is called.
+    ///
+    /// `tests/consent_policy_pin.rs` pins the scope names, the wire strings and
+    /// the variant set, so a rename or an addition cannot slip past. It cannot
+    /// see this mapping, which is private to the crate -- and this mapping is
+    /// the part a contributor actually consented to. Adding
+    /// `TraceAllowedUse::ModelTraining` to `DebuggingEvaluation` here would
+    /// widen the default scope for every future submission, break no test, and
+    /// require no policy-version bump.
+    ///
+    /// So: changing this table changes what <https://tracecommons.ai/legal/>
+    /// part C means. Publish the new text and bump
+    /// `TRACE_CONTRIBUTION_POLICY_VERSION` (and `src/policy.ts` in the
+    /// community repo) before you change it here.
+    #[test]
+    fn scope_permissions_match_the_published_document() {
+        use super::{ConsentScope, TraceAllowedUse, default_allowed_uses_for_scope};
+
+        let cases: &[(ConsentScope, &[TraceAllowedUse])] = &[
+            (
+                ConsentScope::DebuggingEvaluation,
+                &[
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::AggregateAnalytics,
+                ],
+            ),
+            (
+                ConsentScope::BenchmarkOnly,
+                &[
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::BenchmarkGeneration,
+                    TraceAllowedUse::AggregateAnalytics,
+                ],
+            ),
+            (
+                ConsentScope::RankingTraining,
+                &[
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::RankingModelTraining,
+                    TraceAllowedUse::AggregateAnalytics,
+                ],
+            ),
+            (
+                ConsentScope::ModelTraining,
+                &[
+                    TraceAllowedUse::Debugging,
+                    TraceAllowedUse::Evaluation,
+                    TraceAllowedUse::RankingModelTraining,
+                    TraceAllowedUse::ModelTraining,
+                    TraceAllowedUse::AggregateAnalytics,
+                ],
+            ),
+            // Deliberately empty: public_attribution is a profile-management
+            // consent and grants no trace-content use. Part C.5 of the
+            // published document says exactly this.
+            (ConsentScope::PublicAttribution, &[]),
+        ];
+
+        for (scope, expected) in cases {
+            assert_eq!(
+                default_allowed_uses_for_scope(*scope),
+                expected.to_vec(),
+                "consent scope {scope:?} no longer permits what part C of \
+                 https://tracecommons.ai/legal/ says it permits. Traces \
+                 already submitted under this scope were consented on the \
+                 published wording, so widening it here changes the meaning \
+                 of consent already given",
+            );
+        }
+    }
+
     #[test]
     fn read_privacy_env_prefers_canonical_then_legacy() {
         use super::read_privacy_env;

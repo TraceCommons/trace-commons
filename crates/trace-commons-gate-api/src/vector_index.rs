@@ -34,4 +34,16 @@ pub trait VectorIndex: Send + Sync {
     /// `UsearchVectorIndex`, which keeps one file per tenant) can route the
     /// deletion to the right shard without doing a global scan.
     fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool>;
+
+    /// Persist every pending write to whatever durable medium the
+    /// implementation owns.
+    ///
+    /// Purely in-memory implementations (the mocks, the reference index) have
+    /// nothing to persist and keep the no-op default. Implementations that own
+    /// a durable corpus (`UsearchVectorIndex` and its per-tenant files) MUST
+    /// override this: the corpus is what "duplicate" means, so a process that
+    /// exits without flushing silently redefines the novelty gate.
+    fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

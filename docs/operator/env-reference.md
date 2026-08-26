@@ -81,6 +81,8 @@ procedure.
 | `TRACE_COMMONS_VECTOR_INDEX_DIM` | optional | `1024` | Must match embedder output dim. |
 | `TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN` | optional | `32` | LRU cap on per-tenant indexes held open. |
 | `TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY` | optional | `32` | Inserts between disk syncs. |
+| `TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS` | optional | `60` | Periodic flush cadence. Bounds how much of the novelty corpus a hard kill (SIGKILL, power loss) can lose. `0` disables the background flusher — do not set it to `0` in production. |
+| `TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS` | optional | `20` | How long `trace-commons-ingest` drains in-flight requests after SIGTERM before it flushes the vector indexes and exits. Keep it below systemd's `TimeoutStopSec`. |
 | `TRACE_COMMONS_VECTOR_INDEX_HNSW_M` | optional | `16` | HNSW M parameter. |
 | `TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION` | optional | `200` | HNSW efConstruction. |
 | `TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH` | optional | `50` | HNSW efSearch. |

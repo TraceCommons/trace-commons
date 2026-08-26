@@ -383,12 +383,12 @@ history record, audit entry, notification text, or IPC response.
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
 | `approve` | `entry_id`, `all: true`, or `project_id` | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; see "The approval hold" and "What `approve` reports" below |
-| `dismiss` | `entry_id` | `ok: true` | |
+| `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}` | configured **and** discovered projects; see "`list_projects`" below |
-| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above |
+| `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]` | |
 | `history_rollup` | — | see below | |
 | `refresh_history` | — | `requested: true` | |
@@ -651,6 +651,30 @@ cancels on every card leaving the list will hit it constantly.
 `dismiss` cancels an entry's scheduled preview implicitly. `approve` does
 not -- it needs the envelope it would be cancelling.
 
+### `dismiss` is permanent
+
+A queue entry is identified by the hash of its content, so a dismissal
+recorded on the entry alone was a decision about a byte range: the moment
+the contributor typed the next message into the same conversation it hashed
+to something else, and the watcher offered it again as a brand-new
+`pending` card. In a project set to `auto_upload` the re-offer arrived
+already `approved`, so a declined conversation uploaded unattended.
+
+`dismiss` therefore declines the **session**, addressed the way the daemon
+addresses every session -- by its path. Once dismissed, the watcher skips
+that session for good: no new `pending` card, no `approved` one, and no
+re-read (the skip sits in front of the load, so a declined conversation
+someone keeps working in costs nothing per poll). Arming a project does not
+override it -- `auto_upload` is a standing yes to sessions the contributor
+has not ruled on, not to one they have.
+
+There is no un-dismiss. The record is the dismissed entry itself, which
+lives in the queue file with reason `dismissed-by-contributor` and is never
+compacted, so dismissals made by older daemons are honoured with no
+migration. A `refused` entry carrying any *other* reason is the daemon's
+verdict on some bytes rather than the contributor's on the conversation,
+and does not suppress anything.
+
 **Too large.** A session over the admission cap is refused rather than
 previewed, and the refusal carries **no size estimate of any kind**:
 `raw_session_bytes` is a `stat` of the file, `limit_bytes` is the cap, and
@@ -665,6 +689,33 @@ and `approve` still builds and pins one.
 path, size, and mtime, the entry's whole-group size, and a fingerprint of
 the local configuration. Any of those changing rebuilds. The cache lives in
 the daemon process and does not survive a daemon restart.
+
+### `set_project_mode` and the ignore purge
+
+Setting a project to `ignore` also clears whatever it has waiting: every
+`pending` entry for that project moves to `refused` with
+`reason_label = "project-ignored"`. The response carries `purged`, the
+number of entries that moved.
+
+`approved` and `uploading` entries are deliberately untouched. An approval
+is a decision already made about specific bytes under specific consent
+scopes, and a project-level preference set afterwards does not retract it --
+so a project with three waiting and one approved loses three and still
+uploads one. A client MUST say so rather than let a contributor discover it.
+
+`"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
+permanent and suppresses that conversation at its path forever; this is a
+verdict on whatever was queued at the moment the mode changed, so setting
+the project back to `notify_only` or `auto_upload` lets those sessions be
+offered again -- including sessions that are finished and will never be
+written to again. Leaving `ignore` drops that project's `"project-ignored"`
+entries outright, which is what lets the watcher re-offer them; `dismissed`
+and pipeline refusals in the same project are untouched. The re-offer
+arrives on a later poll, not in this response, and is still subject to the
+queue cap.
+
+A client MUST NOT present the purge as irreversible, and MUST NOT rely on
+the entries reappearing within any particular time.
 
 ### `preview_body`
 
@@ -943,9 +994,21 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `not-enrolled` | No config was readable when the build ran | Retry after enrolling |
   | `session-file-vanished` | The session file behind the entry is gone | Will not succeed for this entry |
   | `preview-failed` | The redaction pipeline itself failed | May be transient |
-  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded | **Never** succeeds for this entry -- do not offer retry |
+  | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded. The entry is moved to `refused` with this same string as its `reason_label`, so it stops being offered | **Never** succeeds for this entry -- do not offer retry |
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+
+  Only `envelope-too-large` changes the entry's state; every other label
+  above leaves the entry exactly where it stood. A refusal that no retry
+  can ever get past is not a state a queue should keep calling `pending`,
+  and leaving it there re-offered the same unapprovable card on every poll.
+  The refusal binds to the entry, not to the session's path: a dismissal
+  (`dismissed-by-contributor`) silences a conversation permanently, but
+  this is a verdict on one envelope built under one set of consent scopes,
+  so a session that grows or is rebuilt under narrower scopes is offered
+  again. Note that `list_pending` returns `pending` entries only, so a
+  client's own toast is the only place the contributor sees this: render
+  the skip rather than dropping it.
 
   Nothing here is free text, a path, or trace content. **`approved` plus
   the length of `skipped` always equals the number of entries `approve` was
@@ -1580,6 +1643,7 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
+| `session-too-large` | at least one session on disk is past the byte budget its source will read, so it is not being offered | no |
 | `dismissed-by-contributor` | declined by hand | n/a |
 | `expired-without-decision` | aged out | n/a |
 | `session-changed-after-offer` | superseded | n/a |
@@ -1602,6 +1666,18 @@ listed highest first:
 6. `ingest-unreachable`
 7. `queue-full`
 8. `daily-cap-reached`
+9. `session-too-large`
+
+`session-too-large` sits last on purpose: every label above it describes the
+daemon, and this one describes a single file on disk. It must never mask an
+outage. It is raised by the poll pass when a source declines to read a
+session at all, and retracted by the next full pass that reads everything --
+a scoped pass over a handful of changed paths may raise it and never clears
+it, since one readable session says nothing about the rest of the corpus.
+A read that merely *failed* -- a file deleted mid-pass, a momentary
+permission or IO error -- does not raise it: that is expected to succeed on
+the next poll, and a flag a blip pins on a healthy daemon is one nobody will
+trust.
 
 Because `daily-cap-reached` is last, it is the label most often masked by
 another condition. That is why the daily caps are also reported in full on

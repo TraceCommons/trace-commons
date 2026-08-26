@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::{
     SOURCE_CODEX, SessionEvent, SessionEventKind, SessionHasher, SessionRef, SessionTranscript,
-    TraceSource,
+    TraceSource, real_file_within_root,
 };
 
 pub struct CodexSource {
@@ -51,6 +51,45 @@ impl TraceSource for CodexSource {
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
         load_session(&r.path)
     }
+
+    /// A changed rollout file is its own session.
+    ///
+    /// Codex rollouts are peer files with no parent/child convention -- the
+    /// same fact `SessionRef::group_member_count` records as zero -- so the
+    /// mapping is the identity for anything `discover` would have collected
+    /// and `None` for everything else. `is_rollout_file_name` is the one
+    /// naming rule, shared with `collect_rollout_files`, so a file the walk
+    /// would pass over cannot be addressed here.
+    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        let path = real_file_within_root(&self.root, path)?;
+        // Stricter than the walk in one respect, deliberately:
+        // `collect_rollout_files` reaches a symlinked *file* whose name
+        // matches, because `DirEntry::file_type` only stops it descending
+        // into symlinked directories. Refusing one here costs nothing --
+        // the reconciliation sweep still finds it -- while keeping this
+        // addressing surface uniform with the Claude Code one.
+        is_rollout_file_name(path.file_name()?.to_str()?).then_some(path)
+    }
+
+    /// The ref for whichever rollout a changed path names.
+    ///
+    /// `session_for_path` resolves the address and `rollout_session_ref`
+    /// describes it -- the same function `collect_rollout_files` builds
+    /// every discovered ref with, so a scoped scan and a full sweep cannot
+    /// disagree about a rollout's size or cwd. A rollout deleted between
+    /// the event and this lookup is `Ok(None)`.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        let mut ignored_skips = 0usize;
+        Ok(rollout_session_ref(address, &mut ignored_skips))
+    }
+}
+
+/// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
+fn is_rollout_file_name(file_name: &str) -> bool {
+    file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
 fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &mut usize) {
@@ -81,48 +120,66 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
-        if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+        if !is_rollout_file_name(file_name) {
             continue;
         }
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                *skipped += 1;
-                continue;
-            }
-        };
-        let started_at = metadata
-            .modified()
-            .ok()
-            .map(chrono::DateTime::<chrono::Utc>::from);
-        let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
-        // Derive the label from the cwd we just peeked, the same way
-        // `load_session` does further down. Leaving this `None` meant every
-        // Codex row in the picker rendered as `-`, so a contributor choosing
-        // what to submit could not tell one session from another - while the
-        // submitted envelope carried the correct project all along, because
-        // load_session computes it. `--project` filtering was unaffected too,
-        // since that matches on `cwd`. Only the thing a human reads was wrong.
-        let project = cwd
-            .as_deref()
-            .map(Path::new)
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-        sessions.push(SessionRef {
-            source: SOURCE_CODEX,
-            path,
-            project,
-            cwd,
-            started_at,
-            size_bytes: metadata.len(),
-            // Codex rollouts are peer files: `collect_rollout_files` recurses
-            // arbitrarily deep, but every match is its own session and no
-            // record links one to another. There is no group to describe.
-            group_modified_at: None,
-            group_member_count: 0,
-        });
+        if let Some(session) = rollout_session_ref(path, skipped) {
+            sessions.push(session);
+        }
     }
+}
+
+/// The one way a Codex `SessionRef` is built, used by `collect_rollout_files`
+/// for every rollout it walks to and by `session_at` for the single rollout
+/// an event named.
+///
+/// Shared rather than reimplemented because a scoped scan and a full sweep
+/// that described the same session differently would reach different
+/// eligibility decisions for the same bytes.
+///
+/// `None` for a file that is no longer there, which on the event path is an
+/// ordinary race rather than a failure. `skipped` counts the entries that
+/// were unreadable rather than merely gone.
+fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef> {
+    let metadata = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            *skipped += 1;
+            return None;
+        }
+    };
+    let started_at = metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from);
+    let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
+    // Derive the label from the cwd we just peeked, the same way
+    // `load_session` does further down. Leaving this `None` meant every
+    // Codex row in the picker rendered as `-`, so a contributor choosing
+    // what to submit could not tell one session from another - while the
+    // submitted envelope carried the correct project all along, because
+    // load_session computes it. `--project` filtering was unaffected too,
+    // since that matches on `cwd`. Only the thing a human reads was wrong.
+    let project = cwd
+        .as_deref()
+        .map(Path::new)
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+    Some(SessionRef {
+        source: SOURCE_CODEX,
+        path,
+        project,
+        cwd,
+        started_at,
+        size_bytes: metadata.len(),
+        // Codex rollouts are peer files: `collect_rollout_files` recurses
+        // arbitrarily deep, but every match is its own session and no
+        // record links one to another. There is no group to describe.
+        group_modified_at: None,
+        group_member_count: 0,
+    })
 }
 
 /// Cheap discovery-time peek at a session file's true working directory:
@@ -283,11 +340,18 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // would be consenting to something the preview misdescribes. The size is
     // the contributor's own file's, not operator-secret, so it is safe to
     // state -- but the path is not, and is deliberately absent.
+    //
+    // Typed, not a bare `bail!`, so a caller can tell this refusal apart
+    // from the IO errors around it without matching on message text. The
+    // rendered message is unchanged. See `source::SessionTooLarge`.
     let declared = std::fs::metadata(path)?.len();
     if declared > ROLLOUT_BYTE_BUDGET {
-        anyhow::bail!(
-            "rollout-too-large: {declared} bytes exceeds the {ROLLOUT_BYTE_BUDGET}-byte budget"
-        );
+        return Err(super::SessionTooLarge {
+            label: "rollout-too-large",
+            declared_bytes: declared,
+            budget_bytes: ROLLOUT_BYTE_BUDGET,
+        }
+        .into());
     }
     // Streamed rather than read whole. A rollout can be hundreds of
     // megabytes, and the old `fs::read` plus `from_utf8_lossy` held two
@@ -559,6 +623,157 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex")
     }
 
+    /// A rollout is its own session, and nothing else in the tree is one.
+    #[test]
+    fn a_rollout_maps_to_itself_and_nothing_else_maps_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+        // A stray file the walk passes over, and a directory.
+        std::fs::write(day.join("notes.txt"), "x").unwrap();
+        std::fs::write(day.join("not-a-rollout.jsonl"), "{}\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("rollout-2026-08-20T10-00-00-xyz.jsonl");
+        std::fs::write(&elsewhere, "{}\n").unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        assert_eq!(source.session_for_path(&rollout), Some(rollout.clone()));
+        // The address matches what discovery emits for the same file.
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, rollout);
+
+        for path in [
+            day.join("notes.txt"),
+            day.join("not-a-rollout.jsonl"),
+            day.clone(),
+            root.path().to_path_buf(),
+            day.join("rollout-never-written.jsonl"),
+            elsewhere,
+        ] {
+            assert_eq!(
+                source.session_for_path(&path),
+                None,
+                "{} must not address a session",
+                path.display()
+            );
+        }
+    }
+
+    /// A scoped lookup and a full sweep must describe a rollout
+    /// identically, or the two paths judge the same bytes differently.
+    /// `Debug` rather than a hand-listed field set, so a field added later
+    /// is covered too.
+    #[test]
+    fn session_at_describes_a_rollout_exactly_as_discover_does() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(
+            &rollout,
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "type": "session_meta", "payload": { "cwd": "/Users/z/code/proj" }
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        let discovered = source.discover().unwrap();
+        assert_eq!(discovered.len(), 1);
+        let scoped = source.session_at(&rollout).unwrap().expect("a session");
+
+        assert_eq!(format!("{scoped:?}"), format!("{:?}", discovered[0]));
+        assert_eq!(scoped.path, rollout);
+        assert_eq!(scoped.cwd.as_deref(), Some("/Users/z/code/proj"));
+        assert_eq!(scoped.project.as_deref(), Some("proj"));
+        assert_eq!(scoped.group_member_count, 0);
+    }
+
+    /// A rollout deleted between the event and the lookup, and anything
+    /// outside the root: `Ok(None)`, never an error.
+    #[test]
+    fn a_vanished_or_foreign_rollout_is_ok_none() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-2026-08-20T10-00-00-abc.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("rollout-2026-08-20T10-00-00-xyz.jsonl");
+        std::fs::write(&elsewhere, "{}\n").unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        assert!(source.session_at(&rollout).unwrap().is_some());
+        assert!(source.session_at(&elsewhere).unwrap().is_none());
+        assert!(source.session_at(&day.join("notes.txt")).unwrap().is_none());
+
+        std::fs::remove_file(&rollout).unwrap();
+        assert!(
+            source.session_at(&rollout).unwrap().is_none(),
+            "a deleted rollout must be Ok(None), not an error"
+        );
+    }
+
+    /// The mapping is fed paths from the operating system, so a symlink or
+    /// a `..` must not become a way to name a file outside the declared
+    /// root. `collect_rollout_files` already refuses to descend a symlinked
+    /// directory; this refuses the symlinked file too.
+    #[test]
+    #[cfg(unix)]
+    fn path_mapping_refuses_symlinks_and_traversal_out_of_the_codex_root() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside
+            .path()
+            .join("rollout-2026-08-20T10-00-00-secret.jsonl");
+        std::fs::write(&secret, "{}\n").unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let real = day.join("rollout-2026-08-20T10-00-00-real.jsonl");
+        std::fs::write(&real, "{}\n").unwrap();
+
+        let linked_file = day.join("rollout-2026-08-20T10-00-01-link.jsonl");
+        symlink(&secret, &linked_file).unwrap();
+        let linked_dir = root.path().join("linked");
+        symlink(outside.path(), &linked_dir).unwrap();
+
+        let source = CodexSource::new(root.path().to_path_buf());
+        for escape in [
+            linked_file,
+            linked_dir.join("rollout-2026-08-20T10-00-00-secret.jsonl"),
+            day.join("..").join("..").join("..").join("..").join(
+                secret
+                    .file_name()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default(),
+            ),
+        ] {
+            assert_eq!(
+                source.session_for_path(&escape),
+                None,
+                "{} must not address a session",
+                escape.display()
+            );
+        }
+        assert_eq!(
+            source.session_for_path(&real),
+            Some(real.clone()),
+            "the real rollout must still map, or this test proves nothing"
+        );
+    }
+
     /// A rollout past the budget is declined by name, not truncated.
     ///
     /// Truncating would upload a fragment described by a preview that says
@@ -577,7 +792,17 @@ mod tests {
         bytes.resize(ROLLOUT_BYTE_BUDGET as usize + 1, b'x');
         std::fs::write(&path, &bytes).unwrap();
 
-        let err = load_session(&path).unwrap_err().to_string();
+        let raw = load_session(&path).unwrap_err();
+        // Typed, so the daemon can tell this refusal -- a verdict that will
+        // decide the same way on every poll -- from the IO errors around
+        // it, which very likely will not. Matching on the message text
+        // would make the wording load-bearing.
+        let typed = raw
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .expect("an oversized rollout is refused by type, not only by message");
+        assert_eq!(typed.budget_bytes, ROLLOUT_BYTE_BUDGET);
+        assert!(typed.declared_bytes > ROLLOUT_BYTE_BUDGET);
+        let err = raw.to_string();
         assert!(
             err.contains("rollout-too-large"),
             "expected a named refusal, got: {err}"

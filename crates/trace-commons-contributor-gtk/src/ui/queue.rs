@@ -353,17 +353,17 @@ pub fn render(app: &Rc<App>) {
     }
 
     for (project_id, project_label, members) in &groups {
-        // A group header (and its `Submit all`) only earns its place when it
-        // says something a row's own `Submit` does not: one waiting session
-        // from a project is already covered by that row.
-        if members.len() > 1 {
-            view.list.append(&project_header(
-                app,
-                project_id,
-                project_label,
-                members.len(),
-            ));
-        }
+        // `Submit all` only earns its place when it says something a row's
+        // own `Submit` does not -- see `project_header` -- but the header
+        // itself, and its `Ignore project`, are drawn at every group size:
+        // ignoring a project with one waiting session is exactly as
+        // meaningful as ignoring one with ten.
+        view.list.append(&project_header(
+            app,
+            project_id,
+            project_label,
+            members.len(),
+        ));
         for (index, entry) in members {
             let widget = row(app, entry, *index);
             // Kept so a scroll settle can ask each widget its own bounds
@@ -706,6 +706,25 @@ fn manifest_block(
         caption.add_css_class("tc-attention");
     }
     facts.append(&caption);
+
+    // What this one card actually covers, and -- the half the contract makes
+    // mandatory -- whether any of it was left out to fit. Absent entirely
+    // when there is nothing to report, so a conversation that delegated
+    // nothing carries no line about subagents at all. Independent of the
+    // preview: both counts are load-time facts on the entry itself, so this
+    // is as true while the card still reads "checking" as it is after.
+    if let Some(text) = copy::subagent_line(entry.subagent_count, entry.subagents_dropped) {
+        let extent = gtk::Label::builder()
+            .label(text)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        extent.add_css_class("tc-caveat");
+        if entry.subagents_dropped > 0 {
+            extent.add_css_class("tc-attention");
+        }
+        facts.append(&extent);
+    }
     block.append(&facts);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -761,11 +780,16 @@ fn manifest_block(
     block
 }
 
-/// A project's header, drawn only when it has more than one session
-/// waiting -- see `render`. `Submit all` calls `approve` with `project_id`
-/// rather than enumerating this project's entry ids itself: the daemon is
-/// what decides which entries that selects, exactly once, and this shell
-/// does not keep its own copy of that rule.
+/// A project's header. `Submit all` is built only when there is more than
+/// one session waiting -- one waiting session from a project is already
+/// covered by that row's own `Submit`, so the button would say nothing new
+/// -- but `Ignore project` is built regardless of `waiting`: ignoring a
+/// project with one card pending is exactly as meaningful as ignoring one
+/// with ten. `Submit all` calls `approve` with `project_id` rather than
+/// enumerating this project's entry ids itself: the daemon is what decides
+/// which entries that selects, exactly once, and this shell does not keep
+/// its own copy of that rule. `Ignore project` calls `set_project_mode` the
+/// same way -- see `set_mode` in `ui/settings.rs`.
 fn project_header(
     app: &Rc<App>,
     project_id: &str,
@@ -784,34 +808,102 @@ fn project_header(
     heading.add_css_class("tc-card-title");
     bar.append(&heading);
 
-    let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
-    submit_all.add_css_class("suggested-action");
-    submit_all.add_css_class("tc-primary");
-    submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
-    bar.append(&submit_all);
+    if waiting > 1 {
+        let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
+        submit_all.add_css_class("suggested-action");
+        submit_all.add_css_class("tc-primary");
+        submit_all.set_tooltip_text(Some(copy::SUBMIT_ALL_TOOLTIP));
+        bar.append(&submit_all);
 
-    let app_for_submit = Rc::clone(app);
-    let project_id = project_id.to_string();
-    let project_label = project_label.to_string();
-    submit_all.connect_clicked(move |_| {
-        // Read fresh at click time rather than off what `render` captured
-        // when the header was drawn: the queue can change between a render
-        // and a click, and this is only ever the CANDIDATE set for the undo
-        // bar -- see `submit_and_toast` -- never what tells the daemon what
-        // to approve. `project_id` alone does that.
-        let candidates: Vec<String> = app_for_submit
-            .entries
-            .borrow()
-            .iter()
-            .filter(|e| e.state == "pending" && e.project_id == project_id)
-            .map(|e| e.entry_id.clone())
-            .collect();
-        submit_and_toast(
-            &app_for_submit,
-            serde_json::json!({ "project_id": project_id }),
-            project_label.clone(),
-            candidates,
+        let app_for_submit = Rc::clone(app);
+        let project_id_for_submit = project_id.to_string();
+        let project_label_for_submit = project_label.to_string();
+        submit_all.connect_clicked(move |_| {
+            // Read fresh at click time rather than off what `render` captured
+            // when the header was drawn: the queue can change between a
+            // render and a click, and this is only ever the CANDIDATE set
+            // for the undo bar -- see `submit_and_toast` -- never what tells
+            // the daemon what to approve. `project_id` alone does that.
+            let candidates: Vec<String> = app_for_submit
+                .entries
+                .borrow()
+                .iter()
+                .filter(|e| e.state == "pending" && e.project_id == project_id_for_submit)
+                .map(|e| e.entry_id.clone())
+                .collect();
+            submit_and_toast(
+                &app_for_submit,
+                serde_json::json!({ "project_id": project_id_for_submit }),
+                project_label_for_submit.clone(),
+                candidates,
+            );
+        });
+    }
+
+    let ignore = gtk::Button::with_label(copy::IGNORE_PROJECT);
+    ignore.add_css_class("tc-chip");
+    ignore.set_tooltip_text(Some(copy::IGNORE_PROJECT_TOOLTIP));
+    bar.append(&ignore);
+
+    let app_for_ignore = Rc::clone(app);
+    let project_id_for_ignore = project_id.to_string();
+    let project_label_for_ignore = project_label.to_string();
+    let pending_count = waiting;
+    ignore.connect_clicked(move |_| {
+        let dialog = adw::MessageDialog::new(
+            Some(&app_for_ignore.window),
+            Some(&copy::ignore_project_title(&project_label_for_ignore)),
+            Some(&copy::ignore_project_body(pending_count)),
         );
+        dialog.add_responses(&[("cancel", "Cancel"), ("ignore", copy::IGNORE_PROJECT)]);
+        dialog.set_close_response("cancel");
+        // It sits beside a control that uploads these same traces. The
+        // destructive appearance is what stops the two reading alike.
+        dialog.set_response_appearance("ignore", adw::ResponseAppearance::Destructive);
+
+        let app = Rc::clone(&app_for_ignore);
+        let project_id = project_id_for_ignore.clone();
+        let project_label_for_response = project_label_for_ignore.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response != "ignore" {
+                return;
+            }
+            // Mirrors `set_mode` in `ui/settings.rs`.
+            //
+            // `purged` is read back rather than assumed: the dialog had to
+            // name a count before the call, so it named the one this shell
+            // could see, and the queue can move between the render and the
+            // click. The daemon's number is the authority, and when the two
+            // disagree the contributor is told -- see
+            // `copy::ignore_project_reconciled`.
+            let label = project_label_for_response.clone();
+            app.call(
+                "set_project_mode",
+                serde_json::json!({ "project_id": project_id, "mode": "ignore" }),
+                move |app, result| {
+                    match result {
+                        Err(_) => app.toast(
+                            "That couldn't be changed just now. Nothing else changed either.",
+                        ),
+                        Ok(value) => {
+                            let purged = value.get("purged").and_then(|v| v.as_u64());
+                            // An older daemon does not send the field at all.
+                            // Silence is not a disagreement.
+                            if let Some(purged) = purged {
+                                if let Some(line) =
+                                    copy::ignore_project_reconciled(&label, pending_count, purged)
+                                {
+                                    app.toast(&line);
+                                }
+                            }
+                        }
+                    }
+                    app.refresh();
+                },
+            );
+        });
+        dialog.present();
     });
 
     bar.upcast()

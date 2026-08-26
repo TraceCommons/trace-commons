@@ -54,6 +54,15 @@ where
         self.index.delete(tenant_storage_ref, entry_id)
     }
 
+    /// Make every pending vector-index write durable.
+    ///
+    /// The novelty corpus is the only thing that defines what "duplicate"
+    /// means, so a shutdown path that skips this quietly resets the gate.
+    /// Called on graceful shutdown; a no-op for in-memory indexes.
+    pub fn flush_vector_index(&self) -> anyhow::Result<()> {
+        self.index.flush()
+    }
+
     /// Chunk `plaintext` and score every chunk for perplexity, returning the
     /// chunk plan, the per-chunk scores, and the aggregated perplexity. This is
     /// the perplexity-only prefix shared by [`Self::evaluate`] and
@@ -235,6 +244,11 @@ where
             peak_perplexity_micros: perp_agg.peak_perplexity_micros,
             peak_novelty_micros,
             chunk_count: plan.chunks.len() as u32,
+            // Pre-cap denominator: what was scored plus what the cap dropped.
+            // `ChunkPlan` has always computed the dropped count; until now it
+            // was only logged, so a capped decision could never state its own
+            // coverage.
+            total_chunk_count: (plan.chunks.len() as u32).saturating_add(plan.dropped_chunk_count),
             chunks_capped: plan.chunks_capped,
             inserted_chunk_entries,
         })
@@ -452,6 +466,10 @@ mod tests {
             .unwrap();
         assert_eq!(d.chunk_count, 1);
         assert!(!d.chunks_capped);
+        assert_eq!(
+            d.total_chunk_count, 1,
+            "an uncapped trace's total equals what was scored"
+        );
         assert!(d.perplexity_micros.abs_diff(2_718_281) <= 2);
         assert!(d.peak_perplexity_micros.abs_diff(2_718_281) <= 2);
         assert!(d.tail_fraction_micros.abs_diff(250_000) <= 2_500);
@@ -469,6 +487,9 @@ mod tests {
             .unwrap();
         assert_eq!(d.chunk_count, 16);
         assert!(d.chunks_capped);
+        // The pre-cap denominator reaches the decision, so a capped trace can
+        // be reported as "16 of 20" instead of silently as "16".
+        assert_eq!(d.total_chunk_count, 20);
     }
 
     #[test]

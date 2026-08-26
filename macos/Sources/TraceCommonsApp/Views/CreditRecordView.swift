@@ -170,8 +170,8 @@ private struct CreditCoin: View {
 /// would change the flow's steps, which this pass does not do. It is drawn,
 /// verbatim, ready for the pass that does.
 struct PrivacyManifestoView: View {
-    var onContinue: () -> Void = {}
-    var onBack: () -> Void = {}
+    var onContinue: () -> Void
+    var onBack: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -266,6 +266,6 @@ struct PrivacyManifestoView: View {
 }
 
 #Preview("Privacy stanza") {
-    PrivacyManifestoView()
+    PrivacyManifestoView(onContinue: {}, onBack: {})
         .frame(width: 640, height: 380)
 }

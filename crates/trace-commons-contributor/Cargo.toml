@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.4.6"
+version = "0.4.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 hex = "0.4"
+notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }

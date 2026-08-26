@@ -69,6 +69,12 @@ pub struct OrchestrationDecision {
     pub peak_novelty_micros: u64,
     /// Number of chunks scored (>= 1).
     pub chunk_count: u32,
+    /// Total chunks the trace produced BEFORE the per-trace cap was applied
+    /// (>= `chunk_count`). The denominator of the coverage this decision
+    /// actually has: a capped decision scored `chunk_count` of
+    /// `total_chunk_count` chunks. Equals `chunk_count` when nothing was
+    /// dropped.
+    pub total_chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
     /// Every chunk entry inserted into the vector index (both gates passed,

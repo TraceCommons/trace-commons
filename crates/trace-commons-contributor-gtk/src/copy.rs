@@ -59,10 +59,65 @@ pub fn residual_risk_line(total_redactions: u32) -> String {
         ),
     }
 }
+/// What one card actually covers, when the answer is more than the
+/// conversation itself.
+///
+/// A Claude Code conversation is not one file: each delegated subagent's
+/// turns are written beside the session, and one probed machine had 114 of
+/// them under a single conversation. The card offers all of it as one
+/// decision, so its extent belongs in the description -- see
+/// `docs/contributor-daemon-ipc-v1_1.md`, which asks a client to say how
+/// many delegated transcripts an entry covers and **requires** it to
+/// surface a non-zero dropped count.
+///
+/// The second sentence is the one that has to be exactly right. A dropped
+/// transcript is a normal consequence of a very large conversation, not an
+/// error, and it is never the conversation itself -- the parent file is
+/// always kept, and only delegated transcripts, largest first, are left out
+/// to bring the group under the byte budget. So the line states what was
+/// left out, why, and what that does not mean, in that order, and it does
+/// it without a word that reads as a failure.
+///
+/// Returns `None` when there is nothing to say: an entry covering no
+/// delegated transcripts and dropping none renders no row at all rather
+/// than a line of zeroes.
+pub fn subagent_line(subagent_count: u32, subagents_dropped: u32) -> Option<String> {
+    let trimmed = "left out to keep this session within its size limit; the conversation itself \
+                   is complete.";
+    match (subagent_count, subagents_dropped) {
+        (0, 0) => None,
+        (n, 0) => Some(format!("Includes {n} {}.", transcripts(n))),
+        (0, 1) => Some(format!("1 delegated subagent transcript was {trimmed}")),
+        (0, d) => Some(format!("{d} delegated subagent transcripts were {trimmed}")),
+        (n, 1) => Some(format!(
+            "Includes {n} {}. The largest was {trimmed}",
+            transcripts(n)
+        )),
+        (n, d) => Some(format!(
+            "Includes {n} {}. The {d} largest were {trimmed}",
+            transcripts(n)
+        )),
+    }
+}
+
+fn transcripts(n: u32) -> &'static str {
+    if n == 1 {
+        "delegated subagent transcript"
+    } else {
+        "delegated subagent transcripts"
+    }
+}
+
 pub const LOOK_INSIDE: &str = "Look inside";
 pub const NOT_THIS_ONE: &str = "Not this one";
-pub const NOT_THIS_ONE_TOOLTIP: &str =
-    "Skips this session only. This project will keep being offered.";
+/// Says "for good" because it is. A dismissal is a decision about the
+/// conversation, not about the size it happened to be when the card was
+/// drawn, and there is no un-dismiss -- so the tooltip has to say so before
+/// the click, not leave the contributor to infer it from a card that never
+/// comes back. The second sentence is the reassurance that keeps the first
+/// from reading like an opt-out of the whole project.
+pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this session for good, even if you keep working in \
+     it. This project will keep being offered.";
 
 /// The one-click send on a queue row. See
 /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`: the click
@@ -85,6 +140,65 @@ pub const SUBMIT_ALL: &str = "Submit all";
 pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this project now. \
      Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
      then.";
+
+/// Stops a project being offered again and clears whatever it has waiting.
+/// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry
+/// its primary-action styling -- the two buttons take a contributor's queue
+/// in opposite directions.
+pub const IGNORE_PROJECT: &str = "Ignore project";
+///
+/// Word for word what macOS and Windows put on the same button. Three
+/// shells drift, and a tooltip nobody tests drifts first: this one is
+/// `ProjectIgnoreCopy.tooltip` there.
+pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
+     Anything already submitted is unaffected, and you can undo this in Settings.";
+
+pub fn ignore_project_title(project: &str) -> String {
+    format!("Ignore {project}?")
+}
+
+/// The removal clause is dropped when nothing is waiting.
+///
+/// No group renders that way today: all three shells build their groups
+/// from the pending list alone, so a group that renders has at least one
+/// waiting session in it. The branch is kept because this function is
+/// handed a number and must be right about whatever number it is handed --
+/// "removes 0 waiting traces" would be both wrong and alarming -- not
+/// because a caller is known to produce zero.
+pub fn ignore_project_body(pending: usize) -> String {
+    let tail = "Nothing already submitted is affected. You can undo this in Settings.";
+    if pending == 0 {
+        return format!("Stops this project being offered. {tail}");
+    }
+    let noun = if pending == 1 { "trace" } else { "traces" };
+    format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
+}
+
+/// What is said afterwards when the daemon removed a different number than
+/// the confirmation named.
+///
+/// The dialog has to state a count before the call is made, so it states
+/// the one this shell can see. The queue is live: a poll between the render
+/// and the click adds waiting sessions, an approval elsewhere removes one,
+/// and the daemon acts on what is there when it gets the message. `purged`
+/// is that number and it is the authority; the promise was an estimate.
+///
+/// `None` when the two agree, which is the ordinary case -- a line that
+/// appears every time to say nothing happened is noise, and noise is how a
+/// line that matters gets skipped.
+pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
+    if purged == promised as u64 {
+        return None;
+    }
+    let clause = if purged == 1 {
+        "1 waiting trace was removed".to_string()
+    } else {
+        format!("{purged} waiting traces were removed")
+    };
+    Some(format!(
+        "Ignored {project}. The queue changed while you were deciding: {clause}, not {promised}."
+    ))
+}
 
 /// A project group's header line: the label and how many are waiting under
 /// it. Deliberately plain -- the manifest strip already carries the figures
@@ -1733,6 +1847,75 @@ mod tests {
     }
 
     #[test]
+    fn a_card_covering_nothing_delegated_says_nothing_at_all() {
+        // Never a "0 dropped" row: a line that is always present is a line
+        // nobody reads, and the one case that matters would be lost in it.
+        assert_eq!(subagent_line(0, 0), None);
+    }
+
+    #[test]
+    fn a_dropped_transcript_is_always_stated() {
+        // The contract's one `must`. Every shape with a drop in it says so.
+        for (kept, dropped) in [(0, 1), (0, 7), (3, 1), (42, 3)] {
+            let line = subagent_line(kept, dropped).expect("a drop is never silent");
+            assert!(
+                line.contains(&dropped.to_string()) || (dropped == 1 && line.contains("largest")),
+                "the count of what was left out has to appear: {line}"
+            );
+            // And it says what was NOT lost. The parent conversation is
+            // never dropped, and a contributor reading this line is deciding
+            // whether to send it.
+            assert!(
+                line.contains("the conversation itself is complete"),
+                "a trimmed card must say what survived: {line}"
+            );
+            // Trimming is a size consequence, not a failure. No word here
+            // may read as an error.
+            for alarming in [
+                "error",
+                "failed",
+                "corrupt",
+                "incomplete",
+                "lost",
+                "missing",
+            ] {
+                assert!(
+                    !line.to_lowercase().contains(alarming),
+                    "{alarming} makes a normal trim read as a fault: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_extent_line_counts_in_words_a_person_can_read() {
+        assert_eq!(
+            subagent_line(1, 0).unwrap(),
+            "Includes 1 delegated subagent transcript."
+        );
+        assert_eq!(
+            subagent_line(42, 0).unwrap(),
+            "Includes 42 delegated subagent transcripts."
+        );
+        // "The 1 largest" is a bug; one dropped transcript is "the largest".
+        assert!(subagent_line(42, 1).unwrap().contains("The largest was"));
+        assert!(subagent_line(42, 3).unwrap().contains("The 3 largest were"));
+        // Everything dropped: there is no kept count to open with, so the
+        // sentence starts from what was left out rather than claiming to
+        // include nothing.
+        assert!(
+            subagent_line(0, 2)
+                .unwrap()
+                .starts_with("2 delegated subagent transcripts were left out")
+        );
+        assert!(
+            subagent_line(0, 1)
+                .unwrap()
+                .starts_with("1 delegated subagent transcript was left out")
+        );
+    }
+
+    #[test]
     fn credit_copy_carries_no_currency_projection_or_date() {
         for forbidden in ["$", "USD", "worth", "value of", "by 20", "payout of"] {
             assert!(
@@ -2129,5 +2312,49 @@ mod tests {
             scrub_detector_label("some_new_vendor_key"),
             "some new vendor key"
         );
+    }
+
+    #[test]
+    fn the_ignore_confirmation_counts_in_words_a_person_can_read() {
+        assert!(ignore_project_body(1).contains("1 waiting trace"));
+        assert!(!ignore_project_body(1).contains("traces"));
+        assert!(ignore_project_body(12).contains("12 waiting traces"));
+    }
+
+    #[test]
+    fn the_ignore_confirmation_says_nothing_about_zero() {
+        let body = ignore_project_body(0);
+        assert!(!body.contains('0'), "{body}");
+        assert!(!body.to_lowercase().contains("removes"), "{body}");
+        assert!(body.contains("Stops this project being offered."), "{body}");
+    }
+
+    #[test]
+    fn the_ignore_confirmation_always_names_the_way_back() {
+        for n in [0usize, 1, 7] {
+            let body = ignore_project_body(n);
+            assert!(body.contains("undo this in Settings"), "n={n}: {body}");
+            assert!(
+                body.contains("Nothing already submitted is affected."),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ignore_reconciliation_speaks_only_when_the_count_moved() {
+        assert_eq!(ignore_project_reconciled("api", 3, 3), None);
+        assert_eq!(ignore_project_reconciled("api", 0, 0), None);
+        let line = ignore_project_reconciled("api", 3, 5).expect("a moved count is said out loud");
+        assert!(line.contains("5 waiting traces"), "{line}");
+        assert!(line.contains("not 3"), "{line}");
+        let one = ignore_project_reconciled("api", 3, 1).expect("fewer is still a moved count");
+        assert!(one.contains("1 waiting trace was removed"), "{one}");
+        assert!(!one.contains("traces"), "{one}");
+    }
+
+    #[test]
+    fn the_ignore_title_names_the_project() {
+        assert_eq!(ignore_project_title("api"), "Ignore api?");
     }
 }

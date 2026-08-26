@@ -117,11 +117,18 @@ final class DaemonClient {
     /// The daemon still accepts a `label` parameter from older clients and
     /// always ignores it -- labels are derived from the key inside the
     /// daemon, never accepted from a caller -- so this wrapper sends none.
-    func setProjectMode(projectID: String, mode: ProjectMode) throws {
-        _ = try rawResult(
+    /// Returns how many waiting entries the daemon removed, which is only
+    /// ever non-zero for `.ignore`. A daemon older than this field sends none
+    /// and the answer is 0 — the caller must read that as "nothing to
+    /// reconcile", never as "nothing was removed".
+    @discardableResult
+    func setProjectMode(projectID: String, mode: ProjectMode) throws -> Int {
+        let data = try rawResult(
             "set_project_mode",
             params: ["project_id": projectID, "mode": mode.rawValue]
         )
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return (object?["purged"] as? Int) ?? 0
     }
 
     func settings() throws -> DaemonSettingsView {

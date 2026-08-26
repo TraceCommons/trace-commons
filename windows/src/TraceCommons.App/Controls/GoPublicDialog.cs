@@ -182,7 +182,7 @@ public static class GoPublicDialog
         _open = true;
         try
         {
-            await dialog.ShowAsync();
+            await DialogGuard.ShowOnceAsync(dialog);
         }
         catch (Exception)
         {

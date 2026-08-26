@@ -21,10 +21,12 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
-# TRACE_COMMONS_DATA_DIR + embedder/vector index live under /var/lib and
-# /var/cache. Logs are appended to /var/log/tracecommons. ProtectHome
+# TRACE_COMMONS_DATA_DIR + embedder/vector indexes live under /var/lib and
+# /var/cache. The dedup index needs its OWN entry: it is a separate
+# usearch instance under a separate root (sharing one would cross the two
+# indexes' neighbours), so admitting the novelty root does not admit it. Logs are appended to /var/log/tracecommons. ProtectHome
 # blocks the binary's default ~/.ironclaw fallback, which is intentional.
-ReadWritePaths=/var/cache/trace-commons-embedder /var/lib/trace-commons-vector-index /var/log/tracecommons /var/lib/trace-commons-data
+ReadWritePaths=/var/cache/trace-commons-embedder /var/lib/trace-commons-vector-index /var/lib/trace-commons-dedup-index /var/log/tracecommons /var/lib/trace-commons-data
 
 [Install]
 WantedBy=multi-user.target

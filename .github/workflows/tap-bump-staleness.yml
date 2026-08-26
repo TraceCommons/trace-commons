@@ -1,0 +1,77 @@
+# Surfaces Homebrew tap bump pull requests left open by earlier releases.
+#
+# Why this is its own workflow rather than a step in the release workflows or
+# a job in ci.yml:
+#
+#   - A step in release-apps.yml / release-contributor.yml only fires during
+#     a release, and its only way to complain is to fail the release job --
+#     over a *previous* release's unmerged bump, after this release's assets
+#     have already published. That is the exact failure shape the tap-bump
+#     hardening removed; re-introducing it here would be perverse. The
+#     release steps do auto-merge their own bump, which is what stops the
+#     queue growing in the first place; this workflow is the backstop for
+#     when that auto-merge could not complete.
+#
+#   - A job in ci.yml runs on every push and every pull request, which is
+#     constant noise for a condition that changes at most once per release,
+#     and it cannot work at all on a pull request from a fork, where
+#     HOMEBREW_TAP_TOKEN is not exposed. Adding a `schedule:` trigger to
+#     ci.yml to dodge that would also put every other job in that file --
+#     including the Windows matrix -- on a weekly timer.
+#
+# Weekly, on its own, is the placement where a red run means exactly one
+# thing and blocks nothing. Eleven bump pull requests accumulated unmerged
+# back to 0.4.1 while the tap served cask 0.4.0 and formula 0.3.0; nothing
+# was watching, and no human step in a runbook was going to be.
+
+name: tap-bump-staleness
+
+on:
+  schedule:
+    - cron: "17 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tap-bump-staleness:
+    name: no tap bump pull requests left behind
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # HOMEBREW_TAP_TOKEN is the same fine-grained PAT the release
+      # workflows use; listing pull requests needs only its read access.
+      - name: Check the tap for unmerged bumps
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not available to this run, so the tap cannot be checked at all. That is itself a failure: without it the release workflows cannot bump the tap either." >&2
+            exit 1
+          fi
+          # A bump opened by a release still in flight is not stale. Only
+          # count pull requests that have been open longer than a day.
+          CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          gh pr list --repo TraceCommons/homebrew-tap --state open \
+            --json url,headRefName,createdAt > open-prs.json
+          STALE="$(jq -r --arg cutoff "$CUTOFF" '
+            [.[] | select((.headRefName | startswith("bump-")) and .createdAt < $cutoff)]
+            | .[] | "- \(.url) (\(.headRefName), opened \(.createdAt))"
+          ' open-prs.json)"
+          if [ -z "$STALE" ]; then
+            echo "No tap bump pull requests older than $CUTOFF are still open."
+            exit 0
+          fi
+          {
+            echo "### Tap bump pull requests still unmerged"
+            echo
+            echo "$STALE"
+            echo
+            echo "While these are open, \`brew upgrade\` serves the last merged"
+            echo "cask and formula, not the releases that have shipped since."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$STALE" >&2
+          echo "::error::Homebrew tap bump pull requests are unmerged; Homebrew users are not receiving shipped releases."
+          exit 1

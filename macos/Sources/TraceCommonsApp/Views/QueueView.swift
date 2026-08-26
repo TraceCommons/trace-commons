@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 
 /// The queue: one per session waiting for a decision.
 ///
@@ -73,6 +74,11 @@ struct QueueContent: View {
                     .font(TC.Font_.meta)
                     .foregroundStyle(.secondary)
             }
+            if let notice = model.lastActionNotice {
+                Text(notice)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
 
             if model.awaitingDecision.isEmpty {
                 CenteredNotice(
@@ -126,6 +132,13 @@ struct QueueContent: View {
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
+                        onIgnoreProject: {
+                            model.ignoreProject(
+                                id: group.id,
+                                label: group.label,
+                                promised: group.count
+                            )
+                        },
                         onAppear: { entry in
                             model.requestPreview(for: entry)
                             visibleRowIDs.insert(entry.entryID)
@@ -164,6 +177,7 @@ private struct ProjectQueueGroup: View {
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
+    let onIgnoreProject: () -> Void
     /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
     /// which is where the daemon-side scheduler dedupe lives. See `rowList`
     /// for why this is what drives loading at all now.
@@ -173,6 +187,8 @@ private struct ProjectQueueGroup: View {
     /// away keeps its place in the daemon's queue until it is dismissed or
     /// leaves the pending list for good (`AppModel.applyPendingUpdate`).
     let onDisappear: (QueueEntry) -> Void
+
+    @State private var confirmingIgnore = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -190,6 +206,29 @@ private struct ProjectQueueGroup: View {
                         included, not held back.
                         """)
                 }
+                // Shown at every count, unlike `Submit all`, which hides at
+                // one because the row's own Submit already does the same
+                // thing. This has no row-level equivalent: it is a statement
+                // about the project, not about a trace.
+                //
+                // Never `.tcPrimaryAction()`. It sits beside a control that
+                // uploads the very traces this removes, and two adjacent
+                // actions that do opposite things must not look alike.
+                Button(ProjectIgnoreCopy.buttonLabel) { confirmingIgnore = true }
+                    .help(ProjectIgnoreCopy.tooltip)
+            }
+            .confirmationDialog(
+                ProjectIgnoreCopy.confirmationTitle(project: group.label),
+                isPresented: $confirmingIgnore,
+                titleVisibility: .visible
+            ) {
+                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive, action: onIgnoreProject)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(ProjectIgnoreCopy.confirmationBody(
+                    project: group.label,
+                    pendingCount: entries.count
+                ))
             }
             rowList
         }
@@ -374,6 +413,7 @@ struct QueueRow: View {
                     }
                     caption
                 }
+                extent
             }
             Spacer(minLength: TC.Space.m)
             actions
@@ -401,6 +441,29 @@ struct QueueRow: View {
             .foregroundStyle(ScrubbingCaveat.tone(redactionCount: redactionCount).textColor)
             .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// What this one card actually covers, and -- the half the contract makes
+    /// mandatory -- whether any of it was left out to fit.
+    ///
+    /// Outside the `if let summary` above on purpose: both counts are
+    /// load-time facts carried on the entry itself, so this line is as true
+    /// while the card still reads "Reading it locally…" as it is after the
+    /// preview lands. A trimmed conversation must not be able to reach a
+    /// decision through a card that never got a preview.
+    ///
+    /// Absent entirely when there is nothing to report, so a session that
+    /// delegated nothing carries no line about subagents at all.
+    @ViewBuilder
+    private var extent: some View {
+        if let line = entry.subagentLine {
+            Text(line)
+                .font(TC.Font_.footnote)
+                .foregroundStyle(entry.wasTrimmed ? TC.goldText : TC.inkSecondary)
+                .lineSpacing(TC.Font_.LineHeight.spacing(for: 10, TC.Font_.LineHeight.caption))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(line)
+        }
     }
 
     /// The gold chip that replaces the removed-by-pattern figure when nothing
@@ -472,7 +535,15 @@ struct QueueRow: View {
                 // app accent, and "Not this one" rendered in the same
                 // green as "Look inside" reads as a second approval.
                 .tint(.primary)
-                .help("Skips this session only. This project will keep being offered.")
+                // Says "for good" because it is: a dismissal is a decision
+                // about the conversation, not about the size it happened to
+                // be when this card was drawn, and there is no un-dismiss.
+                // The second sentence keeps the first from reading like an
+                // opt-out of the whole project.
+                .help("""
+                Skips this session for good, even if you keep working in it. \
+                This project will keep being offered.
+                """)
             Button("Submit", action: onSubmit)
                 // Untinted, and the same weight as "Not this one": a
                 // shortcut is not a recommendation. See the note above.

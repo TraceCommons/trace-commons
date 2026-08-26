@@ -36,8 +36,30 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     let state: QueueState
     let reasonLabel: String?
     let attempts: Int
+    /// How many delegated subagent transcripts this entry's session covers,
+    /// and how many were left out because the conversation exceeded the
+    /// source's raw byte budget.
+    ///
+    /// Optional because a daemon predating the fields sends neither, and a
+    /// missing count is not a count of zero -- but both read as "nothing to
+    /// say" through `subagentLine`, which is the only correct rendering of
+    /// silence here. See `TCShellCore.SubagentCopy` for the words.
+    let subagentCount: Int?
+    let subagentsDropped: Int?
 
     var id: String { entryID }
+
+    /// The card's extent line, or `nil` when there is nothing to report.
+    /// The contract makes surfacing a non-zero `subagents_dropped`
+    /// mandatory: a conversation trimmed to fit must say so rather than
+    /// presenting as complete.
+    var subagentLine: String? {
+        SubagentCopy.line(count: subagentCount ?? 0, dropped: subagentsDropped ?? 0)
+    }
+
+    /// Whether this card is standing for a deliberately trimmed
+    /// conversation. Drives tone only; the sentence says the rest.
+    var wasTrimmed: Bool { (subagentsDropped ?? 0) > 0 }
 
     enum CodingKeys: String, CodingKey {
         case entryID = "entry_id"
@@ -50,6 +72,8 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case state
         case reasonLabel = "reason_label"
         case attempts
+        case subagentCount = "subagent_count"
+        case subagentsDropped = "subagents_dropped"
     }
 
     /// "Claude Code" / "Codex", never the raw source token.
