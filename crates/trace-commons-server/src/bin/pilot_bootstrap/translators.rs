@@ -36,10 +36,35 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// Per-translator body cap so envelopes stay well under the gate-service
-/// request body limit. Long sessions get truncated rather than dropped.
-pub const SESSION_BODY_CAP: usize = 16_000;
+/// Per-translator text budget, in characters. Long sessions get truncated
+/// rather than dropped.
+///
+/// Measured, not guessed. The ceiling this has to respect is
+/// `MAX_TRACE_ENVELOPE_BYTES` (16,000,000). Across 35 real sessions pulled
+/// from the three target datasets, a session's redacted envelope came out at
+/// roughly 1.1x its body character count plus ~18 KB of fixed metadata, so a
+/// 1,000,000-character text budget plus the equal `SESSION_TOOL_PAYLOAD_CAP`
+/// lands around 2.4 MB -- a ~6x margin on real content, and still inside the
+/// limit with a ~2x margin under the pathological case where every character
+/// is a 4-byte one.
+///
+/// The previous value was 16,000, which was 0.1% of the limit it cited. It
+/// kept 3% of the largest sampled session (475,268 extractable characters)
+/// and truncated 43% of sampled sessions. Raising it changes `trace_body`,
+/// and therefore `submission_id`, for every session that used to be
+/// truncated -- see the idempotency note in
+/// `docs/operator/pilot-bootstrap.md` before re-running the loader over a
+/// dataset that has already been ingested.
+pub const SESSION_BODY_CAP: usize = 1_000_000;
 
+/// Separate budget, in characters, for tool-call arguments and tool-result
+/// content across one session. Kept separate from `SESSION_BODY_CAP` so that
+/// admitting tool payloads can never displace prose that already reached the
+/// envelope: the text budget behaves exactly as it did before tool events
+/// existed. Largest single payload observed in the sampled real sessions was
+/// 51,310 characters and the largest per-session total was 469,769, so this
+/// budget is not reached by real data; it exists to bound the envelope
+/// against a pathological session rather than to shape normal ones.
 pub const SESSION_TOOL_PAYLOAD_CAP: usize = 1_000_000;
 
 /// Translator-neutral hand-off to the submitter. The deterministic
@@ -1079,6 +1104,33 @@ mod tool_event_tests {
         assert!(
             total <= 12_000,
             "tool payloads must stay inside their budget, got {total}"
+        );
+    }
+
+    /// The body cap must admit a realistic agent session. Measured on real
+    /// downloaded sessions, the largest sampled session extracts 475,268
+    /// characters of text across 320 records; under the old 16,000-character
+    /// cap that session reached the envelope as 10 events. A session of that
+    /// size must now survive whole.
+    #[test]
+    fn the_body_cap_admits_a_realistic_agent_session() {
+        let turn = "word ".repeat(300);
+        let mut records = vec![json!({"type":"session","id":"s"})];
+        for _ in 0..320 {
+            records.push(json!({"type":"message",
+                "message":{"role":"assistant","content":turn}}));
+        }
+        let draft = SwivalTranslator::new()
+            .translate("big.jsonl", &make_session(&records))
+            .unwrap();
+        assert_eq!(
+            draft.session_events.len(),
+            320,
+            "a ~480k-character session must not be truncated"
+        );
+        assert_eq!(
+            draft.trace_body.chars().count(),
+            320 * turn.trim().len() + 319 * 2
         );
     }
 }
