@@ -364,8 +364,9 @@ impl ContributorVerdict {
     ///
     /// This leaves `user_feedback` free for a real satisfaction control
     /// later, including `Correction` once there is a surface to collect one
-    /// (redaction already scrubs `human_correction`; what is missing is the
-    /// consent decision and the UI, not the pipeline).
+    /// (the pipeline already handles `human_correction` -- credential
+    /// detection only, since a correction is stored as written; what is
+    /// missing is the UI, not the pipeline).
     fn outcome(self) -> OutcomeMetadata {
         OutcomeMetadata {
             task_success: self.task_success(),

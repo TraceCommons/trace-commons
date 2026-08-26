@@ -3475,18 +3475,54 @@ impl DeterministicTraceRedactor {
         self.redact_text_with_state(input, &mut state)
     }
 
-    fn redact_text_with_state(
+    /// Credential detection for a contributor-authored correction.
+    ///
+    /// A correction is composed deliberately, for submission, by someone who
+    /// chooses every word knowing where it goes -- unlike session content,
+    /// which is captured as a side effect of working. Replacing the path or
+    /// the name it cites destroys the explanation it exists to give, so the
+    /// semantic passes ([`Self::redact_private_emails`],
+    /// [`Self::redact_generic_paths`], [`Self::redact_known_paths`]) never
+    /// run over one, and neither does the prose-PII filter. Its text is
+    /// stored as written.
+    ///
+    /// Credential detection is the one control that does still apply. A High
+    /// or Critical match sets `blocked_secret_detected`, and the callers
+    /// refuse the submission on it rather than masking the credential and
+    /// sending it on: a masked credential has still been typed and
+    /// transmitted, and the contributor needs to know to rotate it.
+    ///
+    /// This is a decomposition of [`Self::redact_text_with_state`] rather
+    /// than a flag threaded through it -- it runs that function's detection
+    /// half and discards the rewrite. The returned report is the only
+    /// output; no rewritten text is produced, so none can be stored by
+    /// mistake.
+    fn detect_correction_credentials(&self, correction: &str) -> RedactionReport {
+        let mut report = RedactionReport::default();
+        // Detection runs over the same PEM-normalized text the general path
+        // scans, so a private-key block registers once under its own rule
+        // rather than also as a named-pattern or entropy hit. The rewritten
+        // copy is discarded here and never reaches the envelope.
+        let normalized = apply_pem_block_redaction(correction, &mut report);
+        let _discarded_ranges = self.scan_secret_ranges(&normalized, &mut report);
+        report
+    }
+
+    /// The detection half of [`Self::redact_text_with_state`]: named secret
+    /// patterns plus the cue-gated contextual-entropy sweep. Records every
+    /// finding in `report` (including `blocked_secret_detected` for a High or
+    /// Critical match) and returns the ranges a caller would mask. A caller
+    /// that only needs to know whether the text is safe can drop them.
+    ///
+    /// `input` is expected to have been through
+    /// [`apply_pem_block_redaction`] already, so known secrets stay
+    /// attributed to their named rule.
+    fn scan_secret_ranges(
         &self,
         input: &str,
-        state: &mut RedactionState,
-    ) -> (String, RedactionReport) {
-        let mut report = RedactionReport::default();
-        let mut redacted = self.redact_private_emails(input, state, &mut report);
-        redacted = self.redact_generic_paths(&redacted, state, &mut report);
-        redacted = self.redact_known_paths(&redacted, state, &mut report);
-        redacted = apply_pem_block_redaction(&redacted, &mut report);
-
-        let scan = self.leak_detector.scan(&redacted);
+        report: &mut RedactionReport,
+    ) -> Vec<std::ops::Range<usize>> {
+        let scan = self.leak_detector.scan(input);
         let mut ranges = scan
             .matches
             .iter()
@@ -3515,7 +3551,7 @@ impl DeterministicTraceRedactor {
         // with thousands of glued assignments could reach.
         let named_range_count = ranges.len();
         let mut named_cursor = 0usize;
-        for entropy_range in contextual_entropy_secret_ranges(&redacted) {
+        for entropy_range in contextual_entropy_secret_ranges(input) {
             while named_cursor < named_range_count
                 && ranges[named_cursor].end <= entropy_range.start
             {
@@ -3534,6 +3570,21 @@ impl DeterministicTraceRedactor {
             ranges.push(entropy_range);
         }
 
+        ranges
+    }
+
+    fn redact_text_with_state(
+        &self,
+        input: &str,
+        state: &mut RedactionState,
+    ) -> (String, RedactionReport) {
+        let mut report = RedactionReport::default();
+        let mut redacted = self.redact_private_emails(input, state, &mut report);
+        redacted = self.redact_generic_paths(&redacted, state, &mut report);
+        redacted = self.redact_known_paths(&redacted, state, &mut report);
+        redacted = apply_pem_block_redaction(&redacted, &mut report);
+
+        let ranges = self.scan_secret_ranges(&redacted, &mut report);
         if ranges.is_empty() {
             return (redacted, report);
         }
@@ -3719,14 +3770,24 @@ impl TraceRedactor for DeterministicTraceRedactor {
             });
         }
 
-        let mut outcome = trace.outcome;
-        if let Some(correction) = outcome.human_correction.take() {
-            let (mut redacted, child_report) = self.redact_text_with_state(&correction, &mut state);
-            report.merge(child_report);
-            redacted = self
-                .apply_privacy_filter_to_text(redacted, &mut report, &mut privacy_filter_summary)
-                .await?;
-            outcome.human_correction = Some(redacted);
+        // A correction is not scrubbed (S5). Neither rewriting pass runs over
+        // it -- not the deterministic semantic passes, not the prose-PII
+        // filter above -- so its text reaches the corpus as the contributor
+        // typed it. See `detect_correction_credentials` for why, and
+        // `ConsentMetadata::correction_included` for the declaration that
+        // makes the unredacted content visible to risk derivation.
+        let outcome = trace.outcome;
+        if let Some(correction) = outcome.human_correction.as_deref() {
+            let correction_report = self.detect_correction_credentials(correction);
+            if correction_report.blocked_secret_detected {
+                // Refused, not masked: a masked credential has still been
+                // typed and transmitted. Label-only, as with every other
+                // refusal on this path.
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: "correction-credential-detected".to_string(),
+                });
+            }
+            report.merge(correction_report);
         }
 
         let residual_pii_risk = residual_risk(&trace.consent, &report);
@@ -3812,10 +3873,14 @@ pub fn rescrub_trace_envelope_with(
         }
     }
 
-    if let Some(correction) = envelope.outcome.human_correction.take() {
-        let (redacted, child_report) = redactor.redact_text_with_state(&correction, &mut state);
-        report.merge(child_report);
-        envelope.outcome.human_correction = Some(redacted);
+    // A correction is stored as written (S5), on the maintenance path as much
+    // as on the originating one: re-scrubbing it here would destroy the same
+    // explanation the originating pass deliberately preserved. Credential
+    // detection still runs, and its findings still feed `report`, so a
+    // credential that reached storage raises the risk this pass derives.
+    // The residual scan below sees the correction too, and forces High on it.
+    if let Some(correction) = envelope.outcome.human_correction.as_deref() {
+        report.merge(redactor.detect_correction_credentials(correction));
     }
 
     redact_envelope_side_channels(redactor, envelope, &mut report, &mut state);
@@ -4008,9 +4073,14 @@ fn classify_structured_payload_node<'a>(
 
 /// Runs an async prose-PII filter (e.g. the NEAR AI backstop) over an
 /// already-produced envelope's content-bearing fields:
-/// `events[*].redacted_content`, `events[*].structured_payload` (every
-/// string leaf and object key, within the budgets above), and
-/// `outcome.human_correction`.
+/// `events[*].redacted_content` and `events[*].structured_payload` (every
+/// string leaf and object key, within the budgets above).
+///
+/// `outcome.human_correction` is deliberately NOT among them. The filter
+/// rewrites, and a correction is stored as written (S5) -- see
+/// [`DeterministicTraceRedactor::detect_correction_credentials`]. A
+/// correction therefore counts as uncovered prose for the coverage question
+/// below; see [`uncovered_prose_present`].
 ///
 /// Two-pass and atomic: every `adapter.redact_text` call is awaited and
 /// collected in the first pass, so any adapter error is returned before any
@@ -4024,8 +4094,8 @@ fn classify_structured_payload_node<'a>(
 /// chain preserves the prior risk instead - see [`resolve_post_scrub_risk`].
 /// Free-text fields that carry contributor- or model-authored prose but that
 /// [`rescrub_envelope_prose_pii_with`] never submits to the classifier. The
-/// scrub pass covers only `events[*].redacted_content`,
-/// `events[*].structured_payload`, and `outcome.human_correction`; everything
+/// scrub pass covers only `events[*].redacted_content` and
+/// `events[*].structured_payload`; everything
 /// listed here is untouched by it, and the deterministic residual scan that
 /// follows only matches patterned secrets, not prose PII such as names or
 /// addresses.
@@ -4050,6 +4120,20 @@ fn classify_structured_payload_node<'a>(
 fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
     fn has_text(values: &[String]) -> bool {
         values.iter().any(|v| !v.trim().is_empty())
+    }
+
+    // A correction is contributor prose that the scrub deliberately does not
+    // submit to the classifier (S5), so an envelope carrying one was never
+    // fully examined and a High prior risk must stay High. This is the
+    // "added here or covered by the scrub" case above: it used to be covered,
+    // and no longer is.
+    if envelope
+        .outcome
+        .human_correction
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return true;
     }
 
     if has_text(&envelope.replay.replay_notes) {
@@ -4080,7 +4164,6 @@ pub async fn rescrub_envelope_prose_pii_with(
     reconcile_consent_declarations(envelope);
 
     let mut event_updates: Vec<(usize, String)> = Vec::new();
-    let mut correction_update: Option<String> = None;
     let mut structured_updates: Vec<(usize, Value)> = Vec::new();
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
@@ -4097,13 +4180,10 @@ pub async fn rescrub_envelope_prose_pii_with(
         }
     }
 
-    if let Some(correction) = envelope.outcome.human_correction.as_deref() {
-        if let Some(redaction) = adapter.redact_text(correction).await? {
-            merge_privacy_filter_summary(&mut summary, &redaction.summary);
-            report.merge(redaction.report);
-            correction_update = Some(redaction.redacted_text);
-        }
-    }
+    // No correction pass. The classifier rewrites what it is given, and a
+    // correction is stored as written (S5), so submitting one here would
+    // undo the carve-out the originating pass made. `uncovered_prose_present`
+    // accounts for the coverage this leaves missing.
 
     // Structured tool payloads (Task 3): classify every string leaf and
     // object key of each event's `structured_payload`, working on a clone
@@ -4131,9 +4211,6 @@ pub async fn rescrub_envelope_prose_pii_with(
     // above are applied atomically.
     for (index, redacted_text) in event_updates {
         envelope.events[index].redacted_content = Some(redacted_text);
-    }
-    if let Some(redacted_text) = correction_update {
-        envelope.outcome.human_correction = Some(redacted_text);
     }
     for (index, redacted_payload) in structured_updates {
         envelope.events[index].structured_payload = redacted_payload;
@@ -8224,6 +8301,315 @@ mod tests {
         assert_eq!(
             residual_risk(&consent, &RedactionReport::default()),
             ResidualPiiRisk::Low,
+        );
+    }
+
+    /// One turn of session content, so a test can assert that the general
+    /// redaction path is still doing its job beside a correction.
+    fn raw_contribution_with_content(text: &str) -> super::RawTraceContribution {
+        use super::*;
+        let started = Utc::now();
+        RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: text.to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        )
+    }
+
+    // S5: a correction is composed deliberately, for submission, by someone
+    // who chooses every word knowing where it goes. "The agent used
+    // /Users/zaki/proj/config.toml instead of the staging one" is useless once
+    // the path is a placeholder, so the semantic passes do not run over it.
+    #[tokio::test]
+    async fn correction_keeps_a_local_path_verbatim() {
+        use super::*;
+
+        let correction = "the agent used /Users/zaki/proj/config.toml instead of the staging one";
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.outcome.human_correction = Some(correction.to_string());
+
+        let envelope =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/zaki".to_string()])
+                .redact_trace(raw)
+                .await
+                .expect("a correction naming a path is not a refusal");
+
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "a correction is stored as written"
+        );
+    }
+
+    // The email pass is a semantic pass too. A correction naming who to ask
+    // loses its point once the name is a placeholder.
+    #[tokio::test]
+    async fn correction_keeps_an_email_verbatim() {
+        use super::*;
+
+        let correction = "ask alice@example.com which staging bucket the job should write to";
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.outcome.human_correction = Some(correction.to_string());
+
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect("a correction naming a person is not a refusal");
+
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "a correction is stored as written"
+        );
+    }
+
+    // The carve-out is scoped to the correction and to nothing else. Session
+    // content carrying the very same path and address is still fully redacted
+    // in the same envelope.
+    #[tokio::test]
+    async fn session_content_beside_a_correction_is_still_redacted() {
+        use super::*;
+
+        let correction = "the agent edited /Users/zaki/proj/config.toml; ask alice@example.com";
+        let mut raw = raw_contribution_with_content(
+            "edit /Users/zaki/proj/config.toml and mail alice@example.com",
+        );
+        raw.outcome.human_correction = Some(correction.to_string());
+
+        let envelope =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/zaki".to_string()])
+                .redact_trace(raw)
+                .await
+                .expect("redaction succeeds");
+
+        let content = envelope
+            .events
+            .iter()
+            .filter_map(|event| event.redacted_content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !content.contains("/Users/zaki/proj/config.toml"),
+            "the carve-out must not leak into the general path: {content}"
+        );
+        assert!(
+            !content.contains("alice@example.com"),
+            "the carve-out must not leak into the general path: {content}"
+        );
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "the correction is still stored as written"
+        );
+    }
+
+    // The prose-PII filter REWRITES too, so skipping only the deterministic
+    // passes would leave "stored as written" untrue for any correction the
+    // classifier decided to touch. Whether a filter is attached must make no
+    // difference to a correction.
+    #[tokio::test]
+    async fn correction_is_unaffected_by_an_attached_privacy_filter() {
+        use super::*;
+
+        struct RewritesEverything;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for RewritesEverything {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:person_name");
+                report.add_pii_label("person_name");
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("staging", "[REDACTED:person_name]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::from([("person_name".into(), 1)]),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let correction = "the agent used the staging config instead of production";
+        let mut raw = raw_contribution_with_content("point it at the staging bucket");
+        raw.outcome.human_correction = Some(correction.to_string());
+
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(
+                std::sync::Arc::new(RewritesEverything),
+                PrivacyFilterBackendTag::Sidecar,
+            )
+            .redact_trace(raw)
+            .await
+            .expect("redaction succeeds");
+
+        let content = envelope
+            .events
+            .iter()
+            .filter_map(|event| event.redacted_content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            content.contains("[REDACTED:person_name]"),
+            "non-vacuity: the filter must actually rewrite session content: {content}"
+        );
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "the prose-PII filter does not run over a correction either"
+        );
+    }
+
+    // A path in a correction is the point; a live credential in one never is.
+    // The contributor is asked to remove it rather than having it silently
+    // masked, because a masked credential has still been typed and sent.
+    #[tokio::test]
+    async fn correction_carrying_a_credential_is_refused_not_masked() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.outcome.human_correction = Some(format!("it should have used {secret} instead"));
+
+        let error = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect_err("a credential in a correction refuses the submission");
+
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains(secret),
+            "the refusal must stay label-only and never carry the credential"
+        );
+    }
+
+    // The detection half of the general pass still runs over a correction,
+    // and a High/Critical match still sets the blocking flag. Detection only:
+    // the text handed back is never the rewritten copy.
+    #[test]
+    fn correction_credential_detection_blocks_without_rewriting() {
+        use super::*;
+
+        let redactor = DeterministicTraceRedactor::bare();
+
+        let clean = redactor.detect_correction_credentials(
+            "the agent used /Users/zaki/proj/config.toml instead of the staging one",
+        );
+        assert!(!clean.blocked_secret_detected, "a path is not a credential");
+
+        let blocked = redactor.detect_correction_credentials(
+            "it should have used sk-abcdefghijklmnopqrstuvwxyz012345 instead",
+        );
+        assert!(
+            blocked.blocked_secret_detected,
+            "a High/Critical match must still block"
+        );
+    }
+
+    // The async prose-PII backstop is the third site that rewrites, and the
+    // one most easily forgotten: skipping only the deterministic passes would
+    // leave "stored as written" untrue for any correction the classifier
+    // decided to touch.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn prose_pii_backstop_leaves_a_correction_verbatim() {
+        use crate::trace_contribution::*;
+
+        struct RedactsJane;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for RedactsJane {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                if !text.contains("jane@example.com") {
+                    return Ok(None);
+                }
+                let mut report = RedactionReport::default();
+                report.increment("privacy_filter:private_email");
+                report.add_pii_label("private_email");
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.replace("jane@example.com", "[REDACTED:private_email]"),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 1,
+                        by_label: std::collections::BTreeMap::from([("private_email".into(), 1)]),
+                        decoded_mismatch: false,
+                    },
+                    report,
+                }))
+            }
+        }
+
+        let correction = "jane@example.com owns the staging bucket, not the agent";
+        let mut envelope = sample_envelope_with_event_content("email jane@example.com now");
+        envelope.outcome.human_correction = Some(correction.to_string());
+
+        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope)
+            .await
+            .expect("the backstop pass succeeds");
+
+        assert!(
+            envelope.events[0]
+                .redacted_content
+                .as_deref()
+                .expect("event content")
+                .contains("[REDACTED:private_email]"),
+            "non-vacuity: the backstop must actually rewrite session content"
+        );
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "the backstop must not rewrite a correction"
+        );
+    }
+
+    // The envelope-level re-scrub is the second site, and it gets the same
+    // treatment: a stored correction is not rewritten on a later maintenance
+    // pass either, while the events beside it still are.
+    #[test]
+    fn rescrub_leaves_a_correction_verbatim() {
+        use super::*;
+
+        let correction = "the agent edited /Users/zaki/proj/config.toml; ask alice@example.com";
+        let mut envelope = bare_envelope();
+        envelope.events.push(message_event(
+            "edit /Users/zaki/proj/config.toml and mail alice@example.com",
+        ));
+        envelope.outcome.human_correction = Some(correction.to_string());
+
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/zaki".to_string()]);
+        rescrub_trace_envelope_with(&redactor, &mut envelope);
+
+        let content = envelope.events[0]
+            .redacted_content
+            .as_deref()
+            .expect("event content");
+        assert!(
+            !content.contains("/Users/zaki/proj/config.toml")
+                && !content.contains("alice@example.com"),
+            "the re-scrub must still redact session content: {content}"
+        );
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction),
+            "a correction is stored as written on the re-scrub path too"
         );
     }
 
