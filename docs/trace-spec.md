@@ -257,7 +257,7 @@ names the call's `event_id`.
 | `task_success` | `TaskSuccess` | yes | `success`/`partial`/`failure`/`unknown`. |
 | `error_taxonomy` | [string] | optional | Free-form error tags. |
 | `failure_modes` | `[TraceFailureMode]` | optional | Trace-level failure labels. |
-| `human_correction` | string? | optional | Redacted correction text, if opted in. A high-value training signal. |
+| `human_correction` | string? | optional | Contributor-authored correction text, if opted in. A high-value training signal. Stored **as written**: neither rewriting pass runs over it — not the deterministic semantic passes (path, email, identifier replacement) nor the prose-PII filter — because a placeholder destroys the explanation the correction exists to give. Credential detection still runs and still refuses the submission on a High or Critical match, rather than masking it. Its presence is declared by `correction_included`. |
 
 ### `replay` — `ReplayMetadata`
 
