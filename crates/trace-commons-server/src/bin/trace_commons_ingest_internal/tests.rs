@@ -80167,34 +80167,108 @@ fn pii_backstop_target_status_follows_post_backstop_risk() {
     );
 }
 
-// Task 7: the ingest hold decision. Only an Accepted, message-text-bearing
-// trace with the backstop driver enabled is held on `AwaitingPiiBackstop`;
+/// Consent declaring exactly the content flags named, and nothing else that
+/// the hold decision reads.
+fn backstop_consent(message_text: bool, tool_payloads: bool) -> ConsentMetadata {
+    ConsentMetadata {
+        policy_version:
+            trace_commons_protocol::trace_contribution::TRACE_CONTRIBUTION_POLICY_VERSION
+                .to_string(),
+        scopes: vec![ConsentScope::DebuggingEvaluation],
+        message_text_included: message_text,
+        tool_payloads_included: tool_payloads,
+        revocable: true,
+    }
+}
+
+// Task 7: the ingest hold decision. Only an Accepted, content-bearing trace
+// with the backstop driver enabled is held on `AwaitingPiiBackstop`;
 // flipping any one of the three conditions leaves the risk-derived status
 // unchanged. This is a pure-logic check; the full submit-handler + DB path
 // (that the held status is persisted and the trace stays out of the corpus)
 // is covered by Task 8.
 #[test]
-fn pii_backstop_hold_only_holds_accepted_message_text_when_enabled() {
+fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
     // All three conditions true -> held.
     assert_eq!(
-        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, true),
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &backstop_consent(true, false),
+            true
+        ),
         TraceCorpusStatus::AwaitingPiiBackstop
     );
     // Backstop disabled -> unchanged (Accepted lands in the corpus as today).
     assert_eq!(
-        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, true, false),
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &backstop_consent(true, false),
+            false
+        ),
         TraceCorpusStatus::Accepted
     );
-    // No message text -> unchanged.
+    // No content at all -> unchanged. A structure-only trace (tool names, no
+    // payloads, no prose) has nothing for the classifier to re-examine.
     assert_eq!(
-        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Accepted, false, true),
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &backstop_consent(false, false),
+            true
+        ),
         TraceCorpusStatus::Accepted
     );
-    // Non-Accepted risk (Quarantined) is never rerouted, even with text + enabled.
+    // Non-Accepted risk (Quarantined) is never rerouted, even with content
+    // + enabled.
     assert_eq!(
-        corpus_status_with_pii_backstop_hold(TraceCorpusStatus::Quarantined, true, true),
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Quarantined,
+            &backstop_consent(true, false),
+            true
+        ),
         TraceCorpusStatus::Quarantined
     );
+}
+
+// The gap this closes: a trace carrying tool payloads and NO message text.
+// The predicate keyed on message text alone, so the structure-preserving
+// mode -- arguments and results with prose withheld, which is the shape a
+// consumer rebuilding runnable tasks asks for (#298) -- went straight into
+// the corpus with no backstop pass at all. The driver always covered
+// structured payloads; only enrolment did not.
+#[test]
+fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
+    assert_eq!(
+        corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &backstop_consent(false, true),
+            true
+        ),
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        "tool payloads are raw content and must be re-examined before the corpus"
+    );
+}
+
+// Either flag alone is sufficient, and both together do not double-count
+// into some other state. Pinned as a table so a future third content flag
+// has an obvious place to go.
+#[test]
+fn either_content_flag_alone_is_enough_to_hold() {
+    for (message_text, tool_payloads, expected) in [
+        (false, false, TraceCorpusStatus::Accepted),
+        (true, false, TraceCorpusStatus::AwaitingPiiBackstop),
+        (false, true, TraceCorpusStatus::AwaitingPiiBackstop),
+        (true, true, TraceCorpusStatus::AwaitingPiiBackstop),
+    ] {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &backstop_consent(message_text, tool_payloads),
+                true
+            ),
+            expected,
+            "message_text={message_text} tool_payloads={tool_payloads}"
+        );
+    }
 }
 
 // Task 6: the per-tick tally starts empty and counts released vs. held items
