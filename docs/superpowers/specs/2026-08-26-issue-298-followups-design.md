@@ -20,7 +20,7 @@ of it is closed. This covers what is not.
 
 ## Scope
 
-Four items. One of them is deliberately not code.
+Five items. One of them is deliberately not code.
 
 | Item | Nature |
 | --- | --- |
@@ -36,17 +36,21 @@ Four items. One of them is deliberately not code.
 
 ### The gap this must not reopen
 
-`human_correction` is scrubbed by redaction (18 references in
-`trace_contribution.rs`) but is invisible to both
-`derive_envelope_content_presence` and `residual_risk` -- zero references in
-either.
+`human_correction` is invisible to both `derive_envelope_content_presence`
+and `residual_risk` -- zero references in either.
 
 Shipping a correction box without addressing that recreates exactly the bug
 class #418 and #419 just closed. An envelope carrying contributor prose would
 declare no content, take the Low-risk acceptance path, and skip the PII
 backstop hold entirely, because #418's hold predicate reads the consent
-flags. The redactor would scrub it; the backstop that exists to catch what
-the regexes miss would never be enrolled.
+flags.
+
+Read together with the decision below that corrections are NOT scrubbed, the
+gap is worse than the one #419 closed rather than merely equal to it. There,
+the deterministic pass still scrubbed the payload and only backstop enrolment
+was missed. Here, the semantic passes are deliberately skipped, so an
+unenrolled correction reaches the corpus with nothing but secret detection
+having looked at it. The consent flag is what closes it.
 
 This is the same asymmetry as the object-key gap: the component that would
 catch it never runs, because enrolment is decided elsewhere.
