@@ -62,6 +62,13 @@
   </provides>
 
   <releases>
+    <release version="0.6.0" date="2026-08-26">
+      <description>
+        <p>When you mark a session as failed or partly successful, you can now add a short written note saying what went wrong. Writing one is optional and skipping it changes nothing. Nothing else in a trace can carry that: the transcript records what the agent did, not what you expected it to do instead.</p>
+        <p>The note is stored exactly as you write it. This is the one exception to the redaction that covers everything else -- file paths and email addresses elsewhere in a session are replaced with placeholders before upload, and replacing them in a note would remove the explanation it exists to give. Treat it as writing about your own work, and leave out anything you would not want in the corpus.</p>
+        <p>One protection still applies. If a note appears to contain a credential, the upload is refused and you are asked to remove it rather than having it quietly masked, so you know to change the key.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-08-26">
       <description>
         <p>When you approve a session, the app now asks whether it did what you asked: worked, partly, or failed. Nothing in a transcript answers that question. An agent that stops has not thereby succeeded, and a run that recorded no error has not thereby done the job, so you are asked rather than guessed at.</p>
