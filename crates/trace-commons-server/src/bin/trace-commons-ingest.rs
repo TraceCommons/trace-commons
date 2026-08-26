@@ -54166,7 +54166,12 @@ fn status_for_risk(
 ///
 /// Takes the whole `ConsentMetadata` rather than a bool per flag. Passing
 /// them individually is what let one be forgotten, and a third content flag
-/// should not be able to reintroduce the same gap.
+/// should not be able to reintroduce the same gap. `correction_included` is
+/// that third flag, and it is the one that most needs the hold: a correction
+/// is stored AS WRITTEN -- the semantic redaction passes are deliberately
+/// skipped, because a placeholder destroys the thing the correction exists to
+/// carry -- so the backstop classifier is the only pass that reads it for PII
+/// at all. Nothing sets that flag yet, so this changes no behaviour today.
 ///
 /// The `awaiting_pii_backstop` status IS the enrolment: the driver's
 /// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
@@ -54182,7 +54187,9 @@ fn corpus_status_with_pii_backstop_hold(
     consent: &ConsentMetadata,
     backstop_enabled: bool,
 ) -> TraceCorpusStatus {
-    let carries_raw_content = consent.message_text_included || consent.tool_payloads_included;
+    let carries_raw_content = consent.message_text_included
+        || consent.tool_payloads_included
+        || consent.correction_included;
     if risk_status == TraceCorpusStatus::Accepted && carries_raw_content && backstop_enabled {
         TraceCorpusStatus::AwaitingPiiBackstop
     } else {

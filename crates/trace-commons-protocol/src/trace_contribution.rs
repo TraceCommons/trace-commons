@@ -183,6 +183,30 @@ pub struct ConsentMetadata {
     pub scopes: Vec<ConsentScope>,
     pub message_text_included: bool,
     pub tool_payloads_included: bool,
+    /// Whether the envelope carries a contributor-authored correction
+    /// (`outcome.human_correction`).
+    ///
+    /// A third content class, deliberately not folded into
+    /// `message_text_included`. A correction is prose written ABOUT a session
+    /// by the contributor, not session message text captured from one, so one
+    /// flag standing for both would mean two different things and would
+    /// misreport what the envelope carries. The flags are a factual
+    /// declaration of content (`docs/trace-spec.md`), so a new content class
+    /// needs a new declaration.
+    ///
+    /// It also carries more weight than the other two. A correction is stored
+    /// as written -- the semantic redaction passes are deliberately skipped,
+    /// because a placeholder destroys the thing the correction exists to
+    /// carry -- so this flag is the only declaration that the envelope holds
+    /// unredacted prose, and it is what enrols the trace in the PII backstop
+    /// hold and floors it at Medium residual risk.
+    ///
+    /// `#[serde(default)]` because every envelope submitted before this field
+    /// existed omits it, and those envelopes carry no correction: nothing
+    /// could set one. `false` is the correct reading of their silence, not a
+    /// guess.
+    #[serde(default)]
+    pub correction_included: bool,
     pub revocable: bool,
 }
 
@@ -1801,6 +1825,7 @@ impl RawTraceContribution {
                 scopes: options.consent_scopes,
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -2046,6 +2071,7 @@ impl RawTraceContribution {
                 scopes: options.consent_scopes,
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -4548,7 +4574,12 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
         return ResidualPiiRisk::Medium;
     }
 
-    if consent.message_text_included || consent.tool_payloads_included {
+    // Any content flag, not a named pair. A correction counts for the same
+    // reason the other two do, and more directly: it is stored unredacted.
+    if consent.message_text_included
+        || consent.tool_payloads_included
+        || consent.correction_included
+    {
         return ResidualPiiRisk::Medium;
     }
 
@@ -4557,22 +4588,28 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
 
 /// What content-bearing surfaces an envelope actually carries.
 ///
-/// Used to check `ConsentMetadata::{message_text_included,tool_payloads_included}`
+/// Used to check
+/// `ConsentMetadata::{message_text_included,tool_payloads_included,correction_included}`
 /// against the payload those flags claim to describe. The flags are a factual
 /// declaration (`docs/trace-spec.md`), not a client preference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnvelopeContentPresence {
     pub message_text: bool,
     pub tool_payloads: bool,
+    /// A contributor-authored correction. Its own class rather than part of
+    /// `message_text`: see [`ConsentMetadata::correction_included`].
+    pub correction: bool,
 }
 
 /// Inspect an envelope for content that must be declared in consent flags.
 ///
 /// Minimum concordance rule (issue #208):
 /// - non-empty `redacted_content` on user / assistant / reasoning (and other
-///   prose event types), or `outcome.human_correction`, implies message text;
+///   prose event types) implies message text;
 /// - tool-call / tool-result / http content, or a non-null `structured_payload`,
-///   implies tool payloads.
+///   implies tool payloads;
+/// - a non-empty `outcome.human_correction` implies a correction, which is its
+///   own content class and NOT message text.
 ///
 /// A bare `tool_name` deliberately does NOT imply tool payloads. The name is
 /// metadata about which tool ran, not the payload the flag declares, and
@@ -4625,7 +4662,7 @@ pub fn derive_envelope_content_presence(
         .as_ref()
         .is_some_and(|text| !text.is_empty())
     {
-        presence.message_text = true;
+        presence.correction = true;
     }
 
     presence
@@ -4685,6 +4722,10 @@ pub fn reconcile_consent_declarations(
     }
     if presence.tool_payloads && !envelope.consent.tool_payloads_included {
         envelope.consent.tool_payloads_included = true;
+        corrected = true;
+    }
+    if presence.correction && !envelope.consent.correction_included {
+        envelope.consent.correction_included = true;
         corrected = true;
     }
     if corrected {
@@ -6497,6 +6538,7 @@ mod tests {
             scopes: vec![super::ConsentScope::DebuggingEvaluation],
             message_text_included: false,
             tool_payloads_included: false,
+            correction_included: false,
             revocable: true,
         };
         assert_eq!(
@@ -7153,6 +7195,7 @@ mod tests {
                 scopes: vec![ConsentScope::DebuggingEvaluation],
                 message_text_included: true,
                 tool_payloads_included: false,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -7803,6 +7846,7 @@ mod tests {
                 scopes: vec![ConsentScope::DebuggingEvaluation],
                 message_text_included: false,
                 tool_payloads_included: false,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -7986,16 +8030,120 @@ mod tests {
         assert!(!presence.message_text);
     }
 
+    // A correction is its own content class (S5). It was previously folded
+    // into `message_text`, which made that flag mean two things and misreported
+    // what the envelope carries: a correction is contributor-authored prose
+    // ABOUT a session, not session message text.
     #[test]
-    fn reconcile_consent_raises_message_text_for_human_correction() {
+    fn reconcile_consent_raises_correction_for_human_correction() {
         use super::*;
         let mut envelope = bare_envelope();
         envelope.outcome.human_correction = Some("use the other API key".to_string());
 
         let presence = reconcile_consent_declarations(&mut envelope);
 
+        assert!(
+            presence.correction,
+            "a correction is content and must be seen"
+        );
+        assert!(envelope.consent.correction_included);
+        assert!(
+            !presence.message_text,
+            "a correction is not session message text; folding it in would \
+             misreport what the envelope carries"
+        );
+        assert!(!envelope.consent.message_text_included);
+    }
+
+    // An empty correction is not a correction. Mirrors the empty-content rule
+    // the other two flags already follow.
+    #[test]
+    fn empty_correction_does_not_force_the_correction_flag() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.outcome.human_correction = Some(String::new());
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.correction);
+        assert!(!envelope.consent.correction_included);
+    }
+
+    // Upward-only reconciliation holds for the new flag too: an over-reported
+    // correction declaration on an envelope carrying none is left alone.
+    #[test]
+    fn reconcile_consent_never_lowers_an_over_reported_correction_flag() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.consent.correction_included = true;
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(!presence.correction);
+        assert!(
+            envelope.consent.correction_included,
+            "over-reporting is a stricter declaration and is never cleared"
+        );
+        assert!(envelope.privacy.warnings.is_empty());
+    }
+
+    // No correction: behaviour is exactly 0.5.0's.
+    #[test]
+    fn absent_correction_leaves_the_correction_flag_alone() {
+        use super::*;
+        let mut envelope = bare_envelope();
+        envelope.events.push(message_event("hello"));
+        assert!(envelope.outcome.human_correction.is_none());
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
         assert!(presence.message_text);
-        assert!(envelope.consent.message_text_included);
+        assert!(!presence.correction);
+        assert!(!envelope.consent.correction_included);
+    }
+
+    // The gap this flag exists to close: a correction-only envelope must not
+    // reach the Low-risk acceptance path. Low is what skips the PII backstop
+    // hold entirely, and a correction is stored as written (S5).
+    #[test]
+    fn correction_only_consent_floors_residual_risk_at_medium() {
+        use super::*;
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            correction_included: true,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &RedactionReport::default()),
+            ResidualPiiRisk::Medium,
+            "a declared correction is raw content and must not stay Low",
+        );
+    }
+
+    // Non-vacuity for the case above: with no content flag at all the same
+    // clean report is still Low, so the Medium above comes from the flag.
+    #[test]
+    fn no_content_flag_at_all_stays_low() {
+        use super::*;
+
+        let consent = ConsentMetadata {
+            policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            correction_included: false,
+            revocable: true,
+        };
+
+        assert_eq!(
+            residual_risk(&consent, &RedactionReport::default()),
+            ResidualPiiRisk::Low,
+        );
     }
 
     #[test]
@@ -8225,6 +8373,7 @@ mod tests {
             scopes: vec![ConsentScope::DebuggingEvaluation],
             message_text_included: false,
             tool_payloads_included: false,
+            correction_included: false,
             revocable: true,
         };
 
@@ -8249,6 +8398,7 @@ mod tests {
             scopes: vec![ConsentScope::DebuggingEvaluation],
             message_text_included: false,
             tool_payloads_included: false,
+            correction_included: false,
             revocable: true,
         };
 
@@ -8309,6 +8459,7 @@ mod tests {
             scopes: vec![ConsentScope::DebuggingEvaluation],
             message_text_included: false,
             tool_payloads_included: false,
+            correction_included: false,
             revocable: true,
         };
 
@@ -8337,6 +8488,7 @@ mod tests {
             scopes: vec![ConsentScope::DebuggingEvaluation],
             message_text_included: false,
             tool_payloads_included: false,
+            correction_included: false,
             revocable: true,
         };
         let report = RedactionReport {
@@ -8546,6 +8698,7 @@ mod tests {
                 scopes: vec![ConsentScope::DebuggingEvaluation],
                 message_text_included: true,
                 tool_payloads_included: false,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -8713,6 +8866,7 @@ mod tests {
                 scopes: vec![ConsentScope::DebuggingEvaluation],
                 message_text_included: true,
                 tool_payloads_included: false,
+                correction_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {

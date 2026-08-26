@@ -473,6 +473,15 @@ fn build_raw_contribution_with_id(
     // The declaration describes the payload above, rather than asserting a
     // constant. See `declared_content_presence`.
     let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
+    // Built before the consent block so the declaration can describe it. A
+    // correction is its own content class, not message text: see
+    // `ConsentMetadata::correction_included`. No verdict path sets one yet, so
+    // this is `false` on every envelope this client currently produces.
+    let outcome = verdict.map(ContributorVerdict::outcome).unwrap_or_default();
+    let correction_included = outcome
+        .human_correction
+        .as_ref()
+        .is_some_and(|text| !text.is_empty());
 
     RawTraceContribution {
         trace_id: Uuid::new_v4(),
@@ -500,6 +509,7 @@ fn build_raw_contribution_with_id(
             },
             message_text_included,
             tool_payloads_included,
+            correction_included,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -509,7 +519,7 @@ fn build_raw_contribution_with_id(
             revocation_handle: Uuid::new_v4(),
         },
         events,
-        outcome: verdict.map(ContributorVerdict::outcome).unwrap_or_default(),
+        outcome,
         replay: ReplayMetadata {
             // This said `false` unconditionally, and the scorecard reads it as
             // authoritative: sufficiency can only lower a score, never raise

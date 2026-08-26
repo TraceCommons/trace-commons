@@ -87,16 +87,16 @@ breaks the contributor's trust contract.
   `<PRIVATE_LOCAL_PATH_1>`) rather than flattening every entity to one token.
 - **MUST NOT** include raw message text unless the contributor opted into
   message text; likewise tool payloads. Setting `message_text_included` /
-  `tool_payloads_included` is a factual declaration, not a default. The
-  server **MUST** correct under-reported declarations upward to match the
-  envelope payload before risk classification and PII-backstop decisions
-  (over-reporting is left alone).
+  `tool_payloads_included` / `correction_included` is a factual declaration,
+  not a default. The server **MUST** correct under-reported declarations
+  upward to match the envelope payload before risk classification and
+  PII-backstop decisions (over-reporting is left alone).
 - **MUST NOT** serialize original PII-filter text, raw `detected_spans[*].text`,
   raw offsets, or unsafe span labels. Only the safe
   `SafePrivacyFilterSummary` (redacted text + allow-listed label counts +
   warnings) may be carried.
-- **MUST** set `privacy.residual_pii_risk` honestly. Including message text or
-  tool payloads raises the floor to `medium`; a secret that was found **and
+- **MUST** set `privacy.residual_pii_risk` honestly. Including message text,
+  tool payloads or a correction raises the floor to `medium`; a secret that was found **and
   successfully redacted** also raises the floor to `medium` (reviewable
   annotation, not terminal rejection). `high` is reserved for scrub *failure*:
   an unredactable object-key finding, content that still matches after scrub
@@ -156,6 +156,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 | `scopes` | `[ConsentScope]` | yes | What uses the contributor authorized. See matrix in Part 3. |
 | `message_text_included` | bool | yes | Whether raw redacted message text is present. Server corrects `false` → `true` when events/outcome carry message content. |
 | `tool_payloads_included` | bool | yes | Whether tool payloads are present. Server corrects `false` → `true` when events carry tool content or a structured payload that carries readable content. A bare `tool_name` is metadata, not a payload, and does not trigger correction: stripping payloads while keeping names is a supported privacy mode. Neither does a withheld-payload marker — an object whose keys are all drawn from the emitters' fixed literal set (`has_arguments`, `has_result`, `has_error`, `state`, and the `arguments` / `rationale` wrapper keys) and whose values are all booleans, nulls or empty. Object keys are read as content: any other non-blank key declares a payload, because a key is as free-form as the string beside it. |
+| `correction_included` | bool | no (defaults `false`) | Whether the envelope carries a contributor-authored correction (`outcome.human_correction`). A third content class, deliberately not folded into `message_text_included`: a correction is prose written *about* a session, not session message text captured from one. Server corrects `false` → `true` when the outcome carries a non-empty correction. Unlike the other two, the declared content is stored **as written** — the semantic redaction passes (path, email, identifier replacement) are deliberately skipped, because a placeholder destroys what the correction exists to carry. Secret detection still runs and still refuses the submission on a High or Critical match. Omitted by envelopes predating the field, which carry no correction. |
 | `revocable` | bool | yes | Whether the contributor retains a revocation right. |
 
 `ConsentScope` values: `debugging_evaluation`, `benchmark_only`,
