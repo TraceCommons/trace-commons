@@ -28,6 +28,7 @@ Four items. One of them is deliberately not code.
 | S3 recorded-trace timestamps | Format change |
 | S4a `conversation_id` | Wire addition |
 | S4b payload tier | Operational prerequisite, no code |
+| S6 payload profile over-redaction | Found during review; gates S4b |
 
 ---
 
@@ -115,6 +116,30 @@ correction is meaningful.
 
 Absent a correction, nothing changes: the flag is false and behaviour matches
 0.5.0 exactly.
+
+### A correction is not scrubbed
+
+Redaction would destroy the thing a correction exists to carry. "The agent
+used `/Users/zaki/proj/config.toml` instead of the staging one" is useless
+once the path is a placeholder, and a correction is written to be read.
+
+A correction is also categorically different from session content. Session
+content is captured incidentally; a correction is composed deliberately, for
+submission, by someone who chooses every word knowing where it goes.
+
+So corrections skip the semantic passes -- path, email and identifier
+replacement -- and their text is stored as written.
+
+**Secret detection still runs, and still blocks.** A High or Critical match
+sets `blocked_secret_detected` and refuses the submission, exactly as
+elsewhere. The asymmetry is deliberate: a path in a correction is the point,
+and a live credential in a correction is never the point. The contributor is
+asked to remove it rather than having it silently masked, because a masked
+credential still leaked to whoever saw it in transit.
+
+This means `human_correction` reaches the corpus unredacted apart from
+credentials, which is precisely why it needs its own consent flag and its own
+declaration -- see above.
 
 ### Value: novelty-scored, in shadow
 
@@ -217,6 +242,81 @@ be moved by a release.
 
 ---
 
+---
+
+## S6: the tool payload profiles are too aggressive
+
+Found while reviewing the redactor for over-aggression. This is not in issue
+#298 by name, but it decides whether closing S4b would actually deliver
+anything.
+
+### What is fine
+
+Two passes were checked and are well-designed; do not "fix" them.
+
+- The contextual-entropy sweep is **cue-gated**: it requires a
+  credential-shaped cue before measuring entropy, and carries an identifier
+  allowlist. Hashes, UUIDs and git SHAs survive it.
+- `redact_known_paths` replaces only the known **prefix** with a stable
+  placeholder, so `/Users/zaki/proj/src/main.rs` keeps `/src/main.rs`.
+  Structure and repeat-identity both survive.
+
+### What is not
+
+`FILESYSTEM_RULES` (and `BROWSER_RULES` similarly):
+
+```
+Contains["path","file","filename","cwd","directory"]  -> Replace("local_path")
+Exact["content","contents","command","stdout",
+      "stderr","diff","patch"]                        -> Replace("workspace_content")
+```
+
+`Replace` is wholesale: the entire value becomes a marker. So a shell call's
+`command`, an edit's `diff` or `patch`, a read's `content`, and any tool's
+`stdout`/`stderr` are replaced outright.
+
+Note the inconsistency with the general pass above. `redact_known_paths`
+carefully preserves everything after the prefix; a filesystem tool's
+`file_path` field is blanked entirely. Same data, two treatments, and the
+aggressive one wins.
+
+Secondary: `field_matches` uses a plain substring test on the lowercased field
+name, so `Contains` over-matches. `profile` contains `file`; `file_count` is a
+count, not a path.
+
+### Why this decides S4b
+
+Enabling `include_tool_payloads` would not deliver the 109 traces the reporter
+identified as one field from usable, because the fields that make a coding
+trace replayable are exactly the ones these rules replace. Contributors would
+consent to sharing payloads and the corpus would receive markers.
+
+These rules are latent today only because payloads are never on. Enabling the
+tier makes them live. **S4b is therefore gated on this, not only on a
+quarantine-queue owner.**
+
+### The change
+
+Re-scope the profiles from **replace by default** to **preserve by default,
+redact narrowly**.
+
+- Keep wholesale replacement only where the field is inherently sensitive
+  regardless of content: credentials, cookies, auth headers.
+- For content-bearing fields (`command`, `diff`, `patch`, `content`,
+  `stdout`, `stderr`), run the general redaction passes over the value --
+  which already handle paths, emails and secrets well -- instead of
+  discarding it.
+- Narrow `Contains` to exact names plus an explicit suffix list, so `profile`
+  and `file_count` stop matching.
+
+**No measurement backs this section.** No trace has ever been submitted with
+payloads enabled, so there is no corpus to check the rules against. This is
+read from the rules themselves. Anyone implementing it should build a fixture
+from a real coding session, run it through with payloads on, and look at what
+survives -- before and after.
+
+---
+
 ## Non-goals
 
 - No model-graded correction value. Requires a separate decision.
@@ -224,3 +324,5 @@ be moved by a release.
 - No correction box on a successful verdict.
 - No synthesised timestamps anywhere.
 - No `conversation_id` reaching a gate or scoring input.
+- No loosening of secret, credential, cookie or auth-header redaction
+  anywhere, including in corrections and in the re-scoped profiles.
