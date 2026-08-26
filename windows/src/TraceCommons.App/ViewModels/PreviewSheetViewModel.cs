@@ -113,6 +113,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private bool _loading = true;
     private bool _failed;
     private bool _deciding;
+    private string? _verdict;
     private PreviewTab _tab = PreviewTab.Search;
 
     public PreviewSheetViewModel(DaemonHost host, QueueEntryViewModel entry)
@@ -311,6 +312,68 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public string ContributeHelp => Gate.Help;
 
     /// <summary>
+    /// The contributor's answer to <see cref="VerdictCopy.Question"/>: one of
+    /// <see cref="Verdict"/>'s three values, or <c>null</c> for the answer
+    /// they are entitled to give, which is none.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here reads this except <see cref="ContributeAsync"/>, and it
+    /// reads it only to decide whether <c>approve</c> carries an
+    /// <c>outcome</c> key at all. It is deliberately NOT part of
+    /// <see cref="CanContribute"/>: the verdict question never gates the
+    /// approve control, and a sheet that refused to send until it was
+    /// answered would be asking for an opinion under duress.
+    ///
+    /// One sheet is one entry -- this view model is constructed with the
+    /// entry it previews -- so there is no path by which a verdict answered
+    /// for one session can attach to another.
+    /// </remarks>
+    public string? SelectedVerdict => _verdict;
+
+    public string VerdictQuestion => VerdictCopy.Question;
+
+    public string VerdictWorkedLabel => VerdictCopy.Worked;
+
+    public string VerdictPartlyLabel => VerdictCopy.Partly;
+
+    public string VerdictFailedLabel => VerdictCopy.Failed;
+
+    /// <summary>
+    /// The disclosure under the verdict control. Load-bearing: the outcome
+    /// fields sit outside the "exactly what would be sent" guarantee the rest
+    /// of this sheet makes, and this is where a contributor is told so.
+    /// </summary>
+    public string VerdictCaption => VerdictCopy.Caption;
+
+    public bool IsWorkedSelected => _verdict == Verdict.Worked;
+
+    public bool IsPartlySelected => _verdict == Verdict.Partly;
+
+    public bool IsFailedSelected => _verdict == Verdict.Failed;
+
+    /// <summary>
+    /// Selects <paramref name="outcome"/>, or clears the selection if it was
+    /// already the answer.
+    /// </summary>
+    /// <remarks>
+    /// Clearing matters as much as selecting: a contributor who clicks
+    /// "Failed" and then thinks better of it must be able to get back to
+    /// having said nothing, and "nothing" is a state the daemon has a real
+    /// representation for. The three controls behave as a radio group that
+    /// can also be emptied, which is why they are toggles and not a
+    /// <c>RadioButtons</c> group -- the latter cannot be returned to unset.
+    /// </remarks>
+    public void ToggleVerdict(string outcome)
+    {
+        _verdict = _verdict == Verdict.Require(outcome) ? null : outcome;
+
+        Raise(nameof(SelectedVerdict));
+        Raise(nameof(IsWorkedSelected));
+        Raise(nameof(IsPartlySelected));
+        Raise(nameof(IsFailedSelected));
+    }
+
+    /// <summary>
     /// What the sheet says about redaction above Contribute. Always shown,
     /// because it is a statement about the mechanism and not a report on
     /// the state of anything.
@@ -472,7 +535,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         SetDeciding(true);
 
         DaemonResponse response = await _host
-            .CallAsync(DaemonProtocol.Methods.Approve, EntryParams())
+            .CallAsync(DaemonProtocol.Methods.Approve, ApproveParams())
             .ConfigureAwait(true);
 
         SetDeciding(false);
@@ -502,9 +565,20 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         _preview = null;
     }
 
-    private string EntryParams() =>
-        System.Text.Json.JsonSerializer.Serialize(
-            new Dictionary<string, string> { ["entry_id"] = Entry.EntryId });
+    /// <summary>
+    /// The <c>approve</c> request for this sheet's entry, carrying the
+    /// verdict only if one was given.
+    /// </summary>
+    /// <remarks>
+    /// Built through <see cref="SubmitParams"/> rather than inline, so the
+    /// sheet and the queue window cannot drift into two spellings of the same
+    /// call, and so the omit-versus-empty rule is checked by a test that does
+    /// not need a live pipe. No selection omits <c>outcome</c> entirely:
+    /// <c>null</c> and <c>""</c> are both refused as
+    /// <c>outcome-invalid</c>, and a refusal approves nothing.
+    /// </remarks>
+    private string ApproveParams() =>
+        SubmitParams.ForEntry(Entry.EntryId, SelectedVerdict);
 
     private void FillManifest(PreviewSummary summary)
     {

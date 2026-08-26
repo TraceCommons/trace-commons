@@ -647,6 +647,40 @@
                                                 Tag="{x:Bind}"
                                                 ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
                                                 Click="OnSubmitAll" />
+                                        <!--
+                                            The opt-in path for answering the
+                                            verdict question once for the
+                                            whole group. "Submit all" above is
+                                            untouched and still sends no
+                                            outcome: this is a separate
+                                            control BESIDE it, never a
+                                            confirmation step in front of it,
+                                            so the common one-click path does
+                                            not get slower for a question
+                                            nobody has to answer. Secondary
+                                            styling, for the same reason
+                                            Ignore is: only one control here
+                                            reads as the primary send.
+                                        -->
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind SubmitAllAsText}"
+                                                Visibility="{x:Bind ShowSubmitAll}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllWorked" />
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllPartly" />
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllFailed" />
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                        </Button>
                                         <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                 Content="{x:Bind IgnoreProjectText}"
                                                 Visibility="{x:Bind ShowIgnoreProject}"

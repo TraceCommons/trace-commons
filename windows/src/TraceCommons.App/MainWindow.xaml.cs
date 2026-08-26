@@ -764,6 +764,36 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// "Submit all as..." from a project's group header: the same
+    /// <c>approve</c> call "Submit all" makes, carrying the verdict the
+    /// contributor picked from the menu.
+    /// </summary>
+    /// <remarks>
+    /// One handler per verdict rather than one reading a Tag, for the same
+    /// reason the preview sheet has three: which of the three was chosen is
+    /// the whole content of the event, and every entry this call covers is
+    /// recorded with it. The plain "Submit all" beside this is untouched and
+    /// still sends no <c>outcome</c> -- an unanswered bulk submit stays one
+    /// click.
+    /// </remarks>
+    private async void OnSubmitAllWorked(object sender, RoutedEventArgs e) =>
+        await SubmitAllAsAsync(sender, Verdict.Worked);
+
+    private async void OnSubmitAllPartly(object sender, RoutedEventArgs e) =>
+        await SubmitAllAsAsync(sender, Verdict.Partly);
+
+    private async void OnSubmitAllFailed(object sender, RoutedEventArgs e) =>
+        await SubmitAllAsAsync(sender, Verdict.Failed);
+
+    private async Task SubmitAllAsAsync(object sender, string outcome)
+    {
+        if (GroupOf(sender) is QueueGroupViewModel group)
+        {
+            await ViewModel.SubmitProjectAsync(group.ProjectId, outcome);
+        }
+    }
+
+    /// <summary>
     /// "Ignore project" from a project's group header: confirms, then hands
     /// off to <see cref="MainViewModel.IgnoreProjectAsync"/>.
     /// </summary>
