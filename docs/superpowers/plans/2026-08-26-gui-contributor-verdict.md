@@ -790,3 +790,118 @@ cargo test -p trace-commons-contributor-gtk
 ```
 
 Confirm `git show --stat` on each commit touched only the intended files.
+
+---
+
+### Task 6: Offer the verdict on the GTK bulk-approve surface
+
+Task 4 put the verdict control on the preview sheet only. The spec's bulk
+decision -- a verdict supplied with a bulk approval applies to every entry it
+covers -- is implemented in the daemon (Task 2) but unreachable from the GTK
+UI, because `Submit all` hard-codes `verdict: None`. This task closes that.
+
+**Files:**
+- Modify: `crates/trace-commons-contributor-gtk/src/ui/queue.rs` (the `Submit all` button in the project group header, and its `approve_params(ApproveTarget::Project(..), None)` call)
+- Modify: `crates/trace-commons-contributor-gtk/src/copy.rs` (new label constants)
+- Test: `crates/trace-commons-contributor-gtk/src/ui/queue.rs` (inline `mod tests`)
+
+**Interfaces:**
+- Consumes: `approve_params(target, verdict)` and `ApproveTarget` from Task 4;
+  the daemon's `outcome` parameter from Task 2.
+- Produces: nothing later tasks rely on.
+
+**Interaction shape, and why.** `Submit all` is a single-click button in a
+project header bar with no confirmation step. Do NOT turn it into a dialog or
+a popover-first flow: that adds a click to the common path in order to ask an
+optional question, and the answer is optional by design.
+
+Instead add a `gtk::MenuButton` immediately beside `Submit all`, carrying the
+three verdict options. Plain `Submit all` keeps its current one-click
+behaviour and still sends no `outcome`. Choosing an option from the menu
+performs the same bulk approval with that verdict attached.
+
+**Explicitly out of scope.** The per-row quick `Submit` at the other
+`approve_params` call site keeps `verdict: None`. Putting a picker on every
+row is the per-row-verdict design that was considered and rejected; the row
+path stays a fast, unanswered submit.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[test]
+fn a_bulk_approve_can_carry_a_verdict() {
+    let params = approve_params(ApproveTarget::Project("proj-1".to_string()), Some("failed"));
+    assert_eq!(params["project_id"], "proj-1");
+    assert_eq!(params["outcome"], "failed");
+}
+
+/// Plain `Submit all` stays a one-click, unanswered submit.
+#[test]
+fn a_bulk_approve_without_a_verdict_omits_the_parameter() {
+    let params = approve_params(ApproveTarget::Project("proj-1".to_string()), None);
+    assert_eq!(params["project_id"], "proj-1");
+    assert!(params.get("outcome").is_none());
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cargo test -p trace-commons-contributor-gtk a_bulk_approve`
+Expected: FAIL — the project-target verdict path is not exercised yet.
+
+Note: if `approve_params` already supports this and the tests pass
+immediately, say so in your report. The production gap is in the CALLER, not
+in `approve_params`, so the UI change below is required either way.
+
+- [ ] **Step 3: Add the copy constants**
+
+In `copy.rs`, beside the existing `VERDICT_*` constants:
+
+```rust
+/// The bulk verdict menu beside `Submit all`. The plain button stays a
+/// one-click unanswered submit; this is the opt-in path for answering
+/// once for the whole group.
+pub const SUBMIT_ALL_AS: &str = "Submit all as...";
+pub const SUBMIT_ALL_AS_TOOLTIP: &str =
+    "Record the same outcome for every session in this group.";
+```
+
+Reuse `VERDICT_WORKED`, `VERDICT_PARTLY`, `VERDICT_FAILED` for the item
+labels. Do not add new strings for those.
+
+- [ ] **Step 4: Add the menu button**
+
+Beside `submit_all` in the project group header, inside the same
+`if waiting > 1` block, add a `gtk::MenuButton` labelled `copy::SUBMIT_ALL_AS`
+with three menu items. Each item runs the same `submit_and_toast` call the
+plain button runs, with the same freshly-read `candidates` list, passing
+`Some("worked")`, `Some("partly")` or `Some("failed")` respectively.
+
+Read the candidates fresh at click time inside each item's handler, exactly as
+the existing `submit_all.connect_clicked` does, and for the same reason its
+comment gives. Do not capture the list once and share it across the items.
+
+Follow the existing brand styling. No emojis.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test -p trace-commons-contributor-gtk`
+Expected: PASS.
+
+- [ ] **Step 6: Confirm no dependency drift**
+
+```bash
+git status --short
+```
+
+Expected: no change to `Cargo.lock` or the flatpak vendor manifest.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cargo fmt --all
+git add crates/trace-commons-contributor-gtk/src/ui/queue.rs \
+        crates/trace-commons-contributor-gtk/src/copy.rs
+git commit -m "Offer the verdict on the GTK bulk-approve surface"
+git show --stat HEAD
+```
