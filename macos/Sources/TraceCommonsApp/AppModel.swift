@@ -746,8 +746,15 @@ final class AppModel: ObservableObject {
     /// `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`. This
     /// is also what the preview sheet's `Contribute` button calls: a preview
     /// only means the pin already exists, not a different daemon call.
-    func approve(_ entry: QueueEntry) {
-        perform("approve", work: { try $0.approve(entryID: entry.entryID) }) { response in
+    ///
+    /// `verdict` is the contributor's optional answer to the outcome
+    /// question. It defaults to none, and none is sent as an absent
+    /// parameter rather than an empty one -- see
+    /// `DaemonClient.approveParams`.
+    func approve(_ entry: QueueEntry, verdict: ContributorVerdict? = nil) {
+        perform("approve", work: {
+            try $0.approve(entryID: entry.entryID, verdict: verdict)
+        }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: [entry.entryID])
         }
@@ -759,9 +766,15 @@ final class AppModel: ObservableObject {
     /// here. An id naming no project the daemon knows throws a `Failure`
     /// (`bad_params` / `project-id-unrecognized`) that `perform` reports as
     /// `lastActionError`, never as a skip.
-    func submitProject(id projectID: String) {
+    ///
+    /// `verdict` applies to every entry the approval covers. The plain
+    /// `Submit all` passes none; `Submit all as...` is the opt-in path that
+    /// passes one.
+    func submitProject(id projectID: String, verdict: ContributorVerdict? = nil) {
         let attempted = awaitingDecision.filter { $0.projectID == projectID }.map(\.entryID)
-        perform("approve", work: { try $0.approve(projectID: projectID) }) { response in
+        perform("approve", work: {
+            try $0.approve(projectID: projectID, verdict: verdict)
+        }) { response in
             self.refreshQueue()
             self.showToast(for: response, attempted: attempted)
         }

@@ -58,6 +58,15 @@ struct PreviewSheet: View {
     @State private var failure: String?
     @State private var loading: Bool
 
+    /// The contributor's answer to `VerdictCopy.question`, or `nil` for the
+    /// answer they did not give.
+    ///
+    /// `nil` is the starting state and a perfectly good ending one: it never
+    /// gates `Contribute`, and it is sent as an ABSENT `outcome`, not an
+    /// empty one. One sheet is one session's decision, and the sheet is
+    /// rebuilt per entry, so no verdict can carry into the next.
+    @State private var verdict: ContributorVerdict?
+
     // MARK: - The read gate
     //
     // There is no longer a read gate. `Contribute` used to wait on the
@@ -335,6 +344,7 @@ struct PreviewSheet: View {
             // saying it.
             ScrubbingCaveatAtCommit()
             gateStatement
+            verdictQuestion
             HStack(spacing: TC.Space.s) {
                 // Outlined like "Close", never filled: it must not read as a
                 // second way to approve.
@@ -352,7 +362,7 @@ struct PreviewSheet: View {
                 // `.defaultAction`, which put an irreversible send one
                 // Return away from a hand resting on the keyboard.
                 Button("Contribute") {
-                    model.approve(entry)
+                    model.approve(entry, verdict: verdict)
                     // Back to the queue, never on to the next session. The
                     // sheet used to load the next entry with the button
                     // under the same pixels, so a second keystroke or a
@@ -389,6 +399,72 @@ struct PreviewSheet: View {
     /// question it asks. The words are `TCShellCore.ReadGate.statement`
     /// rather than a literal here, because the Linux and Windows sheets
     /// print the same sentence and a copy in a view is a copy that drifts.
+    /// The outcome question, its three answers, and the disclosure under
+    /// them.
+    ///
+    /// Nothing here gates anything. There is no default selection, no
+    /// fourth "didn't answer" option, and `Contribute` is armed by
+    /// `ReadGate` alone -- a contributor who ignores this entire block
+    /// contributes exactly as before, and the approval simply omits
+    /// `outcome`. Tapping the selected answer again clears it, which is the
+    /// only way back to unanswered once an answer is given.
+    ///
+    /// The caption is `VerdictCopy.caption` verbatim: it is where the sheet
+    /// discloses that these fields sit outside its "exactly what would be
+    /// sent" guarantee, which is the one thing on this sheet the preview
+    /// cannot show.
+    private var verdictQuestion: some View {
+        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+            Text(VerdictCopy.question)
+                .font(TC.Font_.captionSmall)
+                .foregroundStyle(TC.inkSecondary)
+            HStack(spacing: TC.Space.xxs) {
+                ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                    verdictOption(option)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(TC.Space.xxs)
+            .background(TC.surfaceInset, in: RoundedRectangle(cornerRadius: TC.Radius.card))
+            Text(VerdictCopy.caption)
+                .font(TC.Font_.captionSmall)
+                .foregroundStyle(TC.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One answer, styled as the tab strip's chips are -- selected means a
+    /// raised surface and the green hairline, the same vocabulary this sheet
+    /// already uses for "this one is current".
+    private func verdictOption(_ option: ContributorVerdict) -> some View {
+        let selected = verdict == option
+        return Button {
+            verdict = selected ? nil : option
+        } label: {
+            Text(option.label)
+                .font(TC.Font_.caption.weight(selected ? .bold : .regular))
+                .foregroundStyle(selected ? TC.inkPrimary : TC.inkSecondary)
+                .padding(.horizontal, TC.Space.m)
+                .padding(.vertical, TC.Space.control)
+                .background {
+                    RoundedRectangle(cornerRadius: TC.Radius.control)
+                        .fill(selected ? TC.surface : Color.clear)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: TC.Radius.control)
+                        .strokeBorder(
+                            selected ? TC.green.opacity(TC.Border.activeTabAlpha) : Color.clear,
+                            lineWidth: TC.Border.hairline
+                        )
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+    }
+
     private var gateStatement: some View {
         Text(ReadGate.statement)
             .font(TC.Font_.captionSmall)
