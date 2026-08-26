@@ -1202,9 +1202,14 @@ mod tests {
         // All three are inside the hashed bytes. The risk tier above is
         // unchanged, which is what says this was a shape change and not a
         // redaction change.
+        //
+        // Moved again, deliberately, for issue #298 S4a: the envelope now
+        // carries `conversation_id`, populated from the fixture session's own
+        // file stem (its `sessionId`, `11111111-1111-1111-1111-111111111111`).
+        // Attribution only, inside the hashed bytes like every other field.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:4a461ec38c7e259b2dfdea48d0bb4ea2bcc536ac82ebbf72457846baf804eef9",
+            "sha256:aea751bfae64957c5f8091031a548b61eb1402043b45df3503aa9d6ef4fe2e45",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

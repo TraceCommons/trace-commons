@@ -1556,6 +1556,7 @@ mod tests {
             cwd: None,
             started_at: None,
             session_hash: "sha256:aa".to_string(),
+            conversation_id: None,
             events: vec![
                 mk(SessionEventKind::User),
                 mk(SessionEventKind::Reasoning),

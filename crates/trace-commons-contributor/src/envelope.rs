@@ -535,6 +535,7 @@ fn build_raw_contribution_with_id(
         },
         embedding_analysis: None,
         value: ValueMetadata::default(),
+        conversation_id: t.conversation_id.clone(),
     }
 }
 

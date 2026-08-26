@@ -458,6 +458,14 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
+    // The rollout file's own stem -- `rollout-<timestamp>-<uuid>` -- the
+    // identifier this session is already addressed by throughout discovery
+    // and the queue. Not invented for this purpose.
+    let conversation_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
     Ok(SessionTranscript {
         source: Cow::Borrowed(SOURCE_CODEX),
         agent_version,
@@ -466,6 +474,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         cwd,
         started_at,
         session_hash: hasher.finish(),
+        conversation_id,
         events,
         subagent_count: 0,
         subagents_dropped: 0,

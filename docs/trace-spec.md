@@ -125,11 +125,18 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 | `replay` | `ReplayMetadata` | yes | client | Replayability and required tools. |
 | `embedding_analysis` | `EmbeddingAnalysisMetadata?` | optional | **server** | Novelty/duplicate/cluster signals. Client may omit. |
 | `value` | `ValueMetadata` | yes | client→**server** | Client estimates; server authors the final score. |
+| `conversation_id` | string? | optional | client | The emitter's own session identifier, so a consumer can tell a trace that opens with an assistant message apart as a resumed thread, a greeting, or a triggered turn. **Attribution only** — see the note below the table. |
 | `trace_card` | `TraceCard` | defaulted | client | Consent/use/retention projection used for ABAC. |
 | `value_card` | `TraceValueCard` | defaulted | client→**server** | Human-readable scorecard. |
 | `hindsight` | `HindsightRelabelingCandidate?` | optional | client | Hindsight relabeling hints. |
 | `training_dynamics` | `TrainingDynamicsSignals?` | optional | client/server | Curriculum signals (confidence/variability). |
 | `process_evaluation` | `ProcessEvaluationLabels?` | optional | **server** | Process-quality labels from evaluators. |
+
+> **`conversation_id` is attribution, not authority.** Like `tenant_scope_ref`,
+> it is whatever the emitter says, not something the server verified. It MUST
+> NOT reach a gate, a scoring input, or a tenant-scoping decision. `None` on
+> any envelope written before this field existed, and on any source that
+> cannot resolve a session identifier — never invented.
 
 ### `ironclaw` — `IronclawTraceMetadata`
 

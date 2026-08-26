@@ -352,6 +352,16 @@ impl TraceSource for TrajectorySource {
 
         let started_at = parsed.events.iter().find_map(|e| e.timestamp);
 
+        // The trajectory file's own stem -- the identifier this session is
+        // already addressed by. Trajectory carries no separate in-file
+        // session id, so this is not an invented one; it is the file's
+        // existing name.
+        let conversation_id = r
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+
         Ok(SessionTranscript {
             source: Cow::Owned(parsed.source),
             // Trajectory carries no harness version field.
@@ -361,6 +371,7 @@ impl TraceSource for TrajectorySource {
             cwd: parsed.cwd,
             started_at,
             session_hash: hash,
+            conversation_id,
             events: parsed.events,
             subagent_count: 0,
             subagents_dropped: 0,
