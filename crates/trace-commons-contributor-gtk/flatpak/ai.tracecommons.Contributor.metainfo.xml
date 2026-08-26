@@ -62,6 +62,13 @@
   </provides>
 
   <releases>
+    <release version="0.5.0" date="2026-08-26">
+      <description>
+        <p>When you approve a session, the app now asks whether it did what you asked: worked, partly, or failed. Nothing in a transcript answers that question. An agent that stops has not thereby succeeded, and a run that recorded no error has not thereby done the job, so you are asked rather than guessed at.</p>
+        <p>Answering is optional and never blocks approving. Skipping is a normal answer -- the session is recorded as unknown, which is what every session before this release recorded. The question appears on the preview sheet, and each project group offers the same three answers for sending everything it has waiting at once.</p>
+        <p>The answer records whether the task was finished, and nothing else. It is not a rating: a run can finish the job by a route you disliked, or fail while doing the right thing, and those are a different question this does not ask. Your answer is not part of the preview shown above it, and the preview says so.</p>
+      </description>
+    </release>
     <release version="0.4.9" date="2026-08-25">
       <description>
         <p>Nothing in the Linux app has changed in this release. It fixes the macOS app, where finishing setup could leave you looking at the last screen of it forever: the button that ends setup recorded that you were finished but did not move you on, so the app sat there as though the button had not been pressed. Every platform is published at one version number, so this one exists on Linux with nothing behind it.</p>
