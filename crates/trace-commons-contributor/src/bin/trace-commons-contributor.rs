@@ -96,7 +96,7 @@ enum Command {
         /// same submission_id so the server can supersede the stored envelope
         #[arg(long)]
         remediate_quarantined: bool,
-        /// How these sessions went: worked | failed. Recorded as the trace
+        /// How these sessions went: worked | partly | failed. Recorded as the trace
         /// outcome, which nothing else in a transcript can answer.
         #[arg(long)]
         outcome: Option<String>,

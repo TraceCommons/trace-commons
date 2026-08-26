@@ -884,7 +884,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         match sel.verdict {
             None => None,
             Some(name) => Some(crate::envelope::ContributorVerdict::parse(name).ok_or_else(
-                || anyhow::anyhow!("unknown --outcome '{name}': use worked or failed"),
+                || anyhow::anyhow!("unknown --outcome '{name}': use worked, partly or failed"),
             )?),
         };
     let opts = SubmitOptions {

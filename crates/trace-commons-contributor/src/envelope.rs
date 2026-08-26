@@ -26,9 +26,8 @@ use trace_commons_protocol::trace_contribution::{
     IronclawTraceMetadata, OutcomeMetadata, PrivacyFilterBackendTag, RawTraceContribution,
     RawTraceContributionEvent, ReplayMetadata, TRACE_CONTRIBUTION_POLICY_VERSION, TaskSuccess,
     TokenCounts, TraceAllowedUse, TraceChannel, TraceContributionEnvelope,
-    TraceContributionEventType, TraceRedactor, UserFeedback, ValueMetadata,
-    run_privacy_filter_canary, synthetic_privacy_filter_canary_text,
-    synthetic_privacy_filter_canary_values,
+    TraceContributionEventType, TraceRedactor, ValueMetadata, run_privacy_filter_canary,
+    synthetic_privacy_filter_canary_text, synthetic_privacy_filter_canary_values,
 };
 
 use crate::config::ContributorConfig;
@@ -324,6 +323,7 @@ impl std::io::Write for ByteCounter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContributorVerdict {
     Worked,
+    Partly,
     Failed,
 }
 
@@ -332,19 +332,36 @@ impl ContributorVerdict {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "worked" => Some(Self::Worked),
+            "partly" => Some(Self::Partly),
             "failed" => Some(Self::Failed),
             _ => None,
         }
     }
 
+    /// Writes `task_success` and nothing else.
+    ///
+    /// `user_feedback` is deliberately left `None`. It is a different
+    /// question -- satisfaction rather than completion -- and the two
+    /// genuinely diverge: a run can complete the task by a route the
+    /// contributor dislikes, or fail at the task while doing the right
+    /// thing. Setting both from one keystroke records a signal that was
+    /// never given.
+    ///
+    /// `Partly` is what makes that concrete. It has no honest thumb, so any
+    /// mapping onto `ThumbsUp`/`ThumbsDown` would have to invent one.
+    ///
+    /// This leaves `user_feedback` free for a real satisfaction control
+    /// later, including `Correction` once there is a surface to collect one
+    /// (redaction already scrubs `human_correction`; what is missing is the
+    /// consent decision and the UI, not the pipeline).
     fn outcome(self) -> OutcomeMetadata {
-        let (task_success, user_feedback) = match self {
-            Self::Worked => (TaskSuccess::Success, UserFeedback::ThumbsUp),
-            Self::Failed => (TaskSuccess::Failure, UserFeedback::ThumbsDown),
+        let task_success = match self {
+            Self::Worked => TaskSuccess::Success,
+            Self::Partly => TaskSuccess::Partial,
+            Self::Failed => TaskSuccess::Failure,
         };
         OutcomeMetadata {
             task_success,
-            user_feedback,
             ..OutcomeMetadata::default()
         }
     }
@@ -1486,7 +1503,14 @@ mod tests {
             Some(ContributorVerdict::Worked),
         );
         assert_eq!(worked.outcome.task_success, TaskSuccess::Success);
-        assert_eq!(worked.outcome.user_feedback, UserFeedback::ThumbsUp);
+
+        let partly = build_raw_contribution_with_verdict(
+            &t,
+            &cfg,
+            chrono::Utc::now(),
+            Some(ContributorVerdict::Partly),
+        );
+        assert_eq!(partly.outcome.task_success, TaskSuccess::Partial);
 
         let failed = build_raw_contribution_with_verdict(
             &t,
@@ -1495,7 +1519,18 @@ mod tests {
             Some(ContributorVerdict::Failed),
         );
         assert_eq!(failed.outcome.task_success, TaskSuccess::Failure);
-        assert_eq!(failed.outcome.user_feedback, UserFeedback::ThumbsDown);
+
+        // A verdict answers "did the task complete", and nothing else. It
+        // must not also assert satisfaction: the contributor was asked one
+        // question, so the envelope carries one fact. `Partly` is what makes
+        // this concrete -- it has no honest thumb.
+        for outcome in [&worked.outcome, &partly.outcome, &failed.outcome] {
+            assert_eq!(
+                outcome.user_feedback,
+                UserFeedback::None,
+                "a verdict must not assert a satisfaction signal"
+            );
+        }
     }
 
     /// No verdict means unknown, not success. Silence is not a claim.
@@ -1578,11 +1613,16 @@ mod tests {
             Some(ContributorVerdict::Worked)
         );
         assert_eq!(
+            ContributorVerdict::parse("partly"),
+            Some(ContributorVerdict::Partly)
+        );
+        assert_eq!(
             ContributorVerdict::parse("failed"),
             Some(ContributorVerdict::Failed)
         );
         // A typo must not silently become "unknown": the caller refuses.
         assert_eq!(ContributorVerdict::parse("Worked"), None);
         assert_eq!(ContributorVerdict::parse("success"), None);
+        assert_eq!(ContributorVerdict::parse("partial"), None);
     }
 }
