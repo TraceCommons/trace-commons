@@ -132,6 +132,7 @@ struct QueueContent: View {
                         onSubmit: { model.approve($0) },
                         onDismiss: { model.dismiss($0) },
                         onSubmitAll: { model.submitProject(id: group.id) },
+                        onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },
                         onIgnoreProject: {
                             model.ignoreProject(
                                 id: group.id,
@@ -177,6 +178,11 @@ private struct ProjectQueueGroup: View {
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     let onSubmitAll: () -> Void
+    /// The opt-in bulk path: the same approval, carrying one verdict for
+    /// every entry it covers. Separate from `onSubmitAll` so the plain
+    /// one-click submit stays exactly one click and keeps sending no
+    /// `outcome` at all.
+    let onSubmitAllAs: (ContributorVerdict) -> Void
     let onIgnoreProject: () -> Void
     /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
     /// which is where the daemon-side scheduler dedupe lives. See `rowList`
@@ -205,6 +211,20 @@ private struct ProjectQueueGroup: View {
                         the same way a single Submit would be, and flagged sessions are \
                         included, not held back.
                         """)
+                    // Beside `Submit all`, never in front of it: answering
+                    // the outcome question for a whole group is a choice a
+                    // contributor opts into, and the common path must not
+                    // grow a step because this exists. Never
+                    // `.tcPrimaryAction()` -- one primary action per group,
+                    // and it is the plain button.
+                    Menu(VerdictCopy.submitAllAs) {
+                        ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
+                            Button(option.label) { onSubmitAllAs(option) }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help(VerdictCopy.submitAllAsTooltip)
                 }
                 // Shown at every count, unlike `Submit all`, which hides at
                 // one because the row's own Submit already does the same

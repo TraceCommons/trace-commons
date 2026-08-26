@@ -188,6 +188,46 @@ final class DaemonClient {
 
     // MARK: - Decide
 
+    /// What one `approve` call acts on. The three selectors are mutually
+    /// exclusive on the wire, so they are mutually exclusive here too.
+    ///
+    /// `all` has no caller in this shell yet; it is modelled anyway because
+    /// the contract has it and a caller that needs it should not have to
+    /// reopen `approveParams` to get it.
+    enum ApproveTarget {
+        case all
+        case project(String)
+        case entry(String)
+    }
+
+    /// Builds the `approve` parameters.
+    ///
+    /// `static` and free of the socket on purpose: the one rule worth
+    /// testing here -- that no answer means no key -- has no other seam it
+    /// can be asserted at. A `nil` verdict OMITS `outcome` entirely; it must
+    /// never become `NSNull` or `""`, both of which the daemon refuses with
+    /// `bad_params` / `outcome-invalid` and approves nothing for. The Linux
+    /// shell's equivalent is `approve_params` in
+    /// `crates/trace-commons-contributor-gtk/src/ui/queue.rs`.
+    static func approveParams(
+        target: ApproveTarget,
+        verdict: ContributorVerdict?
+    ) -> [String: Any] {
+        var params: [String: Any]
+        switch target {
+        case .all:
+            params = ["all": true]
+        case .project(let projectID):
+            params = ["project_id": projectID]
+        case .entry(let entryID):
+            params = ["entry_id": entryID]
+        }
+        if let verdict {
+            params["outcome"] = verdict.rawValue
+        }
+        return params
+    }
+
     /// Approves exactly one entry, by the id `list_pending` gave the caller.
     ///
     /// One-click submit means this no longer requires a preview: where none
@@ -195,9 +235,17 @@ final class DaemonClient {
     /// approving (see `docs/superpowers/specs/2026-08-20-one-click-submit-design.md`,
     /// "What this changes"). The full response is returned rather than just
     /// `approved` -- `ApproveResponse.toast` is how a caller renders it.
+    ///
+    /// `verdict` is the contributor's answer to the preview sheet's outcome
+    /// question, and defaults to none: unanswered is the expected state and
+    /// never an error.
     @discardableResult
-    func approve(entryID: String) throws -> ApproveResponse {
-        try call("approve", params: ["entry_id": entryID], as: ApproveResponse.self)
+    func approve(entryID: String, verdict: ContributorVerdict? = nil) throws -> ApproveResponse {
+        try call(
+            "approve",
+            params: Self.approveParams(target: .entry(entryID), verdict: verdict),
+            as: ApproveResponse.self
+        )
     }
 
     /// Approves every pending entry in one project, by the id `entry_value`
@@ -207,9 +255,16 @@ final class DaemonClient {
     /// project the daemon knows comes back as `bad_params` /
     /// `project-id-unrecognized`, thrown as a `Failure` like any other
     /// refusal -- a caller must not fold that into a skip.
+    ///
+    /// A `verdict` supplied here applies to every entry the approval covers,
+    /// which is what `Submit all as...` means by answering once for a group.
     @discardableResult
-    func approve(projectID: String) throws -> ApproveResponse {
-        try call("approve", params: ["project_id": projectID], as: ApproveResponse.self)
+    func approve(projectID: String, verdict: ContributorVerdict? = nil) throws -> ApproveResponse {
+        try call(
+            "approve",
+            params: Self.approveParams(target: .project(projectID), verdict: verdict),
+            as: ApproveResponse.self
+        )
     }
 
     /// Returns an approved entry to `pending`. This is what the five-second
