@@ -449,6 +449,7 @@ fn visit_session(
                 &ctx.consent_scopes,
                 ctx.approval_inputs.as_deref(),
                 None,
+                None,
             ) {
                 out.changed = true;
                 out.report.auto_ready += 1;
@@ -576,6 +577,11 @@ fn visit_session(
         retry_after: None,
         submission_id: None,
         approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
+        // A fresh entry has no answer to give yet, armed or not: it is
+        // either newly discovered (`Pending`) or auto-approved without
+        // a contributor ever seeing it, so there is no verdict to
+        // record.
+        approved_verdict: None,
         // `None` when the config could not be read, which the
         // uploader treats as "unknown, re-ask": fail-closed.
         approved_inputs: armed.then(|| ctx.approval_inputs.clone()).flatten(),
@@ -652,6 +658,7 @@ fn visit_session(
                         entry_id,
                         &ctx.consent_scopes,
                         ctx.approval_inputs.as_deref(),
+                        None,
                         None,
                     )
                 {

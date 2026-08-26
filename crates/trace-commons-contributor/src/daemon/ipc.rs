@@ -1676,7 +1676,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             skipped.push((id, label));
             continue;
         }
-        if queue.approve(id, &scopes, inputs.as_deref(), Some(approved_at)) {
+        if queue.approve(id, &scopes, inputs.as_deref(), None, Some(approved_at)) {
             approved_ids.push(id);
         } else {
             // `Queue::approve` refuses anything not `Pending`, and this
@@ -2820,6 +2820,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -2921,6 +2922,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3011,6 +3013,7 @@ mod tests {
                     retry_after: None,
                     submission_id: None,
                     approved_scopes: None,
+                    approved_verdict: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
@@ -3477,6 +3480,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3555,6 +3559,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -3676,6 +3681,7 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_verdict: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -3875,6 +3881,7 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_verdict: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -3918,6 +3925,7 @@ mod tests {
                 retry_after: None,
                 submission_id: None,
                 approved_scopes: None,
+                approved_verdict: None,
                 approved_inputs: None,
                 previewed_envelope_digest: None,
                 approved_at: None,
@@ -4006,6 +4014,7 @@ mod tests {
             retry_after: None,
             submission_id: None,
             approved_scopes: None,
+            approved_verdict: None,
             approved_inputs: None,
             previewed_envelope_digest: None,
             approved_at: None,
@@ -4129,6 +4138,7 @@ mod tests {
                     retry_after: None,
                     submission_id: None,
                     approved_scopes: None,
+                    approved_verdict: None,
                     approved_inputs: None,
                     previewed_envelope_digest: None,
                     approved_at: None,
@@ -4473,6 +4483,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
@@ -4517,6 +4528,7 @@ mod tests {
                         retry_after: None,
                         submission_id: None,
                         approved_scopes: None,
+                        approved_verdict: None,
                         approved_inputs: None,
                         previewed_envelope_digest: None,
                         approved_at: None,
