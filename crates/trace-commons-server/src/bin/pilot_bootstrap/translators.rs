@@ -47,17 +47,46 @@ pub const SESSION_BODY_CAP: usize = 16_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionDraft {
     pub submission_id: String,
+    /// The whole session flattened to one string, in event order. Still
+    /// drives `submission_id` and `passes_word_filter` unchanged from
+    /// before this field existed -- those only need the text, not the
+    /// per-event structure. What the submitter actually sends as steps is
+    /// `session_events`, not this.
     pub trace_body: String,
     pub source_dataset: String,
     pub source_row_id: String,
     pub source_domain_tag: String,
-    /// The earliest timestamp found on a session event, if the source
-    /// carried one. Every event in a session gets flattened into a single
-    /// trace body and a single recorded step (see `flatten_session`), so
-    /// this is the one real timestamp available for that step -- never a
-    /// synthesised or interpolated one. `None` when no event in the
-    /// session had a parseable `timestamp` field.
-    pub session_timestamp: Option<DateTime<Utc>>,
+    /// The same session, kept as one entry per event instead of flattened,
+    /// each with its own real timestamp where the source line had one
+    /// (never synthesised) and a role classified only where unambiguous.
+    /// The submitter turns each entry into its own `TraceStep`, so a
+    /// multi-turn session produces a multi-step trace instead of
+    /// collapsing into one instant. Bounded by the same `SESSION_BODY_CAP`
+    /// character budget as `trace_body` -- see `cap_events`.
+    pub session_events: Vec<SessionEvent>,
+}
+
+/// A session event's role, classified only when unambiguous. Everything
+/// that is not clearly `message.role == "user"` or `"assistant"` -- system
+/// prompts, developer prompts, tool calls/results, and anything else --
+/// stays `Other` rather than being guessed at. `Other` maps to the same
+/// catch-all (`TraceResponse::UserInput`) the whole-session flatten used
+/// for every event before this change, so nothing that used to appear in
+/// the trace now goes missing for lack of a role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEventRole {
+    User,
+    Assistant,
+    Other,
+}
+
+/// One classified session event: its flattened text, its own real
+/// timestamp if the source line carried one, and its role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEvent {
+    pub text: String,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub role: SessionEventRole,
 }
 
 /// Per-dataset translator contract. Translators are intentionally small and
@@ -126,16 +155,23 @@ fn extract_event_text(event: &Value) -> Vec<String> {
     parts
 }
 
-/// Concatenate every event's content fields into one trace body. Lines that
-/// fail to parse as JSON are skipped silently (per hash-only logging
-/// convention; malformed event rows do happen in the wild and are not
-/// operator-actionable). Returns the concatenated body, the first observed
-/// `sessionId` (or session `id`) for `source_row_id`, and the earliest
-/// parseable per-event `timestamp`, if any.
-fn flatten_session(session_bytes: &[u8]) -> (String, Option<String>, Option<DateTime<Utc>>) {
-    let mut parts: Vec<String> = Vec::new();
+/// Parse every event in a session into a [`SessionEvent`]. An event whose
+/// text extracts to nothing contributes no event, matching the previous
+/// flatten's behavior exactly (such an event contributed nothing to the
+/// joined body either). Lines that fail to parse as JSON are skipped
+/// silently (per hash-only logging convention; malformed event rows do
+/// happen in the wild and are not operator-actionable). Returns the events
+/// in order plus the first observed `sessionId` (or session `id`) for
+/// `source_row_id`, if any.
+///
+/// Multiple text/thinking chunks within one event are joined with the same
+/// `"\n\n"` separator the old whole-session join used between chunks, so
+/// joining every returned event's `text` with `"\n\n"` reproduces the old
+/// flattened body byte-for-byte (`"\n\n"`-joining is associative over how
+/// the chunks are grouped).
+fn flatten_session(session_bytes: &[u8]) -> (Vec<SessionEvent>, Option<String>) {
+    let mut events: Vec<SessionEvent> = Vec::new();
     let mut session_id: Option<String> = None;
-    let mut session_timestamp: Option<DateTime<Utc>> = None;
 
     for line in session_bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -159,17 +195,32 @@ fn flatten_session(session_bytes: &[u8]) -> (String, Option<String>, Option<Date
                 }
             }
         }
-        if session_timestamp.is_none() {
-            if let Some(raw) = event.get("timestamp").and_then(Value::as_str) {
-                if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
-                    session_timestamp = Some(parsed.with_timezone(&Utc));
-                }
-            }
+        let text = extract_event_text(&event).join("\n\n");
+        if text.is_empty() {
+            continue;
         }
-        parts.extend(extract_event_text(&event));
+        let timestamp = event
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        let role = match event
+            .get("message")
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+        {
+            Some("user") => SessionEventRole::User,
+            Some("assistant") => SessionEventRole::Assistant,
+            _ => SessionEventRole::Other,
+        };
+        events.push(SessionEvent {
+            text,
+            timestamp,
+            role,
+        });
     }
 
-    (parts.join("\n\n"), session_id, session_timestamp)
+    (events, session_id)
 }
 
 /// UTF-8-safe character truncation.
@@ -180,6 +231,38 @@ fn truncate_chars(s: &str, cap: usize) -> String {
             break;
         }
         out.push(ch);
+    }
+    out
+}
+
+/// Apply the same `SESSION_BODY_CAP` character budget to the per-event
+/// sequence that `truncate_chars` applies to the flattened `trace_body`.
+/// Counts the `"\n\n"` separator between events the same way the flattened
+/// join does, so concatenating the returned events' text with `"\n\n"`
+/// reproduces `truncate_chars(&raw_body, cap)` exactly. An event straddling
+/// the boundary is truncated in place, not dropped whole; only events past
+/// the boundary are dropped -- the session as a whole gets cut off, same as
+/// before, not any one event picked out for its content or classification.
+fn cap_events(events: Vec<SessionEvent>, cap: usize) -> Vec<SessionEvent> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for (i, mut event) in events.into_iter().enumerate() {
+        let sep = if i == 0 { 0 } else { 2 };
+        if used + sep >= cap {
+            break;
+        }
+        let remaining = cap - used - sep;
+        let len = event.text.chars().count();
+        if len <= remaining {
+            used += sep + len;
+            out.push(event);
+        } else {
+            event.text = truncate_chars(&event.text, remaining);
+            if !event.text.is_empty() {
+                out.push(event);
+            }
+            break;
+        }
     }
     out
 }
@@ -211,20 +294,26 @@ impl SessionConcatTranslator {
         session_name: &str,
         session_bytes: &[u8],
     ) -> Result<SubmissionDraft> {
-        let (body, session_id, session_timestamp) = flatten_session(session_bytes);
-        if body.is_empty() {
+        let (events, session_id) = flatten_session(session_bytes);
+        if events.is_empty() {
             anyhow::bail!("session yielded no textual content");
         }
-        let body = truncate_chars(&body, SESSION_BODY_CAP);
+        let raw_body = events
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let body = truncate_chars(&raw_body, SESSION_BODY_CAP);
         let id = submission_id_from_body(&body);
         let row_id = session_id.unwrap_or_else(|| row_id_from_sibling(session_name));
+        let session_events = cap_events(events, SESSION_BODY_CAP);
         Ok(SubmissionDraft {
             submission_id: id,
             trace_body: body,
             source_dataset: self.source_dataset.to_string(),
             source_row_id: row_id,
             source_domain_tag: self.source_domain_tag.to_string(),
-            session_timestamp,
+            session_events,
         })
     }
 }
@@ -476,6 +565,98 @@ mod tests {
         })]);
         let draft = t.translate("subdir/2026-01-16T_abc.jsonl", &bytes).unwrap();
         assert_eq!(draft.source_row_id, "2026-01-16T_abc");
+    }
+
+    #[test]
+    fn session_events_carry_distinct_timestamps_and_roles() {
+        // The multi-step point of this change: a session that flattens to
+        // one string must not collapse to one step. Each record keeps its
+        // own real timestamp and gets classified where unambiguous.
+        let t = SwivalTranslator::new();
+        let bytes = make_session(&[
+            serde_json::json!({"type":"session","id":"sess-multi"}),
+            serde_json::json!({
+                "type":"message","timestamp":"2026-01-01T00:00:00Z",
+                "message":{"role":"user","content":"first turn"}
+            }),
+            serde_json::json!({
+                "type":"message","timestamp":"2026-01-01T00:00:05Z",
+                "message":{"role":"assistant","content":"first reply"}
+            }),
+        ]);
+        let draft = t.translate("multi.jsonl", &bytes).unwrap();
+        assert_eq!(draft.session_events.len(), 2);
+        assert_eq!(draft.session_events[0].role, SessionEventRole::User);
+        assert_eq!(draft.session_events[1].role, SessionEventRole::Assistant);
+        assert_ne!(
+            draft.session_events[0].timestamp,
+            draft.session_events[1].timestamp
+        );
+        assert!(draft.session_events[0].timestamp.is_some());
+        assert!(draft.session_events[1].timestamp.is_some());
+    }
+
+    #[test]
+    fn a_record_without_a_timestamp_stays_without_one() {
+        // Never synthesise: a source line with no `timestamp` field yields
+        // `None`, not an invented value.
+        let t = SwivalTranslator::new();
+        let bytes = make_session(&[serde_json::json!({
+            "type":"message",
+            "message":{"role":"user","content":"no timestamp here"}
+        })]);
+        let draft = t.translate("no-ts.jsonl", &bytes).unwrap();
+        assert_eq!(draft.session_events.len(), 1);
+        assert_eq!(draft.session_events[0].timestamp, None);
+    }
+
+    #[test]
+    fn unclassified_records_fall_back_to_the_catch_all_role_not_dropped() {
+        // A record whose role isn't unambiguously user/assistant (a
+        // top-level `content` field, no `message` wrapper) still becomes an
+        // event -- classified `Other`, not silently dropped.
+        let t = SwivalTranslator::new();
+        let bytes = make_session(&[serde_json::json!({
+            "type":"system","content":"system prompt text"
+        })]);
+        let draft = t.translate("sys.jsonl", &bytes).unwrap();
+        assert_eq!(draft.session_events.len(), 1);
+        assert_eq!(draft.session_events[0].role, SessionEventRole::Other);
+        assert_eq!(draft.session_events[0].text, "system prompt text");
+    }
+
+    #[test]
+    fn capped_events_joined_match_the_truncated_trace_body() {
+        // `cap_events` must apply the exact same character budget
+        // `truncate_chars` applies to the flattened body, so the envelope's
+        // steps never carry more content than the body cap allows.
+        let t = SwivalTranslator::new();
+        let long_a = "a".repeat(20);
+        let long_b = "b".repeat(20);
+        let bytes = make_session(&[
+            serde_json::json!({"type":"message","message":{"role":"user","content": long_a}}),
+            serde_json::json!({"type":"message","message":{"role":"assistant","content": long_b}}),
+        ]);
+        let draft = t.translate("cap.jsonl", &bytes).unwrap();
+        // Sanity: the full session is longer than a small cap we impose by
+        // re-running the capping logic directly at a tiny budget.
+        let (events, _) = flatten_session(&bytes);
+        let raw_body = events
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(raw_body.chars().count() > 25);
+        let capped = cap_events(events, 25);
+        let capped_joined = capped
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(capped_joined, truncate_chars(&raw_body, 25));
+        // Untouched by the assertion above (SESSION_BODY_CAP is generous),
+        // draft itself keeps both events since the real cap is 16000 chars.
+        assert_eq!(draft.session_events.len(), 2);
     }
 
     #[test]

@@ -19,20 +19,25 @@ mod sidecar;
 use serde_json::json;
 use sidecar::{Sidecar, SidecarRecord};
 use submitter::Submitter;
-use translators::SubmissionDraft;
+use translators::{SessionEvent, SessionEventRole, SubmissionDraft};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn draft(seed: u8) -> SubmissionDraft {
     let mut id = [0u8; 16];
     id[15] = seed;
+    let trace_body = format!("trace body {seed}");
     SubmissionDraft {
         submission_id: hex::encode(id),
-        trace_body: format!("trace body {seed}"),
+        trace_body: trace_body.clone(),
         source_dataset: "test/dataset".into(),
         source_row_id: format!("row-{seed}"),
         source_domain_tag: "test/synthetic".into(),
-        session_timestamp: None,
+        session_events: vec![SessionEvent {
+            text: trace_body,
+            timestamp: None,
+            role: SessionEventRole::User,
+        }],
     }
 }
 
