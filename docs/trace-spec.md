@@ -148,7 +148,7 @@ The envelope is `TraceContributionEnvelope`. Top-level shape:
 | `policy_version` | string | yes | Consent policy version (`2026-04-24`). |
 | `scopes` | `[ConsentScope]` | yes | What uses the contributor authorized. See matrix in Part 3. |
 | `message_text_included` | bool | yes | Whether raw redacted message text is present. Server corrects `false` → `true` when events/outcome carry message content. |
-| `tool_payloads_included` | bool | yes | Whether tool payloads are present. Server corrects `false` → `true` when events carry tool content or structured payloads. A bare `tool_name` is metadata, not a payload, and does not trigger correction: stripping payloads while keeping names is a supported privacy mode. |
+| `tool_payloads_included` | bool | yes | Whether tool payloads are present. Server corrects `false` → `true` when events carry tool content or a structured payload that carries readable content. A bare `tool_name` is metadata, not a payload, and does not trigger correction: stripping payloads while keeping names is a supported privacy mode. Neither does a withheld-payload marker — an object whose keys are all drawn from the emitters' fixed literal set (`has_arguments`, `has_result`, `has_error`, `state`, and the `arguments` / `rationale` wrapper keys) and whose values are all booleans, nulls or empty. Object keys are read as content: any other non-blank key declares a payload, because a key is as free-form as the string beside it. |
 | `revocable` | bool | yes | Whether the contributor retains a revocation right. |
 
 `ConsentScope` values: `debugging_evaluation`, `benchmark_only`,
