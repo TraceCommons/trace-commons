@@ -1060,6 +1060,41 @@ fn replay_value_is_populated(value: &Value) -> bool {
     }
 }
 
+/// Whether a structured payload carries anything a consumer could read.
+///
+/// The consent flags are a factual declaration of what an envelope carries,
+/// and `structured_payload` was counted as a tool payload whenever it was
+/// merely non-null. That made a marker a payload: with tool payloads
+/// withheld, the capture path writes `{"has_arguments": false, "has_result":
+/// true, "has_error": false}` -- three booleans and nothing else -- and that
+/// declared `tool_payloads_included`, pushed the envelope to Medium residual
+/// risk, and quarantined it on a default deployment for payloads it does not
+/// carry. Which is, word for word, the outcome
+/// [`derive_envelope_content_presence`] already refuses to accept for a bare
+/// `tool_name`.
+///
+/// Deliberately fail-closed, and narrower than it could be. Only values that
+/// provably cannot carry content are ignored: booleans, nulls, empty strings,
+/// and empty containers. Any string with text or any number counts, because
+/// either could be content and under-declaring is the dangerous direction --
+/// a trace that carries payloads while declaring it does not would take the
+/// Low-risk acceptance path and skip the PII backstop entirely.
+///
+/// That leaves known over-declaration in place rather than guessing: an
+/// opaque provenance marker (`{"record_type": "system"}`), a bare
+/// `{"tool_call_id": ...}`, and the capture path's `{"state": "Completed"}`
+/// all still count, because excluding them means judging particular key names
+/// and a key name is exactly what an emitter could put content under.
+pub fn payload_carries_readable_content(payload: &Value) -> bool {
+    match payload {
+        Value::Null | Value::Bool(_) => false,
+        Value::Number(_) => true,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items.iter().any(payload_carries_readable_content),
+        Value::Object(fields) => fields.values().any(payload_carries_readable_content),
+    }
+}
+
 fn payload_carries_any(payload: &Value, keys: &[&str]) -> bool {
     let Some(object) = payload.as_object() else {
         return false;
@@ -4359,7 +4394,10 @@ pub fn derive_envelope_content_presence(
                 | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
             }
         }
-        if !event.structured_payload.is_null() {
+        // A marker is not a payload: `{"has_result": true}` says a result
+        // existed upstream and carries none of it. See
+        // `payload_carries_readable_content`.
+        if payload_carries_readable_content(&event.structured_payload) {
             presence.tool_payloads = true;
         }
     }
@@ -8951,5 +8989,119 @@ mod tests {
             reasoning.content.is_none(),
             "unconsented reasoning must not carry its text"
         );
+    }
+
+    // --- A marker is not a payload ------------------------------------
+    //
+    // The consent flags are a factual declaration of what an envelope
+    // carries. Counting any non-null `structured_payload` as a tool payload
+    // made the payloads-WITHHELD shape declare payloads: the capture path
+    // writes three booleans when consent says no, and that pushed the
+    // envelope to Medium and quarantined it for content it does not have.
+
+    fn marker_event(payload: super::Value) -> super::TraceContributionEvent {
+        use super::*;
+        TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolCall,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: payload,
+            tool_name: Some("gmail__list_messages".to_string()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }
+    }
+
+    #[test]
+    fn a_boolean_marker_payload_declares_nothing() {
+        use super::*;
+        // The exact shape `from_capture_turns` emits when
+        // `include_tool_payloads` is false.
+        let mut envelope = bare_envelope();
+        envelope.events.push(marker_event(serde_json::json!({
+            "has_arguments": false,
+            "has_result": true,
+            "has_error": false,
+        })));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(
+            !presence.tool_payloads,
+            "three booleans are not a tool payload"
+        );
+        assert!(
+            !envelope.consent.tool_payloads_included,
+            "and the declaration must not be corrected upward to claim they are"
+        );
+    }
+
+    #[test]
+    fn a_payload_carrying_arguments_still_declares_them() {
+        use super::*;
+        // The fix must not under-declare: that is the fail-open direction,
+        // where a trace carrying payloads takes the Low-risk acceptance path
+        // and skips the backstop.
+        let mut envelope = bare_envelope();
+        envelope.events.push(marker_event(
+            serde_json::json!({"arguments": {"label": "UNREAD"}}),
+        ));
+
+        let presence = reconcile_consent_declarations(&mut envelope);
+
+        assert!(presence.tool_payloads);
+        assert!(envelope.consent.tool_payloads_included);
+    }
+
+    #[test]
+    fn a_nested_marker_is_still_a_marker() {
+        use super::*;
+        // Containers are walked: an object whose every leaf is a boolean
+        // carries nothing, however deeply it is wrapped.
+        assert!(!payload_carries_readable_content(&serde_json::json!({
+            "outer": {"inner": [true, false]},
+            "flag": null,
+        })));
+    }
+
+    #[test]
+    fn anything_that_could_be_content_counts() {
+        use super::*;
+        // Fail-closed on every value that might carry something: a number
+        // could be an amount or an id, a string could be anything. Only
+        // provably-empty values are ignored.
+        for payload in [
+            serde_json::json!({"n": 0}),
+            serde_json::json!({"s": "x"}),
+            serde_json::json!(["x"]),
+            serde_json::json!("bare string"),
+            serde_json::json!({"nested": {"deep": "value"}}),
+        ] {
+            assert!(
+                payload_carries_readable_content(&payload),
+                "must count as content: {payload}"
+            );
+        }
+        for payload in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!({"s": ""}),
+            serde_json::json!({"s": "   "}),
+        ] {
+            assert!(
+                !payload_carries_readable_content(&payload),
+                "must not count as content: {payload}"
+            );
+        }
     }
 }

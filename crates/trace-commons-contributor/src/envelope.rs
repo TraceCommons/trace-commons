@@ -514,8 +514,13 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
         }
         // A structured payload is tool-call content regardless of event kind.
         // A bare `tool_name` deliberately does NOT count: the name is metadata
-        // about which tool ran, not the payload the flag declares.
-        if !event.structured_payload.is_null() {
+        // about which tool ran, not the payload the flag declares. Neither
+        // does a marker whose every value is a boolean or null -- the same
+        // rule the server half applies, from the same function, because the
+        // two derivations are required to agree.
+        if trace_commons_protocol::trace_contribution::payload_carries_readable_content(
+            &event.structured_payload,
+        ) {
             tool_payloads = true;
         }
     }
@@ -1113,6 +1118,56 @@ mod tests {
         assert!(
             !raw.ironclaw.feature_flags.contains_key("project_hash"),
             "and it must not have been replaced by a hashed one"
+        );
+    }
+
+    /// The client half must apply the same marker rule as the server, or the
+    /// contributor is penalised for declaring honestly: the server corrects
+    /// flags upward only, so a client that under-declares gets corrected and
+    /// a client that over-declares is believed.
+    #[test]
+    fn a_marker_payload_is_not_declared_as_a_tool_payload() {
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.events = vec![crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::ToolCall,
+            timestamp: None,
+            content: None,
+            structured: serde_json::json!({"has_result": true, "has_error": false}),
+            tool_name: Some("read_file".to_string()),
+            token_counts: None,
+        }];
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            !raw.consent.tool_payloads_included,
+            "a payload of booleans carries nothing to declare"
+        );
+    }
+
+    /// Both halves agree on the same envelope. Pinned because the server
+    /// derivation is the one that can overrule this one.
+    #[tokio::test]
+    async fn the_two_content_derivations_agree() {
+        use trace_commons_protocol::trace_contribution::derive_envelope_content_presence;
+
+        let cfg = test_config();
+        let t = fixture_transcript();
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        let declared_message_text = raw.consent.message_text_included;
+        let declared_tool_payloads = raw.consent.tool_payloads_included;
+
+        let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
+        let envelope = redact_to_envelope(&redactor, raw)
+            .await
+            .expect("redaction succeeds");
+        let presence = derive_envelope_content_presence(&envelope);
+
+        assert_eq!(
+            (declared_message_text, declared_tool_payloads),
+            (presence.message_text, presence.tool_payloads),
+            "the client declaration and the server derivation must not disagree"
         );
     }
 }
