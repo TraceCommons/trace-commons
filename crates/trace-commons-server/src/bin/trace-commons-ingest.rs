@@ -49103,6 +49103,103 @@ async fn evaluate_and_record_gate(
         );
     }
 
+    // Shadow-mode correction value (S5). Runs only when the envelope actually
+    // carried a contributor correction — `correction_simhash` is `None`
+    // otherwise, and an envelope without one takes exactly the 0.5.0 path with
+    // no correction columns written at all. Reuses the SAME seams the trace
+    // itself faces: the dedup simhash, the dedup cluster assignment, and the
+    // credit-quality saturating curve.
+    //
+    // SHADOW ONLY: the value is stored and credited nowhere. It cannot reach
+    // `credit_quality_micros`, `dedup_cluster_size`, the contributor cap, or
+    // the gate status — the write is a correction-columns-only UPDATE
+    // (`update_correction_value_sql_touches_only_correction_columns` pins
+    // that). Best-effort: a failure logs hash-only and never blocks the gate
+    // decision. The correction TEXT never appears here; only its simhash does.
+    if let Some(correction_simhash) = decision.correction_simhash {
+        let correction_signals = db
+            .list_correction_signals(i64::MAX)
+            .await
+            .unwrap_or_default();
+        // One candidate per CLUSTER keyed by the cluster's representative
+        // (earliest-decided) simhash, exactly as the trace dedup path above
+        // builds its candidates — `list_correction_signals` returns rows in
+        // `decided_at ASC` order.
+        let mut correction_sizes: std::collections::HashMap<uuid::Uuid, i64> =
+            std::collections::HashMap::new();
+        let mut correction_reps: std::collections::HashMap<uuid::Uuid, i64> =
+            std::collections::HashMap::new();
+        for signal in &correction_signals {
+            if let (Some(cid), Some(sh)) = (signal.correction_cluster_id, signal.correction_simhash)
+            {
+                correction_reps.entry(cid).or_insert(sh);
+                *correction_sizes.entry(cid).or_insert(0) += 1;
+            }
+        }
+        let novelty_micros = trace_commons_server::correction_value::correction_novelty_micros(
+            correction_simhash as u64,
+            &correction_reps
+                .values()
+                .map(|sh| *sh as u64)
+                .collect::<Vec<u64>>(),
+        );
+        let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> =
+            correction_reps
+                .iter()
+                .map(
+                    |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+                        cluster_id: *cluster_id,
+                        size: *correction_sizes.get(cluster_id).unwrap_or(&0),
+                        simhash: *simhash as u64,
+                        embed_cosine_micros: None,
+                    },
+                )
+                .collect();
+        let correction_cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
+            correction_simhash as u64,
+            &correction_candidates,
+            &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
+        ) {
+            trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
+            trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
+        };
+        let correction_cluster_size = i32::try_from(
+            correction_sizes
+                .get(&correction_cluster_id)
+                .copied()
+                .unwrap_or(0)
+                + 1,
+        )
+        .unwrap_or(i32::MAX);
+        let score = trace_commons_server::correction_value::correction_value(
+            novelty_micros,
+            correction_cluster_size,
+            &trace_commons_server::correction_value::CORRECTION_VALUE_ACTIVE,
+        );
+        if let Err(error) = db
+            .update_trace_gate_decision_correction_value(
+                tenant_id,
+                decision_id,
+                trace_commons_server::trace_corpus_storage::CorrectionValueWrite {
+                    correction_simhash,
+                    correction_cluster_id,
+                    correction_cluster_size,
+                    correction_novelty_micros: score.novelty_micros,
+                    correction_value_micros: score.value_micros,
+                    correction_value_version:
+                        trace_commons_server::correction_value::CORRECTION_VALUE_ACTIVE.version,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                tenant_hash = %sha256_prefixed(tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "shadow correction-value inline write failed (non-fatal)"
+            );
+        }
+    }
+
     Ok(GateOutcome::Scored {
         decision_id,
         perplexity_passed: decision.perplexity_passed,
@@ -50202,6 +50299,9 @@ async fn gate_evaluate_worker_handler(
             // in `evaluate_and_record_gate` against the real decision, so
             // there is nothing meaningful to compute for this throwaway copy.
             dedup_simhash: 0,
+            // Same reason: this throwaway copy carries no plaintext, and the
+            // correction value already ran inline against the real decision.
+            correction_simhash: None,
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),

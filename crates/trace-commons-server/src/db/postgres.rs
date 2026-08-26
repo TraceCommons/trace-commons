@@ -1847,6 +1847,30 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+        // V48 adds the shadow-mode correction-value columns (S5) and grants
+        // the two the cross-tenant correction-cluster scan reads to the
+        // gate-driver role. `run_migrations` is hand-rolled: a migration file
+        // that is not wired in here silently never runs.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&48_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V48__trace_correction_value.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&48_i32, &"trace_correction_value"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -4720,6 +4744,41 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_correction_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::CorrectionSignalRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read across every tenant's decisions.
+        // Corrections cluster cross-tenant deliberately — the same correction
+        // pasted into two tenants is one correction.
+        let rows = client
+            .query(
+                "SELECT tenant_id, decision_id, correction_cluster_id, correction_simhash
+                 FROM trace_gate_decisions
+                 WHERE correction_simhash IS NOT NULL
+                 ORDER BY decided_at ASC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::CorrectionSignalRow {
+                tenant_id: row.get("tenant_id"),
+                decision_id: row.get("decision_id"),
+                correction_cluster_id: row.get("correction_cluster_id"),
+                correction_simhash: row.get("correction_simhash"),
+            })
+            .collect())
+    }
+
     async fn list_contributor_cap_signals(
         &self,
         limit: i64,
@@ -5177,6 +5236,50 @@ mod tests {
         assert!(
             !V47.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
             "V47 must not weaken forced RLS"
+        );
+    }
+
+    /// V48 adds the shadow correction-value columns and must grant the two the
+    /// cross-tenant correction-cluster scan reads. The gate-driver role holds
+    /// COLUMN-level grants (V45), so an ungranted new column is unreadable —
+    /// the same drift V47 had to repair for the V37 chunk columns.
+    #[test]
+    fn v48_adds_correction_columns_and_grants_the_scanned_ones() {
+        const V48: &str = include_str!("../../../../migrations/V48__trace_correction_value.sql");
+        for column in [
+            "correction_simhash",
+            "correction_cluster_id",
+            "correction_cluster_size",
+            "correction_novelty_micros",
+            "correction_value_micros",
+            "correction_value_version",
+        ] {
+            assert!(
+                V48.contains(&format!("ADD COLUMN IF NOT EXISTS {column} ")),
+                "V48 must add {column}"
+            );
+        }
+        for column in ["correction_simhash", "correction_cluster_id"] {
+            assert!(
+                V48.contains(&format!(
+                    "GRANT SELECT ({column}) ON trace_gate_decisions TO trace_gate_driver;"
+                )),
+                "V48 must grant column-level SELECT on {column} to trace_gate_driver"
+            );
+        }
+        assert!(
+            !V48.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V48 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v48_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V48__trace_correction_value.sql"),
+            "V48 must be wired into run_migrations with an include_str!"
         );
     }
 

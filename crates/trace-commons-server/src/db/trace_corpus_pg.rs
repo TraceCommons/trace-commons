@@ -106,6 +106,18 @@ const TRACE_CREDIT_SETTLEMENT_BATCH_COLUMNS: &str = "\
     ranking_calibration_joined_evidence_hash, ranking_credit_events_excluded_count, \
     ranking_credit_events_excluded_reason_counts_json, actor_principal_ref, created_at";
 
+/// The shadow correction-value UPDATE (migration V48). Held as a named const
+/// so a test can pin what it is allowed to touch: only the six correction_*
+/// columns, on exactly one tenant-scoped decision row.
+const UPDATE_CORRECTION_VALUE_SQL: &str = "UPDATE trace_gate_decisions
+                SET correction_simhash = $3,
+                    correction_cluster_id = $4,
+                    correction_cluster_size = $5,
+                    correction_novelty_micros = $6,
+                    correction_value_micros = $7,
+                    correction_value_version = $8
+             WHERE tenant_id = $1 AND decision_id = $2";
+
 const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
     tenant_id, hold_id, credit_account_ref, credit_account_hash, reason, reason_hash, \
     actor_principal_ref, created_at, released_at";
@@ -6094,6 +6106,39 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_correction_value(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        write: crate::trace_corpus_storage::CorrectionValueWrite,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the six correction-value columns on exactly this decision
+        // row. Perplexity, novelty, dedup, contributor-cap, gate status, and
+        // credit are left exactly as-is: the shadow correction value must not
+        // be able to move what a contributor is credited.
+        // `update_correction_value_sql_touches_only_correction_columns` pins
+        // that.
+        tx.execute(
+            UPDATE_CORRECTION_VALUE_SQL,
+            &[
+                &tenant_id,
+                &decision_id,
+                &write.correction_simhash,
+                &write.correction_cluster_id,
+                &write.correction_cluster_size,
+                &write.correction_novelty_micros,
+                &write.correction_value_micros,
+                &write.correction_value_version,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn update_trace_gate_decision_contributor_cap(
         &self,
         tenant_id: &str,
@@ -6235,5 +6280,56 @@ impl TraceCorpusStore for PgBackend {
             chunks_capped: row.get(18),
             total_chunk_count: row.get(19),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shadow-mode guarantee, at the only place it can actually be
+    /// violated: the write. A correction's value must not be able to move
+    /// what a contributor is credited, so the statement that stores it may
+    /// set correction_* columns and nothing else — not credit_quality, not
+    /// dedup, not the contributor cap, not the gate status.
+    #[test]
+    fn update_correction_value_sql_touches_only_correction_columns() {
+        let sql = UPDATE_CORRECTION_VALUE_SQL;
+        let set_clause = sql
+            .split_once("SET ")
+            .expect("statement has a SET clause")
+            .1
+            .split_once("WHERE")
+            .expect("statement has a WHERE clause")
+            .0;
+        for assignment in set_clause.split(',') {
+            let column = assignment
+                .split('=')
+                .next()
+                .expect("assignment has a left-hand side")
+                .trim();
+            assert!(
+                column.starts_with("correction_"),
+                "the correction-value write set a non-correction column: {column}"
+            );
+        }
+        // And it is scoped to exactly one decision row of one tenant (forced
+        // RLS still applies, but an unscoped UPDATE would be a bug regardless).
+        assert!(sql.contains("WHERE tenant_id = $1 AND decision_id = $2"));
+
+        // Named so a reader can see what is deliberately absent.
+        for credited in [
+            "credit_quality_micros",
+            "dedup_cluster_size",
+            "contributor_factor_micros",
+            "credit_withheld_reason",
+            "perplexity_passed",
+            "novelty_passed",
+        ] {
+            assert!(
+                !sql.contains(credited),
+                "the correction-value write must not touch {credited}"
+            );
+        }
     }
 }

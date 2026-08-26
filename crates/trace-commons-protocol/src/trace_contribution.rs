@@ -7333,6 +7333,43 @@ mod tests {
         }
     }
 
+    /// S5: the shadow correction value is scored server-side and MUST NOT
+    /// reach the scorecard. `user_correction_value` stays what it has always
+    /// been -- a presence-keyed 1.0/0.0 -- and adding a correction moves no
+    /// other component. If a future change routes the computed value in here,
+    /// or lets a correction drift into `quality`/`novelty`/`replayability`,
+    /// this fails.
+    #[test]
+    fn a_correction_moves_only_the_presence_keyed_scorecard_weight() {
+        use super::{TaskSuccess, compute_value_scorecard};
+        let mut without = sample_envelope_with_event_content("a session that went badly");
+        without.outcome.task_success = TaskSuccess::Failure;
+        without.outcome.human_correction = None;
+        let mut with = without.clone();
+        with.outcome.human_correction =
+            Some("it should have written config/staging.toml, not the production one".to_string());
+
+        let a = compute_value_scorecard(&without);
+        let b = compute_value_scorecard(&with);
+
+        assert_eq!(a.user_correction_value, 0.0);
+        assert_eq!(
+            b.user_correction_value, 1.0,
+            "the weight is presence-keyed, not value-scored"
+        );
+        assert_eq!(a.schema_validity, b.schema_validity);
+        assert_eq!(a.privacy_risk, b.privacy_risk);
+        assert_eq!(a.quality, b.quality);
+        assert_eq!(a.replayability, b.replayability);
+        assert_eq!(a.novelty, b.novelty);
+        assert_eq!(a.duplicate_penalty, b.duplicate_penalty);
+        assert_eq!(a.coverage_bonus, b.coverage_bonus);
+        assert_eq!(a.difficulty, b.difficulty);
+        assert_eq!(a.dependability, b.dependability);
+        assert_eq!(a.process_eval_value, b.process_eval_value);
+        assert_eq!(a.downstream_utility, b.downstream_utility);
+    }
+
     fn sample_envelope_with_event_content(content: &str) -> super::TraceContributionEnvelope {
         use super::*;
         let now = Utc::now();

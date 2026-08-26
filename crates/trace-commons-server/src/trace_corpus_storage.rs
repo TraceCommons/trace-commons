@@ -1866,6 +1866,33 @@ pub struct DedupSignalRow {
     pub dedup_simhash: Option<i64>,
 }
 
+/// Correction-value signal for one decision row (migration V48), read
+/// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
+/// `correction_simhash` / `correction_cluster_id` are `None` for every
+/// decision whose envelope carried no contributor correction — which is every
+/// decision until the collection UI ships. SHADOW-ONLY: nothing derived from
+/// these rows gates, settles, or pays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionSignalRow {
+    pub tenant_id: String,
+    pub decision_id: Uuid,
+    pub correction_cluster_id: Option<Uuid>,
+    pub correction_simhash: Option<i64>,
+}
+
+/// The six shadow correction-value fields written for one decision row
+/// (migration V48). Bundled so the write is one argument rather than six
+/// positional integers that are easy to transpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionValueWrite {
+    pub correction_simhash: i64,
+    pub correction_cluster_id: Uuid,
+    pub correction_cluster_size: i32,
+    pub correction_novelty_micros: i64,
+    pub correction_value_micros: i64,
+    pub correction_value_version: i32,
+}
+
 /// One row for the per-contributor cap recompute pass. Cross-tenant by
 /// construction (enumerated on the gate-driver pool), joining each decision to
 /// its submission for the contributor identity (`auth_principal_ref`). The pass
@@ -2707,6 +2734,28 @@ pub trait TraceCorpusStore: Send + Sync {
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_dedup called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the five correction-value columns (migration V48) for the
+    /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
+    /// novelty, dedup, contributor-cap, gate status, and credit are left
+    /// untouched — the shadow correction value must not be able to move what a
+    /// contributor is credited. Implementations MUST scope by `tenant_id`
+    /// (forced RLS). Defaults to a log-once warning + no-op so a backend
+    /// without a real impl cannot silently drop the write.
+    async fn update_trace_gate_decision_correction_value(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _write: CorrectionValueWrite,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_correction_value called on a backend without a real impl"
             );
         });
         Ok(())
