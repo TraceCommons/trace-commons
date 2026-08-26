@@ -8,6 +8,7 @@ pub mod audit_chain;
 pub mod celestine_sloth_claim;
 pub mod config;
 pub mod contributor_cap;
+pub mod correction_value;
 pub mod credit_quality;
 pub mod db;
 pub mod dedup_assign;

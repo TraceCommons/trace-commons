@@ -69,9 +69,11 @@ pub struct CreditQualityScore {
 }
 
 /// Concave, saturating map of a micros signal onto [0,1]:
+/// Shared with `correction_value`, which scores a contributor correction on the
+/// same concave curve rather than inventing a second one.
 /// `log(1 + max(0, x - floor)) / log(1 + ceil - floor)`, in real (non-micros)
 /// units. Below floor -> 0; at/above ceil -> 1.
-fn saturating_term(value_micros: i64, floor_micros: i64, ceil_micros: i64) -> f64 {
+pub(crate) fn saturating_term(value_micros: i64, floor_micros: i64, ceil_micros: i64) -> f64 {
     if value_micros <= floor_micros {
         return 0.0;
     }

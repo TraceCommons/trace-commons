@@ -1199,6 +1199,20 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Enumerate correction-value signal rows (migration V48), cross-tenant,
+    /// oldest-decided first, capped at `limit`. Reads through the gate-driver
+    /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive
+    /// cross-tenant SELECT policies authorize it). Corrections cluster
+    /// cross-tenant for the same reason traces do: the same correction pasted
+    /// into two tenants is one correction. Default: empty (test doubles /
+    /// backends without a gate-driver pool).
+    async fn list_correction_signals(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::CorrectionSignalRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate per-contributor cap signal rows (migration V41), cross-tenant,
     /// joining each decision to its submission for the contributor identity
     /// (`auth_principal_ref`), ordered `(auth_principal_ref, decided_at ASC)`

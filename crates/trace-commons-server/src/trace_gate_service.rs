@@ -115,6 +115,40 @@ pub struct GateDecision {
     /// dedup clustering; computed inside the service so plaintext never
     /// crosses the boundary (only the hash does), like `nearest_neighbor_hash`.
     pub dedup_simhash: i64,
+    /// 64-bit token simhash of `outcome.human_correction`, when the envelope
+    /// carries one. `None` means "this service did not observe a correction" —
+    /// either the envelope has none, or the service never sees plaintext (the
+    /// deterministic services). Same trust-boundary rule as `dedup_simhash`:
+    /// computed inside the service, only the hash crosses back.
+    ///
+    /// Feeds the SHADOW-ONLY correction value (`crate::correction_value`).
+    /// Nothing downstream of it gates, settles, or pays.
+    pub correction_simhash: Option<i64>,
+}
+
+/// Token simhash of `outcome.human_correction` in a decrypted envelope
+/// plaintext, or `None` when the envelope carries no correction (absent,
+/// null, or whitespace-only).
+///
+/// Deliberately over the correction text ALONE, not the canonical correction
+/// representation: the value being scored is what the contributor wrote, and
+/// folding in surrounding metadata would let an unchanged correction score as
+/// novel because the trace around it differed.
+///
+/// A malformed or non-JSON plaintext yields `None` rather than an error — the
+/// correction value is shadow-only, so a parse failure must degrade to "no
+/// correction observed" and never block a gate decision.
+pub fn correction_simhash_from_plaintext(plaintext: &[u8]) -> Option<i64> {
+    let value: serde_json::Value = serde_json::from_slice(plaintext).ok()?;
+    let correction = value
+        .get("outcome")?
+        .get("human_correction")?
+        .as_str()?
+        .trim();
+    if correction.is_empty() {
+        return None;
+    }
+    Some(crate::dedup_simhash::trace_simhash(correction) as i64)
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -325,6 +359,12 @@ fn build_deterministic_decision(
         chunks_capped: false,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
+        // Deterministic services never see plaintext (see `dedup_simhash`
+        // above), so they cannot know whether the envelope carries a
+        // correction. `None` says exactly that; a digest-derived stand-in
+        // would fabricate a correction signal for every trace and seed the
+        // shadow corpus with phantom corrections.
+        correction_simhash: None,
     }
 }
 
@@ -678,6 +718,10 @@ where
                         .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
                 crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
             },
+            // Same trust boundary and the same `plaintext` in scope: the
+            // correction's simhash is computed here so the correction text
+            // itself never crosses back to the caller.
+            correction_simhash: correction_simhash_from_plaintext(&plaintext),
         })
     }
 
@@ -1181,6 +1225,101 @@ mod enclave_gate_service_tests {
         assert!(
             d2.chunk_vector_entries.is_empty() || !d2.novelty_passed,
             "duplicate chunks must be deduped on insert"
+        );
+    }
+
+    // ---- correction simhash (S5 shadow value) ----
+
+    #[test]
+    fn correction_simhash_is_over_the_correction_text_alone() {
+        let correction = "the agent wrote to config/prod.toml when the task said staging";
+        let envelope = serde_json::json!({
+            "submission_id": "11111111-1111-1111-1111-111111111111",
+            "events": [{"event_type": "user_message", "redacted_content": "some session text"}],
+            "outcome": {"task_success": "failure", "human_correction": correction},
+        });
+        let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
+        assert_eq!(
+            correction_simhash_from_plaintext(&plaintext),
+            Some(crate::dedup_simhash::trace_simhash(correction) as i64),
+            "the correction simhash must be over the correction text alone"
+        );
+
+        // The SAME correction inside a different session must produce the same
+        // signature, or a contributor could re-earn by pasting it into a new
+        // trace.
+        let other_session = serde_json::json!({
+            "submission_id": "22222222-2222-2222-2222-222222222222",
+            "events": [{"event_type": "user_message", "redacted_content": "entirely other text"}],
+            "outcome": {"task_success": "partial", "human_correction": correction},
+        });
+        let other_plaintext = serde_json::to_vec(&other_session).expect("envelope serializes");
+        assert_eq!(
+            correction_simhash_from_plaintext(&plaintext),
+            correction_simhash_from_plaintext(&other_plaintext)
+        );
+    }
+
+    #[test]
+    fn no_correction_yields_no_signal() {
+        for outcome in [
+            serde_json::json!({"task_success": "success"}),
+            serde_json::json!({"task_success": "failure", "human_correction": serde_json::Value::Null}),
+            serde_json::json!({"task_success": "failure", "human_correction": "   "}),
+        ] {
+            let plaintext = serde_json::to_vec(&serde_json::json!({"outcome": outcome}))
+                .expect("envelope serializes");
+            assert_eq!(
+                correction_simhash_from_plaintext(&plaintext),
+                None,
+                "an envelope with no correction must produce no correction signal"
+            );
+        }
+        // No outcome at all, and non-JSON plaintext, both degrade to None
+        // rather than erroring: the correction value is shadow-only.
+        assert_eq!(correction_simhash_from_plaintext(b"{}"), None);
+        assert_eq!(correction_simhash_from_plaintext(b"not json at all"), None);
+    }
+
+    #[test]
+    fn enclave_evaluation_carries_the_correction_signal_end_to_end() {
+        // Drives the real decrypt path: the correction signal must come out of
+        // `evaluate_trace` for an envelope that carries one, and stay absent
+        // for one that does not.
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let correction = "the agent should have run the failing test before closing the bug";
+
+        let evaluate = |body: serde_json::Value| {
+            let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+            let plaintext = serde_json::to_vec(&body).expect("envelope serializes");
+            let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
+            svc.evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace should succeed")
+        };
+
+        let with_correction = evaluate(serde_json::json!({
+            "events": [{"event_type": "user_message", "redacted_content": "session text"}],
+            "outcome": {"task_success": "failure", "human_correction": correction},
+        }));
+        assert_eq!(
+            with_correction.correction_simhash,
+            Some(crate::dedup_simhash::trace_simhash(correction) as i64)
+        );
+
+        let without_correction = evaluate(serde_json::json!({
+            "events": [{"event_type": "user_message", "redacted_content": "session text"}],
+            "outcome": {"task_success": "success"},
+        }));
+        assert_eq!(
+            without_correction.correction_simhash, None,
+            "an envelope with no correction must not produce a correction signal"
         );
     }
 }

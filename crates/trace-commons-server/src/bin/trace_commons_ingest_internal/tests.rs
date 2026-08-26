@@ -65525,6 +65525,20 @@ struct DecisionRowWithDedup {
 }
 
 /// Test-only combined view of a `trace_gate_decisions` row plus its
+/// shadow-mode correction-value columns (migration V48), returned by
+/// `PerplexityDriverTestDb::gate_decision_with_correction_value_by_id`.
+#[derive(Debug, Clone, PartialEq)]
+struct DecisionRowWithCorrectionValue {
+    row: StorageTraceGateDecisionRow,
+    correction_simhash: Option<i64>,
+    correction_cluster_id: Option<Uuid>,
+    correction_cluster_size: Option<i32>,
+    correction_novelty_micros: Option<i64>,
+    correction_value_micros: Option<i64>,
+    correction_value_version: Option<i32>,
+}
+
+/// Test-only combined view of a `trace_gate_decisions` row plus its
 /// per-contributor cap columns (migration V41), returned by
 /// `PerplexityDriverTestDb::gate_decision_with_contributor_cap_by_id`.
 #[derive(Debug, Clone, PartialEq)]
@@ -65570,6 +65584,16 @@ struct PerplexityDriverTestDb {
     /// isolation test can assert the base row is byte-identical before and
     /// after the dedup write.
     dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
+    /// Shadow-mode correction values written by
+    /// `update_trace_gate_decision_correction_value`, keyed by `(tenant_id,
+    /// decision_id)`: (simhash, cluster_id, cluster_size, novelty_micros,
+    /// value_micros, version). A side table like `dedup`, so the stored
+    /// `StorageTraceGateDecisionRow` is structurally untouchable from the
+    /// correction path.
+    #[allow(clippy::type_complexity)]
+    corrections: std::sync::RwLock<
+        std::collections::HashMap<(String, Uuid), (i64, Uuid, i32, i64, i64, i32)>,
+    >,
     /// Per-contributor cap snapshots written by
     /// `update_trace_gate_decision_contributor_cap`, keyed by `(tenant_id,
     /// decision_id)`. Kept as a side table (like `dedup`) rather than fields
@@ -65595,6 +65619,7 @@ impl PerplexityDriverTestDb {
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             credit_quality_scores: std::sync::RwLock::new(std::collections::HashMap::new()),
             dedup: std::sync::RwLock::new(std::collections::HashMap::new()),
+            corrections: std::sync::RwLock::new(std::collections::HashMap::new()),
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
             audit_events: std::sync::RwLock::new(Vec::new()),
         }
@@ -65727,6 +65752,31 @@ impl PerplexityDriverTestDb {
             dedup_simhash: dedup.map(|(h, _, _)| h),
             dedup_cluster_id: dedup.map(|(_, c, _)| c),
             dedup_cluster_size: dedup.map(|(_, _, s)| s),
+        })
+    }
+
+    /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
+    /// decision_id)` together with any shadow correction value recorded for it.
+    fn gate_decision_with_correction_value_by_id(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+    ) -> Option<DecisionRowWithCorrectionValue> {
+        let row = self.gate_decision_by_id(tenant_id, decision_id)?;
+        let correction = self
+            .corrections
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), decision_id))
+            .copied();
+        Some(DecisionRowWithCorrectionValue {
+            row,
+            correction_simhash: correction.map(|c| c.0),
+            correction_cluster_id: correction.map(|c| c.1),
+            correction_cluster_size: correction.map(|c| c.2),
+            correction_novelty_micros: correction.map(|c| c.3),
+            correction_value_micros: correction.map(|c| c.4),
+            correction_value_version: correction.map(|c| c.5),
         })
     }
 
@@ -66563,6 +66613,32 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         Ok(())
     }
     /// In-memory analogue of the Postgres
+    /// `update_trace_gate_decision_correction_value` impl: record the six
+    /// correction values in a side table keyed by `(tenant_id, decision_id)`,
+    /// exactly like the real backend's UPDATE, without touching the stored
+    /// `StorageTraceGateDecisionRow` at all — so the shadow-mode isolation is
+    /// structural here too, not just asserted.
+    async fn update_trace_gate_decision_correction_value(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        write: trace_commons_server::trace_corpus_storage::CorrectionValueWrite,
+    ) -> Result<(), DatabaseError> {
+        self.corrections.write().unwrap().insert(
+            (tenant_id.to_string(), decision_id),
+            (
+                write.correction_simhash,
+                write.correction_cluster_id,
+                write.correction_cluster_size,
+                write.correction_novelty_micros,
+                write.correction_value_micros,
+                write.correction_value_version,
+            ),
+        );
+        Ok(())
+    }
+
+    /// In-memory analogue of the Postgres
     /// `update_trace_gate_decision_contributor_cap` impl: record the four
     /// contributor-cap values in a side table keyed by `(tenant_id,
     /// decision_id)`, exactly like the real backend's UPDATE, without
@@ -66738,6 +66814,38 @@ impl Database for PerplexityDriverTestDb {
                     dedup_simhash: seen.map(|(h, _, _)| *h),
                 }
             })
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_correction_signals`
+    /// enumeration: one `CorrectionSignalRow` per decision row that has a
+    /// recorded correction (any tenant, insertion order, capped at `limit`).
+    /// The real query filters `correction_simhash IS NOT NULL`, so decisions
+    /// whose envelope carried no correction never appear — mirrored here.
+    async fn list_correction_signals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::CorrectionSignalRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let corrections = self.corrections.read().unwrap();
+        Ok(self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|(tenant_id, row)| {
+                let seen = corrections.get(&(tenant_id.clone(), row.decision_id))?;
+                Some(
+                    trace_commons_server::trace_corpus_storage::CorrectionSignalRow {
+                        tenant_id: tenant_id.clone(),
+                        decision_id: row.decision_id,
+                        correction_cluster_id: Some(seen.1),
+                        correction_simhash: Some(seen.0),
+                    },
+                )
+            })
+            .take(limit)
             .collect())
     }
 
@@ -67666,6 +67774,209 @@ fn seed_perplexity_driver_test_db_with_envelopes(
         submission_ids.push(submission_id);
     }
     (db, submission_ids)
+}
+
+/// Like `seed_perplexity_driver_test_db_with_envelopes`, but each submission
+/// also carries an `outcome` block with an optional `human_correction` — the
+/// shape the S5 correction path reads. Every submission gets DISTINCT session
+/// events so the trace-level dedup clustering cannot be what a correction
+/// assertion is really observing.
+fn seed_perplexity_driver_test_db_with_corrections(
+    artifact_store: &ConfiguredTraceArtifactStore,
+    tenant_id: &str,
+    // One entry per submission: its correction text, or None for a submission
+    // that carries no correction at all.
+    corrections: &[Option<&str>],
+) -> (Arc<PerplexityDriverTestDb>, Vec<Uuid>) {
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let mut submission_ids = Vec::with_capacity(corrections.len());
+    for (index, correction) in corrections.iter().enumerate() {
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let created_at = chrono::Utc::now() + chrono::Duration::milliseconds(rand_offset_ms());
+        let mut outcome = serde_json::json!({"task_success": "failure"});
+        if let Some(text) = correction {
+            outcome["human_correction"] = serde_json::Value::String((*text).to_string());
+        }
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "submission_id": submission_id.to_string(),
+            "trace_id": trace_id.to_string(),
+            "created_at": created_at.to_rfc3339(),
+            "events": [{
+                "event_id": Uuid::new_v4().to_string(),
+                "event_type": "user_message",
+                "redacted_content": format!(
+                    "session {index} asked the agent to do something quite different from every \
+                     other session in this fixture, number {index}"
+                ),
+                "timestamp": created_at.to_rfc3339(),
+            }],
+            "outcome": outcome,
+        }))
+        .expect("plaintext serializes");
+        let receipt = artifact_store
+            .store
+            .put_serialized_json(
+                &tenant_storage_ref(tenant_id),
+                TraceArtifactKind::ContributionEnvelope,
+                &submission_id.to_string(),
+                &plaintext,
+            )
+            .expect("v2 artifact write");
+        db.seed_ungated_submission(
+            tenant_id,
+            submission_id,
+            StorageTraceObjectRefRecord {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+                object_ref_id: Uuid::new_v4(),
+                artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: artifact_store.object_store_name().to_string(),
+                object_key: receipt.object_key.clone(),
+                content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                size_bytes: plaintext.len() as i64,
+                compression: None,
+                created_by_job_id: None,
+                invalidated_at: None,
+                deleted_at: None,
+                updated_at: receipt.encrypted_at,
+                created_at: receipt.encrypted_at,
+            },
+        );
+        submission_ids.push(submission_id);
+    }
+    (db, submission_ids)
+}
+
+/// Drive `evaluate_and_record_gate` over the given corrections and return the
+/// stored correction-value view for each, in submission order.
+async fn run_gate_over_corrections(
+    corrections: &[Option<&str>],
+) -> Vec<DecisionRowWithCorrectionValue> {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    let (db, submission_ids) =
+        seed_perplexity_driver_test_db_with_corrections(&artifact_store, tenant_id, corrections);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    let mut rows = Vec::with_capacity(submission_ids.len());
+    for submission_id in &submission_ids {
+        let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, *submission_id)
+            .await
+            .expect("evaluate_and_record_gate succeeds");
+        let GateOutcome::Scored { decision_id, .. } = outcome else {
+            panic!("expected GateOutcome::Scored, got {outcome:?}");
+        };
+        rows.push(
+            db.gate_decision_with_correction_value_by_id(tenant_id, decision_id)
+                .expect("decision row present"),
+        );
+    }
+    rows
+}
+
+/// S5 payoff: a correction gets a stored shadow value, and a repeat paste of
+/// the same correction does not earn again — the cluster it joins carries the
+/// duplicate penalty and its novelty against the one already in the corpus is
+/// zero.
+#[tokio::test]
+async fn evaluate_and_record_gate_stores_a_shadow_value_for_a_correction() {
+    let correction = "the agent edited config/prod.toml when the task asked for the staging \
+                      one; it should have written config/staging.toml and re-run the migration \
+                      check afterwards";
+    let other = "the assistant never ran the failing regression test before declaring the bug \
+                 fixed, so the off by one in the pagination cursor survived the session";
+
+    let rows =
+        run_gate_over_corrections(&[Some(correction), Some(correction), Some(other), None]).await;
+
+    // 1. A correction produces a stored value.
+    assert!(
+        rows[0].correction_simhash.is_some(),
+        "a correction must produce a stored correction signal"
+    );
+    assert_eq!(rows[0].correction_cluster_size, Some(1));
+    assert_eq!(rows[0].correction_novelty_micros, Some(1_000_000));
+    assert!(
+        rows[0].correction_value_micros.unwrap_or(0) > 0,
+        "a first-of-its-kind correction must score above zero, got {:?}",
+        rows[0].correction_value_micros
+    );
+    assert_eq!(
+        rows[0].correction_value_version,
+        Some(trace_commons_server::correction_value::CORRECTION_VALUE_ACTIVE.version)
+    );
+
+    // 2. The repeat paste joins the same cluster and earns nothing.
+    assert_eq!(
+        rows[1].correction_cluster_id, rows[0].correction_cluster_id,
+        "an identical correction must join the same cluster"
+    );
+    assert_eq!(rows[1].correction_cluster_size, Some(2));
+    assert_eq!(rows[1].correction_novelty_micros, Some(0));
+    assert_eq!(
+        rows[1].correction_value_micros,
+        Some(0),
+        "a repeat paste of the same correction must not earn again"
+    );
+
+    // 3. A genuinely different correction is not collapsed into it.
+    assert_ne!(rows[2].correction_cluster_id, rows[0].correction_cluster_id);
+    assert!(rows[2].correction_value_micros.unwrap_or(0) > 0);
+
+    // 4. An envelope with NO correction is unchanged from today: no correction
+    //    columns are written at all.
+    assert_eq!(rows[3].correction_simhash, None);
+    assert_eq!(rows[3].correction_cluster_id, None);
+    assert_eq!(rows[3].correction_value_micros, None);
+}
+
+/// The shadow-mode guarantee, end to end: computing a correction's value must
+/// not change what the contributor is credited. Two runs identical except for
+/// the correction they carry produce the same gate status, the same credit
+/// fields, and the same trace-level dedup and credit-quality signals.
+#[tokio::test]
+async fn a_correction_value_does_not_change_the_credited_decision() {
+    let loud = "the agent edited config/prod.toml when the task asked for the staging one and \
+                never re-ran the migration check, so the schema drifted for the rest of the run";
+
+    let with_correction = run_gate_over_corrections(&[Some(loud)]).await;
+    let without_correction = run_gate_over_corrections(&[None]).await;
+
+    assert!(
+        with_correction[0].correction_value_micros.unwrap_or(0) > 0,
+        "the correction must actually have been valued, or this proves nothing"
+    );
+    assert_eq!(without_correction[0].correction_value_micros, None);
+
+    // Everything the contributor is actually credited on is identical.
+    let a = &with_correction[0].row;
+    let b = &without_correction[0].row;
+    assert_eq!(a.perplexity_passed, b.perplexity_passed);
+    assert_eq!(a.novelty_passed, b.novelty_passed);
+    assert_eq!(a.credit_withheld_reason, b.credit_withheld_reason);
+    assert_eq!(a.gate_policy_version, b.gate_policy_version);
+    assert_eq!(a.gate_version_hash, b.gate_version_hash);
 }
 
 /// Small helper so successive `chrono::Utc::now()` calls in
