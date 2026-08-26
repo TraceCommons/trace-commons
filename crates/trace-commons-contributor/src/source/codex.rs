@@ -440,6 +440,8 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
                     structured: json!({ "record_type": other }),
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: None,
+                    success: None,
                 });
             }
         }
@@ -470,6 +472,15 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     })
 }
 
+/// Codex names both halves of a call with the same `call_id`, which is what
+/// lets a result be paired with its call without trusting array order.
+fn call_id(payload: &Value) -> Option<String> {
+    payload
+        .get("call_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 fn map_response_item(
     payload: Option<&Value>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
@@ -483,6 +494,8 @@ fn map_response_item(
             structured: json!({ "record_type": "response_item" }),
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         });
         return;
     };
@@ -503,6 +516,8 @@ fn map_response_item(
                         structured: json!({ "record_type": "message" }),
                         tool_name: None,
                         token_counts: None,
+                        tool_call_id: None,
+                        success: None,
                     });
                     return;
                 }
@@ -525,6 +540,8 @@ fn map_response_item(
                 structured: Value::Null,
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: None,
+                success: None,
             });
         }
         "function_call" | "custom_tool_call" => {
@@ -550,6 +567,8 @@ fn map_response_item(
                 structured,
                 tool_name: name,
                 token_counts: None,
+                tool_call_id: call_id(payload),
+                success: None,
             });
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -570,6 +589,14 @@ fn map_response_item(
                 structured: Value::Null,
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: call_id(payload),
+                // Only an explicit verdict counts. An exit code would have to
+                // be interpreted per tool, and guessing here would put a
+                // fabricated outcome on a real trace.
+                success: payload
+                    .get("output")
+                    .and_then(|output| output.get("success"))
+                    .and_then(|v| v.as_bool()),
             });
         }
         "reasoning" => {
@@ -597,6 +624,8 @@ fn map_response_item(
                     structured: Value::Null,
                     tool_name: None,
                     token_counts: None,
+                    tool_call_id: None,
+                    success: None,
                 });
             }
         }
@@ -608,6 +637,8 @@ fn map_response_item(
                 structured: json!({ "record_type": other }),
                 tool_name: None,
                 token_counts: None,
+                tool_call_id: None,
+                success: None,
             });
         }
     }
@@ -979,5 +1010,49 @@ mod tests {
         let mut events = Vec::new();
         super::map_response_item(Some(&payload), None, &mut events);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn both_halves_of_a_call_carry_its_call_id() {
+        // Codex names the call and its output with the same `call_id`. This
+        // adapter parsed both records and kept neither id, so pairing a
+        // result with its call came down to array order.
+        let call = serde_json::json!({
+            "type": "function_call",
+            "name": "shell",
+            "arguments": "{\"command\":\"ls\"}",
+            "call_id": "c7"
+        });
+        let output = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "c7",
+            "output": "src"
+        });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&call), None, &mut events);
+        super::map_response_item(Some(&output), None, &mut events);
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("c7"));
+        assert_eq!(events[1].tool_call_id.as_deref(), Some("c7"));
+    }
+
+    #[test]
+    fn only_an_explicit_verdict_sets_success() {
+        // An exit code would have to be read per tool, so it is not read at
+        // all: a guessed outcome on a real trace is worse than no outcome.
+        let explicit = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "c8",
+            "output": {"success": false, "output": "boom"}
+        });
+        let bare = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "c9",
+            "output": "fine"
+        });
+        let mut events = Vec::new();
+        super::map_response_item(Some(&explicit), None, &mut events);
+        super::map_response_item(Some(&bare), None, &mut events);
+        assert_eq!(events[0].success, Some(false));
+        assert_eq!(events[1].success, None);
     }
 }

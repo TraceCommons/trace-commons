@@ -1530,6 +1530,8 @@ mod tests {
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
+            tool_call_id: None,
+            success: None,
         };
         let mut t = crate::source::SessionTranscript {
             source: std::borrow::Cow::Borrowed("claude-code"),
