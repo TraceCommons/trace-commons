@@ -33,6 +33,81 @@ public sealed class SubmitParamsTests
         Assert.False(doc.RootElement.TryGetProperty("entry_id", out _));
     }
 
+    /// <summary>
+    /// A verdict the contributor gave rides along on the same call. The
+    /// daemon records it for the entry this approval covers.
+    /// </summary>
+    [Fact]
+    public void ForEntryCarriesTheSelectedVerdict()
+    {
+        string json = SubmitParams.ForEntry("entry-123", Verdict.Partly);
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        Assert.Equal("entry-123", doc.RootElement.GetProperty("entry_id").GetString());
+        Assert.Equal("partly", doc.RootElement.GetProperty("outcome").GetString());
+    }
+
+    /// <summary>
+    /// No answer OMITS the key. Not <c>null</c>, not <c>""</c>: the daemon
+    /// reads an absent parameter as "the contributor did not say" and
+    /// approves normally, and reads either of the other two as
+    /// <c>outcome-invalid</c> and approves nothing. Sending a placeholder
+    /// would turn every unanswered submit into a refusal.
+    /// </summary>
+    [Fact]
+    public void ForEntryWithNoVerdictOmitsTheKeyEntirely()
+    {
+        foreach (string json in new[]
+                 {
+                     SubmitParams.ForEntry("entry-123"),
+                     SubmitParams.ForEntry("entry-123", null),
+                 })
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            Assert.False(doc.RootElement.TryGetProperty("outcome", out _));
+            Assert.DoesNotContain("outcome", json, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A bulk approval can carry one verdict for everything it covers.
+    /// </summary>
+    [Fact]
+    public void ForProjectCarriesTheSelectedVerdict()
+    {
+        string json = SubmitParams.ForProject("proj_abcdef", Verdict.Failed);
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        Assert.Equal("proj_abcdef", doc.RootElement.GetProperty("project_id").GetString());
+        Assert.Equal("failed", doc.RootElement.GetProperty("outcome").GetString());
+    }
+
+    /// <summary>Plain "Submit all" stays a one-click, unanswered submit.</summary>
+    [Fact]
+    public void ForProjectWithNoVerdictOmitsTheKeyEntirely()
+    {
+        string json = SubmitParams.ForProject("proj_abcdef");
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        Assert.Equal("proj_abcdef", doc.RootElement.GetProperty("project_id").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("outcome", out _));
+    }
+
+    /// <summary>
+    /// A value the daemon would refuse is refused here instead, including the
+    /// empty string -- which is the one an "absent means empty" mistake
+    /// produces.
+    /// </summary>
+    [Fact]
+    public void AnUnrecognisedVerdictIsRejectedRatherThanSentToTheDaemon()
+    {
+        Assert.Throws<ArgumentException>(() => SubmitParams.ForEntry("entry-123", string.Empty));
+        Assert.Throws<ArgumentException>(() => SubmitParams.ForEntry("entry-123", "Worked"));
+        Assert.Throws<ArgumentException>(() => SubmitParams.ForEntry("entry-123", "unknown"));
+        Assert.Throws<ArgumentException>(
+            () => SubmitParams.ForProject("proj_abcdef", "succeeded"));
+    }
+
     [Fact]
     public void AnEmptyEntryIdIsRejectedRatherThanSentToTheDaemon()
     {

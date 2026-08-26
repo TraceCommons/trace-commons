@@ -55,6 +55,26 @@ public sealed class QueueGroupViewModel
         string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.Count);
 
     /// <summary>
+    /// "Submit all as..." and its tooltip: the opt-in verdict path beside
+    /// "Submit all", shown under exactly the same condition
+    /// (<see cref="ShowSubmitAll"/>) because it approves exactly the same
+    /// set. Bound from <see cref="VerdictCopy"/>, not typed here.
+    /// </summary>
+    public string SubmitAllAsText => VerdictCopy.SubmitAllAs;
+
+    /// <summary>See <see cref="SubmitAllAsText"/>.</summary>
+    public string SubmitAllAsTooltip => VerdictCopy.SubmitAllAsTooltip;
+
+    /// <summary>The three verdict labels the menu offers.</summary>
+    public string VerdictWorkedLabel => VerdictCopy.Worked;
+
+    /// <summary>See <see cref="VerdictWorkedLabel"/>.</summary>
+    public string VerdictPartlyLabel => VerdictCopy.Partly;
+
+    /// <summary>See <see cref="VerdictWorkedLabel"/>.</summary>
+    public string VerdictFailedLabel => VerdictCopy.Failed;
+
+    /// <summary>
     /// Whether the header offers "Ignore project". Always true, unlike
     /// <see cref="ShowSubmitAll"/>: a single-entry group's one row already
     /// has its own way to send that one session, but declining the whole

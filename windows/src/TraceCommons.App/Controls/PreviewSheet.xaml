@@ -439,6 +439,43 @@
                        Foreground="{ThemeResource TcInkSecondaryBrush}"
                        TextWrapping="Wrap" />
 
+            <!--
+                The verdict question. Optional, and it never gates
+                Contribute: no selection is the default and a perfectly
+                valid answer, which is why these are ToggleButtons starting
+                unchecked and not a RadioButtons group. Clicking the checked
+                one clears it again, so a contributor can get back to having
+                said nothing.
+
+                The strings are bound from TraceCommons.Interop.VerdictCopy,
+                which is where three shells are kept from drifting into three
+                wordings of one question.
+            -->
+            <TextBlock Text="{x:Bind ViewModel.VerdictQuestion}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <ToggleButton Content="{x:Bind ViewModel.VerdictWorkedLabel}"
+                              IsChecked="{x:Bind ViewModel.IsWorkedSelected, Mode=OneWay}"
+                              Click="OnVerdictWorked" />
+                <ToggleButton Content="{x:Bind ViewModel.VerdictPartlyLabel}"
+                              IsChecked="{x:Bind ViewModel.IsPartlySelected, Mode=OneWay}"
+                              Click="OnVerdictPartly" />
+                <ToggleButton Content="{x:Bind ViewModel.VerdictFailedLabel}"
+                              IsChecked="{x:Bind ViewModel.IsFailedSelected, Mode=OneWay}"
+                              Click="OnVerdictFailed" />
+            </StackPanel>
+
+            <!-- Load-bearing, not decoration: the outcome fields sit outside
+                 the "exactly what would be sent" guarantee everything above
+                 this makes, and this sentence is where a contributor is told
+                 so. Do not reword or drop it. -->
+            <TextBlock Text="{x:Bind ViewModel.VerdictCaption}"
+                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                       TextWrapping="Wrap" />
+
             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
                 <!-- Outlined like Close, never filled: it must not read as a
                      second way to approve. -->
