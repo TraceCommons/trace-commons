@@ -254,12 +254,18 @@ fn cue_sep_char(c: char) -> bool {
     matches!(c, '"' | '\'' | '`' | ':' | '=') || c.is_whitespace()
 }
 
+/// True for the detector cue regex's trailing-identifier class:
+/// `[A-Za-z0-9_-]`.
+fn cue_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
 /// Mirror of the detector's `secret_cue_regex`
 /// (`(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|
 /// access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)
-/// [\x22'`:=\s]{1,6}$`): true when `window` (already lowercased) ends with
-/// one of the cue words followed immediately by 1-6 separator chars and
-/// nothing else.
+/// [A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$`): true when `window` (already
+/// lowercased) ends with one of the cue words, then any run of identifier
+/// chars, then 1-6 separator chars and nothing else.
 fn window_has_cue(window: &str) -> bool {
     const CUES: &[&str] = &[
         "authorization",
@@ -279,10 +285,14 @@ fn window_has_cue(window: &str) -> bool {
         "token",
     ];
     for cue in CUES {
-        if let Some(pos) = window.rfind(cue) {
+        // Every occurrence, not just the last: the trailing identifier run
+        // means an earlier occurrence can reach the separator when a later
+        // one cannot.
+        for (pos, _) in window.match_indices(cue) {
             let tail = &window[pos + cue.len()..];
-            let tail_len = tail.chars().count();
-            if (1..=6).contains(&tail_len) && tail.chars().all(cue_sep_char) {
+            let sep = tail.trim_start_matches(cue_ident_char);
+            let sep_len = sep.chars().count();
+            if (1..=6).contains(&sep_len) && sep.chars().all(cue_sep_char) {
                 return true;
             }
         }
