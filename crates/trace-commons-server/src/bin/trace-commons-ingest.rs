@@ -61,6 +61,9 @@ use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
 };
+use trace_commons_server::driver_liveness::{
+    DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
+};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
@@ -1368,6 +1371,9 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 #[derive(Clone)]
 struct AppState {
     root: PathBuf,
+    /// #438: per-driver liveness, so a background loop that has been failing
+    /// for days is visible as such instead of only as a repeating WARN.
+    driver_liveness: Arc<DriverLivenessRegistry>,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     signed_token_verifier: Option<SharedTraceCommonsSignedTokenVerifier>,
     managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
@@ -3808,6 +3814,7 @@ impl AppState {
 
         Ok(Self {
             root,
+            driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
             managed_eddsa_keyset_refresh,
@@ -9186,6 +9193,52 @@ fn spawn_trace_vector_index_scheduler_task(
     });
 }
 
+/// Stable, label-only driver names. These appear in logs and in the liveness
+/// registry, so they must not change once an operator has learned them.
+const PERPLEXITY_SCORE_DRIVER_NAME: &str = "perplexity_score_driver";
+const PII_BACKSTOP_DRIVER_NAME: &str = "pii_backstop_driver";
+
+/// Run `tick` forever on `interval`, recording liveness and emitting the
+/// escalation decision.
+///
+/// #438: twelve loops each hand-rolled `loop { sleep; match tick { info!,
+/// warn! } }`, so every one of them had the same blind spot and the two that
+/// happened to point at a vendor that ran out of credit were dead for days
+/// behind nothing louder than a repeating WARN. The liveness bookkeeping
+/// lives here so a thirteenth driver cannot be added without it.
+///
+/// `tick` returns `Result<()>` and owns its own success logging, because the
+/// summary fields differ per driver and are worth keeping verbatim. Only the
+/// failure path is shared -- that is the part that was uniform and broken.
+fn spawn_driver_loop<F, Fut>(
+    state: &Arc<AppState>,
+    driver: &'static str,
+    interval: StdDuration,
+    tick: F,
+) where
+    F: Fn(Arc<AppState>) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
+    state
+        .driver_liveness
+        .register(driver, interval.as_secs(), Utc::now());
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let outcome = match tick(state.clone()).await {
+                Ok(()) => DriverTickOutcome::Success,
+                Err(error) => DriverTickOutcome::Failure {
+                    class: classify_driver_failure(&error),
+                    error_hash: safe_display_error_hash(&error),
+                },
+            };
+            let action = state.driver_liveness.observe(driver, outcome, Utc::now());
+            emit_driver_log_action(driver, action);
+        }
+    });
+}
+
 /// Task 5: spawn the in-process perplexity-scoring driver loop. Mirrors the
 /// shape of the other `spawn_*` schedulers in this file (sleep, tick, log,
 /// repeat) but calls `run_perplexity_score_driver_tick` directly instead of
@@ -9198,7 +9251,6 @@ fn spawn_perplexity_score_driver_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         batch_size = config.batch_size,
@@ -9206,30 +9258,28 @@ fn spawn_perplexity_score_driver_task(
         skip_duplicates = config.knobs.skip_duplicates,
         "Trace Commons perplexity score driver enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_perplexity_score_driver_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        scored = summary.scored,
-                        skipped_duplicate = summary.skipped_duplicate,
-                        cached = summary.cached,
-                        failed = summary.failed,
-                        transient = summary.transient,
-                        breaker_tripped = summary.breaker_tripped,
-                        "Trace Commons perplexity score driver tick completed"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error_hash = %safe_display_error_hash(&error),
-                        "Trace Commons perplexity score driver tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_perplexity_score_driver_tick(state, &config).await?;
+                tracing::info!(
+                    scored = summary.scored,
+                    skipped_duplicate = summary.skipped_duplicate,
+                    cached = summary.cached,
+                    failed = summary.failed,
+                    transient = summary.transient,
+                    breaker_tripped = summary.breaker_tripped,
+                    "Trace Commons perplexity score driver tick completed"
+                );
+                Ok(())
             }
-        }
-    });
+        },
+    );
 }
 
 /// Task 6: spawn the in-process server-side NEAR AI PII-backstop driver loop.
@@ -9243,7 +9293,6 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         batch_size = config.batch_size,
@@ -9251,29 +9300,27 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         backoff_base_seconds = config.backoff_base_seconds,
         "Trace Commons PII backstop driver enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_pii_backstop_driver_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        done = summary.done,
-                        failed = summary.failed,
-                        transient = summary.transient,
-                        exhausted = summary.exhausted,
-                        breaker_tripped = summary.breaker_tripped,
-                        "Trace Commons PII backstop driver tick completed"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error_hash = %safe_display_error_hash(&error),
-                        "Trace Commons PII backstop driver tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PII_BACKSTOP_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_pii_backstop_driver_tick(state, &config).await?;
+                tracing::info!(
+                    done = summary.done,
+                    failed = summary.failed,
+                    transient = summary.transient,
+                    exhausted = summary.exhausted,
+                    breaker_tripped = summary.breaker_tripped,
+                    "Trace Commons PII backstop driver tick completed"
+                );
+                Ok(())
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_benchmark_registry_scheduler_task(
@@ -39298,6 +39345,96 @@ fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<trace_commons_gate_enclave::ScorerFailure>()
         .is_some_and(|err| err.is_transient())
+}
+
+/// Map a driver tick error to a short, non-sensitive label for the log.
+///
+/// #438: a hash alone is a fine forensic tool and a terrible triage signal --
+/// recovering what `sha256:37769fdd...` meant took reading the code that
+/// built the string and probing the live endpoint. A stable class alongside
+/// it costs nothing and leaks nothing.
+///
+/// Classification reads the error's TYPE. It never inspects the message: a
+/// message is not a contract, and matching on one would resurrect exactly the
+/// coupling the hash-only convention exists to avoid.
+fn classify_driver_failure(error: &anyhow::Error) -> DriverFailureClass {
+    if let Some(failure) = error.downcast_ref::<trace_commons_gate_enclave::ScorerFailure>() {
+        return if failure.is_transient() {
+            DriverFailureClass::UpstreamUnavailable
+        } else {
+            DriverFailureClass::ContentRejected
+        };
+    }
+    if let Some(failure) =
+        error.downcast_ref::<trace_commons_protocol::trace_contribution::TraceContributionError>()
+    {
+        return if failure.is_transient() {
+            DriverFailureClass::UpstreamUnavailable
+        } else {
+            DriverFailureClass::ContentRejected
+        };
+    }
+    DriverFailureClass::Unclassified
+}
+
+/// Execute the decision `observe_driver_tick` returned.
+///
+/// Every field here is hash-only or label-only.
+fn emit_driver_log_action(driver: &'static str, action: LogAction) {
+    match action {
+        LogAction::None => {}
+        LogAction::Warn { class, error_hash } => {
+            tracing::warn!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                "Trace Commons driver tick failed"
+            );
+        }
+        LogAction::Escalate {
+            class,
+            error_hash,
+            consecutive_failures,
+            dead_seconds,
+        } => {
+            tracing::error!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                consecutive_failures,
+                dead_seconds,
+                "Trace Commons driver is not working and has not been for some time"
+            );
+        }
+        LogAction::EscalateRepeat {
+            class,
+            error_hash,
+            consecutive_failures,
+            dead_seconds,
+            suppressed,
+        } => {
+            tracing::error!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                consecutive_failures,
+                dead_seconds,
+                suppressed,
+                "Trace Commons driver is still not working"
+            );
+        }
+        LogAction::Recovered {
+            failures,
+            dead_seconds,
+        } => {
+            tracing::info!(
+                driver,
+                recovered_after_failures = failures,
+                dead_seconds,
+                "Trace Commons driver recovered"
+            );
+        }
+    }
 }
 
 /// Audit actor label recorded for status transitions the PII-backstop driver

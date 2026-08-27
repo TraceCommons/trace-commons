@@ -4684,6 +4684,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
+        driver_liveness: Arc::new(
+            trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
+        ),
         tokens: Arc::new(tokens),
         signed_token_verifier: None,
         managed_eddsa_keyset_refresh: None,
@@ -25511,6 +25514,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
+        driver_liveness: Arc::new(
+            trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
+        ),
         tokens: Arc::new(tokens),
         signed_token_verifier: None,
         managed_eddsa_keyset_refresh: None,
@@ -85476,5 +85482,51 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
             chunks_scored: 16,
         },
         "unknown-denominator coverage must not be confusable with a fully scored trace"
+    );
+}
+
+/// #438: the failure label must be read off the error's TYPE, never parsed
+/// from its message, matching the discipline the per-driver transient
+/// classifiers already use.
+#[test]
+fn driver_failures_classify_from_typed_markers_not_message_text() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let transient_scorer = anyhow::Error::new(
+        trace_commons_gate_enclave::ScorerFailure::TransientScorerFailed {
+            reason: "upstream_unavailable".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&transient_scorer),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // Context layers must not hide the marker: anyhow preserves the concrete
+    // type underneath, which is what the existing downcasts rely on.
+    let wrapped = transient_scorer.context("PerplexityScorerInferenceFailed");
+    assert_eq!(
+        classify_driver_failure(&wrapped),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // The permanent variant is the content's fault, not the system's.
+    let permanent_scorer =
+        anyhow::Error::new(trace_commons_gate_enclave::ScorerFailure::ScorerFailed {
+            reason: "prompt_too_long".to_string(),
+        });
+    assert_eq!(
+        classify_driver_failure(&permanent_scorer),
+        DriverFailureClass::ContentRejected
+    );
+
+    // An unrecognised error is Unclassified, never a guess. The message here
+    // deliberately contains the words of another label, to prove nothing is
+    // parsed out of message text.
+    let opaque = anyhow::anyhow!("something went wrong upstream and unavailable");
+    assert_eq!(
+        classify_driver_failure(&opaque),
+        DriverFailureClass::Unclassified,
+        "classification must not be inferred from message text"
     );
 }
