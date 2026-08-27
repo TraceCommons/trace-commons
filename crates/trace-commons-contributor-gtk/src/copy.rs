@@ -492,13 +492,13 @@ pub const WITHDRAWN_BY_YOU: &str = "Withdrawn by you";
 /// length rather than at section length.
 pub const HELD_ROW_BODY: &str = "Automated checks saw something that might be personal and \
      couldn't decide on their own. It has not been rejected, and it has not been shared with \
-     anyone but the reviewer.";
+     anyone but the agent that inspects it.";
 pub const QUARANTINE_HEADING: &str = "Held for privacy review";
-pub const QUARANTINE_BODY: &str = "A person at Trace Commons reads these before they enter the \
-     commons. It happens when automated checks see something that might be personal or sensitive \
-     and can't decide on its own.\n\nThese have not been rejected, and they have not been shared \
-     with anyone but the reviewer. They are sitting still.\n\nTypical wait: we don't have a \
-     reliable number yet.";
+pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the commons. It \
+     happens when automated checks see something that might be personal or sensitive and can't \
+     decide on its own.\n\nThese have not been rejected, and they have not been shared with \
+     anyone but the agent that inspects them. They are sitting still.\n\nTypical wait: we don't \
+     have a reliable number yet.";
 
 // --- Withdrawal --------------------------------------------------------
 //
@@ -2126,6 +2126,33 @@ mod tests {
                 "credit copy must not imply a currency: {forbidden}"
             );
         }
+    }
+
+    /// The held queue is worked by an agent, not by a person reading traces.
+    /// Saying otherwise invites a contributor to picture a staff member with
+    /// their session open, which is both wrong and the more alarming reading
+    /// of the two. Pinned because it is the kind of warm-sounding phrase that
+    /// gets reintroduced by someone softening the copy.
+    #[test]
+    fn quarantine_copy_does_not_claim_a_human_reader() {
+        let text = format!("{QUARANTINE_HEADING} {QUARANTINE_BODY} {HELD_ROW_BODY}").to_lowercase();
+        for forbidden in [
+            "a person at",
+            "someone at",
+            "our team",
+            "a human",
+            "staff",
+            "the reviewer",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "held copy must not imply a human reads these: {forbidden}"
+            );
+        }
+        assert!(
+            text.contains("agent"),
+            "held copy must say what actually inspects a held trace"
+        );
     }
 
     #[test]
