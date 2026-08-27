@@ -821,9 +821,16 @@ git show --stat HEAD
 - Consumes: `DriverLivenessRegistry`, `DriverTickOutcome`, `DriverFailureClass`,
   `LogAction` from Tasks 1-3.
 - Produces: `classify_driver_failure(&anyhow::Error) -> DriverFailureClass`,
-  `emit_driver_log_action(driver: &'static str, action: LogAction)`, and the
-  driver-name constants `PERPLEXITY_SCORE_DRIVER_NAME` /
-  `PII_BACKSTOP_DRIVER_NAME`.
+  `emit_driver_log_action(driver: &'static str, action: LogAction)`,
+  `spawn_driver_loop(&Arc<AppState>, &'static str, StdDuration, F)` where
+  `F: Fn(Arc<AppState>) -> Fut + Send + Sync + 'static` and
+  `Fut: Future<Output = anyhow::Result<()>> + Send`, and the driver-name
+  constants `PERPLEXITY_SCORE_DRIVER_NAME` / `PII_BACKSTOP_DRIVER_NAME`.
+
+**Note on duplication:** the liveness bookkeeping must exist exactly once, in
+`spawn_driver_loop`. Task 5 converts ten more loops through the same helper;
+if this task leaves the register/observe/emit sequence inline at a call site,
+Task 5 will multiply it by ten.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1017,54 +1024,102 @@ RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins 2>&1 | grep -
 The compiler names each one. Add the field to each until the build is clean.
 Test helpers that build an `AppState` need it too.
 
-**3e.** Add the driver-name constants beside the spawn functions at `:9194`:
+**3e.** Add the driver-name constants beside the spawn functions:
 
 ```rust
 const PERPLEXITY_SCORE_DRIVER_NAME: &str = "perplexity_score_driver";
 const PII_BACKSTOP_DRIVER_NAME: &str = "pii_backstop_driver";
 ```
 
-**3f.** Convert `spawn_perplexity_score_driver_task`. Replace the `tokio::spawn`
-block (currently `:9211-9232`) with:
+**3f.** Add the shared loop wrapper. This is the point of the task: the
+sleep/register/observe/emit logic exists ONCE, and each driver supplies only
+what genuinely differs -- its own tick call and its own success log line.
 
 ```rust
+/// Run `tick` forever on `interval`, recording liveness and emitting the
+/// escalation decision.
+///
+/// #438: twelve loops each hand-rolled `loop { sleep; match tick { info!,
+/// warn! } }`, so every one of them had the same blind spot and the two that
+/// happened to point at a vendor that ran out of credit were dead for days
+/// behind nothing louder than a repeating WARN. The liveness bookkeeping
+/// lives here so a thirteenth driver cannot be added without it.
+///
+/// `tick` returns `Result<()>` and owns its own success logging, because the
+/// summary fields differ per driver and are worth keeping verbatim. Only the
+/// failure path is shared -- that is the part that was uniform and broken.
+fn spawn_driver_loop<F, Fut>(
+    state: &Arc<AppState>,
+    driver: &'static str,
+    interval: StdDuration,
+    tick: F,
+) where
+    F: Fn(Arc<AppState>) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
     state
         .driver_liveness
-        .register(PERPLEXITY_SCORE_DRIVER_NAME, config.interval.as_secs(), Utc::now());
+        .register(driver, interval.as_secs(), Utc::now());
+    let state = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(config.interval).await;
-            let outcome = match run_perplexity_score_driver_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        scored = summary.scored,
-                        skipped_duplicate = summary.skipped_duplicate,
-                        cached = summary.cached,
-                        failed = summary.failed,
-                        transient = summary.transient,
-                        breaker_tripped = summary.breaker_tripped,
-                        "Trace Commons perplexity score driver tick completed"
-                    );
-                    DriverTickOutcome::Success
-                }
+            tokio::time::sleep(interval).await;
+            let outcome = match tick(state.clone()).await {
+                Ok(()) => DriverTickOutcome::Success,
                 Err(error) => DriverTickOutcome::Failure {
                     class: classify_driver_failure(&error),
                     error_hash: safe_display_error_hash(&error),
                 },
             };
-            let action = state.driver_liveness.observe(
-                PERPLEXITY_SCORE_DRIVER_NAME,
-                outcome,
-                Utc::now(),
-            );
-            emit_driver_log_action(PERPLEXITY_SCORE_DRIVER_NAME, action);
+            let action = state.driver_liveness.observe(driver, outcome, Utc::now());
+            emit_driver_log_action(driver, action);
         }
     });
+}
 ```
 
-**3g.** Convert `spawn_pii_backstop_driver_task` the same way, keeping its own
-`tracing::info!` summary fields (`done`, `failed`, `transient`, `exhausted`,
-`breaker_tripped`) and using `PII_BACKSTOP_DRIVER_NAME`.
+If `StdDuration` is not already the alias in scope for `std::time::Duration`
+in this file, use whatever alias the neighbouring scheduler config structs
+use — grep for `interval:` on one of the `*SchedulerConfig` structs.
+
+**3g.** Convert `spawn_perplexity_score_driver_task`. Keep its existing
+`tracing::info!` enable line untouched; replace the whole `tokio::spawn`
+block with:
+
+```rust
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_perplexity_score_driver_tick(state, &config).await?;
+                tracing::info!(
+                    scored = summary.scored,
+                    skipped_duplicate = summary.skipped_duplicate,
+                    cached = summary.cached,
+                    failed = summary.failed,
+                    transient = summary.transient,
+                    breaker_tripped = summary.breaker_tripped,
+                    "Trace Commons perplexity score driver tick completed"
+                );
+                Ok(())
+            }
+        },
+    );
+```
+
+`PerplexityScoreDriverConfig` may not derive `Clone`. If it does not, add
+`#[derive(Clone)]` to it, or wrap it in an `Arc` before the closure — pick
+whichever the surrounding code already does for shared config. Do not change
+its fields.
+
+**3h.** Convert `spawn_pii_backstop_driver_task` the same way, using
+`PII_BACKSTOP_DRIVER_NAME` and keeping its own success fields (`done`,
+`failed`, `transient`, `exhausted`, `breaker_tripped`).
+
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1098,8 +1153,8 @@ git show --stat HEAD
 - Test: `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/tests.rs`
 
 **Interfaces:**
-- Consumes: `classify_driver_failure`, `emit_driver_log_action`,
-  `state.driver_liveness` from Task 4.
+- Consumes: `spawn_driver_loop`, `classify_driver_failure`,
+  `emit_driver_log_action` from Task 4.
 - Produces: ten more driver-name constants and a
   `ALL_DRIVER_NAMES: &[&str]` slice for the collision test.
 
@@ -1192,16 +1247,26 @@ const ALL_DRIVER_NAMES: &[&str] = &[
 ];
 ```
 
-Convert each of the ten loops using exactly the shape from Task 4 Step 3f:
-register before `tokio::spawn`, build a `DriverTickOutcome` from the match,
-call `state.driver_liveness.observe(...)`, then `emit_driver_log_action(...)`.
-Keep each loop's existing success-path `tracing::info!` and all its summary
-fields unchanged — the tick-completed lines are useful and are not what this
-issue is about.
+Convert each of the ten loops with `spawn_driver_loop` from Task 4 Step 3f.
+The whole point is that the liveness bookkeeping is NOT repeated: each call
+site supplies only the driver name, the interval, and a closure that runs its
+own tick and logs its own success line with its own summary fields. If you
+find yourself writing `register` / `observe` / `emit_driver_log_action` at a
+call site, you are duplicating the wrapper — call it instead.
 
-Several of these schedulers hold their interval differently from the two
-drivers. Read each `config` to find its interval field before writing the
-`register` call; do not assume `config.interval`.
+Keep each loop's existing enable-time `tracing::info!` and its success-path
+fields exactly as they are. The tick-completed lines are useful and are not
+what this issue is about.
+
+Two things differ per scheduler and must be read from the code rather than
+assumed:
+
+- **The interval field.** Several schedulers do not use `config.interval`.
+  Read each config struct before writing the call.
+- **Config cloning.** The closure must own its config. If a config type does
+  not derive `Clone`, add `#[derive(Clone)]` or wrap in `Arc`, matching what
+  the surrounding code already does. Do not change any config field.
+
 
 - [ ] **Step 5: Run tests to verify they pass**
 
