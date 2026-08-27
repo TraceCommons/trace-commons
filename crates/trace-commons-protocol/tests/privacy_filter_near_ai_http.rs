@@ -439,3 +439,97 @@ async fn oversized_input_is_typed_permanent() {
         "an oversized input is about the trace and must stay permanent: {err}"
     );
 }
+
+/// 2026-08-27 drain-rate regression. The windows of one field were classified
+/// strictly sequentially, so a field's cost was (windows x round-trip). With
+/// pilot envelopes at a median 421 kB and a p90 of 971 kB that is 50-120
+/// serialized requests per field, and the PII-backstop backlog drained at
+/// roughly nine minutes per trace. Windows are independent -- each is
+/// classified in its own coordinates and merged afterwards -- so they must go
+/// out concurrently.
+#[tokio::test]
+async fn windows_are_classified_concurrently() {
+    const LINE: &str = "clean line\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let window_count = 12usize;
+    let text = LINE.repeat(lines_per_window * window_count);
+
+    // Each window costs 300ms server-side, so sequentially this is 3.6s.
+    // The bound is deliberately loose rather than "one round": the first
+    // request pays connection setup, and the mock server plus the client's
+    // connection pool cap real overlap below MAX_CONCURRENT_CLASSIFY_WINDOWS.
+    // The property under test is that windows overlap at all, not a specific
+    // speedup -- serial classification cannot get anywhere near this bound.
+    let per_window = Duration::from_millis(300);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(per_window)
+                .set_body_json(json!({ "data": [{ "spans": [] }] })),
+        )
+        .mount(&server)
+        .await;
+
+    let started = std::time::Instant::now();
+    adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds");
+    let elapsed = started.elapsed();
+
+    let sequential = per_window * window_count as u32;
+    assert!(
+        elapsed < sequential / 2,
+        "expected concurrent window classification: {window_count} windows took \
+         {elapsed:?}, sequential would be about {sequential:?}"
+    );
+}
+
+/// The window's full-text offset is accumulated across windows rather than
+/// recomputed from the start of the field each time (which was O(n^2)). That
+/// accumulation counts CODEPOINTS, not bytes -- multibyte filler in every
+/// window would shift every later span if it counted bytes.
+#[tokio::test]
+async fn window_offsets_stay_correct_across_multibyte_windows() {
+    // Multibyte in the filler, and a whole number of lines per window so the
+    // email lands alone in the final window at window-local offset 8.
+    const LINE: &str = "clèan lïne wîth ünicode\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let filler = LINE.repeat(lines_per_window * 2);
+    let text = format!("{filler}contact bob@example.com now");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .and(body_string_contains("bob@example.com"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
+            ]}]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [] }]
+        })))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        format!("{filler}contact [REDACTED:private_email] now"),
+        "a byte-counted accumulator would misplace this span"
+    );
+    assert_eq!(result.summary.span_count, 1);
+}

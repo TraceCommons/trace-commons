@@ -7445,6 +7445,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "futures",
  "hex",
  "regex",
  "reqwest 0.12.28",
