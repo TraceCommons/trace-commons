@@ -6,8 +6,7 @@
 # binary to GCS for the host to pull (deploy/pilot-gcp/pull-and-install.sh).
 #
 # BOTH binaries are built because the pilot runs both services and changes can
-# land in either: ingest (account API + the migration runner that applies V30+
-# on boot) or the issuer (EdDSA upload claims, device-key registration, the
+# land in either: ingest (account API) or the issuer (EdDSA upload claims, device-key registration, the
 # per-user `subject` derivation, and the instance-enroll `/v1/enroll` handler).
 # ingest builds with the cloud features; the issuer builds without them (it does
 # not use GCS/KMS/NEAR-AI), matching the operator runbook. The ONNX runtime

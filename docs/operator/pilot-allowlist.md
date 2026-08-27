@@ -220,9 +220,12 @@ export TRACE_COMMONS_ONBOARDING_LEADERBOARD_URL=https://tracecommons.ai/leaderbo
 ```
 
 `TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true` makes the
-issuer connect to PostgreSQL at startup, run migrations through the
-shared Trace Commons DB path, and fail closed if the registry is not
-available.
+issuer connect to PostgreSQL at startup and fail closed if the registry is
+not available.
+
+It does **not** run migrations, though this paragraph used to say it did.
+`configure_onboarding_device_key_registry_from_env` builds a connection and
+stops there. The schema it depends on has to be at head already.
 
 The issuer warms the source eagerly during startup; a missing or
 malformed file aborts the process with

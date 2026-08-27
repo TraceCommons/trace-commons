@@ -53,9 +53,24 @@ issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-
 ## Contributor accounts provisioning (Slices 1-3b)
 
 The contributor-account feature (accounts, passkeys, login-with-NEAR, credit
-consolidation) ships its schema in migrations V30-V34, which apply automatically
-on `trace-commons-ingest` boot (`run_migrations` runs before the HTTP bind). Two
-manual prerequisites must be in place or the feature fail-closes:
+consolidation) ships its schema in migrations V30-V34.
+
+**These do not apply themselves.** This section used to say they applied on
+`trace-commons-ingest` boot, before the HTTP bind. They do not: the ingest
+binary contains no `run_migrations` call. The only service startup path that
+migrates is the issuer's invite-admin registry
+(`configure_invite_admin_from_env`), which returns early unless
+`TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is set -- and it is not set on the
+pilot. `TRACE_COMMONS_ONBOARDING_DEVICE_KEY_REGISTRY_ENABLED=true`, which *is*
+set there, only opens a connection; it does not migrate.
+
+A binary that needs a new column will therefore start cleanly and fail at the
+first query wanting it, which is a worse failure than refusing to boot. Apply
+migrations deliberately -- through the cloud-sql-proxy already running on the
+host -- before installing a binary that depends on them, and check
+`SELECT max(version) FROM _trace_commons_migrations;` afterwards.
+
+Two manual prerequisites must also be in place or the feature fail-closes:
 
 - **Login-resolver LOGIN role (REQUIRED).** V30 creates the narrow
   `trace_login_resolver` NOLOGIN role (column-scoped, NOBYPASSRLS) — the only

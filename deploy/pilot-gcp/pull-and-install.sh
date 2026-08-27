@@ -5,9 +5,18 @@
 # The pilot runs two services; both can change, so this deploys BOTH by default:
 #   - trace-commons-upload-claim-issuer  (EdDSA claims, device-key registration,
 #     per-user subject, /v1/enroll; serves the JWKS the ingest verifies at boot)
-#   - trace-commons-ingest               (account API; applies migrations on boot)
+#   - trace-commons-ingest               (account API)
 # The issuer is installed first so its (possibly rotated) JWKS is up before ingest
 # restarts and fetches it.
+#
+# NEITHER SERVICE APPLIES MIGRATIONS ON THIS HOST. This comment used to say
+# ingest did; it does not, and never has -- the ingest binary contains no
+# run_migrations call at all. The only startup path that migrates is the
+# issuer's invite-admin registry, which is gated on
+# TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL, and that is unset here. So a
+# deploy that ships a binary needing a new column will start cleanly and then
+# fail at the first query that wants it. Apply migrations deliberately, before
+# installing a binary that depends on them.
 #
 # Usage (on tc-pilot-host):
 #   deploy/pilot-gcp/pull-and-install.sh                    # both binaries (default)
