@@ -114,11 +114,16 @@ identical scaffolding — the same event-type prefixes, the same tool names, the
 same shell-output shapes. The embedder is being asked to distinguish documents
 that are, by construction, mostly the same tokens.
 
-**Test.** Take the pilot's canonical texts for a sample of clustered and
-singleton traces. Measure what fraction of tokens are scaffolding versus
-contributor-specific content, and compute pairwise cosine similarity before
-and after stripping the scaffolding. If similarity drops materially with
-scaffolding removed, the input is the problem.
+**Test.** `trace-commons-gate-calibrate canonical-text --input <envelopes.jsonl>`
+implements the first half and is offline: no database, no embedder, no model
+weights. It calls the production `render_event_text`, so it measures what the
+gate actually embeds rather than a reimplementation of it. Reports the
+scaffolding share of the canonical text (per-envelope percentiles and a
+size-weighted corpus figure) and counts how many events render to
+byte-identical strings — #211's claim, as a number.
+
+The second half — pairwise cosine similarity with and without scaffolding —
+needs the embedder and is deferred with H2, which needs it too.
 
 ### H2: mean-pooling compresses toward the centroid
 
