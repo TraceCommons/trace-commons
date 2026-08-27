@@ -85530,3 +85530,119 @@ fn driver_failures_classify_from_typed_markers_not_message_text() {
         "classification must not be inferred from message text"
     );
 }
+
+/// #438 fix round 1, Finding A: the drivers' own typed failures must reach
+/// `classify_driver_failure` intact. Every arm here corresponds to a real
+/// error the two converted drivers can raise; before this round each of them
+/// arrived stringified and logged as `unclassified`.
+#[test]
+fn driver_failures_classify_the_drivers_own_typed_errors() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // The NEAR-AI-unavailable path -- the actual #438 incident path. The
+    // driver wraps it with `.context(...)`, which must not hide the marker.
+    let transient_upstream = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::TraceContributionError::TransientRedactionFailed {
+            reason: "upstream 503".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&transient_upstream),
+        DriverFailureClass::UpstreamUnavailable
+    );
+    let contextualized = transient_upstream.context("PII backstop canary errored");
+    assert_eq!(
+        classify_driver_failure(&contextualized),
+        DriverFailureClass::UpstreamUnavailable,
+        "`.context()` must preserve the concrete type the classifier downcasts to"
+    );
+
+    // The trace's own fault, not the system's.
+    let permanent_upstream = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+            reason: "oversized input".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&permanent_upstream),
+        DriverFailureClass::ContentRejected
+    );
+
+    // A missing API key: config, not an outage.
+    let missing_key = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::PrivacyFilterConfigError::MissingEnv {
+            backend: "near-ai",
+            var: "TRACE_PRIVACY_FILTER_NEAR_AI_API_KEY",
+        },
+    )
+    .context("PII backstop adapter unavailable");
+    assert_eq!(
+        classify_driver_failure(&missing_key),
+        DriverFailureClass::ConfigMissing
+    );
+
+    // An unconfigured driver pool reaches the loop as a typed DatabaseError
+    // through `?`, not as a string.
+    let db_down = anyhow::Error::new(trace_commons_server::error::DatabaseError::Pool(
+        "gate-driver pool not configured".to_string(),
+    ));
+    assert_eq!(
+        classify_driver_failure(&db_down),
+        DriverFailureClass::DependencyUnavailable
+    );
+
+    // The drivers' own typed refusals.
+    let no_mirror = anyhow::Error::new(DriverTickError::MissingDbMirror {
+        driver: PERPLEXITY_SCORE_DRIVER_NAME,
+    });
+    assert_eq!(
+        classify_driver_failure(&no_mirror),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// #438 fix round 1, Finding B: a tick that trips its consecutive-failure
+/// breaker is a failed tick. Before this, it returned `Ok`, refreshed
+/// `last_success_at` on every pass, and a driver whose upstream had no credit
+/// left never went stale and never escalated.
+#[test]
+fn a_breaker_tripped_perplexity_tick_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let tripped = PerplexityDriverTickSummary {
+        breaker_tripped: true,
+        failed: 3,
+        ..Default::default()
+    };
+    let error = perplexity_tick_outcome(&tripped)
+        .expect_err("a tick that gave up after repeated failures is not a success");
+    assert_ne!(
+        classify_driver_failure(&error),
+        DriverFailureClass::Unclassified,
+        "the breaker failure must carry a usable label, not fall through to unclassified"
+    );
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::UpstreamUnavailable,
+        "a tripped breaker means the upstream failed repeatedly"
+    );
+
+    // An empty queue is still a success: a driver with nothing to do is
+    // working, and must not be reported as dead.
+    assert!(
+        perplexity_tick_outcome(&PerplexityDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // So is a tick that did real work and hit some ordinary per-item failures
+    // without giving up.
+    let partial = PerplexityDriverTickSummary {
+        scored: 4,
+        failed: 1,
+        ..Default::default()
+    };
+    assert!(
+        perplexity_tick_outcome(&partial).is_ok(),
+        "per-item failures below the breaker threshold are not a tick failure"
+    );
+}

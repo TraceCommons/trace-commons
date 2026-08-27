@@ -9276,7 +9276,7 @@ fn spawn_perplexity_score_driver_task(
                     breaker_tripped = summary.breaker_tripped,
                     "Trace Commons perplexity score driver tick completed"
                 );
-                Ok(())
+                perplexity_tick_outcome(&summary)
             }
         },
     );
@@ -39257,9 +39257,12 @@ async fn run_perplexity_score_driver_tick(
     state: Arc<AppState>,
     config: &PerplexityScoreDriverConfig,
 ) -> anyhow::Result<PerplexityDriverTickSummary> {
-    let db = state.db_mirror.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("perplexity score driver requires a configured DB mirror")
-    })?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(DriverTickError::MissingDbMirror {
+            driver: PERPLEXITY_SCORE_DRIVER_NAME,
+        })?;
     let items = db
         .list_submissions_needing_gate_decision(
             Utc::now(),
@@ -39347,6 +39350,45 @@ fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
         .is_some_and(|err| err.is_transient())
 }
 
+/// Typed failures a driver tick raises on its own behalf, rather than
+/// receiving from a dependency.
+///
+/// #438 fix round 1: these existed only as bare `anyhow!("...")` strings, so
+/// `classify_driver_failure` had nothing to downcast to and the two most
+/// common operator-facing failures -- an unconfigured DB mirror and a tick
+/// that gave up after repeated upstream errors -- both logged as
+/// `unclassified`. Every variant carries only the driver's stable label; no
+/// error text, endpoint, or credential is ever part of one.
+#[derive(Debug, thiserror::Error)]
+enum DriverTickError {
+    #[error("driver {driver} requires a configured DB mirror")]
+    MissingDbMirror { driver: &'static str },
+    #[error("driver {driver} tripped its consecutive-failure breaker")]
+    BreakerTripped { driver: &'static str },
+}
+
+/// Decide whether a completed perplexity tick counts as a success.
+///
+/// #438 fix round 1, Finding B: the tick folds per-item failures into its
+/// summary and returns `Ok` even when every item failed and the breaker
+/// tripped, which through `spawn_driver_loop` refreshed `last_success_at` on
+/// every tick -- a scorer pointed at a vendor with no credit never went stale
+/// and never escalated. A tripped breaker means the upstream failed
+/// repeatedly, so it is a failed tick and `upstream_unavailable` is the
+/// honest label.
+///
+/// An empty queue is deliberately still a success: a driver with nothing to
+/// do is working.
+fn perplexity_tick_outcome(summary: &PerplexityDriverTickSummary) -> anyhow::Result<()> {
+    if summary.breaker_tripped {
+        return Err(DriverTickError::BreakerTripped {
+            driver: PERPLEXITY_SCORE_DRIVER_NAME,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Map a driver tick error to a short, non-sensitive label for the log.
 ///
 /// #438: a hash alone is a fine forensic tool and a terrible triage signal --
@@ -39358,6 +39400,24 @@ fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
 /// message is not a contract, and matching on one would resurrect exactly the
 /// coupling the hash-only convention exists to avoid.
 fn classify_driver_failure(error: &anyhow::Error) -> DriverFailureClass {
+    if let Some(failure) = error.downcast_ref::<DriverTickError>() {
+        return match failure {
+            DriverTickError::MissingDbMirror { .. } => DriverFailureClass::ConfigMissing,
+            DriverTickError::BreakerTripped { .. } => DriverFailureClass::UpstreamUnavailable,
+        };
+    }
+    if error
+        .downcast_ref::<trace_commons_protocol::trace_contribution::PrivacyFilterConfigError>()
+        .is_some()
+    {
+        return DriverFailureClass::ConfigMissing;
+    }
+    if error
+        .downcast_ref::<trace_commons_server::error::DatabaseError>()
+        .is_some()
+    {
+        return DriverFailureClass::DependencyUnavailable;
+    }
     if let Some(failure) = error.downcast_ref::<trace_commons_gate_enclave::ScorerFailure>() {
         return if failure.is_transient() {
             DriverFailureClass::UpstreamUnavailable
@@ -39490,20 +39550,32 @@ async fn run_pii_backstop_driver_tick(
     let db = state
         .db_mirror
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("PII backstop driver requires a configured DB mirror"))?;
+        .ok_or(DriverTickError::MissingDbMirror {
+            driver: PII_BACKSTOP_DRIVER_NAME,
+        })?;
 
     // Build the adapter ONCE per tick. A missing key fails the whole tick
     // before any submission is loaded — nothing is processed, traces stay held.
+    //
+    // #438 fix round 1: `.context()` rather than `anyhow!("...: {err}")` --
+    // stringifying the error destroyed the `PrivacyFilterConfigError` the
+    // classifier reads to report `config_missing`. The string is only ever
+    // hashed, so changing it changes the hash and leaks nothing.
     let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
-        .map_err(|err| anyhow::anyhow!("PII backstop adapter unavailable: {err}"))?;
+        .context("PII backstop adapter unavailable")?;
 
     // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
     // touching any real submission; abort without mutating anything when the
     // filter is unhealthy or errors — never process real traces through a
     // broken filter.
+    //
+    // #438 fix round 1: same reason as the adapter build above. This is the
+    // NEAR-AI-unavailable path -- the actual incident path -- and it carries a
+    // `TraceContributionError` whose transient marker is exactly what makes it
+    // report as `upstream_unavailable` instead of `unclassified`.
     let canary = run_privacy_filter_canary(adapter.as_ref())
         .await
-        .map_err(|err| anyhow::anyhow!("PII backstop canary errored: {err}"))?;
+        .context("PII backstop canary errored")?;
     if !canary.healthy {
         anyhow::bail!("PII backstop canary reported unhealthy filter; tick aborted");
     }
