@@ -1505,7 +1505,7 @@ fn tc_daemon_start_with_settings_refuses_when_the_settings_declare_only_one_root
 }
 
 #[test]
-fn discovery_answers_without_a_handle_and_describes_both_sources() {
+fn discovery_answers_without_a_handle_and_describes_every_source() {
     // It has to work with no daemon: the screen that consumes it is the one
     // clearing the refusal that stops a daemon from starting.
     let out = tc_discover_sources();
@@ -1517,13 +1517,18 @@ fn discovery_answers_without_a_handle_and_describes_both_sources() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 2, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 3, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
         .map(|i| i["source"].as_str().unwrap())
         .collect();
-    assert_eq!(sources, vec!["claude-code", "codex"]);
+    // Discovery describes every store a consent prompt may ask about, which
+    // is a longer list than the two `roots_declared` gates daemon startup on:
+    // an absent Gemini answer is not disqualifying, so the shells prompt for
+    // it without refusing to start. Adding a source belongs here; adding one
+    // to that gate would stop the daemon on every installed client.
+    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli"]);
 
     for item in items {
         // The fields a consent prompt needs to be specific rather than
