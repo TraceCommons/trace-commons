@@ -1258,8 +1258,40 @@ Keep each loop's existing enable-time `tracing::info!` and its success-path
 fields exactly as they are. The tick-completed lines are useful and are not
 what this issue is about.
 
-Two things differ per scheduler and must be read from the code rather than
-assumed:
+**Every loop must make an explicit give-up decision.** This is the most
+important requirement of this task, and it is not optional.
+
+Task 4's review found that `run_perplexity_score_driver_tick` returned
+`Ok(summary)` even when every item in the batch failed and its breaker
+tripped. Through the wrapper that reads as a healthy tick, so the driver
+refreshed `last_success_at` forever and could never go stale or escalate --
+the exact invisibility #438 exists to fix. It was resolved by having the
+closure return `Err(DriverTickError::BreakerTripped)` when
+`summary.breaker_tripped`.
+
+`spawn_driver_loop` CANNOT detect this for you: it only sees `Result<()>`, so
+a tick that gave up and a tick that succeeded are indistinguishable to it.
+Ten silent `Ok(())`s would reproduce that bug ten times over.
+
+So for EACH of the ten loops:
+
+1. Read what its tick returns. If its summary has a breaker, an exhausted
+   counter, or any other "we gave up" signal, the closure MUST return `Err`
+   on that condition -- not `Ok(())`.
+2. If a driver genuinely has no give-up condition, say so in a one-line
+   comment at the call site (e.g. `// no give-up signal: any completed tick
+   is a live tick`). An unexplained bare `Ok(())` is a finding.
+3. Prefer an existing `DriverTickError` variant. Add a variant only if none
+   fits, and give it a classification arm in `classify_driver_failure` so it
+   never logs as `unclassified`.
+
+Follow the pattern Task 4 established: a named helper function that maps the
+summary to `Result<()>`, called from the closure. A `tokio::spawn` closure
+body is unreachable from a test, so the named helper is what makes the
+decision assertable.
+
+Two more things differ per scheduler and must be read from the code rather
+than assumed:
 
 - **The interval field.** Several schedulers do not use `config.interval`.
   Read each config struct before writing the call.
