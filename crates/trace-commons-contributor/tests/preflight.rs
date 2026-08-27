@@ -220,11 +220,19 @@ fn spawn_http_counter() -> (
                     // stub that degrades to it on a short read reports itself
                     // healthy while behaving exactly like the broken filter the
                     // canary is looking for.
-                    let input = match read_full_http_request(&mut stream)
+                    // `input` is an array of windows; answer one entry per
+                    // element, carrying its `index`.
+                    let inputs = match read_full_http_request(&mut stream)
                         .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
-                        .and_then(|body| body["input"].as_str().map(str::to_string))
-                    {
-                        Some(input) => input,
+                        .and_then(|body| {
+                            body["input"].as_array().map(|values| {
+                                values
+                                    .iter()
+                                    .map(|value| value.as_str().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>()
+                            })
+                        }) {
+                        Some(inputs) => inputs,
                         None => {
                             let _ = stream.write_all(
                                 b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
@@ -237,23 +245,27 @@ fn spawn_http_counter() -> (
                         ("tc_canary_secret_0123456789abcdef", "secret"),
                         ("/tmp/trace_canary_private/path.txt", "private_url"),
                     ];
-                    let spans: Vec<_> = targets
+                    let data: Vec<_> = inputs
                         .iter()
-                        .filter_map(|(needle, category)| {
-                            input.find(needle).map(|start| {
-                                serde_json::json!({
-                                    "category": category,
-                                    "start": start,
-                                    "end": start + needle.len(),
-                                    "score": 0.99
+                        .enumerate()
+                        .map(|(index, input)| {
+                            let spans: Vec<_> = targets
+                                .iter()
+                                .filter_map(|(needle, category)| {
+                                    input.find(needle).map(|start| {
+                                        serde_json::json!({
+                                            "category": category,
+                                            "start": start,
+                                            "end": start + needle.len(),
+                                            "score": 0.99
+                                        })
+                                    })
                                 })
-                            })
+                                .collect();
+                            serde_json::json!({"index": index, "spans": spans})
                         })
                         .collect();
-                    let body = serde_json::to_string(&serde_json::json!({
-                        "data": [{"spans": spans}]
-                    }))
-                    .unwrap();
+                    let body = serde_json::to_string(&serde_json::json!({ "data": data })).unwrap();
                     let response = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
@@ -288,8 +300,11 @@ fn http_counter_reads_requests_split_across_packets() {
     let (base_url, _requests, stop, handle) = spawn_http_counter();
     let address = base_url.trim_start_matches("http://").to_string();
 
+    // `input` is an array of windows, matching the wire contract the adapter
+    // sends. This test is about HTTP reassembly, but it must still speak the
+    // real request shape or the stub rightly refuses it.
     let body = serde_json::json!({
-        "input": "contact trace-canary.person@example.invalid for details"
+        "input": ["contact trace-canary.person@example.invalid for details"]
     })
     .to_string();
     let head = format!(

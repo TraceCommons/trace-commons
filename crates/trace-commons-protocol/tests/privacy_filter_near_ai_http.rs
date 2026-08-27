@@ -4,11 +4,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    CLASSIFY_CHUNK_BYTES, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
-    NearAiPrivacyFilterAdapter,
+    CLASSIFY_CHUNK_BYTES, MAX_CLASSIFY_BATCH_INPUTS, NearAiPrivacyFilterAdapter,
 };
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
@@ -20,6 +19,32 @@ fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
         1_000_000,
     )
     .expect("adapter builds")
+}
+
+/// Responder for the batched wire contract: one `data` entry per `input`
+/// element, carrying its `index`, with a `private_email` span on whichever
+/// element contains the test's email.
+fn email_span_per_input(req: &wiremock::Request) -> ResponseTemplate {
+    let body: serde_json::Value = serde_json::from_slice(&req.body).expect("request body is JSON");
+    let inputs = body
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("input must be an array");
+    let data: Vec<serde_json::Value> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if value.as_str().unwrap_or("").contains("bob@example.com") {
+                json!({ "index": index, "spans": [
+                    {"category": "private_email", "start": 8, "end": 23,
+                     "score": 0.99, "text": "bob@example.com"}
+                ]})
+            } else {
+                json!({ "index": index, "spans": [] })
+            }
+        })
+        .collect();
+    ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
 }
 
 #[tokio::test]
@@ -76,22 +101,7 @@ async fn large_field_is_chunked_and_span_offsets_are_merged() {
     // codepoint offsets ("contact " = 8, "bob@example.com" = 15 -> 8..23).
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .and(body_string_contains("bob@example.com"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [
-                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
-            ]}]
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    // Every other window (the filler): no PII.
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [] }]
-        })))
-        .with_priority(5)
+        .respond_with(email_span_per_input)
         .mount(&server)
         .await;
 
@@ -235,7 +245,7 @@ async fn empty_data_array_surfaces_as_redaction_failed() {
         .expect_err("empty data array must error fail-closed");
     let msg = err.to_string();
     assert!(
-        msg.contains("near-ai privacy classifier returned empty data array"),
+        msg.contains("missing a result for input 0"),
         "unexpected error: {msg}"
     );
 }
@@ -441,24 +451,121 @@ async fn oversized_input_is_typed_permanent() {
     );
 }
 
-/// Windows are classified ONE AT A TIME, on purpose.
+/// Windows go out batched, and batches go out one at a time.
 ///
-/// #456 raised `MAX_CONCURRENT_CLASSIFY_WINDOWS` to 8 to cut the per-field
-/// cost. Throughput collapsed instead: on the pilot every PII-backstop tick
-/// then returned `done=0 transient=3 breaker_tripped=true` and the queue
-/// drained nothing, so the host was rolled back to the sequential build.
-///
-/// Why concurrency hurt is still not established -- the obvious rate-limit
-/// explanation did not survive testing, since 20 rapid 8 KB requests all
-/// returned 200. Until the classify diagnostics explain the real failures,
-/// this stays at 1, and raising it should be a deliberate change made with
-/// evidence rather than an optimisation someone reaches for again.
-#[test]
-fn classify_windows_are_not_overlapped() {
+/// #456 added a concurrency knob and set it to 8; the pilot dropped to zero
+/// throughput, failures beginning 80 seconds after that deploy and decaying
+/// away only ~14 minutes after the rollback. The knob is gone. Batching is the
+/// replacement: it cuts the request COUNT while lowering the request RATE.
+#[tokio::test]
+async fn windows_are_batched_into_one_request_per_group() {
+    const LINE: &str = "clean line\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let window_count = MAX_CLASSIFY_BATCH_INPUTS + 4;
+    let text = LINE.repeat(lines_per_window * window_count);
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).expect("request body is JSON");
+            let inputs = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .expect("input must be an array, not a bare string");
+            assert!(
+                inputs.len() <= MAX_CLASSIFY_BATCH_INPUTS,
+                "batch of {} exceeds the cap",
+                inputs.len()
+            );
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| json!({ "index": index, "spans": [] }))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+        })
+        // Twelve windows batched eight at a time is two requests, not twelve.
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds");
+    // MockServer::verify runs on drop and asserts the expected request count.
+}
+
+/// Results are matched to windows by the response's `index`, including across
+/// batch boundaries -- a span in the second batch must land at its full-text
+/// offset.
+#[tokio::test]
+async fn spans_map_back_by_index_across_batch_boundaries() {
+    const LINE: &str = "clean line\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    // Enough whole windows of filler to push the email past the first batch.
+    let filler = LINE.repeat(lines_per_window * (MAX_CLASSIFY_BATCH_INPUTS + 2));
+    let text = format!("{filler}contact bob@example.com now");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(email_span_per_input)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
     assert_eq!(
-        CLASSIFY_CONCURRENCY, 1,
-        "raising classify concurrency regressed the pilot to zero throughput \
-         once already; see this test's comment before changing it"
+        result.redacted_text,
+        format!("{filler}contact [REDACTED:private_email] now")
+    );
+    assert_eq!(result.summary.span_count, 1);
+}
+
+/// Fail closed on a short response. An input with no corresponding `data`
+/// entry must be an error, never an empty span list: empty spans mean "this
+/// window is clean", so silently accepting a missing result would pass
+/// unexamined text off as scrubbed.
+#[tokio::test]
+async fn a_missing_result_for_an_input_is_an_error_not_a_clean_window() {
+    const LINE: &str = "clean line\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let text = LINE.repeat(lines_per_window * 3);
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).expect("request body is JSON");
+            let inputs = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .expect("input must be an array");
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .take(inputs.len().saturating_sub(1))
+                .map(|(index, _)| json!({ "index": index, "spans": [] }))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+        })
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect_err("a short response must fail closed");
+    assert!(
+        err.to_string().contains("missing"),
+        "error should name the missing result; got {err}"
     );
 }
 
@@ -478,21 +585,7 @@ async fn window_offsets_stay_correct_across_multibyte_windows() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .and(body_string_contains("bob@example.com"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [
-                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
-            ]}]
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [] }]
-        })))
-        .with_priority(5)
+        .respond_with(email_span_per_input)
         .mount(&server)
         .await;
 
