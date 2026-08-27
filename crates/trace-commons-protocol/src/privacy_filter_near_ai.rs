@@ -20,58 +20,45 @@ pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
-/// Maximum input bytes per `privacy/classify` request. Field text larger than
-/// this is split into windows, one request per window.
+/// Maximum input tokens per `privacy/classify` request.
 ///
-/// **What the endpoint actually limits is total input TOKENS per request, and
-/// it reports exceeding that as a generic 502** -- not a 413, not a 429 -- so
-/// an over-limit request is indistinguishable from a vendor outage by status
-/// code alone. That ambiguity cost a full day of misdiagnosis on 2026-08-27.
+/// **The endpoint limits input TOKENS per request and reports exceeding that
+/// as a generic 502** -- not a 413, not a 429 -- so an over-limit request is
+/// indistinguishable from a vendor outage by status code alone. That ambiguity
+/// cost a day of misdiagnosis on 2026-08-27, during which a byte budget was
+/// tuned three times (20_000 -> 4_000 -> 8_000 -> 4_000) without ever
+/// addressing the quantity actually being limited.
 ///
-/// Measured against the live endpoint that day, same key and model as
-/// production. Token counts are the endpoint's own `usage.input_tokens`:
+/// A byte budget cannot express this. Token density varies ~1.6x across
+/// realistic content -- measured against the endpoint's own
+/// `usage.input_tokens`, English prose runs ~4.7 bytes/token while the paths,
+/// hashes and UUIDs that fill trace content run ~3.0. So any byte budget is
+/// either too small for prose (needless extra requests) or too large for dense
+/// content (silent 502s). 8_000 bytes was the latter: fine for most windows,
+/// deterministically fatal for token-dense ones, which is exactly the
+/// intermittent failure the #462 fingerprints caught.
 ///
-/// | content                  | bytes  | tokens | result |
-/// |--------------------------|--------|--------|--------|
-/// | English prose            | 11,000 |  1,704 | OK     |
-/// | coherent source code     |  8,000 |  2,242 | OK     |
-/// | identifier-dense text    |  8,739 |  2,850 | OK     |
-/// | identifier-dense text    |  9,199 |  3,000 | 1/3 OK |
-/// | identifier-dense text    | 18,399 |  6,000 | 0/3    |
+/// Budgeting in tokens fixes both ends at once: prose windows get BIGGER
+/// (~9,400 bytes at this budget, fewer requests than the 4_000-byte cap it
+/// replaces) while dense windows get capped where they actually break.
 ///
-/// Token density varies about 1.6x across realistic content: prose runs ~4.7
-/// bytes/token, while paths, hashes, UUIDs and base64 -- which trace content
-/// is full of -- run closer to 3.0. So a byte budget must be sized for the
-/// DENSE case or dense windows silently sail over the token limit while prose
-/// windows of the same size are fine. That is exactly what 8_000 did: it
-/// worked for most windows and failed deterministically for token-dense ones,
-/// producing the intermittent 502s that looked like flakiness.
-///
-/// 4_000 bytes is ~1,350 tokens at the dense end and ~850 at the sparse end,
-/// leaving real margin under the ~3,000 where failures begin.
-///
-/// Do NOT raise this to reduce request count. The limit is per REQUEST, so
-/// larger windows and batched windows fail the same way -- see
-/// `redact_text` for why batching was reverted.
-pub const CLASSIFY_CHUNK_BYTES: usize = 4_000;
+/// Sized against measurement, not the advertised context. The served model
+/// reports `context_length: 512` and the cloud-api wrapper splits internally,
+/// so requests spanning several context windows are normal and fine: 2,609
+/// tokens (5.1 windows) classified 6/6. Failures begin around 3,000 (1/3) and
+/// are total by 6,000 (0/3). This budget leaves ~1.5x margin under the point
+/// where failures start.
+pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 2_000;
 
-/// Where failures begin, in the endpoint's own token accounting: 3,000 tokens
-/// classified 1-of-3, 6,000 never did. Expressed in bytes at the DENSE end of
-/// the measured density range (~3.0 bytes/token), which is the case a byte
-/// budget has to survive.
+/// Token count at which classification begins failing, measured 2026-08-27:
+/// 3,000 tokens classified 1-of-3, 6,000 classified 0-of-3.
 pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 3_000;
 
-/// Bytes per token at the dense end of realistic trace content (paths, hashes,
-/// UUIDs, base64). Prose is ~4.7; sizing to prose is what let dense windows
-/// exceed the token limit unnoticed.
-pub const DENSE_BYTES_PER_TOKEN: usize = 3;
-
-// The byte budget must keep even token-DENSE content under the measured token
-// limit, with margin. Sizing to prose density is the bug this pins against.
+// Keep real margin under the measured failure point. The budget is not a
+// guess: exceeding it is what produced the intermittent 502s.
 const _: () = assert!(
-    CLASSIFY_CHUNK_BYTES / DENSE_BYTES_PER_TOKEN <= MEASURED_CLASSIFY_TOKEN_LIMIT / 2,
-    "CLASSIFY_CHUNK_BYTES must leave 2x margin under the measured token limit \
-     for token-dense content; raising it re-creates the intermittent 502s"
+    MAX_CLASSIFY_INPUT_TOKENS * 3 <= MEASURED_CLASSIFY_TOKEN_LIMIT * 2,
+    "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
 );
 
 /// How many `privacy/classify` requests for a single field may be in flight
@@ -289,7 +276,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // are reported in that window's own codepoint coordinates; shift
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
-        let ranges = chunk_byte_ranges(text, CLASSIFY_CHUNK_BYTES);
+        let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -485,6 +472,114 @@ fn classify_input_diagnostics(windows: &[&str]) -> String {
 async fn backoff(failed_attempt: usize) {
     let millis = 250u64.saturating_mul(1u64 << (failed_attempt.saturating_sub(1)).min(5));
     tokio::time::sleep(Duration::from_millis(millis)).await;
+}
+
+/// The tokenizer the hosted classifier actually uses.
+///
+/// Identified by measurement rather than assumption: `o200k_base` reproduced
+/// the endpoint's own `usage.input_tokens` exactly on 17 of 17 samples --
+/// prose, source code, identifier-dense text, hex digests, long words and
+/// repeated characters, from 5 bytes to 8 KB. `cl100k_base` matched only 6 of
+/// 9 on the same short set, so the choice is not arbitrary and should not be
+/// changed without re-running that comparison.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn classifier_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
+    BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
+}
+
+/// Count the tokens the classifier will charge for `text`.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn classifier_token_count(text: &str) -> Option<usize> {
+    classifier_bpe().map(|bpe| bpe.encode_ordinary(text).len())
+}
+
+/// Split `text` into contiguous byte ranges, each within `max_tokens` of the
+/// classifier's budget, covering the whole input on char boundaries.
+///
+/// Segments are cut at newlines where possible -- PII rarely spans lines, and
+/// a window that ends mid-entity risks splitting one across two requests. A
+/// single line that alone exceeds the budget (a long log line, a base64 blob)
+/// is bisected until its pieces fit.
+///
+/// Falls back to a conservative byte split if the tokenizer is unavailable:
+/// under-filling requests costs throughput, over-filling costs 502s, so the
+/// safe direction is down.
+#[cfg(feature = "near-ai-privacy-filter")]
+fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops::Range<usize>> {
+    if classifier_bpe().is_none() {
+        // No tokenizer: fall back to the dense-content byte equivalent, which
+        // is the smallest realistic window for this budget.
+        return chunk_byte_ranges(text, max_tokens.saturating_mul(3).max(1));
+    }
+    let max_tokens = max_tokens.max(1);
+
+    // Line-ish segments, each carrying its own token cost.
+    let mut segments: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut seg_start = 0usize;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            segments.push(seg_start..index + 1);
+            seg_start = index + 1;
+        }
+    }
+    if seg_start < text.len() {
+        segments.push(seg_start..text.len());
+    }
+
+    // Any segment too big on its own is bisected until each piece fits.
+    let mut sized: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    let mut pending: Vec<std::ops::Range<usize>> = segments;
+    pending.reverse();
+    while let Some(range) = pending.pop() {
+        let tokens = classifier_token_count(&text[range.clone()]).unwrap_or(usize::MAX);
+        if tokens <= max_tokens || range.len() <= 1 {
+            sized.push((range, tokens));
+            continue;
+        }
+        // Bisect on a char boundary and re-measure both halves.
+        let mut mid = range.start + range.len() / 2;
+        while mid > range.start && !text.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        if mid == range.start {
+            sized.push((range, tokens));
+            continue;
+        }
+        pending.push(mid..range.end);
+        pending.push(range.start..mid);
+    }
+
+    // Greedily pack segments up to the budget. Per-segment counts can differ
+    // slightly from the count of the joined text, because BPE merges across a
+    // boundary; the budget's margin under the measured limit absorbs that.
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut current: Option<std::ops::Range<usize>> = None;
+    let mut running = 0usize;
+    for (range, tokens) in sized {
+        match current {
+            Some(ref mut open) if running + tokens <= max_tokens => {
+                open.end = range.end;
+                running += tokens;
+            }
+            Some(open) => {
+                ranges.push(open);
+                running = tokens;
+                current = Some(range);
+            }
+            None => {
+                running = tokens;
+                current = Some(range);
+            }
+        }
+    }
+    if let Some(open) = current {
+        ranges.push(open);
+    }
+    if ranges.is_empty() {
+        ranges.push(0..text.len());
+    }
+    ranges
 }
 
 /// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
@@ -744,6 +839,117 @@ mod tests {
             text.chars().count(),
             "test text must actually be multibyte"
         );
+    }
+
+    /// The tokenizer must be the one the endpoint actually charges against.
+    /// These counts are the endpoint's own `usage.input_tokens`, recorded
+    /// 2026-08-27; `cl100k_base` disagrees on several of them.
+    #[test]
+    fn tokenizer_reproduces_the_endpoints_own_counts() {
+        let cases: &[(&str, usize)] = &[
+            ("hello", 1),
+            ("hello world", 2),
+            ("The quick brown fox jumps over the lazy dog.", 10),
+            ("alice@example.com", 3),
+            ("/usr/local/lib/python3.11/site-packages/", 11),
+            ("a7f3c9d2e1b48856f0c1d2e3a4b5c6d7", 29),
+            ("tenant_id submission_id auth_principal_ref", 8),
+            ("supercalifragilisticexpialidocious", 10),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                classifier_token_count(text),
+                Some(*expected),
+                "token count drifted from the endpoint's accounting for {text:?}"
+            );
+        }
+    }
+
+    /// The property the whole change exists for: no window may exceed the
+    /// budget, whatever the content's token density.
+    #[test]
+    fn every_window_fits_the_token_budget() {
+        let prose = "Please email alice@example.com about invoice 12345. ".repeat(600);
+        let dense = (0..600)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(400);
+
+        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
+            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
+            for range in &ranges {
+                let tokens = classifier_token_count(&text[range.clone()]).expect("tokenizer");
+                assert!(
+                    tokens <= MAX_CLASSIFY_INPUT_TOKENS,
+                    "{label}: window of {tokens} tokens exceeds the budget of {}",
+                    MAX_CLASSIFY_INPUT_TOKENS
+                );
+            }
+        }
+    }
+
+    /// Ranges must be contiguous and cover the whole field: a gap would drop
+    /// text from classification entirely, which is a silent privacy hole
+    /// rather than a performance bug.
+    #[test]
+    fn token_windows_cover_the_whole_field_without_gaps() {
+        let text = (0..300)
+            .map(|i| format!("line {i} with alice@example.com and /var/log/f{i}.log"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = chunk_token_ranges(&text, MAX_CLASSIFY_INPUT_TOKENS);
+
+        assert_eq!(ranges.first().expect("at least one window").start, 0);
+        assert_eq!(ranges.last().expect("at least one window").end, text.len());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "gap or overlap between windows");
+        }
+        let rebuilt: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(rebuilt, text, "windows must reconstruct the field exactly");
+    }
+
+    /// Budgeting in tokens is what lets sparse content travel in FEWER
+    /// requests than dense content of the same size -- the thing a byte
+    /// budget structurally cannot do, and the reason dense windows used to
+    /// 502 while prose windows of identical size were fine.
+    #[test]
+    fn sparse_content_packs_into_fewer_windows_than_dense() {
+        let bytes = 60_000;
+        let prose: String = "Please email alice@example.com about invoice 12345. "
+            .repeat(2000)
+            .chars()
+            .take(bytes)
+            .collect();
+        let dense: String = (0..4000)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(bytes)
+            .collect();
+
+        let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
+        let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
+        assert!(
+            prose_windows < dense_windows,
+            "prose took {prose_windows} windows and dense took {dense_windows}; \
+             token budgeting should give sparse content larger windows"
+        );
+    }
+
+    /// A single line longer than the budget still has to be split, or one
+    /// base64 blob or long log line stalls its whole field.
+    #[test]
+    fn an_oversized_single_line_is_split() {
+        let one_line = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(1000);
+        assert!(!one_line.contains('\n'));
+        let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
+        assert!(ranges.len() > 1, "an oversized single line must be split");
+        for range in &ranges {
+            let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
+            assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
+        }
     }
 
     #[test]

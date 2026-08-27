@@ -4,11 +4,16 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    CLASSIFY_CHUNK_BYTES, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
+    MAX_CLASSIFY_INPUT_TOKENS, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
     NearAiPrivacyFilterAdapter,
 };
+
+/// Roughly the byte span of one full window for this filler, at the sparse
+/// (prose-like) end of token density. Windows are budgeted in TOKENS now, so
+/// tests size their filler from the token budget rather than a byte constant.
+const APPROX_BYTES_PER_WINDOW: usize = MAX_CLASSIFY_INPUT_TOKENS * 4;
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
@@ -20,6 +25,36 @@ fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
         1_000_000,
     )
     .expect("adapter builds")
+}
+
+/// Responder that finds the test email inside whichever window carries it and
+/// spans it at that window's own codepoint offsets.
+///
+/// Windows are budgeted in tokens, so which window holds the email -- and
+/// where inside it -- depends on the content's density. Computing the offset
+/// instead of hardcoding it keeps these tests about span merging rather than
+/// about where a boundary happens to fall.
+fn email_span_at_actual_offset(req: &wiremock::Request) -> ResponseTemplate {
+    const NEEDLE: &str = "bob@example.com";
+    let body: serde_json::Value = serde_json::from_slice(&req.body).expect("request body is JSON");
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_str())
+        .expect("input must be a string");
+    let spans = match input.find(NEEDLE) {
+        Some(byte_start) => {
+            let start = input[..byte_start].chars().count();
+            vec![json!({
+                "category": "private_email",
+                "start": start,
+                "end": start + NEEDLE.chars().count(),
+                "score": 0.99,
+                "text": NEEDLE,
+            })]
+        }
+        None => Vec::new(),
+    };
+    ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
 }
 
 #[tokio::test]
@@ -53,7 +88,7 @@ async fn classifies_and_redacts_single_span() {
 
 #[tokio::test]
 async fn large_field_is_chunked_and_span_offsets_are_merged() {
-    // Field text larger than CLASSIFY_CHUNK_BYTES is split into windows and
+    // Field text larger than one window is split and
     // classified per window. The email lands in a later window; its
     // window-local offsets must be shifted into full-text coordinates so the
     // right region is redacted. Sized off the constant rather than a literal
@@ -61,12 +96,12 @@ async fn large_field_is_chunked_and_span_offsets_are_merged() {
     // Windows break at the last newline inside the limit, so a whole number
     // of lines fills a window exactly. Two full windows of filler leave
     // "contact ..." alone in the third, putting the email at window-local
-    // codepoint offset 8 regardless of what CLASSIFY_CHUNK_BYTES is set to.
+    // codepoint offset 8 regardless of how the window budget is set.
     const LINE: &str = "clean line\n"; // 11 bytes, ends on a newline
-    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let lines_per_window = APPROX_BYTES_PER_WINDOW / LINE.len();
     let filler = LINE.repeat(lines_per_window * 2);
     assert!(
-        filler.len() > CLASSIFY_CHUNK_BYTES,
+        filler.len() > APPROX_BYTES_PER_WINDOW,
         "filler must overflow at least one window"
     );
     let text = format!("{filler}contact bob@example.com now");
@@ -76,22 +111,7 @@ async fn large_field_is_chunked_and_span_offsets_are_merged() {
     // codepoint offsets ("contact " = 8, "bob@example.com" = 15 -> 8..23).
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .and(body_string_contains("bob@example.com"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [
-                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
-            ]}]
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    // Every other window (the filler): no PII.
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [] }]
-        })))
-        .with_priority(5)
+        .respond_with(email_span_at_actual_offset)
         .mount(&server)
         .await;
 
@@ -471,28 +491,14 @@ async fn window_offsets_stay_correct_across_multibyte_windows() {
     // Multibyte in the filler, and a whole number of lines per window so the
     // email lands alone in the final window at window-local offset 8.
     const LINE: &str = "clèan lïne wîth ünicode\n";
-    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let lines_per_window = APPROX_BYTES_PER_WINDOW / LINE.len();
     let filler = LINE.repeat(lines_per_window * 2);
     let text = format!("{filler}contact bob@example.com now");
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .and(body_string_contains("bob@example.com"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [
-                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
-            ]}]
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [] }]
-        })))
-        .with_priority(5)
+        .respond_with(email_span_at_actual_offset)
         .mount(&server)
         .await;
 

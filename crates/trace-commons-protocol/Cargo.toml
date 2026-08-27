@@ -23,10 +23,11 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "process", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+tiktoken-rs = { version = "0.12", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "process", "time"] }
 wiremock = "0.6"
 
 [features]
-near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing"]
+near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing", "dep:tiktoken-rs"]
