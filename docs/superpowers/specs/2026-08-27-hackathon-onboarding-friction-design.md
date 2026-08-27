@@ -312,24 +312,58 @@ Under auto-discovery a file that fails to parse is skipped, because it never
 claimed to be a trajectory. Under explicit `--trajectory` it still hard-rejects
 with its reason label, because the contributor named it.
 
-### Slice C: one-step `submit`
+### Slice C: one-step `submit`, scoped by where you are
 
-- **`submit .`** — new positional, equivalent to `--project .`. Conflicts with
-  `--project`. The "single project in the current directory" half of Paxel's
-  shape.
-- **A 7-day default window.** Today `sel.since` is `None` when unset and
-  `discover_filtered` applies no time filter, so bare `submit` discovers every
-  session ever recorded, across every project. That is safe only because the
-  index picker forces a choice. Replacing the picker with select-all would
-  otherwise offer a contributor's entire history behind one keystroke.
-  `--since` overrides it; `--all` means all of time.
+Paxel scopes by **directory subtree**: run it from the folder holding your
+repos and it takes all of them; run it from one project and it takes that one.
+The two commands Devfolio described are one command run from two places, and
+the working directory is the only variable.
+
+We adopt that model. It is also much closer to shipped than an earlier draft of
+this spec assumed: `cwd_matches_project` is already
+`Path::new(cwd).starts_with(project)` (`commands.rs:556-570`), so `--project`
+has always matched a subtree rather than a single directory. The change is what
+happens when nobody passes it.
+
+- **Bare `submit` defaults the project filter to the current working
+  directory** instead of `None`. That is the whole mechanism.
+  `discover_filtered` (`commands.rs:578-638`) is untouched; it simply stops
+  being handed `None`.
+- **`--project <path>`** keeps working, for scoping somewhere you are not.
+- **`--all`** ignores the working directory and means everything, everywhere.
 - **A y/N summary confirm** — count, projects, date range, granted consent
-  scopes — in place of the index picker. `--yes` skips it. The picker stays
-  reachable for per-session selection.
+  scopes — replaces the index picker (`commands.rs:845-867`). `--yes` skips it.
+  The picker stays reachable for per-session selection.
 - **Auto-enroll** when no config exists *and* an invite is available via
   `--invite` or `TRACE_COMMONS_INVITE`. With no invite the error is today's
-  `not logged in; run \`login\` first`, unchanged.
-- **`--json`** — frozen. No auto-enroll, no prompt, no positional handling.
+  `not logged in; run login first`, unchanged.
+- **`--json`** — frozen. No auto-enroll, no prompt, no changed default.
+
+#### No positional, and no default time window
+
+An earlier draft proposed `submit .` as a positional. It is redundant under
+subtree scoping: running bare `submit` from that directory already means the
+same thing, and Paxel demonstrates the working directory alone is enough. A
+second spelling for one behaviour is a concept to document, not a feature.
+
+That draft also gave bare `submit` a 7-day default window, because without a
+filter it discovered every session ever recorded, and select-all would have
+offered a contributor's entire history behind one keystroke. Subtree scoping
+solves that problem better and on the right axis. A time window is the wrong
+rail anyway: a hackathon project started ten days ago would have been silently
+excluded from a submission its contributor believed covered the project.
+`--since` remains available and opt-in.
+
+#### The one case subtree scoping does not bound
+
+Running from `$HOME`, a filesystem root, or any ancestor of every session store
+makes the subtree "everything" — exactly the sweep the window was meant to
+prevent. So `submit` **refuses** when the working directory is `$HOME` or a
+filesystem root, and names `--all` as the way to say it deliberately.
+
+A refusal, not a warning. The distinction matters at a deadline: a warning
+above a y/N prompt reads as noise to someone in a hurry, and the answer to that
+prompt is a full-history upload.
 
 **Consent prompts are not removed.** `prompt_consent_answers`
 (`consent.rs:108-134`) asks four y/N questions on a TTY and auto-enroll
@@ -566,14 +600,17 @@ teach the CLI to register a passkey; or teach it to rebuild receipts from `GET
 caller's own records with no ids supplied and would at least make the keep
 reconstructible from the key alone.
 
-Shape:
+Shape — one command, and the working directory is the only variable, exactly
+as Paxel has it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh | sh -s -- --project .
+# from a project directory: that project
+# from a parent of several repos: all of them
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh | sh
 ```
 
-`--project .` scopes to the current directory; omitting it submits across
-projects. Both shapes take their scoping model from Slice C.
+Scoping comes from Slice C, so the script needs no scoping flags of its own and
+inherits the `$HOME`-and-root refusal with them.
 
 ## Error handling
 
@@ -606,10 +643,13 @@ TDD, against sanitised fixtures under
   an upgraded desktop install still starts.
 - Trajectory auto-discovery finds `*.trajectory.json` in cwd and files in the
   conventional directory, and nothing else — including a plain `session.json`.
-- Bare `submit` selects only sessions inside the 7-day window; `--all` reaches
-  everything.
-- `submit .` equals `--project .`; `--json` output is byte-identical to today
-  for every invocation in `docs/collector-integration.md`.
+- Bare `submit` from a project directory selects that project's sessions and no
+  others; from a parent of several repos it selects all of them.
+- Bare `submit` from `$HOME` or `/` refuses and names `--all`, rather than
+  offering a full-history upload behind one keystroke.
+- `--all` still reaches everything regardless of the working directory.
+- `--json` output is byte-identical to today for every invocation in
+  `docs/collector-integration.md`.
 - An **unscoped** attestation request returns a document with no `pending` or
   `unknown` key at all — the regression test protecting Devfolio's verifier.
 - A scoped request returns exactly the asked-for entries; a submission with no
