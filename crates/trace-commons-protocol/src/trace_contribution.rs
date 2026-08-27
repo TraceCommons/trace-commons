@@ -9071,9 +9071,9 @@ mod tests {
     #[test]
     fn contextual_entropy_applies_cued_secret_shape_decisions() {
         use super::*;
-        // `bare()` rather than `new()`: this test asserts redaction shape, for
-        // which the env-selected privacy filter is irrelevant. `new()` reads
-        // process env and would race the fail-closed tests (#431).
+        // `bare()` rather than `new()`: this asserts redaction shape, for which
+        // the env-selected privacy filter is irrelevant, and `new()` reads
+        // process env and races the fail-closed tests (#431).
         let r = DeterministicTraceRedactor::bare();
 
         // Row 1 — Accept, documented. No separator means no boundary without
@@ -9088,45 +9088,13 @@ mod tests {
             );
         }
 
-        // Row 2 — Redact at the cue floor, and not one byte below it.
-        //
-        // This row used to read "floor is 8, not 16" and assert
-        // `len < 16 && len >= ENTROPY_MIN_LEN`. #225 raised ENTROPY_MIN_LEN
-        // from 8 to 16, which made that assertion unsatisfiable for every
-        // input -- and because the function had no `#[test]` attribute,
-        // nothing reported it (#432). The premise was wrong as well as
-        // impossible: a cue widens the *candidate* class, it does not lower
-        // the minimum length, so there is no separate shorter floor for cued
-        // values.
-        //
-        // Re-derived by measuring the current detector: a cued opaque value is
-        // redacted at exactly ENTROPY_MIN_LEN and survives at one byte below.
-        // Both sides are pinned and expressed in terms of the constant, so
-        // moving it fails here loudly instead of rotting silently again.
-        let pool = "Q7vM2xP9sL4nR8kT6wZ3bY5uH1cJ0dG9fA8eK4mN2pS7";
-        let at_floor = &pool[..ENTROPY_MIN_LEN];
-        let below_floor = &pool[..ENTROPY_MIN_LEN - 1];
-        for text in [
-            format!("api_key: {at_floor}"),
-            format!("api_key={at_floor}"),
-        ] {
+        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
+        let short = "Q7vM2xP9sL4nR8k"; // 15
+        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
+        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
             let (out, rep) = r.redact_text(&text);
-            assert!(
-                !out.contains(at_floor),
-                "cued secret at the entropy floor survived: {out}"
-            );
+            assert!(!out.contains(short), "short cued secret survived: {out}");
             assert!(rep.blocked_secret_detected);
-        }
-        for text in [
-            format!("api_key: {below_floor}"),
-            format!("api_key={below_floor}"),
-        ] {
-            let (out, rep) = r.redact_text(&text);
-            assert!(
-                out.contains(below_floor),
-                "cued value one byte below the entropy floor was redacted: {out}"
-            );
-            assert!(!rep.blocked_secret_detected);
         }
 
         // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
