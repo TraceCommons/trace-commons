@@ -4876,14 +4876,26 @@ fn merge_privacy_warnings(existing: &mut Vec<String>, new_warnings: Vec<String>)
     }
 }
 
+/// Contributor- and operator-facing text for a residual-risk band.
+///
+/// These strings must track #223's rule, which reserves High for scrub
+/// FAILURE and puts scrub SUCCESS at Medium. The #267 squash reverted them
+/// to the wording of the rule #223 reversed while the risk derivation itself
+/// stayed correct (#326, #458), so for a while a quarantined trace carried a
+/// reason that no longer matched the condition that quarantined it.
+///
+/// Medium names successfully-redacted secrets explicitly. A trace can land
+/// here *because* a secret was found and removed, and a warning that only
+/// mentions message text and tool payloads would describe neither what
+/// happened nor why the trace is still fine to review.
 fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
+            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -6420,6 +6432,45 @@ mod training_dynamics_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// #223 reserved High for scrub FAILURE and moved scrub SUCCESS to
+    /// Medium. The risk derivation implements that today, but the #267
+    /// squash reverted these two contributor- and operator-facing strings to
+    /// the wording of the rule #223 reversed (#326, #458).
+    ///
+    /// Asserted on the distinctions #223 argued for rather than on exact
+    /// prose, so the strings can be reworded without silently losing the
+    /// property: High must describe survival, not detection, and Medium must
+    /// account for a secret that was found and successfully removed.
+    #[test]
+    fn privacy_warnings_describe_scrub_outcome_not_mere_detection() {
+        use super::*;
+
+        let high = privacy_warnings(ResidualPiiRisk::High).join(" ");
+        assert!(
+            high.contains("survived scrub")
+                || high.contains("unredactable")
+                || high.contains("could not complete"),
+            "High must say why the scrub FAILED; detection alone is Medium under #223: {high}"
+        );
+        assert!(
+            !high.contains("was detected after deterministic scrubbing"),
+            "High carries the pre-#223 detection wording: {high}"
+        );
+
+        let medium = privacy_warnings(ResidualPiiRisk::Medium).join(" ");
+        assert!(
+            medium.contains("successfully-redacted"),
+            "Medium must account for a secret found and removed -- the case \
+             #223 moved here, and the reassurance it added on purpose: {medium}"
+        );
+        assert!(
+            medium.contains("reviewable"),
+            "Medium must say the trace stays reviewable: {medium}"
+        );
+
+        assert!(privacy_warnings(ResidualPiiRisk::Low).is_empty());
+    }
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Pins what each consent scope PERMITS, not merely what it is called.
