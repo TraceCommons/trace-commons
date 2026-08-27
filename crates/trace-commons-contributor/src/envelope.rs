@@ -972,25 +972,42 @@ mod tests {
         Router::new().route(
             "/privacy/classify",
             post(|Json(req): Json<serde_json::Value>| async move {
-                let input = req["input"].as_str().unwrap_or_default().to_string();
+                // `input` is an array of windows; answer one `data` entry per
+                // element, carrying its `index`, as the real endpoint does.
+                let inputs: Vec<String> = req["input"]
+                    .as_array()
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|value| value.as_str().unwrap_or_default().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let targets: &[(&str, &str)] = &[
                     ("bob@example.com", "private_email"),
                     ("trace-canary.person@example.invalid", "private_email"),
                     ("tc_canary_secret_0123456789abcdef", "secret"),
                     ("/tmp/trace_canary_private/path.txt", "private_url"),
                 ];
-                let mut spans = Vec::new();
-                for (needle, category) in targets {
-                    if let Some(start) = input.find(needle) {
-                        spans.push(serde_json::json!({
-                            "category": category,
-                            "start": start,
-                            "end": start + needle.len(),
-                            "score": 0.99
-                        }));
-                    }
-                }
-                Json(serde_json::json!({"data": [{"spans": spans}]}))
+                let data: Vec<serde_json::Value> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| {
+                        let mut spans = Vec::new();
+                        for (needle, category) in targets {
+                            if let Some(start) = input.find(needle) {
+                                spans.push(serde_json::json!({
+                                    "category": category,
+                                    "start": start,
+                                    "end": start + needle.len(),
+                                    "score": 0.99
+                                }));
+                            }
+                        }
+                        serde_json::json!({"index": index, "spans": spans})
+                    })
+                    .collect();
+                Json(serde_json::json!({"data": data}))
             }),
         )
     }
@@ -1002,8 +1019,14 @@ mod tests {
         use axum::{Json, Router, routing::post};
         Router::new().route(
             "/privacy/classify",
-            post(|Json(_req): Json<serde_json::Value>| async move {
-                Json(serde_json::json!({"data": [{"spans": []}]}))
+            post(|Json(req): Json<serde_json::Value>| async move {
+                // Well-formed for the batched contract -- an entry per input --
+                // but never any spans.
+                let count = req["input"].as_array().map(|v| v.len()).unwrap_or(0);
+                let data: Vec<serde_json::Value> = (0..count)
+                    .map(|index| serde_json::json!({"index": index, "spans": []}))
+                    .collect();
+                Json(serde_json::json!({"data": data}))
             }),
         )
     }
