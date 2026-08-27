@@ -12637,6 +12637,7 @@ async fn submit_trace_handler(
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
+        last_status_reason: None,
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
@@ -53851,6 +53852,7 @@ fn trace_commons_record_from_storage_submission(
             retention_policy_id: record.retention_policy_id,
             expires_at: record.expires_at,
             purged_at: record.purged_at,
+            last_status_reason: record.last_status_reason,
             object_key,
             artifact_receipt: None,
             artifact_object_store: None,
@@ -66252,6 +66254,10 @@ struct TraceCommonsSubmissionRecord {
     expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purged_at: Option<DateTime<Utc>>,
+    /// Allowlisted label for why the submission is in its current status.
+    /// `None` for records written before V49; see `safe_status_reason_label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status_reason: Option<String>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -66436,6 +66442,16 @@ struct TraceReviewQueueItem {
     coverage_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_sequence: Vec<String>,
+    /// Why this submission is in the queue, as an allowlisted label.
+    ///
+    /// `pii_backstop_attempts_exhausted` means the trace was never examined --
+    /// the classifier was unreachable and its retry budget ran out -- as
+    /// opposed to a filter having actually found something. Those need
+    /// opposite handling, and before this field a reviewer could not tell them
+    /// apart without hand-joining the audit trail. `None` on rows predating
+    /// V49.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status_reason: Option<String>,
 }
 
 impl TraceReviewQueueItem {
@@ -66468,6 +66484,7 @@ impl TraceReviewQueueItem {
             tool_sequence: derived
                 .map(|record| record.tool_sequence.clone())
                 .unwrap_or_default(),
+            last_status_reason: record.last_status_reason,
         }
     }
 }
