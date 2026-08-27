@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    CLASSIFY_CHUNK_BYTES, NearAiPrivacyFilterAdapter,
+    CLASSIFY_CHUNK_BYTES, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
+    NearAiPrivacyFilterAdapter,
 };
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
 use wiremock::matchers::{body_string_contains, header, method, path};
@@ -440,50 +441,24 @@ async fn oversized_input_is_typed_permanent() {
     );
 }
 
-/// 2026-08-27 drain-rate regression. The windows of one field were classified
-/// strictly sequentially, so a field's cost was (windows x round-trip). With
-/// pilot envelopes at a median 421 kB and a p90 of 971 kB that is 50-120
-/// serialized requests per field, and the PII-backstop backlog drained at
-/// roughly nine minutes per trace. Windows are independent -- each is
-/// classified in its own coordinates and merged afterwards -- so they must go
-/// out concurrently.
-#[tokio::test]
-async fn windows_are_classified_concurrently() {
-    const LINE: &str = "clean line\n";
-    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
-    let window_count = 12usize;
-    let text = LINE.repeat(lines_per_window * window_count);
-
-    // Each window costs 300ms server-side, so sequentially this is 3.6s.
-    // The bound is deliberately loose rather than "one round": the first
-    // request pays connection setup, and the mock server plus the client's
-    // connection pool cap real overlap below MAX_CONCURRENT_CLASSIFY_WINDOWS.
-    // The property under test is that windows overlap at all, not a specific
-    // speedup -- serial classification cannot get anywhere near this bound.
-    let per_window = Duration::from_millis(300);
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(per_window)
-                .set_body_json(json!({ "data": [{ "spans": [] }] })),
-        )
-        .mount(&server)
-        .await;
-
-    let started = std::time::Instant::now();
-    adapter(server.uri())
-        .redact_text(&text)
-        .await
-        .expect("call succeeds");
-    let elapsed = started.elapsed();
-
-    let sequential = per_window * window_count as u32;
-    assert!(
-        elapsed < sequential / 2,
-        "expected concurrent window classification: {window_count} windows took \
-         {elapsed:?}, sequential would be about {sequential:?}"
+/// Windows are classified ONE AT A TIME, on purpose.
+///
+/// #456 raised `MAX_CONCURRENT_CLASSIFY_WINDOWS` to 8 to cut the per-field
+/// cost. Throughput collapsed instead: on the pilot every PII-backstop tick
+/// then returned `done=0 transient=3 breaker_tripped=true` and the queue
+/// drained nothing, so the host was rolled back to the sequential build.
+///
+/// Why concurrency hurt is still not established -- the obvious rate-limit
+/// explanation did not survive testing, since 20 rapid 8 KB requests all
+/// returned 200. Until the classify diagnostics explain the real failures,
+/// this stays at 1, and raising it should be a deliberate change made with
+/// evidence rather than an optimisation someone reaches for again.
+#[test]
+fn classify_windows_are_not_overlapped() {
+    assert_eq!(
+        CLASSIFY_CONCURRENCY, 1,
+        "raising classify concurrency regressed the pilot to zero throughput \
+         once already; see this test's comment before changing it"
     );
 }
 
