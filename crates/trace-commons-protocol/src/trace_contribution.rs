@@ -2861,8 +2861,19 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection. Shorter tokens are too noisy to gate reliably.
-const ENTROPY_MIN_LEN: usize = 16;
+/// detection.
+///
+/// 8, not 16. #225 lowered it deliberately: a token this short is only ever
+/// reached with a secret-shaped cue already matched within `CUE_WINDOW`, and
+/// the noise that motivated 16 is handled by `ENTROPY_BITS_MIN` and the
+/// allowlists rather than by refusing to look. Restored here after the #267
+/// squash reverted it to 16 (see #326), which reopened the 8-to-15 character
+/// band this constant exists to cover.
+///
+/// It is paired with the `{8,}` bound in `entropy_candidate_regex`: the
+/// regex decides what is a candidate at all, so raising either one alone
+/// silently disables the band while the other still claims to cover it.
+const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -3058,7 +3069,11 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
+        // The `{8,}` bound must stay in step with `ENTROPY_MIN_LEN`: this
+        // regex decides what becomes a candidate, that constant decides what
+        // survives the length check, and a token shorter than either is never
+        // examined. The #267 squash reverted both to 16 together (#326).
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -4413,7 +4428,23 @@ fn redact_envelope_side_channels(
         let manifest = std::mem::take(&mut envelope.replay.tool_manifest_hashes);
         for (key, value) in manifest {
             let mut key = key;
+            let mut value = value;
             redact_string_in_place(redactor, &mut key, report, state);
+            // The VALUE is redacted too (#377). The field is named for
+            // hashes, but nothing validates that it holds one -- it is a
+            // client-populated `BTreeMap<String, String>`, as free-form as
+            // the `feature_flags` map above, which has always redacted both
+            // halves. Leaving values untouched let a planted secret reach
+            // the finished envelope; only the residual scan stood between
+            // that and accepted storage, and the scan is defence in depth,
+            // not the primary control.
+            //
+            // This does not defeat the structural-field exemption below: a
+            // genuine digest survives unchanged, because the detectors match
+            // secret shapes and a bare hex string is not one. Contextual
+            // entropy needs a nearby cue, and the value is redacted as its
+            // own leaf, so the tool name beside it cannot supply one.
+            redact_string_in_place(redactor, &mut value, report, state);
             insert_without_collision(&mut envelope.replay.tool_manifest_hashes, key, value);
         }
     }
@@ -4630,6 +4661,37 @@ fn resolve_post_scrub_risk(
     }
 }
 
+/// Redaction labels that are recorded but do not, on their own, raise the
+/// residual-risk tier.
+///
+/// `local_path` was measured in 2,455 of 2,630 real sessions (93.3%). A
+/// signal present in 93% of records cannot discriminate, and treating it as
+/// one made a filesystem path sufficient to force Medium before the consent
+/// flags were even consulted. No comparable corpus pipeline has a path
+/// sensitivity rule -- not BigCode `pii-lib`, Dolma, StarCoder, Sentry Relay,
+/// or the OTel redaction processor -- and both mature pipelines that looked
+/// at this class of signal went the other way and sub-classified it. Letta's
+/// trajectory format, adopted here as the cross-harness standard, promotes
+/// `cwd` to a named field; its canonical example `"cwd": "/workspace"` is a
+/// value the old rule would have quarantined.
+///
+/// This is a severity decision only. The path is still detected, still
+/// replaced with a placeholder, and still counted into
+/// `privacy.redaction_counts`, because the report is an annotation on an
+/// accepted record. Dropping the count would trade one information loss for
+/// another.
+const NON_SEVERITY_REDACTION_LABELS: &[&str] = &["local_path"];
+
+/// Whether a redaction label contributes to the residual-risk tier.
+///
+/// Exact match, deliberately: the count vocabulary is namespaced
+/// (`secret:contextual_entropy`, `privacy_filter:private_email`), so a prefix
+/// or substring test here would silently exempt labels that were never meant
+/// to be exempt.
+fn label_bears_severity(label: &str) -> bool {
+    !NON_SEVERITY_REDACTION_LABELS.contains(&label)
+}
+
 /// Classify what a redaction pass leaves behind.
 ///
 /// "Residual" means what is still in the envelope after the pass, not what
@@ -4671,9 +4733,19 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     // who under-reports risk should not be able to land in accepted
     // storage with a Low classification just because the flags are
     // clean; the pass has direct evidence the flags are wrong.
+    //
+    // `local_path` is excluded from this test (#219a). It is still redacted
+    // and still counted -- see `label_bears_severity` for why it does not
+    // set a tier on its own.
     if report.blocked_secret_detected
-        || !report.counts.is_empty()
-        || !report.pii_labels_present.is_empty()
+        || report
+            .counts
+            .keys()
+            .any(|label| label_bears_severity(label))
+        || report
+            .pii_labels_present
+            .iter()
+            .any(|label| label_bears_severity(label))
     {
         return ResidualPiiRisk::Medium;
     }
@@ -4860,14 +4932,26 @@ fn merge_privacy_warnings(existing: &mut Vec<String>, new_warnings: Vec<String>)
     }
 }
 
+/// Contributor- and operator-facing text for a residual-risk band.
+///
+/// These strings must track #223's rule, which reserves High for scrub
+/// FAILURE and puts scrub SUCCESS at Medium. The #267 squash reverted them
+/// to the wording of the rule #223 reversed while the risk derivation itself
+/// stayed correct (#326, #458), so for a while a quarantined trace carried a
+/// reason that no longer matched the condition that quarantined it.
+///
+/// Medium names successfully-redacted secrets explicitly. A trace can land
+/// here *because* a secret was found and removed, and a warning that only
+/// mentions message text and tool payloads would describe neither what
+/// happened nor why the trace is still fine to review.
 fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
         ResidualPiiRisk::Medium => vec![
-            "Message text or tool payloads were included after local redaction; server-side re-scrub is still required.".to_string(),
+            "Message text, tool payloads, or successfully-redacted PII/secrets were present; server-side re-scrub is still required and the trace stays reviewable.".to_string(),
         ],
         ResidualPiiRisk::High => vec![
-            "Secret-like content was detected after deterministic scrubbing; keep this trace quarantined until reviewed.".to_string(),
+            "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
 }
@@ -6404,6 +6488,149 @@ mod training_dynamics_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// #225 lowered the cued-secret length floor from 16 to 8; the #267
+    /// squash reverted it to 16, reopening the band. See #326 for the wider
+    /// conflict-resolution reversion.
+    ///
+    /// The lengths here are LITERAL on purpose. The assertion this replaces
+    /// was written relative to `ENTROPY_MIN_LEN` ("redacted at exactly the
+    /// floor, survives one byte below"), which is self-consistent at any
+    /// value of the constant and so cannot detect the constant moving. That
+    /// is precisely how the reversion stayed invisible. A literal pins the
+    /// behaviour to the band that was decided on, not to whatever the
+    /// constant currently says.
+    ///
+    /// The covered band is 10..=15, not 8..=15, and the difference is not a
+    /// slack in the test. `ENTROPY_BITS_MIN` is 3.2 bits/char, and the
+    /// Shannon entropy of an n-character token cannot exceed log2(n), so a
+    /// token needs n >= 2^3.2 ~= 9.2 to clear the entropy gate at all.
+    /// Lengths 8 and 9 are therefore unreachable no matter what
+    /// `ENTROPY_MIN_LEN` says -- the entropy floor binds above the length
+    /// floor down there. `ENTROPY_MIN_LEN = 8` is still the right value to
+    /// restore, because it is what #225 chose and the two gates are meant to
+    /// be independent, but it is worth knowing that 8 and 10 are behaviourally
+    /// identical settings today. The 8..=9 case is asserted below so that a
+    /// future change to `ENTROPY_BITS_MIN` shows up here as a deliberate
+    /// widening rather than an accident.
+    #[test]
+    fn cued_secrets_in_the_ten_to_fifteen_character_band_are_redacted() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        let pool = "Q7vM2xP9sL4nR8kT6wZ3bY5uH1cJ0dG9";
+        for len in 10..=15usize {
+            let value = &pool[..len];
+            let text = format!("api_key={value}");
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(value),
+                "a {len}-char cued secret survived redaction: {out}"
+            );
+            assert!(
+                rep.blocked_secret_detected,
+                "a {len}-char cued secret was not reported as a blocked secret"
+            );
+        }
+
+        // Below the entropy gate's arithmetic floor, documented above. Not a
+        // gap this PR claims to close; recorded so it cannot move silently.
+        for len in 8..=9usize {
+            let value = &pool[..len];
+            let (out, _) = r.redact_text(&format!("api_key={value}"));
+            assert!(
+                out.contains(value),
+                "a {len}-char token cleared a 3.2 bits/char floor it cannot \
+                 mathematically reach; ENTROPY_BITS_MIN must have changed: {out}"
+            );
+        }
+    }
+
+    /// The other half of #225's bargain: lowering the LENGTH floor must not
+    /// lower the ENTROPY floor or bypass the allowlists, or the 8-to-15 band
+    /// fills with git shas and ordinary words. This is the FP budget the
+    /// hardening was accepted with, asserted at the same literal lengths as
+    /// the test above so the two move together.
+    #[test]
+    fn lowering_the_length_floor_does_not_widen_the_false_positive_budget() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        for text in [
+            // Low-entropy values after a cue: length is in band, entropy is not.
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            // Git short shas after a cue: the FP rate here dominates recall.
+            "api_key: deadbee",
+            "api_key: deadbeef",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "FP budget: value was redacted: {out}");
+            assert!(
+                !rep.blocked_secret_detected,
+                "FP budget: value was reported as a blocked secret: {text}"
+            );
+        }
+
+        // Uncued high-entropy content must still survive: the cue gate, not
+        // the length floor, is what makes a token a candidate at all.
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let (out, rep) = r.redact_text(&format!("commit {sha40}"));
+        assert!(out.contains(sha40), "uncued sha was redacted: {out}");
+        assert!(!rep.blocked_secret_detected);
+    }
+    /// #223 reserved High for scrub FAILURE and moved scrub SUCCESS to
+    /// Medium. The risk derivation implements that today, but the #267
+    /// squash reverted these two contributor- and operator-facing strings to
+    /// the wording of the rule #223 reversed (#326, #458).
+    ///
+    /// Asserted on the distinctions #223 argued for rather than on exact
+    /// prose, so the strings can be reworded without silently losing the
+    /// property: High must describe survival, not detection, and Medium must
+    /// account for a secret that was found and successfully removed.
+    #[test]
+    fn privacy_warnings_describe_scrub_outcome_not_mere_detection() {
+        use super::*;
+
+        let high = privacy_warnings(ResidualPiiRisk::High).join(" ");
+        assert!(
+            high.contains("survived scrub")
+                || high.contains("unredactable")
+                || high.contains("could not complete"),
+            "High must say why the scrub FAILED; detection alone is Medium under #223: {high}"
+        );
+        assert!(
+            !high.contains("was detected after deterministic scrubbing"),
+            "High carries the pre-#223 detection wording: {high}"
+        );
+
+        let medium = privacy_warnings(ResidualPiiRisk::Medium).join(" ");
+        assert!(
+            medium.contains("successfully-redacted"),
+            "Medium must account for a secret found and removed -- the case \
+             #223 moved here, and the reassurance it added on purpose: {medium}"
+        );
+        assert!(
+            medium.contains("reviewable"),
+            "Medium must say the trace stays reviewable: {medium}"
+        );
+
+        assert!(privacy_warnings(ResidualPiiRisk::Low).is_empty());
+    }
+    /// A consent block declaring no content, so a test asserting on the
+    /// report alone is not floored to Medium by a flag.
+    fn clean_consent() -> super::ConsentMetadata {
+        super::ConsentMetadata {
+            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![super::ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            correction_included: false,
+            revocable: true,
+        }
+    }
+
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Pins what each consent scope PERMITS, not merely what it is called.
@@ -7344,11 +7571,15 @@ mod tests {
         let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
         assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
 
-        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
-        //    short to gate reliably, even when cued and opaque.
-        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
-        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
-        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+        // 4. There is deliberately no "too short to gate" case here. One
+        //    used to sit at this position, asserting that `api_key=Zx9Qk2Lm7P`
+        //    passes through. #225 DELETED it, because the hardening it
+        //    shipped is exactly the decision to gate that length; the #267
+        //    squash then reintroduced it (#326), leaving the suite holding
+        //    this assertion and #225's dead cue-boundary table stating
+        //    opposite intent. The band is now covered by
+        //    `cued_secrets_in_the_ten_to_fifteen_character_band_are_redacted`.
+        //    Do not re-add a case here: a short cued opaque value IS redacted.
 
         // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
         //    as not opaque enough, even when cued and long enough.
@@ -8910,6 +9141,145 @@ mod tests {
         assert!(!rep.blocked_secret_detected);
     }
 
+    /// #219(a). `local_path` is redacted in 2,455 of 2,630 real sessions
+    /// (93.3%), and any non-empty report forced Medium before consent flags
+    /// were consulted. A signal present in 93% of records carries almost no
+    /// information, and no comparable pipeline -- BigCode, Dolma, StarCoder,
+    /// Sentry, OTel -- has a filesystem-path sensitivity rule at all. Letta's
+    /// trajectory format, which this project adopted as its cross-harness
+    /// standard, promotes `cwd` to a named field; its canonical example
+    /// `"cwd": "/workspace"` is a value the old rule would have quarantined.
+    ///
+    /// Redaction is unchanged. The path is still replaced and still counted;
+    /// it just stops setting the tier on its own.
+    #[test]
+    fn a_redacted_local_path_alone_does_not_raise_the_tier() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 7)]),
+            pii_labels_present: vec!["local_path".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            residual_risk(&clean_consent(), &report),
+            ResidualPiiRisk::Low,
+            "a path the scrubber replaced is an annotation, not a finding"
+        );
+    }
+
+    /// The exemption is for `local_path` specifically, not for "the report
+    /// has entries". Anything else in the same report still sets the tier,
+    /// so a path cannot dilute a real finding sitting beside it.
+    #[test]
+    fn local_path_does_not_mask_a_real_finding_in_the_same_report() {
+        use super::*;
+
+        for (label, count) in [
+            ("secret", 1),
+            ("secret:contextual_entropy", 1),
+            ("sensitive_field", 1),
+            ("tool_sensitive_field", 1),
+            ("privacy_filter:private_email", 1),
+        ] {
+            let report = RedactionReport {
+                counts: BTreeMap::from([
+                    ("local_path".to_string(), 12),
+                    (label.to_string(), count),
+                ]),
+                pii_labels_present: vec!["local_path".to_string()],
+                ..Default::default()
+            };
+            assert_eq!(
+                residual_risk(&clean_consent(), &report),
+                ResidualPiiRisk::Medium,
+                "{label} beside a local_path must still raise the tier"
+            );
+        }
+
+        // Same for a non-exempt pii label with no counts beside it.
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 3)]),
+            pii_labels_present: vec!["local_path".to_string(), "person_name".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            residual_risk(&clean_consent(), &report),
+            ResidualPiiRisk::Medium,
+            "a person_name beside a local_path must still raise the tier"
+        );
+    }
+
+    /// The exemption is about SEVERITY only. The count must still reach
+    /// `privacy.redaction_counts`, because the report is an annotation on an
+    /// accepted record and dropping it would trade one information loss for
+    /// another.
+    #[test]
+    fn local_path_is_still_redacted_and_still_counted() {
+        use super::*;
+
+        let r = DeterministicTraceRedactor::deterministic_only(vec!["/Users/someone".to_string()]);
+        let (out, report) = r.redact_text("opened /Users/someone/code/secret-project/main.rs");
+
+        assert!(
+            !out.contains("/Users/someone/code"),
+            "the path must still be redacted: {out}"
+        );
+        assert_eq!(
+            report.counts.get("local_path").copied(),
+            Some(1),
+            "the path must still be counted for the annotation"
+        );
+        assert!(report.pii_labels_present.iter().any(|l| l == "local_path"));
+    }
+
+    /// Consent flags are a separate route to Medium and are untouched: the
+    /// exemption must not let a declared-content trace fall to Low.
+    #[test]
+    fn local_path_exemption_does_not_bypass_consent_flags() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 4)]),
+            pii_labels_present: vec!["local_path".to_string()],
+            ..Default::default()
+        };
+        let mut consent = clean_consent();
+        consent.message_text_included = true;
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::Medium,
+            "a declared content flag still floors at Medium"
+        );
+    }
+
+    /// High is unaffected: the exemption sits below both High conditions.
+    #[test]
+    fn local_path_exemption_does_not_soften_high() {
+        use super::*;
+
+        for report in [
+            RedactionReport {
+                counts: BTreeMap::from([("local_path".to_string(), 2)]),
+                key_finding_detected: true,
+                ..Default::default()
+            },
+            RedactionReport {
+                counts: BTreeMap::from([("local_path".to_string(), 2)]),
+                coverage_incomplete: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                residual_risk(&clean_consent(), &report),
+                ResidualPiiRisk::High,
+                "High conditions are evaluated before the exemption"
+            );
+        }
+    }
+
     #[test]
     fn successfully_redacted_secret_is_medium_not_high() {
         use super::*;
@@ -9123,13 +9493,96 @@ mod tests {
         );
     }
 
+    /// #377. `replay.tool_manifest_hashes` was traversed by KEY only: each
+    /// value was reinserted untouched, so a secret parked in a value reached
+    /// the finished envelope. The residual scan caught it and forced High,
+    /// which is why this was never an active leak -- but the scan is defence
+    /// in depth, not the primary control, and a value that survives
+    /// redaction is a value that reached storage.
+    #[test]
+    fn tool_manifest_hash_values_are_redacted_not_just_their_keys() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.replay.tool_manifest_hashes.insert(
+            "some_tool".to_string(),
+            format!("export OPENAI_API_KEY={secret}"),
+        );
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        let serialized = serde_json::to_string(&env).expect("envelope serializes");
+        assert!(
+            !serialized.contains(secret),
+            "a secret in a manifest VALUE must not survive the typed pass"
+        );
+    }
+
+    /// The reason the values were left alone reads as "these are hashes, and
+    /// the traversal deliberately exempts structural fields". Redacting them
+    /// is only safe if a genuine digest survives unchanged -- otherwise this
+    /// fix would break replay lookups to remove a secret that is not there.
+    /// It does survive: the detectors match secret SHAPES, and a bare hex
+    /// digest is not one. Contextual entropy needs a nearby cue, and the
+    /// value is scanned as its own leaf, so the key beside it cannot act as
+    /// that cue.
+    #[test]
+    fn tool_manifest_hash_values_that_really_are_digests_pass_through_unchanged() {
+        use super::*;
+
+        let digests = [
+            (
+                "plain_sha256",
+                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            (
+                "prefixed_sha256",
+                "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            (
+                "blake3",
+                "blake3:0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+            ),
+        ];
+        let mut env = sample_envelope_with_event_content("please list the files");
+        for (tool, digest) in digests {
+            env.replay
+                .tool_manifest_hashes
+                .insert(tool.to_string(), digest.to_string());
+        }
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        for (tool, digest) in digests {
+            assert_eq!(
+                env.replay
+                    .tool_manifest_hashes
+                    .get(tool)
+                    .map(String::as_str),
+                Some(digest),
+                "redacting a real manifest digest would break replay lookups"
+            );
+        }
+    }
+
     /// Issue #373 case 2, with a real survivor rather than a stubbed report.
-    /// `replay.tool_manifest_hashes` is redacted by KEY only - the typed
-    /// re-scrub traversal reinserts each value untouched - so a secret
-    /// parked in a value is still in the stored envelope after the pass.
     /// That is exactly the "detect-then-redact bug, or a value the
     /// string-leaf pass never visited" the residual scan exists to catch,
     /// and ingest re-derives it itself rather than taking the client's word.
+    ///
+    /// The survivor is parked in `ironclaw.engine_version`, one of the
+    /// structural fields `redact_envelope_side_channels` exempts ON PURPOSE
+    /// ("ids, hashes, versions, enum discriminants and revocation handles"),
+    /// so the fixture rests on a documented exemption rather than on a hole.
+    /// It used to sit in `replay.tool_manifest_hashes`, whose values were
+    /// passed through untouched -- and when #377 closed that gap, this
+    /// test's own sanity assertion below is what caught the fixture going
+    /// stale. Keep the survivor on a deliberate exemption: a fixture that
+    /// depends on a bug turns every fix into a test failure, and worse, it
+    /// makes "this test passes" mean "the bug is still there".
     #[test]
     fn a_secret_that_survives_the_rescrub_forces_high() {
         use super::*;
@@ -9137,10 +9590,7 @@ mod tests {
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-        env.replay.tool_manifest_hashes.insert(
-            "some_tool".to_string(),
-            format!("export OPENAI_API_KEY={secret}"),
-        );
+        env.ironclaw.engine_version = Some(format!("export OPENAI_API_KEY={secret}"));
 
         let redactor = DeterministicTraceRedactor::bare();
 

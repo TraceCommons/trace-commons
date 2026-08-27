@@ -7513,6 +7513,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/admin/config-status", get(config_status_handler))
         .route("/v1/admin/maintenance", post(maintenance_handler))
         .route(
+            "/v1/admin/requeue-pii-backstop",
+            post(requeue_pii_backstop_handler),
+        )
+        .route(
             "/v1/admin/rescore-perplexity",
             post(rescore_perplexity_handler),
         )
@@ -12732,6 +12736,7 @@ async fn submit_trace_handler(
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
+        last_status_reason: None,
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
@@ -49997,6 +50002,170 @@ async fn evaluate_and_record_gate(
     })
 }
 
+/// Actor ref recorded on a re-queue transition. Distinct from the driver's own
+/// actor ref so the audit trail separates "the driver gave up on this trace"
+/// from "an operator put it back".
+const PII_BACKSTOP_REQUEUE_ACTOR_REF: &str = "trace-commons-pii-backstop-requeue";
+
+/// Reason code stamped on a re-queue transition.
+const PII_BACKSTOP_REQUEUED_REASON: &str = "pii_backstop_requeued";
+
+/// Default bound on one re-queue pass when the caller names none.
+const PII_BACKSTOP_REQUEUE_DEFAULT_LIMIT: i64 = 500;
+
+/// Query params for the PII-backstop re-queue admin route. `limit` bounds a
+/// run (a `?limit=5` smoke before a full pass); absent means
+/// `PII_BACKSTOP_REQUEUE_DEFAULT_LIMIT`.
+#[derive(Debug, Deserialize)]
+struct RequeuePiiBackstopQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Hash-only acknowledgement for the re-queue admin route. The work runs in a
+/// spawned background task; the route returns immediately.
+#[derive(Debug, Serialize)]
+struct RequeuePiiBackstopAck {
+    accepted: bool,
+    limit: i64,
+}
+
+/// Running tally for one re-queue pass.
+#[derive(Debug, Default)]
+struct RequeuePiiBackstopSummary {
+    /// Submissions moved back to `AwaitingPiiBackstop` with a cleared budget.
+    requeued: usize,
+    /// Submissions that could not be moved; they stay `Quarantined`.
+    failed: usize,
+}
+
+/// Move quarantined submissions that were quarantined for PII-backstop retry
+/// exhaustion back onto `AwaitingPiiBackstop`, clearing the attempt budget so
+/// the driver reassesses them.
+///
+/// Retry exhaustion is a PROCESSING outcome, not a privacy finding: the
+/// envelope was never successfully re-scrubbed and no risk determination was
+/// ever made about it (see `quarantine_exhausted_pii_backstop`). A vendor
+/// outage that outlives the retry budget therefore condemns traces nothing is
+/// known about -- 112 of the pilot's 177 quarantined traces on 2026-08-27,
+/// all of them collateral damage from a classifier that was failing every
+/// request.
+///
+/// Exposure is unchanged by this pass. `AwaitingPiiBackstop` is, like
+/// `Quarantined`, not consumer-visible: every `== Accepted` gate still holds
+/// the trace. It moves a submission from "condemned without being examined"
+/// to "queued to be examined", and the driver then makes a real
+/// Accepted/Quarantined determination on evidence.
+async fn run_requeue_pii_backstop_pass(
+    state: Arc<AppState>,
+    tenant_id: String,
+    limit: i64,
+) -> anyhow::Result<RequeuePiiBackstopSummary> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PII backstop re-queue requires a configured DB mirror"))?;
+
+    let submissions = db
+        .list_quarantined_pii_backstop_exhausted(&tenant_id, limit)
+        .await
+        .context("failed to enumerate exhausted PII backstop quarantines")?;
+
+    let mut summary = RequeuePiiBackstopSummary::default();
+    for submission_id in submissions {
+        // Clear the budget FIRST. If the status flip lands and the clear does
+        // not, the trace is enumerable again but re-exhausts on its first
+        // failure; the other order leaves a cleared budget on a still-
+        // quarantined trace, which is inert. Prefer the inert failure.
+        if let Err(error) = db
+            .clear_pii_backstop_attempts(&tenant_id, submission_id)
+            .await
+        {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&anyhow::Error::new(error)),
+                submission_id = %submission_id,
+                "Trace Commons PII backstop re-queue could not clear the attempt budget"
+            );
+            summary.failed += 1;
+            continue;
+        }
+
+        match db
+            .update_trace_submission_status(
+                &tenant_id,
+                submission_id,
+                storage_corpus_status(TraceCorpusStatus::AwaitingPiiBackstop),
+                PII_BACKSTOP_REQUEUE_ACTOR_REF,
+                Some(PII_BACKSTOP_REQUEUED_REASON),
+            )
+            .await
+        {
+            Ok(()) => {
+                if let Some(mut record) =
+                    read_submission_record(&state.root, &tenant_id, submission_id)?
+                {
+                    record.status = TraceCorpusStatus::AwaitingPiiBackstop;
+                    write_submission_record(&state.root, &record)?;
+                }
+                summary.requeued += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&anyhow::Error::new(error)),
+                    submission_id = %submission_id,
+                    "Trace Commons PII backstop re-queue could not transition the submission"
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+async fn requeue_pii_backstop_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RequeuePiiBackstopQuery>,
+) -> ApiResult<Json<RequeuePiiBackstopAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    // Fail-closed precondition: the pass reads the audit trail and writes
+    // status transitions, both of which need the DB mirror.
+    if state.db_mirror.is_none() {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trace PII backstop re-queue requires a configured DB mirror",
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(PII_BACKSTOP_REQUEUE_DEFAULT_LIMIT)
+        .clamp(1, PII_BACKSTOP_REQUEUE_DEFAULT_LIMIT);
+    let tenant_id = tenant.tenant_id.clone();
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        match run_requeue_pii_backstop_pass(task_state, tenant_id, limit).await {
+            Ok(summary) => {
+                tracing::info!(
+                    requeued = summary.requeued,
+                    failed = summary.failed,
+                    "Trace Commons PII backstop re-queue pass completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons PII backstop re-queue pass failed"
+                );
+            }
+        }
+    });
+    Ok(Json(RequeuePiiBackstopAck {
+        accepted: true,
+        limit,
+    }))
+}
+
 /// Query params for the perplexity re-score admin route. `limit` bounds a run
 /// (useful for a `?limit=5` pilot smoke before a full pass); absent means the
 /// whole decision backlog.
@@ -54279,6 +54448,7 @@ fn trace_commons_record_from_storage_submission(
             retention_policy_id: record.retention_policy_id,
             expires_at: record.expires_at,
             purged_at: record.purged_at,
+            last_status_reason: record.last_status_reason,
             object_key,
             artifact_receipt: None,
             artifact_object_store: None,
@@ -66680,6 +66850,10 @@ struct TraceCommonsSubmissionRecord {
     expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purged_at: Option<DateTime<Utc>>,
+    /// Allowlisted label for why the submission is in its current status.
+    /// `None` for records written before V49; see `safe_status_reason_label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status_reason: Option<String>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -66864,6 +67038,16 @@ struct TraceReviewQueueItem {
     coverage_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_sequence: Vec<String>,
+    /// Why this submission is in the queue, as an allowlisted label.
+    ///
+    /// `pii_backstop_attempts_exhausted` means the trace was never examined --
+    /// the classifier was unreachable and its retry budget ran out -- as
+    /// opposed to a filter having actually found something. Those need
+    /// opposite handling, and before this field a reviewer could not tell them
+    /// apart without hand-joining the audit trail. `None` on rows predating
+    /// V49.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status_reason: Option<String>,
 }
 
 impl TraceReviewQueueItem {
@@ -66896,6 +67080,7 @@ impl TraceReviewQueueItem {
             tool_sequence: derived
                 .map(|record| record.tool_sequence.clone())
                 .unwrap_or_default(),
+            last_status_reason: record.last_status_reason,
         }
     }
 }

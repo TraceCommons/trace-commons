@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::trace_contribution::{
@@ -70,7 +71,20 @@ const _: () = assert!(
     "CLASSIFY_CHUNK_BYTES leaves too little headroom under the measured cliff"
 );
 
-/// How many times a single `privacy/classify` request is attempted before
+/// How many `privacy/classify` requests for a single field may be in flight
+/// at once.
+///
+/// **Set to 1 deliberately.** #456 raised this to 8 and throughput collapsed:
+/// on the pilot every PII-backstop tick then returned
+/// `done=0 transient=3 breaker_tripped=true` and the queue drained nothing,
+/// so the host was rolled back to the sequential build. Why concurrency hurt
+/// is still not established -- a rate-limit theory did not survive testing
+/// (20 rapid 8 KB requests all returned 200) -- so this stays at 1 until the
+/// diagnostics below explain the failures. One window per request is also
+/// what makes a failure attributable to specific content.
+pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 1;
+
+/// How many times a single `privacy/classify` request is attempted before/// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few
 /// times with exponential backoff before failing the window closed.
 pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
@@ -262,13 +276,47 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
         let ranges = chunk_byte_ranges(text, CLASSIFY_CHUNK_BYTES);
-        let mut windows: Vec<(usize, Vec<ClassifySpan>)> = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let window = &text[range.clone()];
-            let spans = self.classify_window(window).await?;
-            let codepoint_start = text[..range.start].chars().count();
-            windows.push((codepoint_start, spans));
+
+        // Accumulate each window's starting codepoint in ONE pass over the
+        // field. This used to be `text[..range.start].chars().count()` inside
+        // the classification loop, which rescans the whole prefix per window
+        // and is quadratic in field length -- ~60 MB of redundant scanning on
+        // a 971 kB field, far worse on the 16 MB envelopes the pilot holds.
+        // `chunk_byte_ranges` returns contiguous ranges covering the text from
+        // 0, so a running total is exact.
+        let mut codepoint_starts = Vec::with_capacity(ranges.len());
+        let mut codepoints_so_far = 0usize;
+        for range in &ranges {
+            codepoint_starts.push(codepoints_so_far);
+            codepoints_so_far += text[range.clone()].chars().count();
         }
+
+        // Classify the windows concurrently. They are independent -- each is
+        // classified in its own coordinates and merged afterwards -- so the
+        // sequential loop this replaces made a field cost
+        // (windows x round-trip) for no reason. With pilot envelopes at a
+        // median 421 kB that was 50+ serialized requests per field, and the
+        // PII-backstop backlog drained at roughly nine minutes per trace.
+        //
+        // `buffered` preserves stream order, so `windows` is still ordered by
+        // range and `try_collect` surfaces the FIRST window's error in field
+        // order -- the same error the sequential loop would have returned.
+        // That matters: transient-vs-permanent classification drives whether
+        // the trace's attempt budget is charged.
+        let windows: Vec<(usize, Vec<ClassifySpan>)> =
+            futures::stream::iter(ranges.into_iter().zip(codepoint_starts).map(
+                |(range, codepoint_start)| {
+                    let window = &text[range];
+                    async move {
+                        self.classify_window(window)
+                            .await
+                            .map(|spans| (codepoint_start, spans))
+                    }
+                },
+            ))
+            .buffered(MAX_CONCURRENT_CLASSIFY_WINDOWS)
+            .try_collect()
+            .await?;
 
         apply_windowed_spans(text, &windows)
     }
@@ -310,8 +358,22 @@ impl NearAiPrivacyFilterAdapter {
                     }
                     // Retries are spent and the request never reached the
                     // classifier: the upstream is down, the trace is fine.
+                    // The input fingerprint rides along hash-only so a
+                    // repeatedly-failing window is identifiable in the logs.
+                    let diagnostics = classify_input_diagnostics(&[text]);
+                    // The driver logs only a hash of the error, so emit the
+                    // input fingerprint here where it is provably hash-only.
+                    tracing::warn!(
+                        classify_input = %diagnostics,
+                        attempts = attempt,
+                        failure = "transport",
+                        "near-ai privacy classify failed"
+                    );
                     return Err(TraceContributionError::TransientRedactionFailed {
-                        reason: format!("near-ai privacy classifier transport error: {}", err),
+                        reason: format!(
+                            "near-ai privacy classifier transport error: {} attempts={} {}",
+                            err, attempt, diagnostics
+                        ),
                     });
                 }
             };
@@ -331,11 +393,24 @@ impl NearAiPrivacyFilterAdapter {
                 // Same split the retry decision above makes, carried out to
                 // the caller: a 5xx that outlived our retries is the vendor's
                 // problem, anything else (4xx) is ours or the trace's.
+                let diagnostics = classify_input_diagnostics(&[text]);
+                tracing::warn!(
+                    classify_input = %diagnostics,
+                    attempts = attempt,
+                    status = status.as_u16(),
+                    body_hash = %body_hash,
+                    body_len = body_bytes.len(),
+                    failure = "status",
+                    "near-ai privacy classify failed"
+                );
                 let reason = format!(
-                    "near-ai privacy classifier returned non-2xx: status={} body_hash={} body_len={}",
+                    "near-ai privacy classifier returned non-2xx: status={} body_hash={} \
+                     body_len={} attempts={} {}",
                     status.as_u16(),
                     body_hash,
-                    body_bytes.len()
+                    body_bytes.len(),
+                    attempt,
+                    diagnostics
                 );
                 return Err(if status.is_server_error() {
                     TraceContributionError::TransientRedactionFailed { reason }
@@ -362,6 +437,33 @@ impl NearAiPrivacyFilterAdapter {
             return Ok(entry.spans);
         }
     }
+}
+
+/// Hash-only description of the input a failing classify request carried.
+///
+/// Every synthetic probe of this endpoint succeeds while the driver's real
+/// traffic fails, so the failures depend on something about the actual window
+/// content that cannot be reproduced from outside. This records enough to
+/// identify the offending window -- its size and a stable fingerprint -- while
+/// disclosing none of it.
+///
+/// Content-derived values are SHA-256 prefixes, never the text: these strings
+/// reach operational logs, where the repo's rule is hash-only or label-only.
+fn classify_input_diagnostics(windows: &[&str]) -> String {
+    let parts: Vec<String> = windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let digest = <sha2::Sha256 as sha2::Digest>::digest(window.as_bytes());
+            format!(
+                "{index}:bytes={},chars={},sha256={}",
+                window.len(),
+                window.chars().count(),
+                &hex::encode(digest)[..16]
+            )
+        })
+        .collect();
+    format!("inputs={} [{}]", windows.len(), parts.join(" "))
 }
 
 /// Exponential backoff before retrying a classify attempt: 250ms, 500ms,
@@ -568,6 +670,66 @@ mod tests {
             end,
             score,
         }
+    }
+
+    /// The diagnostics exist to identify a failing window in operational
+    /// logs, so they must carry size and a stable fingerprint -- and none of
+    /// the text. This is the hash-only rule at the one place content could
+    /// leak into a log line.
+    #[test]
+    fn classify_diagnostics_fingerprint_without_disclosing_content() {
+        let secret = "contact alice@example.com about sk-live-000111222333";
+        let diagnostics = classify_input_diagnostics(&[secret]);
+
+        assert!(
+            diagnostics.contains(&format!("bytes={}", secret.len())),
+            "diagnostics must record the window size: {diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("sha256="),
+            "diagnostics must record a fingerprint: {diagnostics}"
+        );
+        for leaked in [
+            secret,
+            "alice@example.com",
+            "sk-live-000111222333",
+            "contact",
+        ] {
+            assert!(
+                !diagnostics.contains(leaked),
+                "diagnostics leaked {leaked:?}: {diagnostics}"
+            );
+        }
+    }
+
+    /// The fingerprint has to be stable for the same window and different for
+    /// different ones, or it cannot answer the question it exists for: is one
+    /// window failing repeatedly, or many different windows failing once?
+    #[test]
+    fn classify_diagnostics_are_stable_per_window_and_distinct_across_windows() {
+        let a = classify_input_diagnostics(&["window content one"]);
+        let a_again = classify_input_diagnostics(&["window content one"]);
+        let b = classify_input_diagnostics(&["window content two"]);
+
+        assert_eq!(a, a_again, "same window must fingerprint identically");
+        assert_ne!(a, b, "different windows must fingerprint differently");
+    }
+
+    /// Multibyte text: the byte length and the character count are both
+    /// recorded because a window can be under the byte cap while carrying far
+    /// fewer characters, and the endpoint's limits are not obviously in either
+    /// unit.
+    #[test]
+    fn classify_diagnostics_record_bytes_and_chars_separately() {
+        let text = "héllo wörld";
+        let diagnostics = classify_input_diagnostics(&[text]);
+        assert!(diagnostics.contains(&format!("bytes={}", text.len())));
+        assert!(diagnostics.contains(&format!("chars={}", text.chars().count())));
+        assert_ne!(
+            text.len(),
+            text.chars().count(),
+            "test text must actually be multibyte"
+        );
     }
 
     #[test]
