@@ -4541,3 +4541,103 @@ async fn chunk_vector_entries_insert_atomically_and_list_by_submission() {
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
 }
+
+/// The scoped attestation's read path, against a real database.
+///
+/// This exists because the defect it pins is invisible to an in-memory double:
+/// the old attestation query INNER JOINed gate decisions, so a submission the
+/// contributor owns but the server has not scored yet simply vanished from the
+/// result, indistinguishable from one that was never submitted. The fix drives
+/// a LEFT join from `trace_submissions`, and "an absent row means unscored, not
+/// unknown" is a claim about SQL, not about Rust.
+///
+/// Requires a gate-driver pool, so it skips when
+/// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset -- the same condition the
+/// RLS suite documents. That connection matters: the query relies on the
+/// `trace_gate_driver` role's permissive cross-tenant SELECT policies, and a
+/// superuser connection would authorize the read for the wrong reason and hide
+/// a policy regression.
+#[tokio::test]
+async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
+        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
+        return;
+    }
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant = format!("pg-scoped-attest-{}", Uuid::new_v4());
+    let mine = "principal:test-user";
+
+    // Three submissions under one tenant: one scored, one submitted but never
+    // scored, and one belonging to a different principal.
+    let scored_id = Uuid::new_v4();
+    let unscored_id = Uuid::new_v4();
+    let other_principal_id = Uuid::new_v4();
+    let never_existed_id = Uuid::new_v4();
+
+    for id in [scored_id, unscored_id] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant, id))
+            .await
+            .expect("insert own submission");
+    }
+    let mut other = sample_submission(&tenant, other_principal_id);
+    other.auth_principal_ref = "principal:somebody-else".to_string();
+    backend
+        .upsert_trace_submission(other)
+        .await
+        .expect("insert other principal's submission");
+
+    backend
+        .insert_trace_gate_decision(&tenant, sample_gate_decision(scored_id))
+        .await
+        .expect("score one of them");
+    backend
+        .insert_trace_gate_decision(&tenant, sample_gate_decision(other_principal_id))
+        .await
+        .expect("score the other principal's too");
+
+    let rows = backend
+        .list_own_gate_decision_scores_for_submissions(
+            &tenant,
+            mine,
+            &[scored_id, unscored_id, other_principal_id, never_existed_id],
+        )
+        .await
+        .expect("scoped score read");
+
+    let by_id: std::collections::BTreeMap<Uuid, bool> = rows
+        .iter()
+        .map(|r| (r.submission_id, r.score.is_some()))
+        .collect();
+
+    // The whole point: owned-and-scored and owned-but-unscored are BOTH
+    // returned, and are told apart by `score`, not by presence.
+    assert_eq!(
+        by_id.get(&scored_id),
+        Some(&true),
+        "a scored submission must come back with its score"
+    );
+    assert_eq!(
+        by_id.get(&unscored_id),
+        Some(&false),
+        "an owned but unscored submission must come back with score: None, \
+         not vanish -- that absence is the defect this method exists to fix"
+    );
+
+    // Not ours, and not real, are both simply absent. The handler turns that
+    // absence into `unknown`, which is why the two must be indistinguishable
+    // here: telling them apart would let the route probe for submission ids.
+    assert!(
+        !by_id.contains_key(&other_principal_id),
+        "another principal's submission must not be returned, even scored, \
+         even under the same tenant"
+    );
+    assert!(
+        !by_id.contains_key(&never_existed_id),
+        "an id that does not exist must be absent, exactly like one we do not own"
+    );
+}
