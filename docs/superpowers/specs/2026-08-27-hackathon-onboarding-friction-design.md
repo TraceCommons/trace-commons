@@ -70,14 +70,34 @@ to arrive from somewhere. That premise was wrong — see Slice D.
 
 ## Motivation
 
-### The Gemini CLI advice was a dead end
+### The Letta on-ramp has never worked
 
 Hackers asked to use Gemini CLI and were pointed at the Letta Trajectory
-integration docs. Trajectory has no Gemini CLI adapter — it covers Claude Code,
-Codex, Hermes, Letta Code, OpenClaw, OpenHands, Pi, and Deep Agents
-(`2026-07-25-letta-trajectory-support-design.md`). Those hackers were not
-facing "too many additional steps"; they were following instructions that could
-not have worked.
+integration docs. They were following instructions that could not have worked,
+though not for the reason an earlier draft of this spec gave.
+
+That draft said Trajectory has no Gemini CLI adapter, citing the eight-adapter
+list in `2026-07-25-letta-trajectory-support-design.md`. **That is stale.**
+Upstream `@letta-ai/trajectory` 0.3.0, published 2026-08-20, carries a
+`gemini-cli` adapter among fourteen.
+
+The real defect is worse and applies to every harness. `README.md:346-350`
+tells contributors to run `npx @letta-ai/trajectory > session.json`. **No
+published version of that package has ever had a `bin` entry** — verified
+against the registry packument for every version from 0.1.0 to 0.3.0, where
+`bin` is absent throughout. `npx` cannot execute it; it fails with "could not
+determine executable to run". The package is a library exposing
+`normalizeTranscript()`, requiring Node >= 20.
+
+So the actual workflow behind our one-line instruction is: install Node,
+install the library, locate your harness's session store yourself, and write a
+script against its API. That is precisely the "too many additional steps"
+Devfolio reported, and the "documented two-step" premise of the 2026-07-25
+design was never true.
+
+Slice A survives this correction, on different grounds. A native adapter reads
+the local store directly with zero conversion step, which is strictly better
+than any Letta path even once that path works.
 
 ### "The more agents your CLI can support" is a capability ask
 
@@ -130,11 +150,10 @@ changes that reasoning.
 
 **This leaves item 1b only partly answered, and the spec should say so.** Slice
 B removes the `--trajectory` flag; it does not shorten the Letta-side
-conversion workflow, which is the friction Devfolio actually described. A
-hacker on a harness Trajectory covers still installs and runs Letta's tool
-first. Making that genuinely seamless means either the npx dependency we
-rejected or a native adapter per harness, and the registration seam in Slice A
-is what makes the second option affordable next time.
+conversion workflow, which is the friction Devfolio actually described, and
+which is worse than documented — see "The Letta on-ramp has never worked".
+Closing it properly is planned separately; the registration seam in Slice A is
+what makes native per-harness adapters affordable as the escalation path.
 
 ### Tolerant parsing for Gemini, not fail-closed
 
@@ -517,6 +536,19 @@ should not be left to be discovered during the event.
 
 The contributor-side mitigation is to submit throughout rather than at the end,
 which is what the daemon is for, and worth saying plainly in the quickstart.
+
+### A live bug this work uncovered, not fixed here
+
+Upstream's trajectory-v1 schema now carries `system` and `observation` roles
+alongside `meta`, `user`, `reasoning`, `assistant`, and `tool` — confirmed in
+the 0.3.0 tarball's `schema/trajectory-v1.schema.json`. Our reader matches a
+fixed set of roles and ends `_ => bail!("unknown_record")`
+(`trajectory.rs:218`), which rejects the **entire file**.
+
+A contributor who does everything correctly can therefore have a valid,
+schema-conforming trajectory refused. This predates and is independent of every
+slice here. It should be fixed on its own, ahead of them, and is tracked in the
+separate Letta plan.
 
 ### Out of scope
 
