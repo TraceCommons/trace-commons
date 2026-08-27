@@ -2829,6 +2829,48 @@ pub trait TraceCorpusStore: Send + Sync {
         ))
     }
 
+    /// List quarantined submissions in `tenant_id` whose quarantine was a
+    /// PII-backstop retry exhaustion rather than a privacy finding, most
+    /// recently received first, bounded by `limit`.
+    ///
+    /// Identified by an audit row with `action = 'review'` and
+    /// `metadata_json->>'reason_code' = 'pii_backstop_attempts_exhausted'`,
+    /// which is the only thing that records WHY a submission was quarantined
+    /// -- `trace_submissions` carries no reason column today.
+    ///
+    /// Only submissions that still have an active `submitted_envelope` object
+    /// ref are returned. Exhaustion never invalidates that ref (nothing was
+    /// re-scrubbed, so there is no replacement), but a retention or revocation
+    /// pass since then may have, and re-queueing a submission whose envelope
+    /// is gone would strand it on `AwaitingPiiBackstop` forever.
+    ///
+    /// The default returns an empty list — a backend without a real
+    /// implementation simply has nothing to re-queue.
+    async fn list_quarantined_pii_backstop_exhausted(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Clear the PII-backstop attempt budget for one submission, so a
+    /// re-queued trace is enumerated again rather than immediately
+    /// re-exhausting. Deletes the bookkeeping row outright; the driver treats
+    /// an absent row as `COALESCE(attempts, 0) = 0`.
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn clear_pii_backstop_attempts(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "clear_pii_backstop_attempts not implemented for this backend".to_string(),
+        ))
+    }
+
     /// Stamp `last_attempt_at`/`last_error_label` on the per-`(tenant_id,
     /// submission_id)` PII-backstop bookkeeping row WITHOUT incrementing
     /// `attempts`, creating the row with `attempts = 0` if absent.
