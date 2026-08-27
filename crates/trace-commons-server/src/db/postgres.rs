@@ -1871,6 +1871,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&49_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V49__trace_submission_last_status_reason.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&49_i32, &"trace_submission_last_status_reason"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5279,6 +5300,53 @@ mod tests {
         assert!(
             !V48.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
             "V48 must not weaken forced RLS"
+        );
+    }
+
+    /// V49 adds the label-only status-reason column. It must stay
+    /// label-only: the point of the column is that a reviewer can tell a
+    /// privacy finding from a processing failure, and the point of the
+    /// allowlist behind it is that caller-supplied revocation text never
+    /// lands in a plainly-readable column. No new reader-role grant either --
+    /// widening a column-scoped reader for a column it never reads is exactly
+    /// the drift V45 exists to prevent.
+    #[test]
+    fn v49_adds_a_nullable_label_only_status_reason_column() {
+        const V49: &str =
+            include_str!("../../../../migrations/V49__trace_submission_last_status_reason.sql");
+        assert!(
+            V49.contains("ADD COLUMN IF NOT EXISTS last_status_reason TEXT"),
+            "V49 must add the status-reason column"
+        );
+        assert!(
+            !V49.to_uppercase().contains("NOT NULL"),
+            "V49 must leave pre-existing rows NULL rather than assert a reason for them"
+        );
+        assert!(
+            !V49.to_uppercase().contains("UPDATE TRACE_SUBMISSIONS"),
+            "V49 must not backfill a guessed reason onto historical rows"
+        );
+        assert!(
+            !V49.contains("GRANT SELECT (last_status_reason)"),
+            "V49 must not widen a column-scoped reader role for a column it does not read"
+        );
+        assert!(
+            !V49.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V49 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v49_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V49__trace_submission_last_status_reason.sql"),
+            "V49 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&49_i32"),
+            "V49 must record itself in _trace_commons_migrations"
         );
     }
 

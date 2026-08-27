@@ -823,6 +823,49 @@ pub struct TraceSubmissionKeysetCursor {
     pub submission_id: Uuid,
 }
 
+/// Fallback label for a status reason that is not on the allowlist below.
+pub const STATUS_REASON_OTHER: &str = "other";
+
+/// Reason labels that may be stored verbatim in
+/// `trace_submissions.last_status_reason`.
+///
+/// Every entry is a fixed compile-time constant produced by the server
+/// itself, never anything a caller supplies.
+const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
+    // The driver gave up on a trace after exhausting its retry budget. The
+    // whole reason this column exists: it means NOTHING was learned about the
+    // trace, as opposed to a filter having found something.
+    "pii_backstop_attempts_exhausted",
+    // An operator returned an exhausted trace to the backlog for reassessment.
+    "pii_backstop_requeued",
+    // The backstop completed and released the hold on a real determination.
+    "near-ai-pii-backstop-v1",
+    // A human review decision.
+    "review_decision",
+    // Retention lifecycle.
+    "retention_purged",
+    "retention_expired",
+];
+
+/// Reduce a status-transition reason to a label safe to store in a
+/// plainly-readable column.
+///
+/// Fail-closed: anything not on `ALLOWLISTED_STATUS_REASONS` becomes
+/// [`STATUS_REASON_OTHER`]. This is not defensive tidiness -- trace revocation
+/// takes a free-text reason straight from the API caller
+/// (`trace_revocation_reason_for_request`), and the audit trail stores only
+/// `sha256(reason)` for exactly that input. Storing it verbatim here would put
+/// arbitrary caller text, potentially PII or operator-secret material, into a
+/// column that the review surface reads back. An allowlist is the only form of
+/// this that cannot be defeated by a new call site forgetting the rule.
+pub fn safe_status_reason_label(reason: &str) -> &'static str {
+    ALLOWLISTED_STATUS_REASONS
+        .iter()
+        .find(|allowed| **allowed == reason)
+        .copied()
+        .unwrap_or(STATUS_REASON_OTHER)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionRecord {
     pub tenant_id: String,
@@ -855,6 +898,10 @@ pub struct TraceSubmissionRecord {
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub purged_at: Option<DateTime<Utc>>,
+    /// Allowlisted label for why the submission is in its current status, or
+    /// `None` for rows written before V49. See [`safe_status_reason_label`].
+    #[serde(default)]
+    pub last_status_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2949,4 +2996,62 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         vector_entry_id: Uuid,
     ) -> Result<bool, DatabaseError>;
+}
+
+#[cfg(test)]
+mod status_reason_tests {
+    use super::{STATUS_REASON_OTHER, safe_status_reason_label};
+
+    /// The labels the review surface actually reasons about must survive
+    /// verbatim, or the queue cannot tell a processing failure from a privacy
+    /// finding -- the entire point of the column.
+    #[test]
+    fn allowlisted_labels_pass_through_unchanged() {
+        for label in [
+            "pii_backstop_attempts_exhausted",
+            "pii_backstop_requeued",
+            "near-ai-pii-backstop-v1",
+            "review_decision",
+            "retention_purged",
+            "retention_expired",
+        ] {
+            assert_eq!(
+                safe_status_reason_label(label),
+                label,
+                "{label} must be storable verbatim"
+            );
+        }
+    }
+
+    /// The reason this is an allowlist and not a sanitiser. Trace revocation
+    /// takes a free-text reason straight from the API caller, and the audit
+    /// trail stores only sha256 of it. Anything of that shape must collapse to
+    /// a fixed label rather than reach a plainly-readable column.
+    #[test]
+    fn caller_supplied_text_never_reaches_the_column() {
+        for hostile in [
+            "contact alice@example.com about this",
+            "sk-live-0000000000000000000000000000000000000000",
+            "https://internal.example.com/admin?token=abcd1234",
+            "arn:aws:iam::123456789012:role/trace-commons",
+            "",
+            "PII_BACKSTOP_ATTEMPTS_EXHAUSTED",
+            "pii_backstop_attempts_exhausted ",
+            "review_decision; DROP TABLE trace_submissions",
+        ] {
+            assert_eq!(
+                safe_status_reason_label(hostile),
+                STATUS_REASON_OTHER,
+                "{hostile:?} must not be stored verbatim"
+            );
+        }
+    }
+
+    /// The label is `&'static str`, so a stored value can only ever be one of
+    /// a fixed set. Pin that the fallback is not itself caller-influenced.
+    #[test]
+    fn the_fallback_is_a_fixed_label() {
+        assert_eq!(STATUS_REASON_OTHER, "other");
+        assert_eq!(safe_status_reason_label("anything at all"), "other");
+    }
 }

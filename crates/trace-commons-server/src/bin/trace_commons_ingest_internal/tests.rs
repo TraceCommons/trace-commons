@@ -15591,6 +15591,7 @@ fn db_reconciliation_projects_submitted_audit_metadata_privacy_risk_drift() {
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     };
     let db_by_submission = BTreeMap::from([(submission_id, &submission_record)]);
 
@@ -65850,6 +65851,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
     }
@@ -65909,6 +65911,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
         self.object_refs
@@ -81290,6 +81293,7 @@ fn seeded_storage_submission_record(
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     }
 }
 

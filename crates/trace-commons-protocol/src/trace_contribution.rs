@@ -4646,6 +4646,37 @@ fn resolve_post_scrub_risk(
     }
 }
 
+/// Redaction labels that are recorded but do not, on their own, raise the
+/// residual-risk tier.
+///
+/// `local_path` was measured in 2,455 of 2,630 real sessions (93.3%). A
+/// signal present in 93% of records cannot discriminate, and treating it as
+/// one made a filesystem path sufficient to force Medium before the consent
+/// flags were even consulted. No comparable corpus pipeline has a path
+/// sensitivity rule -- not BigCode `pii-lib`, Dolma, StarCoder, Sentry Relay,
+/// or the OTel redaction processor -- and both mature pipelines that looked
+/// at this class of signal went the other way and sub-classified it. Letta's
+/// trajectory format, adopted here as the cross-harness standard, promotes
+/// `cwd` to a named field; its canonical example `"cwd": "/workspace"` is a
+/// value the old rule would have quarantined.
+///
+/// This is a severity decision only. The path is still detected, still
+/// replaced with a placeholder, and still counted into
+/// `privacy.redaction_counts`, because the report is an annotation on an
+/// accepted record. Dropping the count would trade one information loss for
+/// another.
+const NON_SEVERITY_REDACTION_LABELS: &[&str] = &["local_path"];
+
+/// Whether a redaction label contributes to the residual-risk tier.
+///
+/// Exact match, deliberately: the count vocabulary is namespaced
+/// (`secret:contextual_entropy`, `privacy_filter:private_email`), so a prefix
+/// or substring test here would silently exempt labels that were never meant
+/// to be exempt.
+fn label_bears_severity(label: &str) -> bool {
+    !NON_SEVERITY_REDACTION_LABELS.contains(&label)
+}
+
 /// Classify what a redaction pass leaves behind.
 ///
 /// "Residual" means what is still in the envelope after the pass, not what
@@ -4687,9 +4718,19 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     // who under-reports risk should not be able to land in accepted
     // storage with a Low classification just because the flags are
     // clean; the pass has direct evidence the flags are wrong.
+    //
+    // `local_path` is excluded from this test (#219a). It is still redacted
+    // and still counted -- see `label_bears_severity` for why it does not
+    // set a tier on its own.
     if report.blocked_secret_detected
-        || !report.counts.is_empty()
-        || !report.pii_labels_present.is_empty()
+        || report
+            .counts
+            .keys()
+            .any(|label| label_bears_severity(label))
+        || report
+            .pii_labels_present
+            .iter()
+            .any(|label| label_bears_severity(label))
     {
         return ResidualPiiRisk::Medium;
     }
@@ -6471,6 +6512,19 @@ mod tests {
 
         assert!(privacy_warnings(ResidualPiiRisk::Low).is_empty());
     }
+    /// A consent block declaring no content, so a test asserting on the
+    /// report alone is not floored to Medium by a flag.
+    fn clean_consent() -> super::ConsentMetadata {
+        super::ConsentMetadata {
+            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+            scopes: vec![super::ConsentScope::DebuggingEvaluation],
+            message_text_included: false,
+            tool_payloads_included: false,
+            correction_included: false,
+            revocable: true,
+        }
+    }
+
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Pins what each consent scope PERMITS, not merely what it is called.
@@ -8975,6 +9029,145 @@ mod tests {
             "uncued short opaque was redacted: {out}"
         );
         assert!(!rep.blocked_secret_detected);
+    }
+
+    /// #219(a). `local_path` is redacted in 2,455 of 2,630 real sessions
+    /// (93.3%), and any non-empty report forced Medium before consent flags
+    /// were consulted. A signal present in 93% of records carries almost no
+    /// information, and no comparable pipeline -- BigCode, Dolma, StarCoder,
+    /// Sentry, OTel -- has a filesystem-path sensitivity rule at all. Letta's
+    /// trajectory format, which this project adopted as its cross-harness
+    /// standard, promotes `cwd` to a named field; its canonical example
+    /// `"cwd": "/workspace"` is a value the old rule would have quarantined.
+    ///
+    /// Redaction is unchanged. The path is still replaced and still counted;
+    /// it just stops setting the tier on its own.
+    #[test]
+    fn a_redacted_local_path_alone_does_not_raise_the_tier() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 7)]),
+            pii_labels_present: vec!["local_path".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            residual_risk(&clean_consent(), &report),
+            ResidualPiiRisk::Low,
+            "a path the scrubber replaced is an annotation, not a finding"
+        );
+    }
+
+    /// The exemption is for `local_path` specifically, not for "the report
+    /// has entries". Anything else in the same report still sets the tier,
+    /// so a path cannot dilute a real finding sitting beside it.
+    #[test]
+    fn local_path_does_not_mask_a_real_finding_in_the_same_report() {
+        use super::*;
+
+        for (label, count) in [
+            ("secret", 1),
+            ("secret:contextual_entropy", 1),
+            ("sensitive_field", 1),
+            ("tool_sensitive_field", 1),
+            ("privacy_filter:private_email", 1),
+        ] {
+            let report = RedactionReport {
+                counts: BTreeMap::from([
+                    ("local_path".to_string(), 12),
+                    (label.to_string(), count),
+                ]),
+                pii_labels_present: vec!["local_path".to_string()],
+                ..Default::default()
+            };
+            assert_eq!(
+                residual_risk(&clean_consent(), &report),
+                ResidualPiiRisk::Medium,
+                "{label} beside a local_path must still raise the tier"
+            );
+        }
+
+        // Same for a non-exempt pii label with no counts beside it.
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 3)]),
+            pii_labels_present: vec!["local_path".to_string(), "person_name".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            residual_risk(&clean_consent(), &report),
+            ResidualPiiRisk::Medium,
+            "a person_name beside a local_path must still raise the tier"
+        );
+    }
+
+    /// The exemption is about SEVERITY only. The count must still reach
+    /// `privacy.redaction_counts`, because the report is an annotation on an
+    /// accepted record and dropping it would trade one information loss for
+    /// another.
+    #[test]
+    fn local_path_is_still_redacted_and_still_counted() {
+        use super::*;
+
+        let r = DeterministicTraceRedactor::deterministic_only(vec!["/Users/someone".to_string()]);
+        let (out, report) = r.redact_text("opened /Users/someone/code/secret-project/main.rs");
+
+        assert!(
+            !out.contains("/Users/someone/code"),
+            "the path must still be redacted: {out}"
+        );
+        assert_eq!(
+            report.counts.get("local_path").copied(),
+            Some(1),
+            "the path must still be counted for the annotation"
+        );
+        assert!(report.pii_labels_present.iter().any(|l| l == "local_path"));
+    }
+
+    /// Consent flags are a separate route to Medium and are untouched: the
+    /// exemption must not let a declared-content trace fall to Low.
+    #[test]
+    fn local_path_exemption_does_not_bypass_consent_flags() {
+        use super::*;
+
+        let report = RedactionReport {
+            counts: BTreeMap::from([("local_path".to_string(), 4)]),
+            pii_labels_present: vec!["local_path".to_string()],
+            ..Default::default()
+        };
+        let mut consent = clean_consent();
+        consent.message_text_included = true;
+
+        assert_eq!(
+            residual_risk(&consent, &report),
+            ResidualPiiRisk::Medium,
+            "a declared content flag still floors at Medium"
+        );
+    }
+
+    /// High is unaffected: the exemption sits below both High conditions.
+    #[test]
+    fn local_path_exemption_does_not_soften_high() {
+        use super::*;
+
+        for report in [
+            RedactionReport {
+                counts: BTreeMap::from([("local_path".to_string(), 2)]),
+                key_finding_detected: true,
+                ..Default::default()
+            },
+            RedactionReport {
+                counts: BTreeMap::from([("local_path".to_string(), 2)]),
+                coverage_incomplete: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                residual_risk(&clean_consent(), &report),
+                ResidualPiiRisk::High,
+                "High conditions are evaluated before the exemption"
+            );
+        }
     }
 
     #[test]
