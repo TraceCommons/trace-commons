@@ -4413,7 +4413,23 @@ fn redact_envelope_side_channels(
         let manifest = std::mem::take(&mut envelope.replay.tool_manifest_hashes);
         for (key, value) in manifest {
             let mut key = key;
+            let mut value = value;
             redact_string_in_place(redactor, &mut key, report, state);
+            // The VALUE is redacted too (#377). The field is named for
+            // hashes, but nothing validates that it holds one -- it is a
+            // client-populated `BTreeMap<String, String>`, as free-form as
+            // the `feature_flags` map above, which has always redacted both
+            // halves. Leaving values untouched let a planted secret reach
+            // the finished envelope; only the residual scan stood between
+            // that and accepted storage, and the scan is defence in depth,
+            // not the primary control.
+            //
+            // This does not defeat the structural-field exemption below: a
+            // genuine digest survives unchanged, because the detectors match
+            // secret shapes and a bare hex string is not one. Contextual
+            // entropy needs a nearby cue, and the value is redacted as its
+            // own leaf, so the tool name beside it cannot supply one.
+            redact_string_in_place(redactor, &mut value, report, state);
             insert_without_collision(&mut envelope.replay.tool_manifest_hashes, key, value);
         }
     }
@@ -9123,13 +9139,96 @@ mod tests {
         );
     }
 
+    /// #377. `replay.tool_manifest_hashes` was traversed by KEY only: each
+    /// value was reinserted untouched, so a secret parked in a value reached
+    /// the finished envelope. The residual scan caught it and forced High,
+    /// which is why this was never an active leak -- but the scan is defence
+    /// in depth, not the primary control, and a value that survives
+    /// redaction is a value that reached storage.
+    #[test]
+    fn tool_manifest_hash_values_are_redacted_not_just_their_keys() {
+        use super::*;
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mut env = sample_envelope_with_event_content("please list the files");
+        env.replay.tool_manifest_hashes.insert(
+            "some_tool".to_string(),
+            format!("export OPENAI_API_KEY={secret}"),
+        );
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        let serialized = serde_json::to_string(&env).expect("envelope serializes");
+        assert!(
+            !serialized.contains(secret),
+            "a secret in a manifest VALUE must not survive the typed pass"
+        );
+    }
+
+    /// The reason the values were left alone reads as "these are hashes, and
+    /// the traversal deliberately exempts structural fields". Redacting them
+    /// is only safe if a genuine digest survives unchanged -- otherwise this
+    /// fix would break replay lookups to remove a secret that is not there.
+    /// It does survive: the detectors match secret SHAPES, and a bare hex
+    /// digest is not one. Contextual entropy needs a nearby cue, and the
+    /// value is scanned as its own leaf, so the key beside it cannot act as
+    /// that cue.
+    #[test]
+    fn tool_manifest_hash_values_that_really_are_digests_pass_through_unchanged() {
+        use super::*;
+
+        let digests = [
+            (
+                "plain_sha256",
+                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            (
+                "prefixed_sha256",
+                "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            ),
+            (
+                "blake3",
+                "blake3:0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+            ),
+        ];
+        let mut env = sample_envelope_with_event_content("please list the files");
+        for (tool, digest) in digests {
+            env.replay
+                .tool_manifest_hashes
+                .insert(tool.to_string(), digest.to_string());
+        }
+
+        let redactor = DeterministicTraceRedactor::bare();
+        rescrub_trace_envelope_with(&redactor, &mut env);
+
+        for (tool, digest) in digests {
+            assert_eq!(
+                env.replay
+                    .tool_manifest_hashes
+                    .get(tool)
+                    .map(String::as_str),
+                Some(digest),
+                "redacting a real manifest digest would break replay lookups"
+            );
+        }
+    }
+
     /// Issue #373 case 2, with a real survivor rather than a stubbed report.
-    /// `replay.tool_manifest_hashes` is redacted by KEY only - the typed
-    /// re-scrub traversal reinserts each value untouched - so a secret
-    /// parked in a value is still in the stored envelope after the pass.
     /// That is exactly the "detect-then-redact bug, or a value the
     /// string-leaf pass never visited" the residual scan exists to catch,
     /// and ingest re-derives it itself rather than taking the client's word.
+    ///
+    /// The survivor is parked in `ironclaw.engine_version`, one of the
+    /// structural fields `redact_envelope_side_channels` exempts ON PURPOSE
+    /// ("ids, hashes, versions, enum discriminants and revocation handles"),
+    /// so the fixture rests on a documented exemption rather than on a hole.
+    /// It used to sit in `replay.tool_manifest_hashes`, whose values were
+    /// passed through untouched -- and when #377 closed that gap, this
+    /// test's own sanity assertion below is what caught the fixture going
+    /// stale. Keep the survivor on a deliberate exemption: a fixture that
+    /// depends on a bug turns every fix into a test failure, and worse, it
+    /// makes "this test passes" mean "the bug is still there".
     #[test]
     fn a_secret_that_survives_the_rescrub_forces_high() {
         use super::*;
@@ -9137,10 +9236,7 @@ mod tests {
         let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
         let mut env = sample_envelope_with_event_content("please list the files");
         env.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-        env.replay.tool_manifest_hashes.insert(
-            "some_tool".to_string(),
-            format!("export OPENAI_API_KEY={secret}"),
-        );
+        env.ironclaw.engine_version = Some(format!("export OPENAI_API_KEY={secret}"));
 
         let redactor = DeterministicTraceRedactor::bare();
 
