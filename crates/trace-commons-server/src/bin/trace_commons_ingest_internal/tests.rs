@@ -64842,6 +64842,9 @@ async fn evaluate_and_record_gate_scores_and_writes_decision_row() {
         vector_entry_id: _,
         gate_policy_version: _,
         gate_version_hash: _,
+        chunk_count: _,
+        total_chunk_count: _,
+        chunks_capped: _,
     } = outcome
     else {
         panic!("expected GateOutcome::Scored, got {outcome:?}");
@@ -85641,5 +85644,69 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
             chunks_scored: 16,
         },
         "unknown-denominator coverage must not be confusable with a fully scored trace"
+    );
+}
+
+/// #444: a gate decision that did not pass records no reason at all, so a
+/// trace judged on every chunk and a trace judged on a third of one are
+/// indistinguishable in the audit row and to the contributor.
+///
+/// Measured on the pilot: capped decisions read 32.9% of their trace on
+/// average, and one carried 2,362 chunks against a cap of 16. Reporting that
+/// as a plain failure tells a contributor their work fell short when most of
+/// it was never read.
+#[test]
+fn a_capped_failing_decision_says_coverage_was_the_reason() {
+    // Not capped: the gate judged the whole trace, so a failure is a
+    // statement about the trace and carries no coverage excuse.
+    assert_eq!(gate_failure_withheld_reason(Some(false)), None);
+    assert_eq!(gate_failure_withheld_reason(None), None);
+
+    // Capped: the failure is a statement about what we could afford to read.
+    assert_eq!(
+        gate_failure_withheld_reason(Some(true)).as_deref(),
+        Some("insufficient_coverage")
+    );
+}
+
+/// The contributor-facing sentence. Coverage already exists as a type and is
+/// already signed into the score attestation, but that attestation is an
+/// opaque JWT handed to a collector -- nothing renders it for the person who
+/// submitted the trace.
+#[test]
+fn coverage_is_explained_in_words_only_when_it_is_partial() {
+    // A fully scored trace needs no caveat; saying "we read all of it" on
+    // every receipt is noise that would train contributors to skip the line.
+    assert_eq!(
+        coverage_explanation(ScoreAttestationCoverage::Complete { chunks_scored: 4 }),
+        None
+    );
+
+    let partial = coverage_explanation(ScoreAttestationCoverage::Partial {
+        chunks_scored: 16,
+        chunks_total: 2_362,
+    })
+    .expect("a partially read trace must say so");
+    assert!(
+        partial.contains("16") && partial.contains("2362"),
+        "the contributor must see both numbers, not a bare adjective: {partial}"
+    );
+    assert!(
+        !partial.contains("fail") && !partial.contains("inadequate"),
+        "a coverage caveat must not read as a judgement on the work: {partial}"
+    );
+
+    // V47 is not populated on pre-migration rows, so the denominator can be
+    // genuinely unknown. Say that rather than inventing one.
+    let unknown =
+        coverage_explanation(ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored: 16 })
+            .expect("an unknown denominator is still partial coverage");
+    assert!(
+        unknown.contains("16"),
+        "the numerator is known and must be stated: {unknown}"
+    );
+    assert!(
+        !unknown.contains("2362"),
+        "an unknown total must not be fabricated: {unknown}"
     );
 }

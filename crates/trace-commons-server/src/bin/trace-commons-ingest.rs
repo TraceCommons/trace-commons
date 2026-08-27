@@ -49010,6 +49010,65 @@ struct TraceGateEvaluateWorkerResponse {
     /// `"non_production_gate"`, `"submission_not_accepted"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     credit_withheld_reason: Option<String>,
+    /// #444: how much of the trace this decision read, in words, when it read
+    /// less than all of it. Absent for a fully scored trace -- a caveat on
+    /// every response is noise. Derived from the same three columns the score
+    /// attestation signs, so the two surfaces cannot disagree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_explanation: Option<String>,
+}
+
+/// Stable, label-only `credit_withheld_reason` written when a decision failed
+/// a gate floor and the trace was chunk-capped.
+///
+/// #444: credit is withheld either way -- we cannot vouch for what we did not
+/// read -- but the reason matters. A capped decision is a judgement about the
+/// prefix of the trace we could afford to score, not about the trace. Measured
+/// on the pilot, capped decisions read 32.9% of their trace on average, and
+/// one carried 2,362 chunks against a cap of 16. Recording that as an
+/// unexplained failure tells a contributor their work fell short when most of
+/// it was never read.
+const INSUFFICIENT_COVERAGE_LABEL: &str = "insufficient_coverage";
+
+/// Why credit was withheld from a decision that did not pass both floors.
+///
+/// `None` when the trace was fully scored: the gate genuinely judged all of
+/// it, so the failure is a statement about the trace and needs no excuse.
+/// NULL `chunks_capped` reads as false, matching migration V37.
+fn gate_failure_withheld_reason(chunks_capped: Option<bool>) -> Option<String> {
+    chunks_capped
+        .unwrap_or(false)
+        .then(|| INSUFFICIENT_COVERAGE_LABEL.to_string())
+}
+
+/// Render coverage as a sentence for the contributor.
+///
+/// `None` for a fully scored trace: a caveat on every receipt is noise that
+/// trains people to skip the line. Only says something when there is
+/// something to say, and never characterises the work -- the numbers are the
+/// message.
+///
+/// The type and its derivation already existed for the score attestation, but
+/// that attestation is a signed JWT handed to a collector; nothing rendered it
+/// for the person who submitted the trace.
+fn coverage_explanation(coverage: ScoreAttestationCoverage) -> Option<String> {
+    match coverage {
+        ScoreAttestationCoverage::Complete { .. } => None,
+        ScoreAttestationCoverage::Partial {
+            chunks_scored,
+            chunks_total,
+        } => Some(format!(
+            "Scored {chunks_scored} of {chunks_total} sections of this trace; \
+             the rest was not read. Any gate result reflects only the part \
+             that was scored."
+        )),
+        ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored } => Some(format!(
+            "Scored {chunks_scored} sections of this trace; the rest was not \
+             read, and this decision predates recording how many sections \
+             there were. Any gate result reflects only the part that was \
+             scored."
+        )),
+    }
 }
 
 /// Stable, label-only `credit_withheld_reason` sentinel written to the
@@ -49047,6 +49106,12 @@ enum GateOutcome {
         vector_entry_id: Option<Uuid>,
         gate_policy_version: String,
         gate_version_hash: String,
+        /// #444: how much of the trace this decision actually read. Carried
+        /// so a failing decision can say whether the gate judged the trace or
+        /// only the part of it we could afford to score.
+        chunk_count: u32,
+        total_chunk_count: u32,
+        chunks_capped: bool,
     },
     SkippedDuplicate {
         decision_id: Uuid,
@@ -49403,6 +49468,9 @@ async fn evaluate_and_record_gate(
         vector_entry_id: decision.vector_entry_id,
         gate_policy_version: decision.gate_policy_version,
         gate_version_hash: decision.gate_version_hash,
+        chunk_count: decision.chunk_count,
+        total_chunk_count: decision.total_chunk_count,
+        chunks_capped: decision.chunks_capped,
     })
 }
 
@@ -50621,6 +50689,9 @@ async fn gate_evaluate_worker_handler(
         vector_entry_id,
         gate_policy_version,
         gate_version_hash,
+        chunk_count,
+        total_chunk_count,
+        chunks_capped,
     ) = match outcome {
         GateOutcome::Scored {
             decision_id,
@@ -50629,6 +50700,9 @@ async fn gate_evaluate_worker_handler(
             vector_entry_id,
             gate_policy_version,
             gate_version_hash,
+            chunk_count,
+            total_chunk_count,
+            chunks_capped,
         } => (
             decision_id,
             perplexity_passed,
@@ -50636,6 +50710,9 @@ async fn gate_evaluate_worker_handler(
             vector_entry_id,
             gate_policy_version,
             gate_version_hash,
+            chunk_count,
+            total_chunk_count,
+            chunks_capped,
         ),
         GateOutcome::Failed { label } => {
             return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
@@ -50739,7 +50816,13 @@ async fn gate_evaluate_worker_handler(
         }
         (emitted, withheld_reason)
     } else {
-        (false, None)
+        // #444: the decision did not pass a floor. Say WHY credit is withheld.
+        // A capped decision judged only the part of the trace we could afford
+        // to score, so an unexplained failure misrepresents it as a verdict on
+        // the whole. Credit is withheld either way -- we cannot vouch for what
+        // we did not read -- but the label makes the two distinguishable in
+        // the audit row and to the contributor.
+        (false, gate_failure_withheld_reason(Some(chunks_capped)))
     };
 
     Ok(Json(TraceGateEvaluateWorkerResponse {
@@ -50753,6 +50836,13 @@ async fn gate_evaluate_worker_handler(
         vector_entry_id,
         credit_emitted,
         credit_withheld_reason,
+        coverage_explanation: coverage_explanation(
+            ScoreAttestationCoverage::from_decision_columns(
+                Some(chunk_count as i32),
+                Some(total_chunk_count as i32),
+                Some(chunks_capped),
+            ),
+        ),
     }))
 }
 
