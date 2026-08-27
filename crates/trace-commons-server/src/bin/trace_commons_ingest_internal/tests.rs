@@ -85988,3 +85988,102 @@ fn each_pii_backstop_give_up_counter_fails_the_tick_with_its_own_class() {
         DriverFailureClass::UpstreamUnavailable
     );
 }
+
+/// #438: liveness answers "when did this last work?" in one read. It is
+/// admin-gated on purpose -- see the companion test below for why.
+#[tokio::test]
+async fn driver_liveness_reports_registered_drivers_to_an_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let Json(drivers) =
+        driver_liveness_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("admin may read driver liveness");
+
+    assert_eq!(drivers.len(), 1);
+    assert_eq!(drivers[0].driver, "example_driver");
+    assert_eq!(drivers[0].consecutive_failures, 0);
+    assert_eq!(drivers[0].stale_after_seconds, 300);
+    assert!(!drivers[0].stale, "a just-registered driver is not stale");
+}
+
+/// A contributor must not learn which subsystem is currently dead. That is
+/// operational intelligence: it says when the PII backstop is not running.
+#[tokio::test]
+async fn driver_liveness_is_refused_to_a_non_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let error = driver_liveness_handler(State(state), auth_headers("token-a"))
+        .await
+        .expect_err("a contributor token must be refused");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+/// The route is actually registered, not merely a reachable function.
+#[tokio::test]
+async fn driver_liveness_route_is_wired_and_requires_auth() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let anonymous = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/admin/driver-liveness")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("anonymous response");
+    assert_eq!(
+        anonymous.status(),
+        StatusCode::UNAUTHORIZED,
+        "the route must exist and refuse an unauthenticated caller"
+    );
+}
+
+/// #438 proposed putting liveness on `/health`. It is unauthenticated, so
+/// this test exists to stop that being "fixed" back later.
+#[tokio::test]
+async fn health_does_not_expose_driver_liveness() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("health response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body reads");
+    let text = String::from_utf8(body.to_vec()).expect("health body is utf8");
+    assert!(
+        !text.contains("example_driver") && !text.contains("driver"),
+        "unauthenticated /health must not name a driver: {text}"
+    );
+}

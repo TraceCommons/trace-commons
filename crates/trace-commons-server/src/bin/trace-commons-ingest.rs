@@ -7452,6 +7452,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/rollout-smoke/preflight",
             get(rollout_smoke_preflight_handler),
         )
+        .route("/v1/admin/driver-liveness", get(driver_liveness_handler))
         .route("/v1/admin/rollback-drill", post(rollback_drill_handler))
         .route(
             "/v1/admin/key-rotation-drill",
@@ -41070,6 +41071,25 @@ async fn rollout_smoke_evidence_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(evidence))
+}
+
+/// #438: "last successful tick at T" is a single value that makes a five-day
+/// outage obvious at a glance; 6,999 warnings do not.
+///
+/// Admin-gated rather than on `/health`, which is unauthenticated: which
+/// subsystem is currently dead, and for how long, is operational intelligence
+/// -- it tells an anonymous caller when the PII backstop is not running.
+///
+/// Deliberately does no DB read, no tenant scoping, and no audit write.
+/// Driver health is process-global and tenant-independent, and this should
+/// stay cheap enough to poll.
+async fn driver_liveness_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<trace_commons_server::driver_liveness::DriverLivenessSnapshot>>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    Ok(Json(state.driver_liveness.snapshot(Utc::now())))
 }
 
 async fn rollout_smoke_preflight_handler(
