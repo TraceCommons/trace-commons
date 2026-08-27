@@ -4600,11 +4600,12 @@ impl Database for PgBackend {
                 // to multiple rows per submission. Deduplicate to one work item
                 // per (tenant, submission) — otherwise a multi-ref submission
                 // wastes LIMIT slots and gets attempted concurrently more than
-                // once. `received_at` is included in the projection only so it
-                // is a legal DISTINCT + ORDER BY target; it is a per-submission
-                // constant, so it does not change dedup cardinality, and it is
-                // dropped when mapping to GateWorkItem.
-                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                // once. `received_at` and `a.last_attempt_at` are included in
+                // the projection only so they are legal DISTINCT + ORDER BY
+                // targets; both are per-submission constants, so they do not
+                // change dedup cardinality, and both are dropped when mapping
+                // to GateWorkItem.
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at, a.last_attempt_at
                  FROM trace_submissions s
                  JOIN trace_object_refs o
                    ON o.tenant_id = s.tenant_id
@@ -4618,7 +4619,15 @@ impl Database for PgBackend {
                    AND COALESCE(a.attempts, 0) < $1
                    AND (a.last_attempt_at IS NULL
                         OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
-                 ORDER BY s.received_at ASC
+                 -- Least-recently-attempted first, never-attempted before
+                 -- everything else. Ordering by received_at alone let a
+                 -- submission that keeps failing transiently sit at the head
+                 -- of every batch forever: a transient failure charges no
+                 -- attempt, so it stayed permanently eligible, and the
+                 -- consecutive-failure breaker aborted each tick before
+                 -- reaching anything behind it. On 2026-08-27 that starved
+                 -- 233 never-attempted traces behind the same three.
+                 ORDER BY a.last_attempt_at ASC NULLS FIRST, s.received_at ASC
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
             )

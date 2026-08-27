@@ -39401,6 +39401,29 @@ async fn run_pii_backstop_driver_tick(
                 // input, or anything else about the trace itself -- may spend
                 // the trace's budget and eventually exclude it.
                 if is_transient_pii_backstop_failure(&error) {
+                    // Record that an attempt was MADE without charging it, so
+                    // the driver's least-recently-attempted ordering moves this
+                    // submission to the back of the queue. Without this a
+                    // transiently-failing trace stays permanently first and
+                    // starves the whole backlog behind it. A failure to stamp
+                    // is non-fatal -- the trace stays held either way -- but it
+                    // does mean the starvation guard did not apply this round,
+                    // so it is logged hash-only rather than swallowed.
+                    if let Err(touch_error) = db
+                        .touch_pii_backstop_attempt(
+                            &item.tenant_id,
+                            item.submission_id,
+                            Utc::now(),
+                            &error_label,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            error_hash = %safe_runtime_error_hash(&anyhow::Error::new(touch_error)),
+                            submission_id = %item.submission_id,
+                            "Trace Commons PII backstop transient-attempt stamp failed"
+                        );
+                    }
                     tracing::warn!(
                         error_hash = %error_label,
                         submission_id = %item.submission_id,

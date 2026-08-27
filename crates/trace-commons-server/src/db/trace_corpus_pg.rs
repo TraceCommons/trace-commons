@@ -6228,6 +6228,34 @@ impl TraceCorpusStore for PgBackend {
         Ok(row.get(0))
     }
 
+    async fn touch_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // attempts is seeded at 0 and left alone on conflict: this records
+        // that an attempt was MADE without charging it against the trace's
+        // budget, so the driver's least-recently-attempted ordering advances
+        // while `COALESCE(a.attempts, 0) < max_attempts` stays satisfied.
+        tx.execute(
+            "INSERT INTO trace_pii_backstop
+                 (tenant_id, submission_id, attempts, last_attempt_at, last_error_label)
+             VALUES ($1, $2, 0, $3, $4)
+             ON CONFLICT (tenant_id, submission_id) DO UPDATE
+                 SET last_attempt_at = $3,
+                     last_error_label = $4",
+            &[&tenant_id, &submission_id, &now, &error_label],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn find_gate_decision_by_canonical_hash(
         &self,
         tenant_id: &str,
