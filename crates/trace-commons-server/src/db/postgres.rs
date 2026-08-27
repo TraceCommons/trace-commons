@@ -4609,6 +4609,50 @@ impl Database for PgBackend {
         }))
     }
 
+    async fn count_submissions_needing_gate_decision(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_attempts: i32,
+        backoff_base_seconds: i64,
+    ) -> Result<i64, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // Character-for-character the predicate in
+        // `list_submissions_needing_gate_decision`, minus its ORDER BY and
+        // LIMIT. If the two ever drift, the logged backlog stops describing
+        // the queue the driver is actually draining, which is worse than not
+        // logging one -- an operator would tune against a number that means
+        // something else. The pg test asserts they agree on real rows.
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM (
+                   SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                     FROM trace_submissions s
+                     JOIN trace_object_refs o
+                       ON o.tenant_id = s.tenant_id
+                      AND o.submission_id = s.submission_id
+                      AND o.artifact_kind = 'submitted_envelope'
+                      AND o.invalidated_at IS NULL
+                      AND o.deleted_at IS NULL
+                     LEFT JOIN trace_gate_decisions d
+                       ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                     LEFT JOIN trace_gate_evaluation_attempts a
+                       ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                    WHERE d.decision_id IS NULL
+                      AND COALESCE(a.attempts, 0) < $1
+                      AND (a.last_attempt_at IS NULL
+                           OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                 ) pending",
+                &[&max_attempts, &backoff_base_seconds, &now],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.get::<_, i64>(0))
+    }
+
     async fn list_submissions_needing_gate_decision(
         &self,
         now: chrono::DateTime<chrono::Utc>,

@@ -4733,3 +4733,115 @@ async fn pg_store_invite_max_uses_binds_across_derived_tenants() {
         outcomes[1]
     );
 }
+
+/// The backlog count and the work enumeration must agree on real rows.
+///
+/// They are two copies of one predicate, and the whole value of logging a
+/// backlog is that it describes the queue the driver is actually draining. If
+/// they drift, an operator tunes concurrency against a number that means
+/// something else -- worse than logging nothing, because it looks like data.
+///
+/// Also pins the two exclusions the count inherits, because both make a zero
+/// mean less than it appears: a submission in backoff is absent until its
+/// next attempt is due, and one at `max_attempts` is absent for good.
+#[tokio::test]
+async fn pg_store_backlog_count_agrees_with_the_work_enumeration() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
+        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
+        return;
+    }
+    backend.run_migrations().await.expect("run migrations");
+
+    let now = chrono::Utc::now();
+    let max_attempts = 5;
+    let backoff = 30_i64;
+
+    // Give the predicate something to find, or both sides return zero and the
+    // comparison passes without comparing anything. One submission carrying a
+    // submitted_envelope object ref and no gate decision is the exact shape
+    // the driver picks up.
+    let tenant_id = format!("pg-backlog-{}", Uuid::new_v4());
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get provisioning connection");
+        client
+            .execute(
+                "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                &[&tenant_id],
+            )
+            .await
+            .expect("provision tenant");
+    }
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+    // Written directly: no trait method writes a single object ref -- they are
+    // produced as part of larger operations -- and the predicate only cares
+    // that a live submitted_envelope row exists.
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get provisioning connection");
+        client
+            .execute(
+                "INSERT INTO trace_object_refs
+                   (tenant_id, submission_id, object_ref_id, artifact_kind,
+                    object_store, object_key, content_sha256, encryption_key_ref,
+                    size_bytes)
+                 VALUES ($1, $2, $3, 'submitted_envelope',
+                         'trace_commons_file_store', $4, 'sha256:envelope',
+                         $5, 64)",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &Uuid::new_v4(),
+                    &format!("{tenant_id}/{submission_id}/envelope.json"),
+                    &format!("tenant:{tenant_id}"),
+                ],
+            )
+            .await
+            .expect("record submitted envelope ref");
+    }
+
+    // A large limit, so the enumeration is not the thing truncating.
+    let listed = backend
+        .list_submissions_needing_gate_decision(now, max_attempts, backoff, 100_000)
+        .await
+        .expect("enumeration");
+    let counted = backend
+        .count_submissions_needing_gate_decision(now, max_attempts, backoff)
+        .await
+        .expect("count");
+
+    assert_eq!(
+        counted,
+        listed.len() as i64,
+        "count and enumeration disagree: the logged backlog would not describe \
+         the queue the driver drains"
+    );
+    assert!(
+        counted >= 1,
+        "the fixture submission must be counted, or this test compares two zeroes"
+    );
+
+    // max_attempts = 0 admits nothing, whatever else is true of the rows.
+    let none = backend
+        .count_submissions_needing_gate_decision(now, 0, backoff)
+        .await
+        .expect("count with no attempts allowed");
+    assert_eq!(
+        none, 0,
+        "a submission at or past max_attempts must be excluded -- this is why \
+         a backlog of zero can coexist with traces that will never be scored"
+    );
+}
