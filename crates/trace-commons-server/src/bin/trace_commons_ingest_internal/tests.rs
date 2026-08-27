@@ -85646,3 +85646,153 @@ fn a_breaker_tripped_perplexity_tick_is_a_failed_tick() {
         "per-item failures below the breaker threshold are not a tick failure"
     );
 }
+
+/// #438: the shared wrapper keys liveness by name. Two drivers sharing a name
+/// would silently report one driver's health for the other -- a worse failure
+/// than the one this work fixes, because it would look like it was working.
+#[test]
+fn every_driver_registers_a_distinct_name() {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in ALL_DRIVER_NAMES {
+        assert!(
+            seen.insert(*name),
+            "duplicate driver name {name}; liveness would be reported for the wrong driver"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        12,
+        "every spawned driver loop must register; got {seen:?}"
+    );
+}
+
+/// The names are an operator-facing grep target and an admin API field, so
+/// they are a wire format.
+#[test]
+fn driver_names_are_snake_case_and_stable() {
+    for name in ALL_DRIVER_NAMES {
+        assert!(
+            name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "driver name {name} must be snake_case"
+        );
+    }
+}
+
+/// #438: the give-up rule the batch-draining schedulers share. A tick that
+/// claimed work and had every single attempt fail has not done its job, and
+/// through `spawn_driver_loop` a bare `Ok(())` there would refresh
+/// `last_success_at` forever -- the same invisibility the perplexity breaker
+/// bug had.
+#[test]
+fn a_tick_whose_every_attempt_failed_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Nothing to do is not a failure: an idle driver is a working driver.
+    assert!(
+        all_attempts_failed_outcome(
+            EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+            "run_queued",
+            0,
+            0,
+            DriverFailureClass::DependencyUnavailable,
+        )
+        .is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // Partial failure is ordinary per-item noise, not a driver outage.
+    assert!(
+        all_attempts_failed_outcome(
+            EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+            "run_queued",
+            4,
+            1,
+            DriverFailureClass::DependencyUnavailable,
+        )
+        .is_ok(),
+        "per-item failures alongside successes are not a tick failure"
+    );
+
+    // Every attempt failed: the driver gave up on the whole batch.
+    let error = all_attempts_failed_outcome(
+        EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+        "run_queued",
+        0,
+        3,
+        DriverFailureClass::DependencyUnavailable,
+    )
+    .expect_err("a tick where nothing succeeded is not a success");
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::DependencyUnavailable,
+        "the call site names the dependency it gave up on"
+    );
+
+    // The same rule, a different dependency: an outbox drains to a chain RPC.
+    let upstream = all_attempts_failed_outcome(
+        NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+        "submit",
+        0,
+        2,
+        DriverFailureClass::UpstreamUnavailable,
+    )
+    .expect_err("a submit stage where every item failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&upstream),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// A scheduler that refuses to act because a control is not configured is
+/// stalled, not healthy. It reports `config_missing` so the log names the
+/// thing an operator has to change.
+#[test]
+fn a_policy_refusal_is_a_failed_tick_classified_as_config() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let refused = anyhow::Error::new(DriverTickError::RefusedByPolicy {
+        driver: CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
+        control: "credit_settlement_allowed_policy_versions",
+    });
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// The ten worker-route schedulers reach the wrapper through a typed error
+/// rather than a stringified one, so the status they failed with still
+/// decides the class. Before this the whole tuple was formatted into a
+/// message and every one of them logged `unclassified`.
+#[test]
+fn a_worker_route_rejection_is_classified_by_its_status() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let server_error = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "db mirror unavailable"),
+    );
+    assert_eq!(
+        classify_driver_failure(&server_error),
+        DriverFailureClass::DependencyUnavailable
+    );
+
+    let unauthorized = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::UNAUTHORIZED, "worker token rejected"),
+    );
+    assert_eq!(
+        classify_driver_failure(&unauthorized),
+        DriverFailureClass::ConfigMissing,
+        "a worker token the route will not accept is a configuration problem"
+    );
+
+    let bad_request = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::BAD_REQUEST, "unsupported dataset kind"),
+    );
+    assert_eq!(
+        classify_driver_failure(&bad_request),
+        DriverFailureClass::ContentRejected
+    );
+}
