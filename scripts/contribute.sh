@@ -30,6 +30,18 @@
 # The invite is never passed in argv, where it would land in your shell
 # history and in `ps` for every user on the machine. Set TRACE_COMMONS_INVITE,
 # or let the script prompt for it on a terminal.
+#
+# The keep is deliberately its OWN directory, not the state directory an
+# installed CLI uses. Two reasons. A script fetched over the network should not
+# silently adopt an existing enrollment and submit under an identity you did
+# not pick for it; and the delete instruction below has to be safe to follow,
+# which `rm -rf` on an installed CLI's state would not be.
+#
+# The cost is worth stating plainly: if you later install the CLI properly, it
+# enrolls separately. That is a second device key, so a second identity, a
+# second invite use, and per-contributor credit that does not add up across the
+# two. Point TRACE_COMMONS_KEEP_DIR at your installed state directory if you
+# would rather they were one -- and then do not run the delete command.
 
 set -eu
 

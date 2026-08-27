@@ -565,6 +565,17 @@ re-derived locally — and inventing a combined blob would mean a new parser for
 a private-key-bearing file, which is a poor place to add a parser. Reusing the
 existing store is less code and already correct.
 
+The keep is its own directory rather than the platform state directory an
+installed CLI uses. A script fetched over the network should not silently adopt
+an existing enrollment and submit under an identity the contributor did not
+pick for it, and the printed delete instruction has to be safe to follow --
+`rm -rf` against an installed CLI's state would not be.
+
+The cost is a second identity: a contributor who later installs the CLI enrolls
+again, spending another invite use, and per-contributor credit does not
+aggregate across the two device keys. `TRACE_COMMONS_KEEP_DIR` points the keep
+at an existing state directory for anyone who would rather they were one.
+
 What the keep buys:
 
 - **Withdrawal.** `account login` mints a browser session through the
