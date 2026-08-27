@@ -265,7 +265,7 @@ names the call's `event_id`.
 |---|---|---|---|
 | `replayable` | bool | yes | Whether the emitter knows this trace to be unreplayable. See below — it is a veto, not a score. |
 | `required_tools` | [string] | optional | Tools the replay depends on. |
-| `tool_manifest_hashes` | map<string,string> | optional | Hash-pinned tool versions. |
+| `tool_manifest_hashes` | map<string,string> | optional | Hash-pinned tool versions. Both halves are redacted: nothing validates that a value is a digest, so it is treated as free text like every other string leaf. A genuine digest is unaffected — the detectors match secret shapes, and a bare hex string is not one. |
 | `expected_assertions` | [JSON] | optional | Assertions a replay must satisfy. |
 | `replay_notes` | [string] | optional | Caveats (e.g. omitted tool args). |
 

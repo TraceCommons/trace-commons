@@ -251,12 +251,14 @@ const ADVISORY_PATTERNS: &[&str] = &["bearer value"];
 // entire purpose: a mirror that disagrees with the detector reports on inputs
 // the detector never considered.
 //
-// ENTROPY_MIN_LEN was left at 8 when #225 raised the detector to 16, so the
-// audit over-reported every 8-to-15 character value the detector had no
-// intention of redacting (#432). Advisory-only, so it cost noise rather than a
-// missed secret -- but noise in an audit is how real findings get ignored.
+// This value has been argued in both directions and the resolution is #457:
+// #225 lowered the cued-secret floor to 8, the #267 squash reverted it to 16,
+// and #457 restored 8 as the decided band. The mirror was already at 8 and is
+// therefore correct as it stands -- an earlier draft of #432 raised it to 16
+// to match a detector that has since moved back, which would have recreated
+// the drift in the opposite direction.
 const CUE_WINDOW: usize = 48;
-const ENTROPY_MIN_LEN: usize = 16;
+const ENTROPY_MIN_LEN: usize = 8;
 const ENTROPY_BITS_MIN: f64 = 3.2;
 
 /// True for the detector cue regex's separator class: `[\x22'`:=\s]`.
