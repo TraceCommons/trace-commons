@@ -4928,25 +4928,39 @@ impl Database for PgBackend {
         // `score_attestation_handler`).
         let rows = client
             .query(
-                "SELECT DISTINCT ON (d.submission_id)
-                    d.submission_id,
-                    d.credit_quality_micros,
-                    d.perplexity_micros,
-                    d.novelty_score_micros,
-                    d.perplexity_passed,
-                    d.novelty_passed,
-                    d.chunk_count,
-                    d.total_chunk_count,
-                    d.chunks_capped
-                 FROM trace_gate_decisions d
-                 JOIN trace_submissions s
-                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
-                 WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
-                 -- decision_id is the final, unique tiebreaker (mirrors
-                 -- list_scores_by_submission_ids) so decisions that share a
-                 -- decided_at sort deterministically instead of Postgres
-                 -- picking an arbitrary row among ties on repeated reads.
-                 ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                // The inner SELECT picks the LATEST decision per submission;
+                // the outer one orders those by recency and truncates. The
+                // two cannot be one statement: DISTINCT ON requires its
+                // leading ORDER BY term to be the distinct key, so a single
+                // query can only truncate in submission_id order — which is
+                // a random v4 per trace, making truncation an arbitrary slice
+                // of the UUID space rather than a comprehensible "your oldest
+                // scores fell off".
+                "SELECT * FROM (
+                    SELECT DISTINCT ON (d.submission_id)
+                        d.submission_id,
+                        d.credit_quality_micros,
+                        d.perplexity_micros,
+                        d.novelty_score_micros,
+                        d.perplexity_passed,
+                        d.novelty_passed,
+                        d.chunk_count,
+                        d.total_chunk_count,
+                        d.chunks_capped,
+                        d.decided_at
+                     FROM trace_gate_decisions d
+                     JOIN trace_submissions s
+                       ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                     WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                     -- decision_id is the final, unique tiebreaker (mirrors
+                     -- list_scores_by_submission_ids) so decisions that share a
+                     -- decided_at sort deterministically instead of Postgres
+                     -- picking an arbitrary row among ties on repeated reads.
+                     ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                 ) latest
+                 -- submission_id breaks decided_at ties so the truncated set
+                 -- is stable across repeated reads.
+                 ORDER BY latest.decided_at DESC, latest.submission_id DESC
                  LIMIT $3",
                 &[&tenant_id, &auth_principal_ref, &limit],
             )
@@ -4966,6 +4980,83 @@ impl Database for PgBackend {
                     chunk_count: row.get("chunk_count"),
                     total_chunk_count: row.get("total_chunk_count"),
                     chunks_capped: row.get("chunks_capped"),
+                }
+            })
+            .collect())
+    }
+
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // Same authorization story as `list_own_gate_decision_scores`: no
+        // tenant GUC, the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize the read, and the `s.tenant_id = $1 AND
+        // s.auth_principal_ref = $2` predicates are what scope it to the
+        // caller's own rows. $3 only NARROWS that set.
+        //
+        // The join is LEFT, and driven from trace_submissions rather than
+        // from trace_gate_decisions, precisely so an owned-but-unscored
+        // submission comes back with NULL score columns instead of
+        // vanishing. That absence is the defect this method exists to fix.
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (s.submission_id)
+                    s.submission_id,
+                    d.decision_id,
+                    d.credit_quality_micros,
+                    d.perplexity_micros,
+                    d.novelty_score_micros,
+                    d.perplexity_passed,
+                    d.novelty_passed,
+                    d.chunk_count,
+                    d.total_chunk_count,
+                    d.chunks_capped
+                 FROM trace_submissions s
+                 LEFT JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 WHERE s.tenant_id = $1
+                   AND s.auth_principal_ref = $2
+                   AND s.submission_id = ANY($3)
+                 ORDER BY s.submission_id, d.decided_at DESC NULLS LAST, d.decision_id DESC",
+                &[&tenant_id, &auth_principal_ref, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let decision_id: Option<Uuid> = row.get("decision_id");
+                let submission_id: Uuid = row.get("submission_id");
+                // Every score column is NULLable only because of the LEFT
+                // join; a present decision_id means the whole row is present.
+                let score = decision_id.map(|_| {
+                    let perplexity_passed: bool = row.get("perplexity_passed");
+                    let novelty_passed: bool = row.get("novelty_passed");
+                    crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                        submission_id,
+                        credit_quality_micros: row.get("credit_quality_micros"),
+                        perplexity_micros: row.get("perplexity_micros"),
+                        novelty_score_micros: row.get("novelty_score_micros"),
+                        gate_passed: perplexity_passed && novelty_passed,
+                        chunk_count: row.get("chunk_count"),
+                        total_chunk_count: row.get("total_chunk_count"),
+                        chunks_capped: row.get("chunks_capped"),
+                    }
+                });
+                crate::trace_corpus_storage::OwnSubmissionScoreRow {
+                    submission_id,
+                    score,
                 }
             })
             .collect())

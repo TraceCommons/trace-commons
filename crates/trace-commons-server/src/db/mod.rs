@@ -1262,6 +1262,28 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
         Ok(Vec::new())
     }
+
+    /// The scoped counterpart of `list_own_gate_decision_scores`: for each of
+    /// `submission_ids` OWNED by `(tenant_id, auth_principal_ref)`, return
+    /// its latest gate-decision score, or `None` when it has not been scored
+    /// yet. Ids the principal does not own are simply absent from the
+    /// result, whether they belong to another principal or to nobody — the
+    /// caller must not be able to tell those apart, or this becomes a probe
+    /// for other contributors' submission ids.
+    ///
+    /// `submission_ids` is the ONLY caller-supplied input; the identity pair
+    /// still comes from the authenticated request context, never from the
+    /// request body. The id list narrows a set the principal already owns,
+    /// so it cannot widen the read. Default: empty (test doubles / backends
+    /// without a gate-driver pool).
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        _tenant_id: &str,
+        _auth_principal_ref: &str,
+        _submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The session row to create on a winning redeem. `token_hash` is sha256-shaped;

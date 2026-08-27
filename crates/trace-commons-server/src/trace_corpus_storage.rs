@@ -1984,6 +1984,22 @@ pub struct TraceScoreBySubmissionRow {
     pub chunks_capped: Option<bool>,
 }
 
+/// One asked-about submission that the requesting principal actually owns,
+/// with its latest gate-decision score when there is one.
+///
+/// The scoped score-attestation read returns one of these per owned id.
+/// `score: None` is the "submitted, not scored yet" state that had no
+/// representation anywhere before: the unscoped enumeration inner-joins the
+/// decision table, so a submission awaiting the gate driver is simply absent
+/// and indistinguishable from one that was never uploaded. Ids the principal
+/// does not own are not returned at all, and the caller reports them as
+/// `unknown` without saying whether they exist elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnSubmissionScoreRow {
+    pub submission_id: Uuid,
+    pub score: Option<TraceScoreBySubmissionRow>,
+}
+
 /// Safe, label-only missing-control name returned when a storage backend has
 /// no real withdrawal implementation. Withdrawal deletes content and reports a
 /// distribution tier; a backend that cannot do either must refuse rather than

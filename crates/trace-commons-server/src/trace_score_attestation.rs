@@ -311,9 +311,34 @@ pub struct ScoreAttestationClaims {
     pub tenant_id: String,
     pub auth_principal_ref: String,
     pub submissions: Vec<ScoreAttestationSubmissionEntry>,
+    /// Asked-for submissions this principal owns that have no gate decision
+    /// yet. Present ONLY in a scoped response; an unscoped attestation omits
+    /// the key entirely (see `ScoreAttestationScope`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Vec<Uuid>>,
+    /// Asked-for submissions this principal does not own. Deliberately
+    /// collapses "belongs to someone else" and "does not exist" into one
+    /// bucket so the route cannot be used to probe for submission ids.
+    /// Present ONLY in a scoped response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown: Option<Vec<Uuid>>,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub nonce: String,
+}
+
+/// The two extra statements a SCOPED attestation makes, over and above the
+/// scored `submissions` an unscoped one carries.
+///
+/// This is an `Option` at the call site rather than two empty vectors
+/// because "no pending submissions" and "I was not asked a scoped question"
+/// are different claims, and only the second may omit the keys. Emitting
+/// `pending: []` on an unscoped document would be a schema change to every
+/// verifier pinned to `trace_commons.score_attestation.v2`.
+#[derive(Debug, Clone, Default)]
+pub struct ScoreAttestationScope {
+    pub pending: Vec<Uuid>,
+    pub unknown: Vec<Uuid>,
 }
 
 /// Sign a score attestation for `(tenant_id, auth_principal_ref)` as of
@@ -332,14 +357,41 @@ pub fn sign_score_attestation(
     submissions: Vec<ScoreAttestationSubmissionEntry>,
     now: DateTime<Utc>,
 ) -> anyhow::Result<String> {
+    sign_scoped_score_attestation(state, tenant_id, auth_principal_ref, submissions, None, now)
+}
+
+/// As `sign_score_attestation`, but for a request that named a specific set
+/// of submissions. `scope` carries what the caller asked about and did not
+/// get a score for; `None` reproduces the unscoped document byte for byte,
+/// including the ABSENCE of the `pending` and `unknown` keys.
+///
+/// The same non-negotiable applies: `tenant_id` and `auth_principal_ref`
+/// MUST come from the authenticated request context. A scoped request adds
+/// a submission-id list to the wire, and nothing else — the id list is a
+/// filter over what the authenticated principal already owns, never a way
+/// to name a principal.
+pub fn sign_scoped_score_attestation(
+    state: &AttestationSigningState,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    submissions: Vec<ScoreAttestationSubmissionEntry>,
+    scope: Option<ScoreAttestationScope>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<String> {
     let expires_at = now
         .checked_add_signed(Duration::seconds(state.ttl_seconds))
         .context("attestation ttl_seconds overflow")?;
+    let (pending, unknown) = match scope {
+        Some(scope) => (Some(scope.pending), Some(scope.unknown)),
+        None => (None, None),
+    };
     let claims = ScoreAttestationClaims {
         schema_version: SCORE_ATTESTATION_SCHEMA_VERSION.to_string(),
         tenant_id: tenant_id.to_string(),
         auth_principal_ref: auth_principal_ref.to_string(),
         submissions,
+        pending,
+        unknown,
         issued_at: now,
         expires_at,
         nonce: Uuid::new_v4().to_string(),

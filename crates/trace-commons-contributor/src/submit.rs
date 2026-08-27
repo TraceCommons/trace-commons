@@ -2,6 +2,7 @@
 //! status. Every outcome reason is a fixed label -- never a response body,
 //! trace content, or raw path.
 
+use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
@@ -948,6 +949,173 @@ pub async fn fetch_score_attestation(
         .await
         .context("fetching score attestation")?;
     Ok(body.attestation)
+}
+
+/// Ids per scoped attestation request, matching the server's per-request cap
+/// on `POST /v1/contributors/me/score-attestation`. A run that submitted
+/// more traces than this is split across several requests -- and so across
+/// several signed documents -- rather than truncated, because a document
+/// that silently omits ids the contributor asked about is exactly the defect
+/// the scoped form exists to remove.
+pub const SCORE_ATTESTATION_REQUEST_CHUNK: usize = 500;
+
+#[derive(Debug, Clone, Serialize)]
+struct ScopedScoreAttestationRequest {
+    submission_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScopedAttestationBody {
+    attestation: String,
+    scored: usize,
+    pending: usize,
+}
+
+/// A scoped attestation over one submit run's ids.
+///
+/// `scored + pending` need not equal `requested`: an id the server does not
+/// recognise as this principal's lands in the signed document's `unknown`
+/// list and in neither count.
+#[derive(Debug, Clone)]
+pub struct ScopedAttestation {
+    /// One compact JWS per request chunk, in request order. Usually one.
+    pub attestations: Vec<String>,
+    pub requested: usize,
+    pub scored: usize,
+    pub pending: usize,
+}
+
+impl ScopedAttestation {
+    /// The line `submit` prints when the bounded wait ran out with traces
+    /// still unscored. Counts only -- no ids, no paths.
+    pub fn progress_line(&self) -> String {
+        format!(
+            "{} of {} traces scored, {} pending",
+            self.scored, self.requested, self.pending
+        )
+    }
+
+    /// The file body: one JWS per line. A single-chunk run -- every ordinary
+    /// one -- is therefore just the JWS and a newline.
+    pub fn document(&self) -> String {
+        let mut body = self.attestations.join("\n");
+        body.push('\n');
+        body
+    }
+}
+
+/// One round of scoped attestation requests over `submission_ids`, chunked
+/// to the server's per-request cap.
+async fn scoped_attestation_round(
+    client: &Client,
+    submission_ids: &[Uuid],
+) -> Result<ScopedAttestation> {
+    let mut collected = ScopedAttestation {
+        attestations: Vec::new(),
+        requested: submission_ids.len(),
+        scored: 0,
+        pending: 0,
+    };
+    for chunk in submission_ids.chunks(SCORE_ATTESTATION_REQUEST_CHUNK) {
+        let request = ScopedScoreAttestationRequest {
+            submission_ids: chunk.to_vec(),
+        };
+        let body: ScopedAttestationBody = client
+            .call_json(
+                Method::POST,
+                "/v1/contributors/me/score-attestation",
+                &[],
+                Some(&request),
+            )
+            .await
+            .context("fetching scoped score attestation")?;
+        collected.attestations.push(body.attestation);
+        collected.scored += body.scored;
+        collected.pending += body.pending;
+    }
+    Ok(collected)
+}
+
+/// Ask for an attestation scoped to `submission_ids` and keep asking until
+/// nothing is pending or `timeout` elapses, whichever comes first.
+///
+/// The wait has to be bounded and the bound has to be honest. Scoring is
+/// asynchronous -- a 45-second tick over a small batch, and off entirely
+/// unless the operator enabled the driver -- so "wait until scored" is not a
+/// promise this side can keep. What it returns on timeout is a real signed
+/// document that says which traces are still waiting, which a collector can
+/// resolve later through the admin score read-back.
+///
+/// One upload claim is minted for the whole wait and reused across polls,
+/// rather than re-minting per poll.
+pub async fn await_scoped_score_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    submission_ids: &[Uuid],
+    timeout: StdDuration,
+    poll_interval: StdDuration,
+) -> Result<ScopedAttestation> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status` and the unscoped attestation: a read
+    // of scores the server already holds must not depend on whatever scopes
+    // were narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for score attestation")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let attestation = scoped_attestation_round(&client, submission_ids).await?;
+        if attestation.pending == 0 {
+            return Ok(attestation);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(attestation);
+        }
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
+    }
+}
+
+/// Fetch a scoped attestation for `submission_ids` and write it to `path`.
+///
+/// Returns `None` -- after a label-only warning -- when there was nothing to
+/// attest to or the fetch failed. A submit run whose traces were accepted
+/// and whose receipts were written has succeeded; failing it because a
+/// follow-up read did not come back would throw away work the contributor
+/// already did. The attestation is written on timeout too, because with the
+/// scoped schema it is truthful about the part it does not cover.
+pub async fn emit_scoped_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    submission_ids: &[Uuid],
+    path: &Path,
+    timeout: StdDuration,
+    poll_interval: StdDuration,
+) -> Option<ScopedAttestation> {
+    if submission_ids.is_empty() {
+        return None;
+    }
+    let attestation =
+        match await_scoped_score_attestation(store, cfg, submission_ids, timeout, poll_interval)
+            .await
+        {
+            Ok(attestation) => attestation,
+            Err(_) => {
+                // Label-only: the error can carry a URL or a token-bearing
+                // request context, and this line reaches a terminal and any
+                // log scraping it.
+                tracing::warn!("score attestation unavailable: attestation-fetch-failed");
+                return None;
+            }
+        };
+    if std::fs::write(path, attestation.document()).is_err() {
+        tracing::warn!("score attestation not written: attestation-write-failed");
+    }
+    Some(attestation)
 }
 
 /// Re-scan a finished envelope for a residual secret shape. Returns
@@ -2913,6 +3081,201 @@ mod tests {
             serde_json::Value::String(submission_id.to_string())
         );
         assert_eq!(parsed[0]["status"], "accepted");
+    }
+    /// A scoped-attestation ingest stub whose `pending` count drains by one
+    /// on every call, so a test can watch the bounded wait poll.
+    fn stub_scoped_attestation_ingest(
+        calls: Arc<Mutex<Vec<serde_json::Value>>>,
+        pending_for_call: Vec<usize>,
+    ) -> Router {
+        Router::new().route(
+            "/v1/contributors/me/score-attestation",
+            post(move |Json(req): Json<serde_json::Value>| {
+                let calls = calls.clone();
+                let pending_for_call = pending_for_call.clone();
+                async move {
+                    let requested = req["submission_ids"].as_array().unwrap().len();
+                    let call_index = {
+                        let mut calls = calls.lock().unwrap();
+                        calls.push(req.clone());
+                        calls.len() - 1
+                    };
+                    let pending = *pending_for_call
+                        .get(call_index)
+                        .unwrap_or(pending_for_call.last().unwrap_or(&0));
+                    let pending = pending.min(requested);
+                    Json(serde_json::json!({
+                        "attestation": format!("header.payload-{call_index}.signature"),
+                        "scored": requested - pending,
+                        "pending": pending,
+                        "unknown": 0,
+                    }))
+                }
+            }),
+        )
+    }
+
+    /// The bounded wait polls until nothing is pending, then writes the
+    /// attestation it was given last.
+    #[tokio::test]
+    async fn attest_out_waits_for_pending_to_empty_then_writes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![2, 1, 0])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("attestation emitted");
+
+        assert_eq!(outcome.requested, 2);
+        assert_eq!(outcome.scored, 2);
+        assert_eq!(outcome.pending, 0);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            3,
+            "polled until nothing pending"
+        );
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(written.trim(), "header.payload-2.signature");
+    }
+
+    /// On timeout the attestation is still written and the outcome reports
+    /// what it does not cover. `submit` must not fail here: the traces are
+    /// uploaded and the receipts written, and the artifact is truthful about
+    /// the part that is still waiting.
+    #[tokio::test]
+    async fn attest_out_on_timeout_still_writes_and_reports_pending() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![1])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("a timed-out attestation is still emitted");
+
+        assert_eq!(outcome.scored, 1);
+        assert_eq!(outcome.pending, 1);
+        assert!(out.exists(), "the attestation is written on timeout too");
+        assert_eq!(
+            outcome.progress_line(),
+            "1 of 2 traces scored, 1 pending",
+            "the timeout line names the shortfall without failing the submit"
+        );
+    }
+
+    /// A failed attestation fetch is a warning, not a submit failure: the
+    /// caller gets `None` and nothing is written.
+    #[tokio::test]
+    async fn attest_out_reports_a_failed_fetch_as_none_rather_than_an_error() {
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(Router::new().route(
+            "/v1/contributors/me/score-attestation",
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        ))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &[Uuid::new_v4()],
+            &out,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(1),
+        )
+        .await;
+        assert!(outcome.is_none(), "a failed fetch does not fail the submit");
+        assert!(
+            !out.exists(),
+            "nothing is written when there is nothing to write"
+        );
+    }
+
+    /// More ids than the server's per-request cap are split across requests
+    /// rather than silently truncated: every submitted trace is attested to
+    /// by one of the documents in the file.
+    #[tokio::test]
+    async fn attest_out_splits_id_lists_past_the_server_cap() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![0])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids: Vec<Uuid> = (0..SCORE_ATTESTATION_REQUEST_CHUNK + 1)
+            .map(|_| Uuid::new_v4())
+            .collect();
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("attestation emitted");
+
+        assert_eq!(outcome.requested, SCORE_ATTESTATION_REQUEST_CHUNK + 1);
+        assert_eq!(outcome.scored, SCORE_ATTESTATION_REQUEST_CHUNK + 1);
+        let sizes: Vec<usize> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|req| req["submission_ids"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(sizes, vec![SCORE_ATTESTATION_REQUEST_CHUNK, 1]);
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            2,
+            "one signed document per chunk, newline-delimited"
+        );
     }
 }
 

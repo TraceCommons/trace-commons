@@ -33,9 +33,15 @@ This is **not idempotent** — each success spends one use of the invite. Run
 it once. It refuses up front if the device is already enrolled, rather than
 burning a use.
 
-The CLI ships as source; build with
-`cargo build --release -p trace-commons-contributor`. There is no published
-binary on npm, Homebrew, or PyPI.
+Installing the CLI: on macOS and Linux, `scripts/install.sh` fetches a
+verified release binary into `~/.local/bin`; on macOS there is also a
+Homebrew tap (`brew tap TraceCommons/tap && brew install
+trace-commons-contributor`); on Windows, `scripts/install.ps1`, and
+`winget install TraceCommons.Contributor`. Building from source
+(`cargo build --release -p trace-commons-contributor`) works too, but it is
+not the only path and should not be the one you tell participants about. See
+the repository README for the full instructions and how to verify a download
+by hand. There is no npm or PyPI package.
 
 ### 2. Confirm enrollment
 
@@ -151,6 +157,17 @@ The attestation is a compact JWS, EdDSA (Ed25519), with `kid` in the header.
    longer issued; a verifier that pins the v1 string will reject every
    attestation until it is updated. See "Migrating from v1" below.
 
+   **Ignore top-level fields you do not recognise, within a schema version.**
+   A verifier must reject an unknown `schema_version`, and must reject an
+   unknown `coverage_state` (step 5) — but it must not reject a document for
+   carrying a top-level key it has never seen. Additive top-level fields are
+   how this contract grows without a version bump; `pending` and `unknown`
+   (see "Scoping an attestation") are the first two, and a verifier written
+   before they existed keeps working precisely because of this rule. The rule
+   is deliberately narrow: it does not extend to new fields inside
+   `submissions` entries or inside `coverage`, where a silently ignored field
+   could change what an existing field means.
+
 5. Read `coverage` on every entry. **The scores may describe only part of
    the trace.** The gate splits a large trace into chunks and scores at most
    a fixed number of them; anything past that cap is not scored, and
@@ -183,6 +200,111 @@ The attestation is a compact JWS, EdDSA (Ed25519), with `kid` in the header.
 6. Bind `auth_principal_ref` to your own participant record, and reject a
    second participant presenting an attestation for the same ref. `nonce`
    lets you detect a replayed document inside its validity window.
+
+## Scoping an attestation
+
+`GET /v1/contributors/me/score-attestation` attests to everything the calling
+contributor has that carries a score. It takes no parameters, and it is
+capped: past the cap it returns the contributor's most recent scored
+submissions and drops the oldest.
+
+`POST` to the same path, with the contributor's own credential, attests to
+**exactly** the ids you name:
+
+```json
+{ "submission_ids": ["...", "..."] }
+```
+
+At most 500 ids per request; more is a `413`, so chunk. The body carries a
+submission-id list and nothing else — an unrecognised field is rejected,
+because this endpoint must never grow a way to name a principal other than
+the caller.
+
+A scoped response is:
+
+```json
+{ "attestation": "<compact JWS>", "scored": 2, "pending": 1, "unknown": 0 }
+```
+
+The counts are a convenience. The signed payload is the contract, and it
+carries two top-level fields the unscoped document does not:
+
+```json
+{
+  "schema_version": "trace_commons.score_attestation.v2",
+  "submissions": [ { "submission_id": "...", "...": "..." } ],
+  "pending": ["..."],
+  "unknown": ["..."]
+}
+```
+
+- `submissions` — asked about, owned by this contributor, scored. Same entry
+  shape as always.
+- `pending` — asked about, owned by this contributor, **not scored yet**.
+  Scoring is asynchronous, so this is the normal state for a trace submitted
+  minutes ago, and at a deadline it may be most of them. A `pending` entry is
+  a signed statement that the trace exists and is queued — not an absence.
+- `unknown` — asked about, and not this contributor's. It says nothing about
+  whether the id exists at all, deliberately: this route cannot be used to
+  probe for someone else's submission ids.
+
+`schema_version` **stays `trace_commons.score_attestation.v2`**. These fields
+are additive and appear only in a scoped response. An unscoped request
+returns the document it always did, with no `pending` key and no `unknown`
+key — not empty arrays, absent. That is what the forward-compatibility rule
+above buys: a verifier built against the unscoped document keeps working, and
+sees the new fields only once it opts in by asking a scoped question.
+
+The contributor CLI can produce a scoped attestation as part of a submit run:
+`trace-commons-contributor submit --attest-out attestation.jws` requests one
+over exactly the traces that run uploaded, waits a bounded time for `pending`
+to drain, and writes it either way, reporting `N of M traces scored, K
+pending` rather than failing. When a run uploads more than 500 traces the
+file holds one signed document per line.
+
+## Reading scores for ids you already hold
+
+A participant who submits at the deadline hands you an attestation dominated
+by `pending`. Resolving those later is a collector-side read, not something
+the participant has to come back for.
+
+```
+POST /v1/admin/scores-by-submission
+Authorization: Bearer <competition read worker token>
+```
+
+```json
+{ "submission_ids": ["...", "..."] }
+```
+
+```json
+[ { "submission_id": "...", "credit_quality_micros": 0,
+    "perplexity_micros": 0, "novelty_score_micros": 0,
+    "gate_passed": true } ]
+```
+
+At most 500 ids per request (`413` past that). Ids with no gate decision are
+**omitted from the response** — this route has no `pending` signal, so treat
+an absent id as "still unscored, ask again later" rather than as a refusal.
+Ask again rather than assuming: a submission can also exhaust its scoring
+attempts, in which case it never appears here.
+
+The credential is a token with role `competition_read_worker`, issued by the
+operator running the ingest deployment. It is scoped to this read: it cannot
+submit, review, export, or reach any other admin route, and it is not the
+contributor credential the participant holds. An `admin` token also works;
+prefer the narrow one. Anything else gets a `403`.
+
+Two limits worth knowing before you build on it:
+
+- The read is by `submission_id` across every contributor's tenant, so it
+  **does not tell you whose submission an id is**. Only the attestation binds
+  ids to an `auth_principal_ref`. Read scores here for ids you already know
+  belong to a participant, from an attestation you already verified; do not
+  use this route to discover ownership.
+- The entries here carry no `coverage`. A score read back this way may still
+  describe only part of a trace, and this response will not say so — the
+  attestation for the same id will.
 
 ## Migrating from v1
 
@@ -239,3 +361,7 @@ accepting it from the participant later.
 | Every session `already-submitted` | Normal on a re-run. Read `status` per entry. |
 | `refused` with `secret-leak-detected` | Redaction found a residual secret and fail-closed. Not retryable as-is. |
 | `attest` returns 503 | Server signing key unconfigured. An operator problem; do not proceed with unsigned data. |
+| Scoped attestation returns `413` | More than 500 ids in one request. Chunk them. |
+| Attestation `pending` never empties | Scoring is asynchronous and can be disabled or backlogged. Take the attestation as it is and resolve the ids later via `POST /v1/admin/scores-by-submission`. |
+| `scores-by-submission` omits an id | No gate decision yet, or scoring exhausted its attempts. Not a refusal; retry, then escalate to the operator. |
+| `scores-by-submission` returns `403` | Token is neither `admin` nor `competition_read_worker`. |
