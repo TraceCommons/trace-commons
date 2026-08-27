@@ -1088,6 +1088,41 @@ pub async fn await_scoped_score_attestation(
 /// follow-up read did not come back would throw away work the contributor
 /// already did. The attestation is written on timeout too, because with the
 /// scoped schema it is truthful about the part it does not cover.
+/// The submission ids this run actually delivered, for a scoped attestation.
+///
+/// `Submitted` and `AlreadySubmitted` both count: a re-run that finds a trace
+/// already on the server has still contributed it, and omitting it would make
+/// the attestation shrink every time a contributor re-ran the command. Every
+/// other outcome -- refused, quarantined, parse failure -- is something the
+/// server cannot attest to and must not be asked about, or it comes back in
+/// `unknown` and reads as a disclaimer.
+pub fn submitted_ids(outcomes: &[SubmitOutcome]) -> Vec<Uuid> {
+    outcomes
+        .iter()
+        .filter_map(|o| match o {
+            SubmitOutcome::Submitted { submission_id, .. }
+            | SubmitOutcome::AlreadySubmitted { submission_id, .. } => Some(*submission_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Add the attestation to a `--json` submit document.
+///
+/// `scored` and `pending` ride alongside it because a collector reading this
+/// programmatically needs to know the document is partial without parsing the
+/// JWS to find out.
+pub fn attach_attestation_to_json(document: &mut serde_json::Value, attested: &ScopedAttestation) {
+    if let Some(map) = document.as_object_mut() {
+        map.insert(
+            "attestation".to_string(),
+            serde_json::json!(attested.attestations),
+        );
+        map.insert("scored".to_string(), serde_json::json!(attested.scored));
+        map.insert("pending".to_string(), serde_json::json!(attested.pending));
+    }
+}
+
 pub async fn emit_scoped_attestation(
     store: &ConfigStore,
     cfg: &ContributorConfig,

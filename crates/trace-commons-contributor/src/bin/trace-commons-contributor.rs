@@ -97,6 +97,10 @@ enum Command {
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
         #[arg(long)]
         manifest: Option<PathBuf>,
+        /// Write the signed score attestation for this run's submissions to this path.
+        /// This is what a collector scores you on; an id list is not proof of authorship.
+        #[arg(long, conflicts_with = "dry_run")]
+        attest_out: Option<PathBuf>,
         /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
         #[arg(long)]
         trajectory: Option<PathBuf>,
@@ -371,6 +375,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             pii_filter,
             manifest,
+            attest_out,
             trajectory,
             no_reasoning,
             remediate_quarantined,
@@ -387,6 +392,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 dry_run,
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
+                attest_out: attest_out.as_deref(),
                 trajectory: trajectory.as_deref(),
                 json: cli.json,
                 no_reasoning,

@@ -933,6 +933,10 @@ pub struct SubmitSelection<'a> {
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
     pub manifest: Option<&'a Path>,
+    /// Where to write the signed score attestation for this run's
+    /// submissions. Absent leaves the standalone `attest` command as the only
+    /// way to get one.
+    pub attest_out: Option<&'a Path>,
     /// Path to a trajectory-v1 file or a directory of them. Trajectory
     /// sessions are only discoverable when this is set.
     pub trajectory: Option<&'a Path>,
@@ -964,6 +968,20 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
 /// error (nonzero exit) if a real submission is refused or any run fails.
+/// How long `--attest-out` waits for the traces it just sent to be scored.
+///
+/// Deliberately short. The scoring driver runs a small batch on a fixed tick
+/// and may be disabled entirely, so a long wait buys nothing on a queue that
+/// is not moving, and a contributor at a deadline needs the artifact more than
+/// they need it complete. The document is written either way and says how much
+/// of it is still pending.
+const ATTEST_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How often to re-ask while waiting. One request per tick of the driver's
+/// default interval is enough; asking faster only adds load to the endpoint
+/// that is already the bottleneck.
+const ATTEST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
@@ -972,6 +990,16 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         anyhow::bail!(
             "--manifest cannot be combined with --dry-run: a dry run uploads nothing, \
              so its envelope ids would never exist server-side"
+        );
+    }
+    // Same reasoning: a scoped attestation names submission ids, and a dry
+    // run's ids exist only in this process. The server would return a signed
+    // document listing every one of them as `unknown`, which is a worse thing
+    // to hand a collector than nothing at all.
+    if sel.attest_out.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--attest-out cannot be combined with --dry-run: a dry run uploads nothing, \
+             so the server could attest to none of its submission ids"
         );
     }
     // Refuse an unbounded run before anything else: enrolling, discovering,
@@ -1122,13 +1150,40 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         println!("wrote {} envelope id(s) to manifest", entries.len());
     }
 
+    // The attestation covers what this run actually delivered, so it is built
+    // from the outcomes rather than from the sessions we set out to send:
+    // anything refused, quarantined or skipped is not something the server can
+    // attest to.
+    let scoped_attestation = match sel.attest_out {
+        Some(path) if !unenrolled_preview => {
+            let ids = submit::submitted_ids(&outcomes);
+            submit::emit_scoped_attestation(
+                store,
+                &cfg,
+                &ids,
+                path,
+                ATTEST_WAIT_TIMEOUT,
+                ATTEST_POLL_INTERVAL,
+            )
+            .await
+        }
+        _ => None,
+    };
+
     if sel.json {
-        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        let mut document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        if let Some(attested) = &scoped_attestation {
+            submit::attach_attestation_to_json(&mut document, attested);
+        }
         println!("{}", serde_json::to_string_pretty(&document)?);
         if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
             return Err(RenderedSubmitFailure.into());
         }
         return Ok(());
+    }
+
+    if let Some(attested) = &scoped_attestation {
+        println!("{}", attested.progress_line());
     }
 
     let preview_prefix = if unenrolled_preview {
@@ -1813,6 +1868,7 @@ mod project_filter_tests {
             dry_run: true,
             pii_filter: None,
             manifest: Some(&manifest),
+            attest_out: None,
             trajectory: None,
             json: false,
             no_reasoning: false,
@@ -1828,6 +1884,48 @@ mod project_filter_tests {
         );
         // Refused BEFORE the not-logged-in check, i.e. before any work.
         assert!(!manifest.exists(), "no manifest is written on refusal");
+    }
+
+    #[tokio::test]
+    async fn attest_out_with_dry_run_is_refused_before_any_upload() {
+        // Same reasoning as the manifest guard, and the same failure if it is
+        // missing. A scoped attestation asks the server to attest to specific
+        // submission ids; a dry run's ids were minted locally and delivered
+        // nowhere, so the server owns none of them and would answer with every
+        // one of them listed as `unknown`. Handing a collector a signed
+        // document that disclaims the entire submission is worse than handing
+        // them nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let attestation = dir.path().join("attestation.jws");
+        let sel = super::SubmitSelection {
+            all: true,
+            since: None,
+            project: None,
+            source: None,
+            yes: true,
+            pick: false,
+            dry_run: true,
+            pii_filter: None,
+            manifest: None,
+            attest_out: Some(&attestation),
+            trajectory: None,
+            json: false,
+            no_reasoning: false,
+            remediate_quarantined: false,
+            verdict: None,
+            invite: None,
+        };
+
+        let error = super::submit(&store, &sel).await.expect_err("refused");
+        assert!(
+            error.to_string().contains("--dry-run"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !attestation.exists(),
+            "no attestation is written on refusal"
+        );
     }
 
     #[test]
