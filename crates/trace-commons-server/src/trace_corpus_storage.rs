@@ -2829,6 +2829,37 @@ pub trait TraceCorpusStore: Send + Sync {
         ))
     }
 
+    /// Stamp `last_attempt_at`/`last_error_label` on the per-`(tenant_id,
+    /// submission_id)` PII-backstop bookkeeping row WITHOUT incrementing
+    /// `attempts`, creating the row with `attempts = 0` if absent.
+    ///
+    /// This is the transient-failure counterpart to
+    /// `bump_pii_backstop_attempt`. A transient upstream failure must not
+    /// spend the trace's attempt budget — that is the 2026-08-26 incident
+    /// fix — but it must still move the trace to the back of the driver's
+    /// least-recently-attempted ordering. Without the timestamp a
+    /// transiently-failing submission stays permanently first in every batch
+    /// and starves the whole backlog behind it (2026-08-27).
+    ///
+    /// Implementations MUST scope the upsert by `tenant_id` (migration V38
+    /// forces RLS on `trace_pii_backstop` bound to
+    /// `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today. The caller treats a
+    /// failure here as non-fatal: the trace stays held either way.
+    async fn touch_pii_backstop_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "touch_pii_backstop_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
     /// Look up an existing `trace_gate_decisions` row belonging to a
     /// DIFFERENT submission in the same tenant that shares the given
     /// `canonical_summary_hash`, used by the perplexity-scoring driver's

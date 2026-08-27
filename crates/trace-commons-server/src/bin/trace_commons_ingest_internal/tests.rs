@@ -81058,8 +81058,12 @@ struct PiiBackstopDriverTestDb {
     awaiting_pii_backstop: std::sync::RwLock<Vec<GateWorkItem>>,
     /// Per-submission PII-backstop attempt bookkeeping bumped on redaction
     /// failure.
-    pii_backstop_attempts:
-        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Per-submission PII-backstop bookkeeping: `(attempts, last_error_label,
+    /// last_attempt_at)`. `last_attempt_at` is stamped by BOTH a charged bump
+    /// and an uncharged transient touch, mirroring `trace_pii_backstop`.
+    pii_backstop_attempts: std::sync::RwLock<
+        std::collections::HashMap<(String, Uuid), (i32, String, Option<DateTime<Utc>>)>,
+    >,
     /// When set, `release_pii_backstop_hold` simulates the invalidation half
     /// of the atomic release failing (e.g. a transient DB error after the
     /// status UPDATE would have applied). Neither the status flip nor the
@@ -81107,7 +81111,7 @@ impl PiiBackstopDriverTestDb {
     fn seed_pii_attempts(&self, tenant_id: &str, submission_id: Uuid, attempts: i32) {
         self.pii_backstop_attempts.write().unwrap().insert(
             (tenant_id.to_string(), submission_id),
-            (attempts, String::new()),
+            (attempts, String::new(), None),
         );
     }
 
@@ -81178,7 +81182,17 @@ impl PiiBackstopDriverTestDb {
             .read()
             .unwrap()
             .get(&(tenant_id.to_string(), submission_id))
-            .map(|(count, _)| *count)
+            .map(|(count, _, _)| *count)
+    }
+
+    /// The `last_attempt_at` stamp, if any. A transient failure must set this
+    /// (so the driver's ordering advances) without touching `attempts`.
+    fn pii_last_attempt_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<DateTime<Utc>> {
+        self.pii_backstop_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .and_then(|(_, _, at)| *at)
     }
 
     fn appended_kinds(
@@ -81359,6 +81373,10 @@ enum ClassifierMode {
     /// when it contains `POISON_MARKER_NEEDLE`, so a batch can mix failing and
     /// succeeding submissions in a controlled order.
     FailPoisonedPermanent,
+    /// As `FailPoisonedPermanent` but the poisoned window returns 500 -- a
+    /// TRANSIENT failure, which charges no attempt. This is the shape that
+    /// starved the backlog on 2026-08-27.
+    FailPoisonedTransient,
     /// Return no spans for anything, so the canary's raw values survive and the
     /// filter reports unhealthy -> the tick aborts before touching submissions.
     UnhealthyCanary,
@@ -81413,6 +81431,12 @@ fn near_ai_classify_response(
         {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
+        }
+        ClassifierMode::FailPoisonedTransient
+            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
+        {
+            wiremock::ResponseTemplate::new(500)
+                .set_body_json(serde_json::json!({"error": "synthetic upstream failure"}))
         }
         _ => {
             let mut needles = canary_values;
@@ -81987,9 +82011,14 @@ async fn pii_backstop_driver_tick_transient_failure_does_not_bump() {
         "an upstream 5xx must tally as transient, never as a charged failure: {summary:?}"
     );
     assert_eq!(
-        db.pii_attempts_of("tenant-a", submission_id),
-        None,
+        db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0),
+        0,
         "a transient upstream failure must not spend the trace's attempt budget"
+    );
+    assert!(
+        db.pii_last_attempt_of("tenant-a", submission_id).is_some(),
+        "a transient failure must still stamp last_attempt_at, or the trace \
+         stays first in every batch and starves the backlog behind it"
     );
     assert_eq!(
         db.status_of("tenant-a", submission_id),
@@ -82037,8 +82066,8 @@ async fn pii_backstop_transient_failures_never_exhaust_a_trace() {
             "round {round} must still find and attempt the held trace: {summary:?}"
         );
         assert_eq!(
-            db.pii_attempts_of("tenant-a", submission_id),
-            None,
+            db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0),
+            0,
             "round {round} must leave the attempt budget untouched"
         );
     }
@@ -82162,6 +82191,98 @@ async fn pii_backstop_driver_tick_below_breaker_processes_rest_of_batch() {
         Some(StorageTraceCorpusStatus::Accepted),
         "the last item in the batch must have been released"
     );
+}
+
+/// 2026-08-27 starvation regression. Enough transiently-failing submissions to
+/// trip the breaker sit at the head of the backlog. Because a transient failure
+/// charges no attempt, ordering by `received_at` alone left them permanently
+/// first: every tick re-picked the same three, the breaker aborted the batch,
+/// and the traces behind them were never attempted at all -- 233 of 248 on the
+/// pilot. Stamping `last_attempt_at` on a transient failure and enumerating
+/// least-recently-attempted-first is what lets the queue drain past them.
+#[tokio::test]
+async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    // Seeded FIRST, so they are the head of the backlog under any
+    // received_at-style ordering.
+    let poison_marker = format!("{POISON_MARKER_NEEDLE}@example.com");
+    let mut poisoned = Vec::new();
+    for _ in 0..MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES {
+        let id = seed_held_backstop_submission(&state, "tenant-a", &poison_marker).await;
+        db.seed_awaiting("tenant-a", id);
+        poisoned.push(id);
+    }
+    let marker = "jane.doe@example.com";
+    let mut clean = Vec::new();
+    for _ in 0..2 {
+        let id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+        db.seed_awaiting("tenant-a", id);
+        clean.push(id);
+    }
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailPoisonedTransient).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let mut config = backstop_driver_config();
+    config.batch_size = MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES as i64;
+
+    // Tick 1: the poisoned head fills the batch and trips the breaker, so
+    // nothing else is reached. This much was true before the fix too.
+    let first = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert!(
+        first.breaker_tripped,
+        "the poisoned head must trip the breaker: {first:?}"
+    );
+    assert_eq!(first.done, 0, "nothing should have been released yet");
+    for id in &clean {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+            "clean traces are still queued behind the poisoned head"
+        );
+    }
+
+    // Tick 2: the poisoned three now carry a `last_attempt_at`, so the
+    // never-attempted clean traces sort ahead of them and get processed.
+    // Without the fix this tick is byte-for-byte identical to tick 1, forever.
+    let second = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert_eq!(
+        second.done,
+        clean.len(),
+        "the previously-starved traces must be reached on the next tick: {second:?}"
+    );
+    for id in &clean {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::Accepted),
+            "a clean trace behind the poisoned head must be released"
+        );
+    }
+    // The poisoned traces are still held, and still owe no attempt budget.
+    for id in &poisoned {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+            "a transiently-failing trace stays held, never excluded"
+        );
+        assert_eq!(
+            db.pii_attempts_of("tenant-a", *id).unwrap_or(0),
+            0,
+            "a transient failure must never spend the trace's attempt budget"
+        );
+    }
 }
 
 // --- (c) canary failure aborts the tick without mutating anything -------
@@ -82997,16 +83118,35 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         &self,
         tenant_id: &str,
         submission_id: Uuid,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
         error_label: &str,
     ) -> Result<i32, DatabaseError> {
         let mut attempts = self.pii_backstop_attempts.write().unwrap();
         let entry = attempts
             .entry((tenant_id.to_string(), submission_id))
-            .or_insert((0, String::new()));
+            .or_insert((0, String::new(), None));
         entry.0 += 1;
         entry.1 = error_label.to_string();
+        entry.2 = Some(now);
         Ok(entry.0)
+    }
+
+    async fn touch_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<(), DatabaseError> {
+        // Mirrors the Postgres upsert: stamp the timestamp and error label,
+        // seed `attempts` at 0 on insert, and never increment it.
+        let mut attempts = self.pii_backstop_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new(), None));
+        entry.1 = error_label.to_string();
+        entry.2 = Some(now);
+        Ok(())
     }
     async fn stream_trace_gate_decisions_for_replay(
         &self,
@@ -83081,7 +83221,7 @@ impl Database for PiiBackstopDriverTestDb {
         let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
         let statuses = self.statuses.read().unwrap();
         let attempts = self.pii_backstop_attempts.read().unwrap();
-        Ok(self
+        let mut eligible = self
             .awaiting_pii_backstop
             .read()
             .unwrap()
@@ -83095,12 +83235,22 @@ impl Database for PiiBackstopDriverTestDb {
             .filter(|item| {
                 attempts
                     .get(&(item.tenant_id.clone(), item.submission_id))
-                    .map(|(count, _)| *count < max_attempts)
+                    .map(|(count, _, _)| *count < max_attempts)
                     .unwrap_or(true)
             })
-            .take(limit)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        // Mirror the production ORDER BY: least-recently-attempted first,
+        // never-attempted (NULL) before everything else. `sort_by_key` is
+        // stable, so ties keep seeding order, which stands in for the
+        // `received_at ASC` tiebreak.
+        eligible.sort_by_key(|item| {
+            attempts
+                .get(&(item.tenant_id.clone(), item.submission_id))
+                .and_then(|(_, _, at)| *at)
+        });
+        eligible.truncate(limit);
+        Ok(eligible)
     }
 }
 

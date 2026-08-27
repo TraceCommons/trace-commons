@@ -20,11 +20,49 @@ pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
 /// Maximum input bytes per `privacy/classify` request. The hosted endpoint
-/// returns 502 for oversized requests (observed to fail above ~30 KiB), so
-/// large field text is split into windows no bigger than this before it is
-/// sent. Kept well under the observed ceiling to leave room for request
-/// overhead and multibyte expansion.
-pub const CLASSIFY_CHUNK_BYTES: usize = 20_000;
+/// returns 502 for oversized requests, so large field text is split into
+/// windows no bigger than this before it is sent.
+///
+/// The ceiling is set by the vendor and has moved down over time. Measured
+/// against the live endpoint on 2026-08-27, same key and model as production:
+///
+/// | input bytes | 200 OK |
+/// |-------------|--------|
+/// | 2,000       | 14/15  |
+/// | 8,000       | 7/8    |
+/// | 12,000      | 6/8    |
+/// | 16,000      | 0/8    |
+/// | 20,000      | 0/15   |
+///
+/// There is a hard cliff between 12 KiB and 16 KiB, and the band below it is
+/// itself flaky. The previous value of 20_000 sat *above* the cliff, so every
+/// request the adapter made failed 100% of the time and the PII-backstop
+/// backlog could not drain at all. Kept far enough below the cliff to absorb
+/// another vendor-side tightening without a repeat outage, and low enough to
+/// sit in the most reliable measured band.
+pub const CLASSIFY_CHUNK_BYTES: usize = 4_000;
+
+/// The lowest input size measured to fail outright against the hosted
+/// endpoint (0/8 successes on 2026-08-27). `CLASSIFY_CHUNK_BYTES` must stay
+/// well below this; see the table above.
+pub const MEASURED_CLASSIFY_FAILURE_CLIFF_BYTES: usize = 16_000;
+
+// 2026-08-27 outage regression, enforced at compile time. The vendor's payload
+// ceiling dropped below the configured chunk size, so every `privacy/classify`
+// request the adapter made returned 502 and the PII-backstop backlog wedged at
+// 248 held traces with 233 never attempted once. Raising CLASSIFY_CHUNK_BYTES
+// back over the cliff must not compile.
+const _: () = assert!(
+    CLASSIFY_CHUNK_BYTES < MEASURED_CLASSIFY_FAILURE_CLIFF_BYTES,
+    "CLASSIFY_CHUNK_BYTES must stay below the measured hard-failure cliff; \
+     above it every classify request fails and the backstop cannot drain"
+);
+// Leave real headroom, not a single byte of it: the band just under the cliff
+// was itself only 6/8 reliable when measured.
+const _: () = assert!(
+    CLASSIFY_CHUNK_BYTES * 2 <= MEASURED_CLASSIFY_FAILURE_CLIFF_BYTES,
+    "CLASSIFY_CHUNK_BYTES leaves too little headroom under the measured cliff"
+);
 
 /// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few

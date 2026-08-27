@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use serde_json::json;
-use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
+use trace_commons_protocol::privacy_filter_near_ai::{
+    CLASSIFY_CHUNK_BYTES, NearAiPrivacyFilterAdapter,
+};
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,11 +52,22 @@ async fn classifies_and_redacts_single_span() {
 
 #[tokio::test]
 async fn large_field_is_chunked_and_span_offsets_are_merged() {
-    // Field text larger than CLASSIFY_CHUNK_BYTES (20_000) is split into
-    // windows and classified per window. The email lands in the second
-    // window; its window-local offsets must be shifted into full-text
-    // coordinates so the right region is redacted.
-    let filler = "clean line\n".repeat(1818); // 19_998 bytes, ends on a newline
+    // Field text larger than CLASSIFY_CHUNK_BYTES is split into windows and
+    // classified per window. The email lands in a later window; its
+    // window-local offsets must be shifted into full-text coordinates so the
+    // right region is redacted. Sized off the constant rather than a literal
+    // so the test keeps its meaning when the vendor's ceiling moves.
+    // Windows break at the last newline inside the limit, so a whole number
+    // of lines fills a window exactly. Two full windows of filler leave
+    // "contact ..." alone in the third, putting the email at window-local
+    // codepoint offset 8 regardless of what CLASSIFY_CHUNK_BYTES is set to.
+    const LINE: &str = "clean line\n"; // 11 bytes, ends on a newline
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let filler = LINE.repeat(lines_per_window * 2);
+    assert!(
+        filler.len() > CLASSIFY_CHUNK_BYTES,
+        "filler must overflow at least one window"
+    );
     let text = format!("{filler}contact bob@example.com now");
 
     let server = MockServer::start().await;
