@@ -226,6 +226,36 @@ Confirm the install with:
 trace-commons-contributor --version
 ```
 
+Then contribute from the directory you want to cover. `submit` scopes itself
+to the working directory's subtree: stand in one project to submit that
+project, or in the parent of several repos to submit all of them. It refuses
+to run from `$HOME` or a filesystem root, where the subtree would be every
+session on the machine; `--all` says that deliberately, `--project <path>`
+scopes somewhere you are not, and `--pick` brings back the per-session table.
+
+```bash
+cd ~/code/my-hackathon-project
+trace-commons-contributor submit          # summarises the batch, asks y/N
+```
+
+For a single submission with nothing to install first, `scripts/contribute.sh`
+fetches the verified binary into a cache directory, submits once, and exits —
+no PATH entry, no daemon, nothing that autostarts. Reading it before running it
+is encouraged, which is why the two-step form is first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh -o contribute.sh
+cd ~/code/my-hackathon-project
+TRACE_COMMONS_INVITE='<your invite link>' sh ~/contribute.sh
+```
+
+It leaves one thing behind, deliberately: a **keep** — a `0700` state
+directory holding the device key your account is minted from. That key is the
+only way to sign in and withdraw the traces the run uploaded, so there is no
+flag that suppresses it; the script prints where the keep is and how to delete
+it on every run. Put the invite in `TRACE_COMMONS_INVITE` rather than on the
+command line, where it would land in your shell history and in `ps`.
+
 The desktop app ships as a universal notarized DMG
 (`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows
 as a self-contained Authenticode-signed zip — unpack it and run
