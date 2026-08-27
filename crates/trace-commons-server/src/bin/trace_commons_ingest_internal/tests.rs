@@ -86087,3 +86087,237 @@ async fn health_does_not_expose_driver_liveness() {
         "unauthenticated /health must not name a driver: {text}"
     );
 }
+
+/// #438 final round: the breaker alone let a live outage through. It trips at
+/// `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`, so a queue holding fewer items
+/// than that could fail every one of them transiently, never reach the
+/// threshold, and refresh `last_success_at` on every tick. Each branch below
+/// asserts a DISTINCT class, so an implementation that folds the wrong
+/// counter fails a named assertion rather than passing by coincidence.
+#[test]
+fn perplexity_tick_outcome_folds_each_counter_with_its_own_class() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Idle: nothing to do is not a failure.
+    assert!(
+        perplexity_tick_outcome(&PerplexityDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // Progress alongside failures, in each of the three success dispositions.
+    for progress in [
+        PerplexityDriverTickSummary {
+            scored: 2,
+            failed: 1,
+            transient: 1,
+            ..Default::default()
+        },
+        PerplexityDriverTickSummary {
+            skipped_duplicate: 1,
+            failed: 2,
+            ..Default::default()
+        },
+        PerplexityDriverTickSummary {
+            cached: 1,
+            transient: 2,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            perplexity_tick_outcome(&progress).is_ok(),
+            "a tick that moved a trace forward is a success: {progress:?}"
+        );
+    }
+
+    // A short all-transient batch: the incident, below the breaker threshold.
+    let transient = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        transient: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed transiently is not a success");
+    assert_eq!(
+        classify_driver_failure(&transient),
+        DriverFailureClass::UpstreamUnavailable,
+        "a transient sweep is the scorer being unreachable"
+    );
+
+    // A permanent sweep: the scorer answered and refused the content.
+    let failed = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        failed: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed permanently is not a success");
+    assert_eq!(
+        classify_driver_failure(&failed),
+        DriverFailureClass::ContentRejected,
+        "a permanent sweep must not point the operator at vendor availability"
+    );
+
+    // Both, no progress: the outage outranks the symptom.
+    let mixed = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        failed: 1,
+        transient: 1,
+        ..Default::default()
+    })
+    .expect_err("a swept tick is not a success");
+    assert_eq!(
+        classify_driver_failure(&mixed),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// The all-failed assertions live on `credit_cycle_sub_run_outcome`, so
+/// nothing else pins the fold that feeds it. Deleting the loop, or the
+/// `settlement.policy_version_allowed` argument, would still compile and would
+/// silently reintroduce the finding this closed.
+#[test]
+fn the_credit_cycle_fold_reaches_its_sub_runs() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let swept = TraceCreditCycleSchedulerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        preflight_only: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: None,
+        policy_version: None,
+        reason_hash: "sha256:0".to_string(),
+        limit: 8,
+        checked_count: 1,
+        eligible_count: 1,
+        started_count: 1,
+        skipped_active_count: 0,
+        skipped_count: 0,
+        pending_after_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        decisions: Vec::new(),
+        cycles: vec![credit_cycle_response_with_failed_submits(3)],
+    };
+    let error = credit_cycle_scheduler_tick_outcome(&swept)
+        .expect_err("a cycle whose every submit failed must reach the top-level fold");
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// One cycle sub-run whose NEAR outbox submits all failed. Only the outbox and
+/// settlement fields carry meaning here; the ranking sub-runs are filled with
+/// their idle shapes so the fold has a real `TraceCreditCycleWorkerRunResponse`
+/// to walk.
+fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleWorkerRunResponse {
+    TraceCreditCycleWorkerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: "model-v1".to_string(),
+        policy_version: "policy-v1".to_string(),
+        reason_hash: "sha256:0".to_string(),
+        near_contract_id: None,
+        calibration: TraceRankingCalibrationRunWorkerResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            limit: 0,
+            target_use: TraceAllowedUse::RankingModelTraining,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            policy_version: None,
+            checked_count: 0,
+            calibrated_count: 0,
+            skipped_existing_count: 0,
+            skipped_ineligible_count: 0,
+            skipped_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+            calibration_runs: Vec::new(),
+        },
+        model_promotion: TraceRankingModelPromotionRunResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            limit: 0,
+            target_use: TraceAllowedUse::RankingModelTraining,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            policy_version: None,
+            checked_count: 0,
+            promoted_count: 0,
+            skipped_ineligible_count: 0,
+            skipped_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+            promotions: Vec::new(),
+        },
+        prediction_credit: TraceRankingPredictionCreditRunResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            allow_at_risk_models: false,
+            limit: 0,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            target_use: None,
+            policy_version: None,
+            checked_count: 0,
+            credited_count: 0,
+            skipped_existing_count: 0,
+            skipped_model_risk_count: 0,
+            skipped_ineligible_count: 0,
+            blocked_model_risk_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+        },
+        settlement: TraceCreditSettlementRunResponse {
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            settlement_batch_id: Uuid::nil(),
+            dry_run: false,
+            policy_version: "policy-v1".to_string(),
+            policy_version_allowed: true,
+            source_list_hash: "sha256:0".to_string(),
+            issuer_approval_evidence_hash: None,
+            limit: None,
+            settled_source_event_count: 0,
+            eligible_source_event_count: 0,
+            pending_after_count: 0,
+            settled_account_count: 0,
+            settled_credit_points: 0.0,
+            near_outbox_item_count: 0,
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+            settlement_max_credit_micros_per_account: None,
+            settlement_policy_excluded_source_event_count: 0,
+            settlement_policy_excluded_reason_counts: BTreeMap::new(),
+        },
+        near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            dry_run: false,
+            checked: failed,
+            submitted: 0,
+            failed,
+            skipped: 0,
+            pending: failed,
+        },
+        near_outbox_confirm: TraceNearCreditOutboxConfirmWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            dry_run: false,
+            checked: 0,
+            confirmed: 0,
+            failed: 0,
+            skipped: 0,
+            pending: 0,
+        },
+    }
+}

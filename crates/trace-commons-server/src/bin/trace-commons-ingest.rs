@@ -9235,7 +9235,14 @@ const ALL_DRIVER_NAMES: &[&str] = &[
 /// warn! } }`, so every one of them had the same blind spot and the two that
 /// happened to point at a vendor that ran out of credit were dead for days
 /// behind nothing louder than a repeating WARN. The liveness bookkeeping
-/// lives here so a thirteenth driver cannot be added without it.
+/// lives here so a new driver gets it by calling one function rather than by
+/// remembering to repeat it. Nothing forces a periodic loop through here,
+/// though: three predate this work and are knowingly out of scope --
+/// `spawn_community_snapshot_recompute_task`,
+/// `spawn_managed_eddsa_keyset_refresh_task`, and
+/// `spawn_community_snapshot_invalidation_scheduler_task`. The last
+/// has the same incident shape as the twelve and differs only in its error
+/// type; converting it is future work, not an oversight.
 ///
 /// `tick` returns `Result<()>` and owns its own success logging, because the
 /// summary fields differ per driver and are worth keeping verbatim. Only the
@@ -39696,6 +39703,19 @@ fn credit_cycle_sub_run_outcome(
 ///
 /// An empty queue is deliberately still a success: a driver with nothing to
 /// do is working.
+///
+/// #438 fix round 2: the breaker alone was not enough. It trips at
+/// `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`, so a tick that enumerated fewer
+/// items than that and had every one come back transient never reached the
+/// threshold and returned `Ok`. A transient scoring failure deliberately does
+/// not charge an attempt and sets no backoff, so that state persists: one or
+/// two traces awaiting a decision with the scorer down kept the driver
+/// reporting healthy forever. The counters are folded the same way the PII
+/// backstop's are, and for the same reason.
+///
+/// `succeeded` is every disposition that moved a trace forward -- scored,
+/// skipped as a duplicate, or served from cache -- so a tick that made real
+/// progress alongside some failures is still a success.
 fn perplexity_tick_outcome(summary: &PerplexityDriverTickSummary) -> anyhow::Result<()> {
     if summary.breaker_tripped {
         return Err(DriverTickError::BreakerTripped {
@@ -39703,7 +39723,23 @@ fn perplexity_tick_outcome(summary: &PerplexityDriverTickSummary) -> anyhow::Res
         }
         .into());
     }
-    Ok(())
+    let succeeded = summary.scored + summary.skipped_duplicate + summary.cached;
+    // Transient first: an outage is the more actionable label when a sweep is
+    // both.
+    all_attempts_failed_outcome(
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        "score_upstream",
+        succeeded,
+        summary.transient,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        "score",
+        succeeded,
+        summary.failed,
+        DriverFailureClass::ContentRejected,
+    )
 }
 
 /// Map a driver tick error to a short, non-sensitive label for the log.

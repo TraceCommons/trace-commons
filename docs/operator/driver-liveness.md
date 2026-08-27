@@ -95,7 +95,7 @@ are per-deployment config, not constants:
 
 ```json
 {
-  "driver": "credit_cycle_scheduler",
+  "driver": "pii_backstop_driver",
   "interval_seconds": 60,
   "started_at": "2026-08-21T04:11:02Z",
   "last_success_at": "2026-08-21T04:12:02Z",
@@ -111,8 +111,22 @@ are per-deployment config, not constants:
 
 `stale: true`, `failure_class: upstream_unavailable`, `dead_seconds` in the
 hundreds of thousands, `consecutive_failures` near 7,000. The triage from
-there is one step: `upstream_unavailable` on a NEAR AI-backed driver means
-check the vendor account before touching anything in this repo.
+there is one step: `upstream_unavailable` on a NEAR AI-backed driver —
+`pii_backstop_driver` and `perplexity_score_driver` — means check the vendor
+account before touching anything in this repo. The same class on
+`credit_cycle_scheduler`, `near_credit_outbox_scheduler`, or
+`benchmark_registry_scheduler` points at NEAR **chain RPC**, not NEAR AI.
+
+Two things that are expected rather than an outage:
+
+- `error_hash` values changed for the ten worker-route-backed drivers when
+  they moved onto the shared wrapper. Hashes recorded before that change no
+  longer correlate with the ones you see now; compare only within an era.
+- A deliberate dry-run settlement rehearsal against a policy version that is
+  not in `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` will show
+  `credit_settlement_scheduler` (and `credit_cycle_scheduler`, which runs the
+  same settlement step) as stale with `config_missing`. That is the rehearsal
+  reporting that it settles nothing, not a fault.
 
 ## Nothing alerts on this yet
 
