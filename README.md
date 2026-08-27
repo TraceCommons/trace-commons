@@ -369,50 +369,49 @@ folder — delete it.
 
 #### Contributing sessions from other harnesses
 
-The CLI reads Claude Code and Codex sessions natively. For any other harness
-covered by [Letta Trajectory](https://github.com/letta-ai/trajectory) —
-`atif`, `copilot-cli`, `cursor`, `droid`, `gemini-cli`, `hermes`,
-`letta-code`, `omp`, `openclaw`, `opencode`, `openhands`, `pi`, and
-`deepagents` as of 0.3.0 — normalize the session first, then point the CLI at
-the result.
+The CLI reads Claude Code, Codex and Gemini CLI sessions natively, straight
+from their local stores. Nothing below is needed for those.
 
-**`@letta-ai/trajectory` is a library, not a command.** No published version
-declares a `bin`, so `npx @letta-ai/trajectory` fails with "could not
-determine executable to run". An earlier version of this section told you to
-run exactly that; it never worked, and we are sorry for the time it cost.
-
-What does work, with Node 20 or newer — `listTrajectories` finds the sessions
-in a harness's local store and `normalizeTranscript` converts one:
+For any other harness [Letta Trajectory](https://github.com/letta-ai/trajectory)
+covers -- `atif`, `copilot-cli`, `cursor`, `droid`, `hermes`, `letta-code`,
+`omp`, `openclaw`, `opencode`, `openhands`, `pi` -- export the sessions first:
 
 ```bash
-npm install @letta-ai/trajectory@0.3.0
+cd ~/code/my-project
+npx @tracecommons/trajectory-export --all
+trace-commons-contributor submit
 ```
 
-```js
-// export.mjs — run as: node export.mjs gemini-cli
-import { listTrajectories, normalizeTranscript } from "@letta-ai/trajectory";
-import { readFile, writeFile } from "node:fs/promises";
+The exporter writes `<source>-<id>.trajectory.json` into the working
+directory, which is the name `submit` looks for, so there is no flag to pass
+between the two commands.
 
-const source = process.argv[2];
-const { items } = await listTrajectories({ source, limit: 5 });
-for (const item of items.slice(0, 1)) {
-  const transcript = await readFile(item.path, "utf8");
-  const { records } = normalizeTranscript({ source, transcript });
-  await writeFile(
-    `${source}-${item.id}.trajectory.json`,
-    records.map((r) => JSON.stringify(r)).join("\n") + "\n",
-  );
-}
-```
+Some of those harnesses cannot be listed from disk -- upstream can normalize
+their transcripts but not enumerate their stores. The exporter names them and
+takes a file instead:
 
 ```bash
-trace-commons-contributor submit --trajectory gemini-cli-<id>.trajectory.json
+npx @tracecommons/trajectory-export --source cursor --input session.json
 ```
 
-`--trajectory` also accepts a directory, in which case every `*.json` and
-`*.jsonl` file directly inside it is offered. Trajectory files are never
-discovered implicitly; without `--trajectory` they are invisible to `list`
-and `submit`.
+**Do not run `npx @letta-ai/trajectory`.** Earlier versions of this file told
+you to; it has never worked. That package is a library with no `bin`, so npx
+exits with "could not determine executable to run". `@tracecommons/trajectory-export`
+is the command that instruction assumed, and it wraps the same library.
+
+##### What `submit` will and will not pick up
+
+Trajectory files are discovered in exactly two places: the working directory,
+where the name must end `.trajectory.json` or `.trajectory.jsonl`, and
+`<state-dir>/trajectories/`, where any `*.json` or `*.jsonl` counts. Nothing
+else is scanned -- never `$HOME`, never recursively.
+
+The suffix is what keeps an unrelated `session.json` out of a submission.
+Putting a file in the staging directory is itself the opt-in, so it needs no
+suffix.
+
+`--trajectory <path>` still names a file or directory explicitly, and still
+treats a path that does not exist as an error rather than an empty result.
 
 Model reasoning is captured by default and redacted client-side like any
 other content. Pass `--no-reasoning` to exclude it from a submission.
