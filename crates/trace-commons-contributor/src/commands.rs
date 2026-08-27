@@ -26,7 +26,7 @@ use crate::identity::{
 };
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
+use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources, cli_source_roots};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
@@ -604,7 +604,7 @@ fn discover_filtered(
     let project_filter = resolved_project.as_deref();
 
     let mut refs = Vec::new();
-    for source in all_sources(None, None, trajectory.map(|p| p.to_path_buf())) {
+    for source in all_sources(&cli_source_roots(trajectory)) {
         if let Some(sf) = source_filter {
             if source.name() != sf {
                 continue;
@@ -642,7 +642,7 @@ fn discover_filtered(
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
 fn source_for(name: &str, trajectory: Option<&Path>) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None, trajectory.map(|p| p.to_path_buf()))
+    all_sources(&cli_source_roots(trajectory))
         .into_iter()
         .find(|s| s.name() == name)
 }

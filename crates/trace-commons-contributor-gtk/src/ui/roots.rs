@@ -221,22 +221,18 @@ fn present_with<F>(
         let failure = failure.clone();
         let on_declared = Rc::new(on_declared);
         move |_| {
-            // Both are Some: the button is insensitive until they are, and
-            // this re-reads rather than trusting that.
-            let find = |source: &str| {
-                choices
-                    .iter()
-                    .find(|c| c.source == source)
-                    .and_then(|c| c.declaration())
-            };
-            let (Some(claude), Some(codex)) = (
-                find(trace_commons_contributor::source::SOURCE_CLAUDE_CODE),
-                find(trace_commons_contributor::source::SOURCE_CODEX),
-            ) else {
-                failure.set_visible(true);
-                return;
-            };
-            match crate::backend::declare_sources(&dir, &claude, &codex) {
+            // Every answered choice, not a hand-listed pair: this screen
+            // renders one row per discovered source, so a source it can
+            // show is a source whose answer must be written. The button is
+            // insensitive until all of them are answered, and this
+            // re-reads rather than trusting that -- an unanswered row is
+            // simply absent, and `declare_sources` refuses an incomplete
+            // declaration.
+            let answers: Vec<(&str, SourceDeclaration)> = choices
+                .iter()
+                .filter_map(|c| c.declaration().map(|d| (c.source.as_str(), d)))
+                .collect();
+            match crate::backend::declare_sources(&dir, &answers) {
                 Ok(()) => {
                     failure.set_visible(false);
                     window.close();
