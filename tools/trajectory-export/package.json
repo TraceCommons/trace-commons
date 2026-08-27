@@ -1,0 +1,29 @@
+{
+  "name": "@tracecommons/trajectory-export",
+  "version": "0.1.0",
+  "description": "Export local agent-harness sessions to Letta Trajectory v1 files for Trace Commons",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "trajectory-export": "./bin/trajectory-export.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TraceCommons/trace-commons-server.git",
+    "directory": "tools/trajectory-export"
+  },
+  "dependencies": {
+    "@letta-ai/trajectory": "0.3.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
