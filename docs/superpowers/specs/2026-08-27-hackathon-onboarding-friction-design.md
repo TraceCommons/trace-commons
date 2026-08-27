@@ -28,7 +28,7 @@ Counting honestly, including the steps earlier drafts of this spec left out:
 | --- | --- | --- | --- |
 | Today | 6 | 5 | yes |
 | After A-F | 3 | 1 | no |
-| After A-F, via Slice F | 2 | 1 | no |
+| After A-F, via Slice F | 1 | 1 | no |
 
 "Today" is `curl -o`, `sh install.sh`, `login --invite`, `submit --dry-run`,
 `submit`, `attest --out` — the sequence `docs/collector-integration.md`
@@ -455,6 +455,126 @@ E2 the artifact is truthful about what it does not cover. `--json` gains
 
 A failed attestation fetch is a warning, not a submit failure.
 
+### Slice F: the one-time script, and the one thing it leaves behind
+
+Devfolio's third question under item 2: "Can we also make the CLI runnable as a
+one-time script, for a single traces submission?" The flow they praised is
+Paxel's, which is `curl -fsSL .../upload.sh | bash` — no binary on PATH, no
+persistent state, nothing that reads as installation.
+
+We can match the first half of that exactly. We cannot match the second half,
+and this section is mostly about why, and what the smallest honest amount of
+persistence is.
+
+#### F1. The binary is ephemeral
+
+`scripts/contribute.sh` (and `contribute.ps1`) fetches the verified binary into
+a cache directory, enrolls if needed, submits, attests, and exits. No PATH
+entry, no daemon, no autostart, no login item.
+
+It reuses `install.sh` rather than reimplementing verification. That script
+already takes `--dir` / `TC_INSTALL_DIR` (`install.sh:33,42`) and refuses any
+binary whose published SHA-256 does not match, or on macOS whose signature does
+not name our Developer ID, with no `--force` and no `--skip-verify`
+(`install.sh:15-27`). A second download path with its own verification would be
+a second chance to get verification wrong.
+
+The script itself may be advertised in its piped form for hackathon audiences.
+The security boundary is the binary's signature, not the script's delivery: a
+tampered script cannot make `install.sh` accept an unsigned binary. The
+two-step download-then-read form stays documented first in the README, per
+`install.sh:4-8`. The script body is wrapped in a function invoked on the last
+line, so a truncated download executes nothing — table stakes once we advertise
+piping.
+
+#### F2. Statelessness is not available, and the reason is withdrawal
+
+A fully stateless run — discard everything on exit — is correct for exactly one
+operation: submit. Everything downstream breaks, because **the device key is
+the identity**, not merely a credential for it.
+
+On the CLI path the actor is always namespaced under the device key: `actor =
+device_key_id`, or `instance:{tenant}:{device_key_id}:user:{subject}` when a
+subject is present (`trace_upload_claim_issuer.rs:1808-1821`). The invite flow
+derives the subject from the key itself — `let user_subject =
+device_key_id_from_public_key_bytes(...)` (`:2072`). A fresh key is therefore a
+fresh person, with four consequences:
+
+- A new `auth_principal_ref`, and under `InviteTenantMode::Derived` a new
+  tenant (`db/postgres.rs:760-765`).
+- One invite use spent per run. Idempotency is keyed on `device_key_id`
+  (`postgres.rs:2664-2690`); there is no subject-level or human-level dedup.
+- A fresh per-contributor cap budget every run. Caps key on
+  `auth_principal_ref` (`postgres.rs:4791-4832`), so wipe-and-rerun resets the
+  concave cap. Content dedup (`dedup_assign.rs`) is the only remaining brake.
+- **No withdrawal, ever.** The account is minted *from* the device principal
+  (`create_or_reuse_account`, called at `ingest.rs:15317`), so no key means no
+  account, means no way to revoke. Traces sit on the server that the
+  contributor cannot take back.
+
+The last one settles it. A one-time script that leaves a contributor unable to
+withdraw is not a convenience feature; it is a consent failure. Uploading
+something a person cannot retract is the one outcome this project's threat
+model exists to prevent.
+
+#### F3. The keep
+
+The script therefore leaves exactly one thing behind: a **keep** — the device
+private key plus the coordinates needed to use it.
+
+Concretely it is a normal `ConfigStore` state directory
+(`config.rs:206-234`, mode `0700`) at a clearly named path, holding the device
+key, `contributor.json`, and the run's receipts. It is deliberately **not** a
+new single-file format. The key alone is insufficient — reaching the server
+needs the issuer URL, ingest URL, tenant, and instance id, none of which can be
+re-derived locally — and inventing a combined blob would mean a new parser for
+a private-key-bearing file, which is a poor place to add a parser. Reusing the
+existing store is less code and already correct.
+
+What the keep buys:
+
+- **Withdrawal.** `account login` mints a browser session through the
+  device-authenticated `POST /v1/account/login-links`
+  (`account_auth.rs:325`), and `withdraw` revokes from there.
+- **Idempotent re-runs.** The same key re-enrolling returns
+  `OnboardDeviceKeyStatus::Idempotent` and spends no invite use
+  (`postgres.rs:2664-2690`).
+- **`status` and credit**, since the receipts are there.
+
+The script prints, in plain language and every run: where the keep is, that it
+is the only way to withdraw these traces, and the command to delete it.
+
+There is no `--no-keep`. Deleting the keep later is the same act with better
+timing — the contributor has by then seen what it is and what it is for —
+whereas a flag that silently produces unrevocable traces is a footgun aimed at
+the person holding it.
+
+#### F4. What the keep does not buy, and should
+
+`daemon/withdraw.rs:10-24` states withdrawal is "meant to survive losing the
+device that submitted a trace." As wired it does not: surviving device loss
+requires a passkey or NEAR identity registered on the account beforehand, and
+**the CLI has no command to register one** — no caller of
+`/v1/account/passkeys/register/*` exists in the contributor crate. Losing the
+keep is losing the traces' revocability.
+
+That gap predates this design and is not fixed here, but Slice F is the first
+thing that makes it routine rather than exceptional, so it should be closed
+before the script ships to an event. Two candidates, in order of cost:
+teach the CLI to register a passkey; or teach it to rebuild receipts from `GET
+/v1/contributors/me/credit` (`ingest.rs:13892-13931`), which returns the
+caller's own records with no ids supplied and would at least make the keep
+reconstructible from the key alone.
+
+Shape:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh | sh -s -- --project .
+```
+
+`--project .` scopes to the current directory; omitting it submits across
+projects. Both shapes take their scoping model from Slice C.
+
 ## Error handling
 
 Gemini adapter failures are label-only: `unreadable-gemini-session`,
@@ -501,7 +621,18 @@ TDD, against sanitised fixtures under
 - `submit --attest-out` on timeout writes the attestation and reports the
   pending count rather than failing.
 - The one-time script run twice enrolls once and does not spend a second invite
-  use.
+  use: the second run finds the keep and the server returns
+  `OnboardDeviceKeyStatus::Idempotent`.
+- The script never writes outside its cache directory and the keep, and puts
+  nothing on `PATH` — the contract Slice F's "nothing that reads as
+  installation" claim rests on.
+- The keep is created mode `0700` and the device key within it `0600`.
+- After a run, `account login` against the keep reaches an account whose
+  principal set contains the run's `auth_principal_ref`, and `withdraw`
+  revokes a submission from that run. This is the regression test for the
+  consent property in F2: if it fails, the script is producing traces its
+  contributor cannot retract.
+- A truncated `contribute.sh` executes nothing (the `main` wrapper).
 
 ## Consequences
 
