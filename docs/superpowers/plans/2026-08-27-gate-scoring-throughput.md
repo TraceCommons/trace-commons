@@ -224,6 +224,55 @@ env.
 
 ## 3. The plan
 
+### Baseline, measured 2026-08-27 (Task 0 step 1, done)
+
+Taken on the pilot before any tuning. **The headline number changes the
+diagnosis.**
+
+From `/var/log/tracecommons/ingest.log`, over 129 ticks that scored at least
+one trace, taking `(gap between consecutive tick lines - 45 s interval) /
+scored`:
+
+| per-trace scoring time | |
+| --- | --- |
+| p50 | 287 s (~4.8 min) |
+| p90 | 385 s |
+| max | 918 s |
+
+From the database, via the gate-driver role (the `app` role cannot see these
+rows: it is `NOBYPASSRLS` against forced RLS with no tenant GUC, and returns
+zero for everything, which is not the same as there being nothing):
+
+| | |
+| --- | --- |
+| submissions | 1055 |
+| scored | 1035 |
+| unscored | 20 -- of which 13 at 0 attempts, 3 at 1, 1 at 4, **3 at max_attempts and therefore permanently out of the queue** |
+| queue latency `decided_at - received_at` | p50 39 min, p90 32.5 h, p99 22 days |
+
+The queue-latency tail spans the pilot's whole history including outages and
+the PII-backstop wedge, so it overstates steady state. There has been no
+traffic for 30 days, so a clean steady-state figure would need a load run.
+
+**The queue-depth rows above are a snapshot and have since moved**: the
+unscored traces were requeued shortly after this was taken, so the 20 and the
+three exhausted no longer describe the pilot. The per-trace timing does not
+move -- it is derived from historical tick logs -- and it is the number this
+plan turns on.
+
+**What this says.** At ~287 s per trace, scored one at a time, throughput is
+about **12.5 traces/hour** -- not the ~6.7 per *minute* the config-level
+arithmetic implies. The 45 s interval and batch of 5 are not the binding
+constraint and tuning them alone buys almost nothing: a field of 200
+submissions in a final hour would take roughly 16 hours to clear.
+
+That makes Task 1 (concurrency across submissions) the load-bearing change
+rather than an optimisation, and it sets the sizing: N=4 gives ~50 traces/hour,
+N=8 about 100. It also means the per-chunk serial loop inside a trace, not the
+driver's pacing, is where the 287 s lives -- so the next measurement worth
+having is the split between NEAR round trips and local embedding inside one
+trace.
+
 ### Task 0 — baseline and instrumentation (no behavior change)
 
 1. Capture the current baseline on the pilot before any change:

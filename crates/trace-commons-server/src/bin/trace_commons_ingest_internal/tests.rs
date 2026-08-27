@@ -86013,3 +86013,33 @@ fn a_dry_run_receipt_does_not_imply_an_on_chain_credit() {
         receipt.explanation
     );
 }
+
+/// The driver's tick summary carries the two numbers a throughput decision
+/// needs, and defaults that cannot be mistaken for a measurement.
+///
+/// `tick_duration_ms` exists because the loop sleeps THEN ticks, so cycle time
+/// is interval plus tick, and per-trace latency was previously only derivable
+/// from gaps between log lines minus an interval that may since have been
+/// retuned. That is how it came to be unmeasured.
+///
+/// `backlog` is an `Option` on purpose. A failed count must be distinguishable
+/// from an empty queue: reporting `0` when the probe itself failed would read
+/// as "caught up" at exactly the moment nobody can see the queue.
+#[test]
+fn perplexity_tick_summary_carries_duration_and_backlog() {
+    let summary = super::PerplexityDriverTickSummary::default();
+    assert_eq!(summary.tick_duration_ms, 0);
+    assert_eq!(
+        summary.backlog, None,
+        "an unmeasured backlog must be None, never 0 -- 0 means an empty queue"
+    );
+
+    let measured = super::PerplexityDriverTickSummary {
+        scored: 3,
+        tick_duration_ms: 1234,
+        backlog: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(measured.tick_duration_ms, 1234);
+    assert_eq!(measured.backlog, Some(42));
+}
