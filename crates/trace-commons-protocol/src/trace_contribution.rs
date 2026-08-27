@@ -2861,8 +2861,19 @@ struct SecretLeakPattern {
 /// secret-shaped cue (`api_key:`, `Bearer `, `password=`, ...).
 const CUE_WINDOW: usize = 48;
 /// Minimum candidate token length considered for contextual-entropy
-/// detection. Shorter tokens are too noisy to gate reliably.
-const ENTROPY_MIN_LEN: usize = 16;
+/// detection.
+///
+/// 8, not 16. #225 lowered it deliberately: a token this short is only ever
+/// reached with a secret-shaped cue already matched within `CUE_WINDOW`, and
+/// the noise that motivated 16 is handled by `ENTROPY_BITS_MIN` and the
+/// allowlists rather than by refusing to look. Restored here after the #267
+/// squash reverted it to 16 (see #326), which reopened the 8-to-15 character
+/// band this constant exists to cover.
+///
+/// It is paired with the `{8,}` bound in `entropy_candidate_regex`: the
+/// regex decides what is a candidate at all, so raising either one alone
+/// silently disables the band while the other still claims to cover it.
+const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
 const ENTROPY_BITS_MIN: f64 = 3.2;
@@ -3058,7 +3069,11 @@ fn secret_cue_regex() -> &'static Regex {
 fn entropy_candidate_regex() -> &'static Regex {
     static ENTROPY_CANDIDATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"[A-Za-z0-9+/=_.\-]{16,}")
+        // The `{8,}` bound must stay in step with `ENTROPY_MIN_LEN`: this
+        // regex decides what becomes a candidate, that constant decides what
+        // survives the length check, and a token shorter than either is never
+        // examined. The #267 squash reverted both to 16 together (#326).
+        Regex::new(r"[A-Za-z0-9+/=_.\-]{8,}")
             .expect("hardcoded entropy candidate regex must compile")
     });
     &ENTROPY_CANDIDATE_REGEX
@@ -6474,6 +6489,97 @@ mod training_dynamics_tests {
 #[cfg(test)]
 mod tests {
 
+    /// #225 lowered the cued-secret length floor from 16 to 8; the #267
+    /// squash reverted it to 16, reopening the band. See #326 for the wider
+    /// conflict-resolution reversion.
+    ///
+    /// The lengths here are LITERAL on purpose. The assertion this replaces
+    /// was written relative to `ENTROPY_MIN_LEN` ("redacted at exactly the
+    /// floor, survives one byte below"), which is self-consistent at any
+    /// value of the constant and so cannot detect the constant moving. That
+    /// is precisely how the reversion stayed invisible. A literal pins the
+    /// behaviour to the band that was decided on, not to whatever the
+    /// constant currently says.
+    ///
+    /// The covered band is 10..=15, not 8..=15, and the difference is not a
+    /// slack in the test. `ENTROPY_BITS_MIN` is 3.2 bits/char, and the
+    /// Shannon entropy of an n-character token cannot exceed log2(n), so a
+    /// token needs n >= 2^3.2 ~= 9.2 to clear the entropy gate at all.
+    /// Lengths 8 and 9 are therefore unreachable no matter what
+    /// `ENTROPY_MIN_LEN` says -- the entropy floor binds above the length
+    /// floor down there. `ENTROPY_MIN_LEN = 8` is still the right value to
+    /// restore, because it is what #225 chose and the two gates are meant to
+    /// be independent, but it is worth knowing that 8 and 10 are behaviourally
+    /// identical settings today. The 8..=9 case is asserted below so that a
+    /// future change to `ENTROPY_BITS_MIN` shows up here as a deliberate
+    /// widening rather than an accident.
+    #[test]
+    fn cued_secrets_in_the_ten_to_fifteen_character_band_are_redacted() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        let pool = "Q7vM2xP9sL4nR8kT6wZ3bY5uH1cJ0dG9";
+        for len in 10..=15usize {
+            let value = &pool[..len];
+            let text = format!("api_key={value}");
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(value),
+                "a {len}-char cued secret survived redaction: {out}"
+            );
+            assert!(
+                rep.blocked_secret_detected,
+                "a {len}-char cued secret was not reported as a blocked secret"
+            );
+        }
+
+        // Below the entropy gate's arithmetic floor, documented above. Not a
+        // gap this PR claims to close; recorded so it cannot move silently.
+        for len in 8..=9usize {
+            let value = &pool[..len];
+            let (out, _) = r.redact_text(&format!("api_key={value}"));
+            assert!(
+                out.contains(value),
+                "a {len}-char token cleared a 3.2 bits/char floor it cannot \
+                 mathematically reach; ENTROPY_BITS_MIN must have changed: {out}"
+            );
+        }
+    }
+
+    /// The other half of #225's bargain: lowering the LENGTH floor must not
+    /// lower the ENTROPY floor or bypass the allowlists, or the 8-to-15 band
+    /// fills with git shas and ordinary words. This is the FP budget the
+    /// hardening was accepted with, asserted at the same literal lengths as
+    /// the test above so the two move together.
+    #[test]
+    fn lowering_the_length_floor_does_not_widen_the_false_positive_budget() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        for text in [
+            // Low-entropy values after a cue: length is in band, entropy is not.
+            "password: password",
+            "api_key: staging1",
+            "token: aaaaaaaa",
+            // Git short shas after a cue: the FP rate here dominates recall.
+            "api_key: deadbee",
+            "api_key: deadbeef",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "FP budget: value was redacted: {out}");
+            assert!(
+                !rep.blocked_secret_detected,
+                "FP budget: value was reported as a blocked secret: {text}"
+            );
+        }
+
+        // Uncued high-entropy content must still survive: the cue gate, not
+        // the length floor, is what makes a token a candidate at all.
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let (out, rep) = r.redact_text(&format!("commit {sha40}"));
+        assert!(out.contains(sha40), "uncued sha was redacted: {out}");
+        assert!(!rep.blocked_secret_detected);
+    }
     /// #223 reserved High for scrub FAILURE and moved scrub SUCCESS to
     /// Medium. The risk derivation implements that today, but the #267
     /// squash reverted these two contributor- and operator-facing strings to
@@ -7465,11 +7571,15 @@ mod tests {
         let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
         assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
 
-        // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
-        //    short to gate reliably, even when cued and opaque.
-        assert!("Zx9Qk2Lm7P".len() < ENTROPY_MIN_LEN);
-        let (out, _) = r.redact_text("api_key=Zx9Qk2Lm7P");
-        assert_eq!(out, "api_key=Zx9Qk2Lm7P");
+        // 4. There is deliberately no "too short to gate" case here. One
+        //    used to sit at this position, asserting that `api_key=Zx9Qk2Lm7P`
+        //    passes through. #225 DELETED it, because the hardening it
+        //    shipped is exactly the decision to gate that length; the #267
+        //    squash then reintroduced it (#326), leaving the suite holding
+        //    this assertion and #225's dead cue-boundary table stating
+        //    opposite intent. The band is now covered by
+        //    `cued_secrets_in_the_ten_to_fifteen_character_band_are_redacted`.
+        //    Do not re-add a case here: a short cued opaque value IS redacted.
 
         // 5. Below `ENTROPY_BITS_MIN` (3.2 bits/char): intentionally treated
         //    as not opaque enough, even when cued and long enough.
