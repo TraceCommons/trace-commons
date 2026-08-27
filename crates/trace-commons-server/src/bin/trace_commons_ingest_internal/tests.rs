@@ -85643,3 +85643,68 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
         "unknown-denominator coverage must not be confusable with a fully scored trace"
     );
 }
+
+/// #445: 307 credit events sat `pending` for three months because settlement is
+/// deliberately disabled on the pilot, and nothing on the contributor-facing
+/// receipt said so. A contributor saw an accepted trace, a pending credit
+/// figure, and an empty `FINAL` column, with no way to learn that the settling
+/// path was switched off rather than merely slow.
+///
+/// The receipt must state the deployment's settlement posture in its own
+/// words. This is wording only -- no outbox row moves because of it.
+#[test]
+fn an_accepted_receipt_says_settlement_is_disabled_when_it_is() {
+    let record = submission_record_with_principal("principal_a");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::Disabled);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("not settled") && line.contains("not enabled")),
+        "a disabled-settlement deployment must say so on the receipt; got {:?}",
+        receipt.explanation
+    );
+}
+
+/// The converse, so the line cannot become a permanent falsehood the moment a
+/// deployment turns settlement on. An undocumented deliberate state drifting
+/// from what the contributor is told is the whole defect in #445; hardcoding
+/// the disabled wording would reintroduce it pointing the other way.
+#[test]
+fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
+    let record = submission_record_with_principal("principal_a");
+
+    for mode in [NearSettlementMode::Http, NearSettlementMode::DryRun] {
+        let receipt = receipt_from_record(&record, mode);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("not enabled")),
+            "mode {:?} must not claim settlement is disabled; got {:?}",
+            mode,
+            receipt.explanation
+        );
+    }
+}
+
+/// Dry-run advances the outbox with synthetic transaction hashes and no funds.
+/// A contributor must not read that as an on-chain credit.
+#[test]
+fn a_dry_run_receipt_does_not_imply_an_on_chain_credit() {
+    let record = submission_record_with_principal("principal_a");
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::DryRun);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("dry-run")),
+        "dry-run settlement must be named on the receipt; got {:?}",
+        receipt.explanation
+    );
+}
