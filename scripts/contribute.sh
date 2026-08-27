@@ -21,6 +21,11 @@
 # directory that is removed when the run ends, leaving nothing of the program
 # behind at all; the default keeps it so a second run costs no download.
 #
+# --with-export first normalizes sessions from harnesses the CLI does not read
+# natively, via our npm exporter. Opt-in: it fetches an npm package, which the
+# registry signs but which carries no provenance attestation, unlike the binary
+# this script verifies by checksum and Developer ID.
+#
 # But one thing does persist either way, deliberately -- the keep: a device key
 # and the coordinates needed to use it. --no-cache does not touch it, and
 # nothing else should be read as promising to.
@@ -62,6 +67,11 @@ tc_contribute_main() {
   bin_dir="$cache_root/bin"
   keep_dir="${TRACE_COMMONS_KEEP_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tracecommons/keep}"
   no_cache=""
+  with_export=""
+  # Pinned exactly. npx resolves a range at runtime, and this script is
+  # advertised in its piped form: "whatever is latest right now" is not a thing
+  # to run unattended over session transcripts.
+  EXPORTER="@tracecommons/trajectory-export@0.1.0"
 
   say() { printf '%s\n' "$*"; }
   die() { printf 'contribute failed: %s\n' "$*" >&2; exit 1; }
@@ -70,6 +80,7 @@ tc_contribute_main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --no-cache) no_cache=1; shift ;;
+      --with-export) with_export=1; shift ;;
       -h|--help) sed -n '2,45p' "$0" 2>/dev/null || say "see scripts/contribute.sh"; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -150,6 +161,31 @@ run this from a terminal so it can ask."
   say "  To delete it later, and give up the ability to withdraw them:"
   say "    rm -rf \"$keep_dir\""
   say ""
+
+  # ---- optional: normalize other harnesses first ------------------------
+  #
+  # Opt-in, and it stays opt-in for a reason worth reading. Everything else
+  # this script fetches is one binary whose checksum must match and whose macOS
+  # signature must name our Developer ID, with no flag to skip either. The
+  # exporter is an npm package: the registry signs it, but there is no
+  # provenance attestation tying that tarball to our source, so this widens the
+  # trust surface of a script that reads coding transcripts. Defaulting it on
+  # would spend that trust for people who never asked.
+  #
+  # It writes <source>-<id>.trajectory.json into this directory, which is the
+  # name `submit` discovers, so nothing needs to be passed between them.
+  if [ -n "$with_export" ]; then
+    if command -v npx >/dev/null 2>&1; then
+      say "normalizing sessions from other harnesses..."
+      # A non-zero exit here is ordinary: the exporter reports 1 when it finds
+      # nothing to export, which is the common case on a machine that only runs
+      # natively-read harnesses. Never fatal -- the native sources are the point
+      # of the run and must still be submitted.
+      npx --yes "$EXPORTER" --all || say "  nothing exported; continuing"
+    else
+      say "--with-export needs npx (Node 20+); skipping, native sources still submit"
+    fi
+  fi
 
   # ---- one submission --------------------------------------------------
   # `submit` scopes itself to this directory's subtree and enrolls with the

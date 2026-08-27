@@ -143,3 +143,71 @@ fn no_cache_removes_the_binary_and_leaves_the_keep() {
         "the script says which of the two --no-cache applies to"
     );
 }
+
+/// `--with-export` must be opt-in, pinned, and unable to fail the run.
+///
+/// The script's whole security story is that it fetches one artifact whose
+/// checksum must match and whose macOS signature must name our Developer ID,
+/// with no flag to skip either. The exporter is an npm package: signed by the
+/// registry, but with no provenance attestation tying the tarball to our
+/// source. Fetching it is a real widening of that surface, so it may not
+/// happen to someone who did not ask, and it may not decide whether traces get
+/// submitted.
+#[test]
+fn with_export_is_opt_in_pinned_and_never_fatal() {
+    let s = script();
+
+    // Opt-in: the exporter may only run inside the flag's branch.
+    assert!(s.contains("--with-export"), "the flag exists");
+    let guarded = s
+        .split("if [ -n \"$with_export\" ]; then")
+        .nth(1)
+        .expect("the exporter runs inside the flag's branch");
+    assert!(
+        guarded.contains("npx --yes"),
+        "npx is invoked only under --with-export"
+    );
+    // Count real invocations, not the word: the script mentions npx in a
+    // comment and in the message shown when it is missing, and an assertion
+    // that counts those would fail for the wrong reason and get loosened.
+    let invocations = s
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with('#') && t.contains("npx --yes")
+        })
+        .count();
+    assert_eq!(
+        invocations, 1,
+        "exactly one npx invocation, inside the guard"
+    );
+
+    // Pinned: npx resolves a range at runtime, and this script is advertised
+    // in its piped form. "Whatever is latest right now" is not something to
+    // run unattended over session transcripts.
+    assert!(
+        s.contains("@tracecommons/trajectory-export@0.1.0"),
+        "the exporter version is pinned exactly"
+    );
+
+    // Never fatal, twice over: the script runs under `set -e`, the exporter
+    // exits non-zero when it finds nothing to export, and a machine that only
+    // runs natively-read harnesses is the common case. Either failure must
+    // leave the submission -- the actual point of the run -- to proceed.
+    assert!(
+        guarded.contains("||"),
+        "a failing exporter is tolerated, not fatal"
+    );
+    assert!(
+        guarded.contains("command -v npx"),
+        "a machine without npx is told and continues"
+    );
+
+    // Order: exporting after `submit` would write files nothing then reads.
+    let export_at = s.find("normalizing sessions").expect("export step present");
+    let submit_at = s.find("\"$cli\" submit").expect("submit step present");
+    assert!(
+        export_at < submit_at,
+        "the export must run before submit discovers what it wrote"
+    );
+}
