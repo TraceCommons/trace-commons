@@ -142,6 +142,131 @@ impl DriverLiveness {
     }
 }
 
+/// What the caller should log for a tick. Returned rather than logged here so
+/// every rule below is testable without a subscriber, a spawned task, or a
+/// clock trait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogAction {
+    /// Nothing to say: a healthy tick, or a failure already covered by a
+    /// standing escalation.
+    None,
+    /// First failure of a run, or the failure class changed.
+    Warn {
+        class: DriverFailureClass,
+        error_hash: String,
+    },
+    /// This driver just crossed its staleness threshold.
+    Escalate {
+        class: DriverFailureClass,
+        error_hash: String,
+        consecutive_failures: u64,
+        dead_seconds: i64,
+    },
+    /// Still dead, and the repeat interval has elapsed since the last line.
+    EscalateRepeat {
+        class: DriverFailureClass,
+        error_hash: String,
+        consecutive_failures: u64,
+        dead_seconds: i64,
+        suppressed: u64,
+    },
+    /// First success after one or more failures. The incident had no
+    /// equivalent: its end was as invisible as its start.
+    Recovered { failures: u64, dead_seconds: i64 },
+}
+
+/// Fold one tick outcome into a driver's liveness, and decide what to log.
+///
+/// Pure: same inputs, same outputs, no clock and no I/O. `now` is a
+/// parameter precisely so the five-day scenario in the tests runs instantly.
+pub fn observe_driver_tick(
+    prev: &DriverLiveness,
+    outcome: DriverTickOutcome,
+    now: DateTime<Utc>,
+) -> (DriverLiveness, LogAction) {
+    let mut next = prev.clone();
+
+    match outcome {
+        DriverTickOutcome::Success => {
+            let failures = prev.consecutive_failures;
+            let dead_seconds = prev.dead_seconds(now);
+            next.last_success_at = Some(now);
+            next.consecutive_failures = 0;
+            next.escalated = false;
+            next.last_escalated_log_at = None;
+            next.suppressed_since_last_log = 0;
+            let action = if failures > 0 {
+                LogAction::Recovered {
+                    failures,
+                    dead_seconds,
+                }
+            } else {
+                LogAction::None
+            };
+            (next, action)
+        }
+        DriverTickOutcome::Failure { class, error_hash } => {
+            let class_changed = prev.last_failure_class != Some(class);
+            next.last_failure_at = Some(now);
+            next.consecutive_failures = prev.consecutive_failures.saturating_add(1);
+            next.last_failure_class = Some(class);
+            next.last_error_hash = Some(error_hash.clone());
+
+            let dead_seconds = next.dead_seconds(now);
+            let stale = dead_seconds > next.stale_after_seconds();
+
+            if !stale {
+                // Below the threshold this is "unlucky", not "dead". Say so
+                // once per run, and again if the reason changes.
+                if prev.consecutive_failures == 0 || class_changed {
+                    (next, LogAction::Warn { class, error_hash })
+                } else {
+                    (next, LogAction::None)
+                }
+            } else if !prev.escalated {
+                next.escalated = true;
+                next.last_escalated_log_at = Some(now);
+                next.suppressed_since_last_log = 0;
+                let consecutive_failures = next.consecutive_failures;
+                (
+                    next,
+                    LogAction::Escalate {
+                        class,
+                        error_hash,
+                        consecutive_failures,
+                        dead_seconds,
+                    },
+                )
+            } else {
+                let since_last_log = next
+                    .last_escalated_log_at
+                    .map(|at| (now - at).num_seconds())
+                    .unwrap_or(i64::MAX);
+                if since_last_log >= ESCALATED_REPEAT_INTERVAL_SECONDS {
+                    let suppressed = next.suppressed_since_last_log;
+                    next.last_escalated_log_at = Some(now);
+                    next.suppressed_since_last_log = 0;
+                    let consecutive_failures = next.consecutive_failures;
+                    (
+                        next,
+                        LogAction::EscalateRepeat {
+                            class,
+                            error_hash,
+                            consecutive_failures,
+                            dead_seconds,
+                            suppressed,
+                        },
+                    )
+                } else {
+                    next.suppressed_since_last_log =
+                        next.suppressed_since_last_log.saturating_add(1);
+                    (next, LogAction::None)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +340,137 @@ mod tests {
         live.last_success_at = Some(at(280));
         assert!(!live.is_stale(at(500)));
         assert!(live.is_stale(at(600)));
+    }
+
+    fn fail(hash: &str) -> DriverTickOutcome {
+        DriverTickOutcome::Failure {
+            class: DriverFailureClass::UpstreamUnavailable,
+            error_hash: hash.to_string(),
+        }
+    }
+
+    /// The incident, simulated. A 45s driver failing every tick for five days
+    /// produced 6,999 identical WARNs. It must now produce one WARN, one
+    /// escalation, and then one line per repeat interval -- not one per tick.
+    #[test]
+    fn five_days_of_failure_does_not_produce_one_line_per_tick() {
+        let mut live = DriverLiveness::new("pii_backstop", 45, at(0));
+        let mut warns = 0;
+        let mut escalations = 0;
+        let mut repeats = 0;
+        let mut silent = 0;
+
+        // 5 days at one tick per 45s.
+        let ticks = 5 * 24 * 60 * 60 / 45;
+        for tick in 1..=ticks {
+            let now = at(tick * 45);
+            let (next, action) = observe_driver_tick(&live, fail("sha256:abc"), now);
+            live = next;
+            match action {
+                LogAction::Warn { .. } => warns += 1,
+                LogAction::Escalate { .. } => escalations += 1,
+                LogAction::EscalateRepeat { .. } => repeats += 1,
+                LogAction::None => silent += 1,
+                LogAction::Recovered { .. } => unreachable!("no success was fed"),
+            }
+        }
+
+        assert_eq!(warns, 1, "only the first failure warns");
+        assert_eq!(escalations, 1, "escalation happens once, not per tick");
+        // 5 days / 15 min, minus the interval already covered by the initial
+        // escalation line.
+        assert_eq!(repeats, 479);
+        assert_eq!(warns + escalations + repeats, 481);
+        assert!(
+            silent > 9_000,
+            "the rest are suppressed, got {silent} suppressed of {ticks} ticks"
+        );
+    }
+
+    /// Escalation must mean "dead", not "unreliable". A driver that fails and
+    /// recovers repeatedly never crosses the threshold, because each success
+    /// resets the clock.
+    #[test]
+    fn a_flapping_driver_never_escalates() {
+        let mut live = DriverLiveness::new("flappy", 45, at(0));
+        for tick in 0..200 {
+            let now = at(tick * 45);
+            let outcome = if tick % 2 == 0 {
+                fail("sha256:abc")
+            } else {
+                DriverTickOutcome::Success
+            };
+            let (next, action) = observe_driver_tick(&live, outcome, now);
+            live = next;
+            assert!(
+                !matches!(
+                    action,
+                    LogAction::Escalate { .. } | LogAction::EscalateRepeat { .. }
+                ),
+                "flapping escalated at tick {tick}"
+            );
+            assert!(!live.escalated);
+        }
+    }
+
+    #[test]
+    fn recovery_emits_exactly_one_line_carrying_the_real_duration() {
+        let mut live = DriverLiveness::new("recovering", 45, at(0));
+        for tick in 1..=40 {
+            let (next, _) = observe_driver_tick(&live, fail("sha256:abc"), at(tick * 45));
+            live = next;
+        }
+        assert!(live.escalated);
+
+        let (recovered, action) = observe_driver_tick(&live, DriverTickOutcome::Success, at(1_845));
+        assert_eq!(
+            action,
+            LogAction::Recovered {
+                failures: 40,
+                dead_seconds: 1_845,
+            }
+        );
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert!(!recovered.escalated);
+        assert_eq!(recovered.last_success_at, Some(at(1_845)));
+
+        // A second success is silent -- recovery is an edge, not a state.
+        let (_, action) = observe_driver_tick(&recovered, DriverTickOutcome::Success, at(1_890));
+        assert_eq!(action, LogAction::None);
+    }
+
+    /// A different failure class is news even mid-outage: a 402 becoming a
+    /// 500 means something changed. Suppression must not mask it.
+    #[test]
+    fn a_changed_failure_class_warns_even_while_suppressed() {
+        let mut live = DriverLiveness::new("changing", 45, at(0));
+        let (next, action) = observe_driver_tick(&live, fail("sha256:abc"), at(45));
+        live = next;
+        assert!(matches!(action, LogAction::Warn { .. }));
+
+        // Same class, below threshold: suppressed.
+        let (next, action) = observe_driver_tick(&live, fail("sha256:abc"), at(90));
+        live = next;
+        assert_eq!(action, LogAction::None);
+
+        // Different class, still below threshold: warns.
+        let (_, action) = observe_driver_tick(
+            &live,
+            DriverTickOutcome::Failure {
+                class: DriverFailureClass::ConfigMissing,
+                error_hash: "sha256:def".to_string(),
+            },
+            at(135),
+        );
+        assert!(
+            matches!(
+                action,
+                LogAction::Warn {
+                    class: DriverFailureClass::ConfigMissing,
+                    ..
+                }
+            ),
+            "a class change must not be suppressed, got {action:?}"
+        );
     }
 }
