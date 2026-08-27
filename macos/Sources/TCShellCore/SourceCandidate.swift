@@ -9,11 +9,13 @@ import Foundation
 public enum SourceKind: String, Equatable, Sendable {
     case claudeCode = "claude-code"
     case codex
+    case geminiCli = "gemini-cli"
 
     public var displayName: String {
         switch self {
         case .claudeCode: return "Claude Code"
         case .codex: return "Codex"
+        case .geminiCli: return "Gemini CLI"
         }
     }
 }

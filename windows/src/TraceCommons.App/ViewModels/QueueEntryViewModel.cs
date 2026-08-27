@@ -143,6 +143,7 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
         null or "" => "—",
         "claude-code" or "claude_code" => "Claude Code",
         "codex" => "Codex",
+        "gemini-cli" or "gemini_cli" => "Gemini CLI",
         "trajectory" or "letta_trajectory" => "Letta trajectory",
         string other when string.IsNullOrWhiteSpace(other) => "—",
         string other => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(

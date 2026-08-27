@@ -56,15 +56,38 @@ public enum SourceChoice: Equatable, Sendable {
 public struct SessionRoots: Equatable, Sendable {
     public var claude: SourceChoice
     public var codex: SourceChoice
+    public var gemini: SourceChoice
 
-    public init(claude: SourceChoice = .undecided, codex: SourceChoice = .undecided) {
+    public init(
+        claude: SourceChoice = .undecided,
+        codex: SourceChoice = .undecided,
+        gemini: SourceChoice = .undecided
+    ) {
         self.claude = claude
         self.codex = codex
+        self.gemini = gemini
     }
 
+    /// Exhaustive on purpose. The binary form this replaced -- `kind ==
+    /// .claudeCode ? claude : codex` -- silently routed every future source to
+    /// the Codex answer, so adding a case to `SourceKind` would have made the
+    /// screen record one store's decision against another's name. A switch
+    /// stops compiling instead.
     public subscript(kind: SourceKind) -> SourceChoice {
-        get { kind == .claudeCode ? claude : codex }
-        set { if kind == .claudeCode { claude = newValue } else { codex = newValue } }
+        get {
+            switch kind {
+            case .claudeCode: return claude
+            case .codex: return codex
+            case .geminiCli: return gemini
+            }
+        }
+        set {
+            switch kind {
+            case .claudeCode: claude = newValue
+            case .codex: codex = newValue
+            case .geminiCli: gemini = newValue
+            }
+        }
     }
 
     /// Adopt the path discovery found for this candidate. One source only --
@@ -74,6 +97,17 @@ public struct SessionRoots: Equatable, Sendable {
         self[candidate.source] = .watch(path: candidate.path)
     }
 
+    /// Claude and Codex only, deliberately.
+    ///
+    /// This mirrors `daemon::settings::roots_declared`, which is the rule that
+    /// actually gates the daemon starting, and which stays two-conjunct: an
+    /// absent Gemini declaration constructs no adapter, so nothing is read
+    /// unasked. Requiring a Gemini answer here would refuse to start for every
+    /// contributor upgrading from a build that never asked them -- a
+    /// re-onboarding for a store the daemon will not touch either way.
+    ///
+    /// Gemini is still offered on the screen and still recorded when answered;
+    /// it just cannot block.
     public var isComplete: Bool {
         claude.isAnswered && codex.isAnswered
     }
@@ -94,10 +128,17 @@ public struct SessionRoots: Equatable, Sendable {
             let codexDeclaration = codex.declaration
         else { return nil }
 
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "claude_source": claudeDeclaration,
             "codex_source": codexDeclaration,
         ]
+        // Emitted only when answered. Absent is the tri-state's "never asked",
+        // which the contributor library treats as "construct no adapter";
+        // sending `off` for an unanswered row would record a refusal nobody
+        // made.
+        if let geminiDeclaration = gemini.declaration {
+            object["gemini_source"] = geminiDeclaration
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: object),
             let json = String(data: data, encoding: .utf8)
         else { return nil }
