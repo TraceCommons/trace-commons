@@ -7,8 +7,12 @@ always on; a small trace is one chunk and behaves as before.
 **Scoring a large trace is lossy.** A trace that packs into more chunks
 than `TRACE_COMMONS_GATE_CHUNK_CAP` does NOT contribute its full content
 to either signal — the cap is a hard bound on how many scorer requests one
-trace may cost, and the scorer has no retry, so raising it multiplies both
-latency and fail-closed failure exposure. What the cap does guarantee is
+trace may cost, and each of those requests may now be retried up to
+`MAX_SCORE_ATTEMPTS` (3) times, so raising it multiplies both latency and
+fail-closed failure exposure. The retry budget is per request, but only
+failures that produced no completion are re-issued (transport, 5xx, 429) —
+a timeout is never retried, precisely so a chunk cap raise cannot multiply
+*billed* inference by the attempt count. What the cap does guarantee is
 that the scored sample is *unbiased in position*: the gate keeps an evenly
 strided subset spanning the whole trace, endpoint-inclusive, rather than
 its first N chunks.
