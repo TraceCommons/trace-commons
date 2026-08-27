@@ -1276,8 +1276,21 @@ cargo test -p trace-commons-server --bin trace-commons-ingest driver_names_are_s
 grep -c 'tick failed"' crates/trace-commons-server/src/bin/trace-commons-ingest.rs
 ```
 
-Expected: both tests PASS, and the grep returns **0** — every hand-rolled
-warning is now routed through the wrapper.
+Expected: both tests PASS, and the grep returns **1**.
+
+That remaining match is the wrapper's OWN generic line inside
+`emit_driver_log_action` (`"Trace Commons driver tick failed"`), which is
+correct and must stay. What must reach zero is the per-driver hand-rolled
+warnings. Verify that instead:
+
+```bash
+grep -c 'scheduler tick failed"\|driver tick failed"' crates/trace-commons-server/src/bin/trace-commons-ingest.rs
+grep -n 'tick failed"' crates/trace-commons-server/src/bin/trace-commons-ingest.rs
+```
+
+The second command must list exactly one line, and it must be the one inside
+`emit_driver_log_action`. Any line naming a specific scheduler or driver is an
+unconverted loop.
 
 - [ ] **Step 6: Format, verify, commit**
 
@@ -1524,7 +1537,8 @@ cargo clippy -p trace-commons-server --all-targets -- \
   -A clippy::type_complexity -A clippy::collapsible_if \
   -A clippy::manual_option_as_slice -A clippy::useless_vec \
   -A clippy::redundant_pattern_matching
-grep -c 'tick failed"' crates/trace-commons-server/src/bin/trace-commons-ingest.rs   # must be 0
+# Exactly one match, and it must be the generic line inside emit_driver_log_action:
+grep -n 'tick failed"' crates/trace-commons-server/src/bin/trace-commons-ingest.rs
 ```
 
 The `local-gpu-models` check may fail to LINK locally without a CUDA
