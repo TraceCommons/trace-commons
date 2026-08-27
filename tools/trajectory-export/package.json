@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "trajectory-export": "./bin/trajectory-export.mjs"
+    "trajectory-export": "bin/trajectory-export.mjs"
   },
   "files": [
     "bin",

@@ -100,3 +100,23 @@ test("exportInput writes a discoverable file from a named transcript", async () 
   assert.equal(first.role, "meta");
   assert.equal(first.source, "codex");
 });
+
+test("the bin entry survives publishing", async () => {
+  // npm silently strips a bin whose path is written "./bin/x.mjs" -- it warns
+  // once at publish time and drops the entry, producing a CLI package with no
+  // command in it. That is precisely the defect in @letta-ai/trajectory that
+  // this tool exists to work around, so it must not be the defect in this one.
+  //
+  // The guard is the path shape, because that is what npm normalizes. Anything
+  // npm would rewrite is something a publish would have quietly changed.
+  const pkg = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const entries = Object.entries(pkg.bin ?? {});
+  assert.equal(entries.length, 1, "expected exactly one bin entry");
+  const [name, path] = entries[0];
+  assert.equal(name, "trajectory-export");
+  assert.ok(!path.startsWith("./"), `bin path must not start with "./": ${path}`);
+  assert.equal(path, "bin/trajectory-export.mjs");
+  assert.ok(pkg.files.includes("bin"), "bin/ must be in files or the command is not shipped");
+});
