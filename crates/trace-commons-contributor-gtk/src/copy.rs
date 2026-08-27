@@ -1480,6 +1480,12 @@ pub const ROOTS_BOTH: &str = "Answer for both. Leaving one blank is not the same
      falls back to the standard location, which is probably your real work.";
 pub const ROOTS_CLAUDE: &str = "Claude Code sessions";
 pub const ROOTS_CODEX: &str = "Codex sessions";
+pub const ROOTS_GEMINI: &str = "Gemini CLI sessions";
+/// Shown when a store arrives that this build has no name for -- a newer
+/// contributor library discovering a source this shell predates. Deliberately
+/// not one of the named titles: a row must never claim to be a product it is
+/// not, and the path beside it still says exactly what would be read.
+pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent sessions";
 pub const ROOTS_WATCH: &str = "Watch this folder";
 pub const ROOTS_OFF: &str = "I don't use this";
 pub const ROOTS_CHOOSE: &str = "Choose a different folder...";

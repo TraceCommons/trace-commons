@@ -136,6 +136,9 @@ public static class SourceDiscovery
     /// <summary>The <c>source</c> value for Codex's store.</summary>
     public const string Codex = "codex";
 
+    /// <summary>The <c>source</c> value for the Gemini CLI's store.</summary>
+    public const string GeminiCli = "gemini-cli";
+
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = false,
@@ -216,9 +219,21 @@ public sealed class SessionRootsDeclaration
     /// <summary>What the contributor said about Codex's sessions.</summary>
     public SourceDecision Codex { get; set; } = SourceDecision.Undecided;
 
+    /// <summary>What the contributor said about the Gemini CLI's sessions.</summary>
+    public SourceDecision Gemini { get; set; } = SourceDecision.Undecided;
+
     /// <summary>
-    /// Whether both sources have been answered. Continue stays disabled until
-    /// this is true -- an unanswered source is not "no".
+    /// Whether Claude Code and Codex have been answered. Continue stays
+    /// disabled until this is true -- an unanswered source is not "no".
+    ///
+    /// Gemini is deliberately excluded. This mirrors
+    /// <c>daemon::settings::roots_declared</c>, the rule that actually gates
+    /// the daemon starting, which stays two-conjunct: an absent Gemini
+    /// declaration constructs no adapter, so nothing is read unasked.
+    /// Requiring it here would refuse to start for every contributor upgrading
+    /// from a build that never asked them, over a store the daemon will not
+    /// touch either way. Gemini is still offered and still recorded when
+    /// answered; it just cannot block.
     /// </summary>
     public bool IsComplete => Claude.IsDecided && Codex.IsDecided;
 
@@ -228,9 +243,9 @@ public sealed class SessionRootsDeclaration
     ///
     /// Serialized, never concatenated. On Windows these paths are full of
     /// backslashes and may contain quotes, and hand-built JSON would corrupt
-    /// the first store whose folder had either. It carries exactly the two
-    /// recognized keys, because the settings validator rejects an unknown
-    /// top-level key rather than ignoring it.
+    /// the first store whose folder had either. It carries only recognized
+    /// keys, because the settings validator rejects an unknown top-level key
+    /// rather than ignoring it.
     /// </summary>
     public string? SettingsJson()
     {
@@ -248,6 +263,14 @@ public sealed class SessionRootsDeclaration
             ["claude_source"] = Describe(Claude),
             ["codex_source"] = Describe(Codex),
         };
+
+        // Only when answered. Absent is the tri-state's "never asked", which
+        // the contributor library reads as "construct no adapter"; sending
+        // "off" for an unanswered row would record a refusal nobody made.
+        if (Gemini.IsDecided)
+        {
+            payload["gemini_source"] = Describe(Gemini);
+        }
 
         return JsonSerializer.Serialize(payload);
     }
