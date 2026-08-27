@@ -85796,3 +85796,195 @@ fn a_worker_route_rejection_is_classified_by_its_status() {
         DriverFailureClass::ContentRejected
     );
 }
+
+/// #438 fix round 2, Important 1: the credit cycle scheduler drives its own
+/// NEAR outbox submit and confirm stages. Their counters are the give-up
+/// signal; the top-level `started_count` says nothing about them, so a cycle
+/// pointed at a dead RPC failed every submit on every tick and still looked
+/// healthy.
+#[test]
+fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    fn submit(submitted: usize, failed: usize) -> TraceNearCreditOutboxSubmitWorkerResponse {
+        TraceNearCreditOutboxSubmitWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            dry_run: false,
+            checked: submitted + failed,
+            submitted,
+            failed,
+            skipped: 0,
+            pending: failed,
+        }
+    }
+    fn confirm(confirmed: usize, failed: usize) -> TraceNearCreditOutboxConfirmWorkerResponse {
+        TraceNearCreditOutboxConfirmWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            dry_run: false,
+            checked: confirmed + failed,
+            confirmed,
+            failed,
+            skipped: 0,
+            pending: failed,
+        }
+    }
+
+    // A cycle that did nothing on either stage is idle, not dead.
+    assert!(
+        credit_cycle_sub_run_outcome(&submit(0, 0), &confirm(0, 0), true).is_ok(),
+        "an idle cycle must count as a success"
+    );
+
+    // Partial progress is progress.
+    assert!(
+        credit_cycle_sub_run_outcome(&submit(3, 1), &confirm(2, 1), true).is_ok(),
+        "per-item outbox failures alongside successes are not a tick failure"
+    );
+
+    // Every submit failed: the RPC is not answering.
+    let submit_swept = credit_cycle_sub_run_outcome(&submit(0, 4), &confirm(0, 0), true)
+        .expect_err("a cycle whose every submit failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&submit_swept),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // The confirm stage is read too, not just the first one.
+    let confirm_swept = credit_cycle_sub_run_outcome(&submit(2, 0), &confirm(0, 3), true)
+        .expect_err("a cycle whose every confirm failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&confirm_swept),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // And the cycle's settlement step stalls exactly like the standalone
+    // settlement scheduler's does.
+    let refused = credit_cycle_sub_run_outcome(&submit(1, 0), &confirm(1, 0), false)
+        .expect_err("a cycle settling under a disallowed policy version settles nothing");
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// A scheduler tick that started no cycles at all has no sub-runs to judge and
+/// must stay a success -- an idle driver is a working driver.
+#[test]
+fn a_credit_cycle_tick_with_no_cycles_is_a_success() {
+    let idle = TraceCreditCycleSchedulerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        preflight_only: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: None,
+        policy_version: None,
+        reason_hash: "sha256:0".to_string(),
+        limit: 8,
+        checked_count: 0,
+        eligible_count: 0,
+        started_count: 0,
+        skipped_active_count: 0,
+        skipped_count: 0,
+        pending_after_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        decisions: Vec::new(),
+        cycles: Vec::new(),
+    };
+    assert!(
+        credit_cycle_scheduler_tick_outcome(&idle).is_ok(),
+        "a tick that started no cycles must count as a success"
+    );
+}
+
+/// #438 fix round 2, Important 2: the PII backstop sorts everything it could
+/// not release into three disjoint counters, and the earlier version read only
+/// one of them. A tick that quarantined its whole batch reported `done=0,
+/// failed=0, exhausted=N` and passed as healthy -- the exhausted counter the
+/// brief names verbatim as a give-up signal.
+#[test]
+fn each_pii_backstop_give_up_counter_fails_the_tick_with_its_own_class() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Nothing to do, and partial progress, are both successes.
+    assert!(
+        pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+    assert!(
+        pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+            done: 2,
+            failed: 1,
+            transient: 1,
+            exhausted: 1,
+            ..Default::default()
+        })
+        .is_ok(),
+        "a tick that released submissions is a success even with failures beside it"
+    );
+
+    // The whole batch quarantined: the driver stopped retrying those
+    // submissions for good, and it is the trace content that was refused.
+    let exhausted = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        exhausted: 3,
+        ..Default::default()
+    })
+    .expect_err("a tick that exhausted its whole batch is not a success");
+    assert_eq!(
+        classify_driver_failure(&exhausted),
+        DriverFailureClass::ContentRejected
+    );
+
+    // A permanent re-redaction sweep is the upstream ANSWERING and refusing,
+    // so it must not point the operator at NEAR AI availability.
+    let refused = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        failed: 3,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed permanently is not a success");
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ContentRejected,
+        "a non-transient sweep is the trace's fault, not the vendor's"
+    );
+
+    // The genuinely-upstream sweep. A short batch never reaches the breaker
+    // threshold, so without this the #438 incident itself still reads healthy.
+    let transient = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        transient: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick that held its whole batch on upstream errors is not a success");
+    assert_eq!(
+        classify_driver_failure(&transient),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // Mixed and terminal: the outage is the more actionable label.
+    let mixed = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        transient: 1,
+        exhausted: 2,
+        ..Default::default()
+    })
+    .expect_err("a swept tick is not a success");
+    assert_eq!(
+        classify_driver_failure(&mixed),
+        DriverFailureClass::UpstreamUnavailable,
+        "triage order puts the outage ahead of the symptom"
+    );
+
+    // The breaker still wins outright.
+    let tripped = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        done: 1,
+        transient: 4,
+        breaker_tripped: true,
+        ..Default::default()
+    })
+    .expect_err("a tripped breaker is a failed tick even when something landed");
+    assert_eq!(
+        classify_driver_failure(&tripped),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}

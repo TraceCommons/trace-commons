@@ -9504,11 +9504,7 @@ fn spawn_trace_credit_cycle_scheduler_task(
                     preflight_only = summary.preflight_only,
                     "Trace Commons credit cycle scheduler tick completed"
                 );
-                // No give-up signal: the tick has no failure counter. Every
-                // candidate is started or skipped, and a skip is an
-                // eligibility decision about that candidate, not the driver
-                // abandoning work it meant to do.
-                Ok(())
+                credit_cycle_scheduler_tick_outcome(&summary)
             }
         },
     );
@@ -39584,9 +39580,26 @@ fn revocation_propagation_scheduler_tick_outcome(
     )
 }
 
-/// The PII backstop trips the same consecutive-failure breaker the
-/// perplexity driver does, and its `exhausted` counter records submissions it
-/// stopped retrying. Either means it gave up on this batch.
+/// Decide whether a completed PII-backstop tick counts as a success.
+///
+/// The tick sorts every item it could not release into exactly one of three
+/// disjoint counters, and each one means something different to an operator:
+///
+/// - `transient` — the NEAR AI classifier was unreachable or erroring. The
+///   submission is held and not charged an attempt. A whole batch of these
+///   with nothing released is the #438 incident itself, and it does not
+///   necessarily trip the breaker: a batch shorter than
+///   `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES` never reaches the threshold.
+///   `upstream_unavailable`.
+/// - `exhausted` — the submission spent its whole retry budget on permanent
+///   failures and was quarantined. The driver has stopped retrying it for
+///   good; that is a give-up in the most literal sense. `content_rejected`.
+/// - `failed` — a permanent, non-transient re-redaction failure: the upstream
+///   answered and refused this trace. `content_rejected`.
+///
+/// Checked in triage order, so a sweep that is both transient and terminal
+/// reports the outage rather than the symptom. A tick that released anything
+/// (`done > 0`) is a success in all three cases: partial progress is progress.
 fn pii_backstop_tick_outcome(summary: &PiiBackstopDriverTickSummary) -> anyhow::Result<()> {
     if summary.breaker_tripped {
         return Err(DriverTickError::BreakerTripped {
@@ -39596,11 +39609,78 @@ fn pii_backstop_tick_outcome(summary: &PiiBackstopDriverTickSummary) -> anyhow::
     }
     all_attempts_failed_outcome(
         PII_BACKSTOP_DRIVER_NAME,
-        "backstop",
+        "backstop_upstream",
+        summary.done,
+        summary.transient,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        PII_BACKSTOP_DRIVER_NAME,
+        "backstop_exhausted",
+        summary.done,
+        summary.exhausted,
+        DriverFailureClass::ContentRejected,
+    )?;
+    all_attempts_failed_outcome(
+        PII_BACKSTOP_DRIVER_NAME,
+        "backstop_rescrub",
         summary.done,
         summary.failed,
-        DriverFailureClass::UpstreamUnavailable,
+        DriverFailureClass::ContentRejected,
     )
+}
+
+/// A credit cycle drives its own NEAR outbox submit and confirm stages, and
+/// its own settlement, through `config.submit_near_outbox` /
+/// `config.confirm_near_outbox`. Those sub-runs carry the same counters the
+/// standalone outbox scheduler gives up on, and the top-level cycle counters
+/// say nothing about them: a cycle pointed at a dead NEAR RPC fails every
+/// submit on every tick while `started_count` looks healthy.
+fn credit_cycle_scheduler_tick_outcome(
+    summary: &TraceCreditCycleSchedulerRunResponse,
+) -> anyhow::Result<()> {
+    for cycle in &summary.cycles {
+        credit_cycle_sub_run_outcome(
+            &cycle.near_outbox_submit,
+            &cycle.near_outbox_confirm,
+            cycle.settlement.policy_version_allowed,
+        )?;
+    }
+    Ok(())
+}
+
+/// The give-up decision for one cycle's sub-runs, taking only the fields it
+/// reads so it is reachable from a test without standing up a whole cycle
+/// response.
+fn credit_cycle_sub_run_outcome(
+    submit: &TraceNearCreditOutboxSubmitWorkerResponse,
+    confirm: &TraceNearCreditOutboxConfirmWorkerResponse,
+    policy_version_allowed: bool,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+        "near_outbox_submit",
+        submit.submitted,
+        submit.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+        "near_outbox_confirm",
+        confirm.confirmed,
+        confirm.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    // The cycle's settlement step is the same handler the settlement
+    // scheduler calls, so it stalls the same way and reports the same control.
+    if !policy_version_allowed {
+        return Err(DriverTickError::RefusedByPolicy {
+            driver: CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+            control: "credit_settlement_allowed_policy_versions",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Decide whether a completed perplexity tick counts as a success.
