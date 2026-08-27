@@ -15591,6 +15591,7 @@ fn db_reconciliation_projects_submitted_audit_metadata_privacy_risk_drift() {
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     };
     let db_by_submission = BTreeMap::from([(submission_id, &submission_record)]);
 
@@ -65850,6 +65851,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
     }
@@ -65909,6 +65911,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
         self.object_refs
@@ -81056,6 +81059,9 @@ struct PiiBackstopDriverTestDb {
     seeded_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
     /// The `awaiting_pii_backstop` backlog enumerated by the driver tick.
     awaiting_pii_backstop: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Quarantined submissions whose quarantine reason was retry exhaustion,
+    /// standing in for the audit-trail join the Postgres impl performs.
+    exhausted_quarantines: std::sync::RwLock<Vec<GateWorkItem>>,
     /// Per-submission PII-backstop attempt bookkeeping bumped on redaction
     /// failure.
     /// Per-submission PII-backstop bookkeeping: `(attempts, last_error_label,
@@ -81100,6 +81106,7 @@ impl PiiBackstopDriverTestDb {
             invalidated_kinds: std::sync::RwLock::new(Vec::new()),
             seeded_refs: std::sync::RwLock::new(Vec::new()),
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
+            exhausted_quarantines: std::sync::RwLock::new(Vec::new()),
             pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
             status_transitions: std::sync::RwLock::new(Vec::new()),
@@ -81161,6 +81168,28 @@ impl PiiBackstopDriverTestDb {
             StorageTraceObjectArtifactKind::SubmittedEnvelope,
         ));
         self.awaiting_pii_backstop
+            .write()
+            .unwrap()
+            .push(GateWorkItem {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+            });
+    }
+
+    /// Register a submission that the driver quarantined for retry
+    /// exhaustion: status Quarantined, a spent attempt budget, and an entry in
+    /// the set the re-queue pass enumerates.
+    fn seed_exhausted_quarantine(&self, tenant_id: &str, submission_id: Uuid, attempts: i32) {
+        let key = (tenant_id.to_string(), submission_id);
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key.clone(), StorageTraceCorpusStatus::Quarantined);
+        self.pii_backstop_attempts
+            .write()
+            .unwrap()
+            .insert(key, (attempts, "exhausted".to_string(), None));
+        self.exhausted_quarantines
             .write()
             .unwrap()
             .push(GateWorkItem {
@@ -81264,6 +81293,7 @@ fn seeded_storage_submission_record(
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     }
 }
 
@@ -82285,6 +82315,104 @@ async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
     }
 }
 
+// --- re-queue of traces quarantined for retry exhaustion ----------------
+//
+// 2026-08-27: 112 of the pilot's 177 quarantined traces carried reason code
+// `pii_backstop_attempts_exhausted`. None had been scrubbed or assessed --
+// they burned their retry budget against a classifier that was failing every
+// request. Quarantine there records a processing failure, not a privacy
+// finding, and the re-queue pass is what undoes it.
+
+/// The pass moves an exhausted quarantine back to `AwaitingPiiBackstop` and
+/// clears its attempt budget, so the driver enumerates and reassesses it
+/// instead of leaving it condemned unexamined.
+#[tokio::test]
+async fn requeue_pass_returns_exhausted_quarantines_to_the_backlog() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    db.seed_exhausted_quarantine("tenant-a", submission_id, 5);
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Quarantined),
+        "precondition: the trace starts quarantined"
+    );
+
+    let summary = run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
+        .await
+        .expect("re-queue pass succeeds");
+
+    assert_eq!(
+        (summary.requeued, summary.failed),
+        (1, 0),
+        "the exhausted quarantine must be re-queued: {summary:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "a re-queued trace must be held for reassessment, not left quarantined"
+    );
+    assert_eq!(
+        db.pii_attempts_of("tenant-a", submission_id),
+        None,
+        "the attempt budget must be cleared, or the trace re-exhausts immediately"
+    );
+    // The transition is audited, and attributed to the re-queue rather than to
+    // the driver that gave up on it.
+    let transitions = db.status_transitions_of("tenant-a", submission_id);
+    assert!(
+        transitions.iter().any(|(status, actor, reason)| {
+            *status == StorageTraceCorpusStatus::AwaitingPiiBackstop
+                && actor == PII_BACKSTOP_REQUEUE_ACTOR_REF
+                && reason.as_deref() == Some(PII_BACKSTOP_REQUEUED_REASON)
+        }),
+        "the re-queue must write its own audited transition; got {transitions:?}"
+    );
+}
+
+/// The pass is narrow on purpose. A trace quarantined by a real privacy
+/// determination is NOT an exhaustion victim and must not be swept back into
+/// the corpus pipeline by an operator reaching for this route.
+#[tokio::test]
+async fn requeue_pass_leaves_genuinely_quarantined_traces_alone() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    // Quarantined, but never registered as an exhaustion -- i.e. quarantined
+    // because the filter actually found something.
+    db.statuses.write().unwrap().insert(
+        ("tenant-a".to_string(), submission_id),
+        StorageTraceCorpusStatus::Quarantined,
+    );
+
+    let summary = run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
+        .await
+        .expect("re-queue pass succeeds");
+
+    assert_eq!(
+        (summary.requeued, summary.failed),
+        (0, 0),
+        "a privacy-determined quarantine must not be re-queued: {summary:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Quarantined),
+        "the trace must stay quarantined"
+    );
+}
+
 // --- (c) canary failure aborts the tick without mutating anything -------
 
 /// (c) An unhealthy canary (the synthetic PII survives the filter) aborts the
@@ -83129,6 +83257,43 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         entry.1 = error_label.to_string();
         entry.2 = Some(now);
         Ok(entry.0)
+    }
+
+    async fn list_quarantined_pii_backstop_exhausted(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let statuses = self.statuses.read().unwrap();
+        Ok(self
+            .exhausted_quarantines
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|item| item.tenant_id == tenant_id)
+            // Mirror the production WHERE: only still-quarantined rows.
+            .filter(|item| {
+                statuses
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .copied()
+                    == Some(StorageTraceCorpusStatus::Quarantined)
+            })
+            .take(limit)
+            .map(|item| item.submission_id)
+            .collect())
+    }
+
+    async fn clear_pii_backstop_attempts(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        self.pii_backstop_attempts
+            .write()
+            .unwrap()
+            .remove(&(tenant_id.to_string(), submission_id));
+        Ok(())
     }
 
     async fn touch_pii_backstop_attempt(

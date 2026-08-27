@@ -1246,9 +1246,22 @@ mod tests {
         // fixture carries no correction, so the new key is `false` -- the move
         // is one added key, not a change to what the envelope declares. The
         // risk tier asserted above is unchanged, which is what says so.
+        //
+        // Moved again, deliberately, for #458: the residual-risk warning
+        // strings were restored to #223's wording, which the #267 squash had
+        // reverted. This fixture is the Medium case -- its only finding is a
+        // successfully scrubbed secret -- so it carries the Medium string,
+        // and that string now names successfully-redacted secrets and says
+        // the trace stays reviewable. The warning text is inside the hashed
+        // bytes.
+        //
+        // The `residual_risk == "medium"` assertion above is unchanged and
+        // still passes, which is what says this was a wording change and not
+        // a redaction or classification change. That ordering is the point of
+        // asserting the tier before the digest.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:fa70626c3239550f22ea4329368de407ab47d2c3d8bdd34b58fec9ca65bcf427",
+            "sha256:ce2d6dadbfcabd7594475d5f43a70afbd1fec35a8bc2524c6e1dcd71bdec74af",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"
