@@ -35,12 +35,18 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// | 20,000      | 0/15   |
 ///
 /// There is a hard cliff between 12 KiB and 16 KiB, and the band below it is
-/// itself flaky. The previous value of 20_000 sat *above* the cliff, so every
-/// request the adapter made failed 100% of the time and the PII-backstop
-/// backlog could not drain at all. Kept far enough below the cliff to absorb
-/// another vendor-side tightening without a repeat outage, and low enough to
-/// sit in the most reliable measured band.
-pub const CLASSIFY_CHUNK_BYTES: usize = 4_000;
+/// itself flaky. The value 20_000 sat *above* the cliff, so every request the
+/// adapter made failed 100% of the time and the PII-backstop backlog could not
+/// drain at all.
+///
+/// The first fix went to 4_000, which drained but only just: on the pilot a
+/// single held trace took roughly eleven minutes, projecting to ~45 hours for
+/// a 247-trace backlog, because chunk count scales inversely with this value
+/// and each window is a separate round-trip. 8_000 measured 7/8 -- as reliable
+/// as anything below the cliff -- and halves the request count, while still
+/// leaving 2x headroom under the measured cliff for another vendor-side
+/// tightening. That headroom is enforced below.
+pub const CLASSIFY_CHUNK_BYTES: usize = 8_000;
 
 /// The lowest input size measured to fail outright against the hosted
 /// endpoint (0/8 successes on 2026-08-27). `CLASSIFY_CHUNK_BYTES` must stay
