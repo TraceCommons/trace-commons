@@ -7,6 +7,9 @@
 //! answered "when did this last work?". This module supplies that answer as
 //! state, and a stable failure label to grep for alongside the forensic hash.
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -267,6 +270,95 @@ pub fn observe_driver_tick(
     }
 }
 
+/// A read-time view of one driver's health, with `stale` derived rather than
+/// stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DriverLivenessSnapshot {
+    pub driver: &'static str,
+    pub interval_seconds: u64,
+    pub started_at: DateTime<Utc>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_failure_at: Option<DateTime<Utc>>,
+    pub consecutive_failures: u64,
+    pub last_failure_class: Option<DriverFailureClass>,
+    pub last_error_hash: Option<String>,
+    /// Seconds since this driver last worked.
+    pub dead_seconds: i64,
+    /// Threshold this driver is measured against, so a reader can tell why
+    /// `stale` is what it is without knowing the constants.
+    pub stale_after_seconds: i64,
+    pub stale: bool,
+}
+
+/// Process-global driver health, keyed by driver name.
+///
+/// In memory deliberately. A persisted `last_success_at` would survive a
+/// restart, and would then be actively misleading: after a restart the
+/// process does not know whether the driver works, and `None` says so.
+#[derive(Debug, Default)]
+pub struct DriverLivenessRegistry {
+    inner: Mutex<BTreeMap<&'static str, DriverLiveness>>,
+}
+
+impl DriverLivenessRegistry {
+    /// Record a driver as running. Called once per driver at spawn, before
+    /// its first tick.
+    pub fn register(&self, driver: &'static str, interval_seconds: u64, now: DateTime<Utc>) {
+        let mut inner = self.lock();
+        inner.insert(driver, DriverLiveness::new(driver, interval_seconds, now));
+    }
+
+    /// Fold a tick outcome into the named driver and return what to log.
+    ///
+    /// An unregistered name is inert rather than a panic: a driver that never
+    /// registered is a wiring bug, and taking down a production tick loop
+    /// over it would be a worse outcome than the missing telemetry.
+    pub fn observe(
+        &self,
+        driver: &'static str,
+        outcome: DriverTickOutcome,
+        now: DateTime<Utc>,
+    ) -> LogAction {
+        let mut inner = self.lock();
+        let Some(prev) = inner.get(driver) else {
+            return LogAction::None;
+        };
+        let (next, action) = observe_driver_tick(prev, outcome, now);
+        inner.insert(driver, next);
+        action
+    }
+
+    /// Every driver's health, ordered by name.
+    pub fn snapshot(&self, now: DateTime<Utc>) -> Vec<DriverLivenessSnapshot> {
+        let inner = self.lock();
+        inner
+            .values()
+            .map(|live| DriverLivenessSnapshot {
+                driver: live.driver,
+                interval_seconds: live.interval_seconds,
+                started_at: live.started_at,
+                last_success_at: live.last_success_at,
+                last_failure_at: live.last_failure_at,
+                consecutive_failures: live.consecutive_failures,
+                last_failure_class: live.last_failure_class,
+                last_error_hash: live.last_error_hash.clone(),
+                dead_seconds: live.dead_seconds(now),
+                stale_after_seconds: live.stale_after_seconds(),
+                stale: live.is_stale(now),
+            })
+            .collect()
+    }
+
+    /// Recover rather than propagate a poisoned lock. The guarded data is
+    /// telemetry; a panic in one tick must not disable liveness reporting for
+    /// every other driver.
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<&'static str, DriverLiveness>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +564,63 @@ mod tests {
             ),
             "a class change must not be suppressed, got {action:?}"
         );
+    }
+
+    #[test]
+    fn the_registry_tracks_drivers_independently() {
+        let registry = DriverLivenessRegistry::default();
+        registry.register("alpha", 45, at(0));
+        registry.register("beta", 45, at(0));
+
+        registry.observe("alpha", fail("sha256:abc"), at(45));
+        registry.observe("beta", DriverTickOutcome::Success, at(45));
+
+        let snapshot = registry.snapshot(at(60));
+        let alpha = snapshot
+            .iter()
+            .find(|d| d.driver == "alpha")
+            .expect("alpha");
+        let beta = snapshot.iter().find(|d| d.driver == "beta").expect("beta");
+
+        assert_eq!(alpha.consecutive_failures, 1);
+        assert_eq!(
+            alpha.last_failure_class,
+            Some(DriverFailureClass::UpstreamUnavailable)
+        );
+        assert_eq!(beta.consecutive_failures, 0);
+        assert_eq!(beta.last_success_at, Some(at(45)));
+    }
+
+    /// A snapshot derives `stale` at read time rather than storing it, so a
+    /// driver that has stopped ticking entirely still reports correctly --
+    /// nothing has run to update a stored flag.
+    #[test]
+    fn snapshot_derives_staleness_at_read_time() {
+        let registry = DriverLivenessRegistry::default();
+        registry.register("silent", 45, at(0));
+
+        assert!(!registry.snapshot(at(100))[0].stale);
+        assert!(registry.snapshot(at(400))[0].stale);
+        assert_eq!(registry.snapshot(at(400))[0].dead_seconds, 400);
+    }
+
+    /// Observing an unregistered driver must not panic or poison the lock.
+    #[test]
+    fn observing_an_unknown_driver_is_inert() {
+        let registry = DriverLivenessRegistry::default();
+        assert_eq!(
+            registry.observe("ghost", fail("sha256:abc"), at(45)),
+            LogAction::None
+        );
+        assert!(registry.snapshot(at(45)).is_empty());
+    }
+
+    #[test]
+    fn snapshot_is_ordered_by_driver_name() {
+        let registry = DriverLivenessRegistry::default();
+        registry.register("zulu", 45, at(0));
+        registry.register("alpha", 45, at(0));
+        let names: Vec<&str> = registry.snapshot(at(0)).iter().map(|d| d.driver).collect();
+        assert_eq!(names, vec!["alpha", "zulu"]);
     }
 }
