@@ -341,12 +341,42 @@ folder — delete it.
 
 The CLI reads Claude Code and Codex sessions natively. For any other harness
 covered by [Letta Trajectory](https://github.com/letta-ai/trajectory) —
-Hermes, Letta Code, OpenClaw, OpenHands, Pi, or Deep Agents — normalize the
-session first, then point the CLI at the result:
+`atif`, `copilot-cli`, `cursor`, `droid`, `gemini-cli`, `hermes`,
+`letta-code`, `omp`, `openclaw`, `opencode`, `openhands`, `pi`, and
+`deepagents` as of 0.3.0 — normalize the session first, then point the CLI at
+the result.
+
+**`@letta-ai/trajectory` is a library, not a command.** No published version
+declares a `bin`, so `npx @letta-ai/trajectory` fails with "could not
+determine executable to run". An earlier version of this section told you to
+run exactly that; it never worked, and we are sorry for the time it cost.
+
+What does work, with Node 20 or newer — `listTrajectories` finds the sessions
+in a harness's local store and `normalizeTranscript` converts one:
 
 ```bash
-npx @letta-ai/trajectory > session.json
-trace-commons-contributor submit --trajectory session.json
+npm install @letta-ai/trajectory@0.3.0
+```
+
+```js
+// export.mjs — run as: node export.mjs gemini-cli
+import { listTrajectories, normalizeTranscript } from "@letta-ai/trajectory";
+import { readFile, writeFile } from "node:fs/promises";
+
+const source = process.argv[2];
+const { items } = await listTrajectories({ source, limit: 5 });
+for (const item of items.slice(0, 1)) {
+  const transcript = await readFile(item.path, "utf8");
+  const { records } = normalizeTranscript({ source, transcript });
+  await writeFile(
+    `${source}-${item.id}.trajectory.json`,
+    records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+  );
+}
+```
+
+```bash
+trace-commons-contributor submit --trajectory gemini-cli-<id>.trajectory.json
 ```
 
 `--trajectory` also accepts a directory, in which case every `*.json` and
