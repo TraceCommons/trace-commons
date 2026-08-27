@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    CLASSIFY_CHUNK_BYTES, NearAiPrivacyFilterAdapter,
+    CLASSIFY_CHUNK_BYTES, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
+    NearAiPrivacyFilterAdapter,
 };
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
 use wiremock::matchers::{body_string_contains, header, method, path};
@@ -438,4 +439,72 @@ async fn oversized_input_is_typed_permanent() {
         !err.is_transient(),
         "an oversized input is about the trace and must stay permanent: {err}"
     );
+}
+
+/// Windows are classified ONE AT A TIME, on purpose.
+///
+/// #456 raised `MAX_CONCURRENT_CLASSIFY_WINDOWS` to 8 to cut the per-field
+/// cost. Throughput collapsed instead: on the pilot every PII-backstop tick
+/// then returned `done=0 transient=3 breaker_tripped=true` and the queue
+/// drained nothing, so the host was rolled back to the sequential build.
+///
+/// Why concurrency hurt is still not established -- the obvious rate-limit
+/// explanation did not survive testing, since 20 rapid 8 KB requests all
+/// returned 200. Until the classify diagnostics explain the real failures,
+/// this stays at 1, and raising it should be a deliberate change made with
+/// evidence rather than an optimisation someone reaches for again.
+#[test]
+fn classify_windows_are_not_overlapped() {
+    assert_eq!(
+        CLASSIFY_CONCURRENCY, 1,
+        "raising classify concurrency regressed the pilot to zero throughput \
+         once already; see this test's comment before changing it"
+    );
+}
+
+/// The window's full-text offset is accumulated across windows rather than
+/// recomputed from the start of the field each time (which was O(n^2)). That
+/// accumulation counts CODEPOINTS, not bytes -- multibyte filler in every
+/// window would shift every later span if it counted bytes.
+#[tokio::test]
+async fn window_offsets_stay_correct_across_multibyte_windows() {
+    // Multibyte in the filler, and a whole number of lines per window so the
+    // email lands alone in the final window at window-local offset 8.
+    const LINE: &str = "clèan lïne wîth ünicode\n";
+    let lines_per_window = CLASSIFY_CHUNK_BYTES / LINE.len();
+    let filler = LINE.repeat(lines_per_window * 2);
+    let text = format!("{filler}contact bob@example.com now");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .and(body_string_contains("bob@example.com"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
+            ]}]
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [] }]
+        })))
+        .with_priority(5)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        format!("{filler}contact [REDACTED:private_email] now"),
+        "a byte-counted accumulator would misplace this span"
+    );
+    assert_eq!(result.summary.span_count, 1);
 }
