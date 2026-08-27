@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::trace_contribution::{
@@ -69,6 +70,16 @@ const _: () = assert!(
     CLASSIFY_CHUNK_BYTES * 2 <= MEASURED_CLASSIFY_FAILURE_CLIFF_BYTES,
     "CLASSIFY_CHUNK_BYTES leaves too little headroom under the measured cliff"
 );
+
+/// How many `privacy/classify` requests for a single field may be in flight
+/// at once.
+///
+/// The windows of one field are independent, so classifying them serially made
+/// a field cost (windows x round-trip). Kept modest deliberately: the hosted
+/// endpoint is flaky under load (a ~12% 502 rate was measured below its size
+/// cliff on 2026-08-27), and this multiplies the offered rate, so a larger
+/// value trades throughput for retries.
+pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 8;
 
 /// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few
@@ -262,13 +273,47 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
         let ranges = chunk_byte_ranges(text, CLASSIFY_CHUNK_BYTES);
-        let mut windows: Vec<(usize, Vec<ClassifySpan>)> = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let window = &text[range.clone()];
-            let spans = self.classify_window(window).await?;
-            let codepoint_start = text[..range.start].chars().count();
-            windows.push((codepoint_start, spans));
+
+        // Accumulate each window's starting codepoint in ONE pass over the
+        // field. This used to be `text[..range.start].chars().count()` inside
+        // the classification loop, which rescans the whole prefix per window
+        // and is quadratic in field length -- ~60 MB of redundant scanning on
+        // a 971 kB field, far worse on the 16 MB envelopes the pilot holds.
+        // `chunk_byte_ranges` returns contiguous ranges covering the text from
+        // 0, so a running total is exact.
+        let mut codepoint_starts = Vec::with_capacity(ranges.len());
+        let mut codepoints_so_far = 0usize;
+        for range in &ranges {
+            codepoint_starts.push(codepoints_so_far);
+            codepoints_so_far += text[range.clone()].chars().count();
         }
+
+        // Classify the windows concurrently. They are independent -- each is
+        // classified in its own coordinates and merged afterwards -- so the
+        // sequential loop this replaces made a field cost
+        // (windows x round-trip) for no reason. With pilot envelopes at a
+        // median 421 kB that was 50+ serialized requests per field, and the
+        // PII-backstop backlog drained at roughly nine minutes per trace.
+        //
+        // `buffered` preserves stream order, so `windows` is still ordered by
+        // range and `try_collect` surfaces the FIRST window's error in field
+        // order -- the same error the sequential loop would have returned.
+        // That matters: transient-vs-permanent classification drives whether
+        // the trace's attempt budget is charged.
+        let windows: Vec<(usize, Vec<ClassifySpan>)> =
+            futures::stream::iter(ranges.into_iter().zip(codepoint_starts).map(
+                |(range, codepoint_start)| {
+                    let window = &text[range];
+                    async move {
+                        self.classify_window(window)
+                            .await
+                            .map(|spans| (codepoint_start, spans))
+                    }
+                },
+            ))
+            .buffered(MAX_CONCURRENT_CLASSIFY_WINDOWS)
+            .try_collect()
+            .await?;
 
         apply_windowed_spans(text, &windows)
     }
