@@ -67009,28 +67009,99 @@ impl Database for PerplexityDriverTestDb {
                 }
             }
         }
-        let mut rows: Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow> =
-            latest
-                .into_values()
-                .map(|row| {
-                    let credit_quality_micros = credit
-                        .get(&(tenant_id.to_string(), row.decision_id))
-                        .map(|(q, _, _)| *q);
-                    trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
-                        submission_id: row.submission_id,
-                        credit_quality_micros,
-                        perplexity_micros: row.perplexity_micros,
-                        novelty_score_micros: row.novelty_score_micros,
-                        gate_passed: row.perplexity_passed && row.novelty_passed,
-                        chunk_count: row.chunk_count,
-                        total_chunk_count: row.total_chunk_count,
-                        chunks_capped: row.chunks_capped,
-                    }
-                })
-                .collect();
-        rows.sort_by_key(|row| row.submission_id);
-        rows.truncate(limit);
-        Ok(rows)
+        // Recency first, submission_id as the tiebreaker -- mirroring the
+        // Postgres impl's outer `ORDER BY decided_at DESC, submission_id
+        // DESC` -- so truncation drops the OLDEST scores rather than an
+        // arbitrary slice of the random-v4 submission-id space.
+        let mut ordered: Vec<&StorageTraceGateDecisionRow> = latest.into_values().collect();
+        ordered.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then_with(|| b.submission_id.cmp(&a.submission_id))
+        });
+        ordered.truncate(limit);
+        Ok(ordered
+            .into_iter()
+            .map(|row| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id.to_string(), row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
+                }
+            })
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres
+    /// `list_own_gate_decision_scores_for_submissions` read: drives from the
+    /// seeded submissions (not the decisions), keeps only ids the requested
+    /// `(tenant_id, auth_principal_ref)` owns, and attaches the LATEST
+    /// decision for each -- or `None` when there is none, which is the
+    /// "submitted, not scored yet" state the unscoped read cannot express.
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError>
+    {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let submissions = self.submissions.read().unwrap();
+        let mut out = Vec::new();
+        for submission_id in submission_ids {
+            let owned = submissions
+                .get(&(tenant_id.to_string(), *submission_id))
+                .is_some_and(|s| s.auth_principal_ref == auth_principal_ref);
+            if !owned {
+                continue;
+            }
+            let mut latest: Option<&StorageTraceGateDecisionRow> = None;
+            for (row_tenant_id, row) in decisions.iter() {
+                if row_tenant_id != tenant_id || row.submission_id != *submission_id {
+                    continue;
+                }
+                let candidate_key = (row.decided_at, row.decision_id);
+                match latest {
+                    Some(existing)
+                        if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                    _ => latest = Some(row),
+                }
+            }
+            let score = latest.map(|row| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id.to_string(), row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
+                }
+            });
+            out.push(
+                trace_commons_server::trace_corpus_storage::OwnSubmissionScoreRow {
+                    submission_id: *submission_id,
+                    score,
+                },
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -83854,6 +83925,240 @@ async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_c
         .await
         .expect_err("no DB mirror fails closed");
     assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+/// Regression test for the one property Devfolio's in-flight v2 verifier
+/// depends on: an UNSCOPED attestation is the document it always was. Slice
+/// E's `pending`/`unknown` fields must be ABSENT -- not null, not empty
+/// arrays -- so a verifier that pinned `trace_commons.score_attestation.v2`
+/// and rejects on shape sees no change until it opts in by asking a scoped
+/// question.
+#[tokio::test]
+async fn unscoped_score_attestation_omits_pending_and_unknown_entirely() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal_a = static_token_principal_ref("token-a");
+
+    let id1 = Uuid::new_v4();
+    let row1 = rescore_test_decision_row(id1);
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.seed_submission_with_principal("tenant-a", id1, &principal_a);
+    // An owned submission with no gate decision at all: invisible to the
+    // unscoped document, exactly as before.
+    db.seed_submission_with_principal("tenant-a", Uuid::new_v4(), &principal_a);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state), auth_headers("token-a"))
+        .await
+        .expect("unscoped attestation signs");
+
+    let claims = decode_attestation_payload(&response.attestation);
+    let object = claims.as_object().expect("claims are a JSON object");
+    assert!(
+        !object.contains_key("pending"),
+        "unscoped attestation must not carry a pending key: {object:?}"
+    );
+    assert!(
+        !object.contains_key("unknown"),
+        "unscoped attestation must not carry an unknown key: {object:?}"
+    );
+    assert_eq!(
+        object["schema_version"],
+        serde_json::json!("trace_commons.score_attestation.v2"),
+        "the schema version does not bump for scoped fields"
+    );
+    assert_eq!(
+        object["submissions"]
+            .as_array()
+            .expect("submissions is an array")
+            .len(),
+        1
+    );
+}
+
+/// A SCOPED request attests to exactly the asked-for ids, splitting them
+/// three ways: scored (a gate decision exists), `pending` (owned, no
+/// decision yet -- the signal that did not exist before, so a hacker
+/// submitting at 23:58 hands the collector a signed "these are waiting"
+/// rather than nothing), and `unknown`.
+///
+/// `unknown` deliberately collapses "belongs to another principal" and
+/// "no such submission anywhere" into one bucket, so the route cannot be
+/// used to probe for the existence of someone else's submission id.
+#[tokio::test]
+async fn scoped_score_attestation_reports_scored_pending_and_unknown() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal_a = static_token_principal_ref("token-a");
+    let principal_a2 = static_token_principal_ref("token-a-2");
+
+    let scored_id = Uuid::new_v4();
+    let mut scored_row = rescore_test_decision_row(scored_id);
+    scored_row.perplexity_passed = true;
+    scored_row.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", scored_row.clone());
+    db.seed_submission_with_principal("tenant-a", scored_id, &principal_a);
+
+    let pending_id = Uuid::new_v4();
+    db.seed_submission_with_principal("tenant-a", pending_id, &principal_a);
+
+    // Owned by a DIFFERENT contributor in the same tenant, and scored.
+    let other_id = Uuid::new_v4();
+    db.seed_gate_decision("tenant-a", rescore_test_decision_row(other_id));
+    db.seed_submission_with_principal("tenant-a", other_id, &principal_a2);
+
+    // Never submitted anywhere.
+    let absent_id = Uuid::new_v4();
+
+    // Owned and scored, but NOT asked about: a scoped request attests to the
+    // asked-for set and nothing else.
+    let unasked_id = Uuid::new_v4();
+    db.seed_gate_decision("tenant-a", rescore_test_decision_row(unasked_id));
+    db.seed_submission_with_principal("tenant-a", unasked_id, &principal_a);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = scoped_score_attestation_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(ScopedScoreAttestationRequest {
+            submission_ids: vec![scored_id, pending_id, other_id, absent_id],
+        }),
+    )
+    .await
+    .expect("scoped attestation signs");
+
+    assert_eq!(response.scored, 1);
+    assert_eq!(response.pending, 1);
+
+    let claims = decode_attestation_payload(&response.attestation);
+    let object = claims.as_object().expect("claims are a JSON object");
+    assert_eq!(
+        object["schema_version"],
+        serde_json::json!("trace_commons.score_attestation.v2"),
+        "scoped responses stay on v2"
+    );
+    let submissions = object["submissions"]
+        .as_array()
+        .expect("submissions is an array");
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0]["submission_id"],
+        serde_json::json!(scored_id.to_string())
+    );
+    assert_eq!(
+        object["pending"],
+        serde_json::json!([pending_id.to_string()])
+    );
+    assert_eq!(
+        object["unknown"],
+        serde_json::json!([other_id.to_string(), absent_id.to_string()]),
+        "another principal's id and an id that exists nowhere are indistinguishable"
+    );
+}
+
+/// The scoped request is capped by REQUEST SIZE rather than by the unscoped
+/// path's global `LIMIT`, so a collector asking about more than the cap gets
+/// a refusal it can chunk around -- never a silently truncated signed
+/// document that omits ids it explicitly asked about.
+#[tokio::test]
+async fn scoped_score_attestation_refuses_more_ids_than_the_cap() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_attestation_signing(test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    ));
+
+    let too_many = (0..usize::try_from(SCORE_ATTESTATION_MAX_SUBMISSIONS).unwrap() + 1)
+        .map(|_| Uuid::new_v4())
+        .collect::<Vec<_>>();
+    let refused = scoped_score_attestation_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(ScopedScoreAttestationRequest {
+            submission_ids: too_many,
+        }),
+    )
+    .await
+    .expect_err("an oversized scoped request is refused");
+    assert_eq!(refused.0, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// The unscoped enumeration truncates by RECENCY, so a contributor past the
+/// cap loses their oldest scores rather than an arbitrary slice of the
+/// submission-UUID space. Ordering by `submission_id` -- a random v4 for
+/// every trace -- made truncation unpredictable and unexplainable.
+#[tokio::test]
+async fn unscoped_gate_decision_enumeration_truncates_the_oldest_not_a_uuid_range() {
+    let db = PerplexityDriverTestDb::new();
+    let principal = "principal-truncation";
+
+    let mut ids = Vec::new();
+    for age_minutes in [30_i64, 20, 10] {
+        let id = Uuid::new_v4();
+        let mut row = rescore_test_decision_row(id);
+        row.decided_at = Utc::now() - chrono::Duration::minutes(age_minutes);
+        db.seed_gate_decision("tenant-a", row);
+        db.seed_submission_with_principal("tenant-a", id, principal);
+        ids.push(id);
+    }
+    let (oldest, newest) = (ids[0], ids[2]);
+    let middle = ids[1];
+
+    let kept = db
+        .list_own_gate_decision_scores("tenant-a", principal, 2)
+        .await
+        .expect("enumeration succeeds");
+    let kept_ids = kept.iter().map(|row| row.submission_id).collect::<Vec<_>>();
+    assert_eq!(
+        kept_ids,
+        vec![newest, middle],
+        "truncation drops the oldest decision, newest first"
+    );
+    assert!(!kept_ids.contains(&oldest));
+}
+
+/// Decode an attestation's claims as raw JSON, so a test can assert on the
+/// PRESENCE of keys rather than on a typed struct that would silently
+/// default an absent field.
+fn decode_attestation_payload(attestation: &str) -> serde_json::Value {
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    jsonwebtoken::decode::<serde_json::Value>(attestation, &decoding_key, &validation)
+        .expect("attestation verifies against the published key")
+        .claims
 }
 
 /// The attestation keyset endpoint fails closed (503, same missing-control

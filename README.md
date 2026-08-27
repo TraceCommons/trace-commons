@@ -226,6 +226,36 @@ Confirm the install with:
 trace-commons-contributor --version
 ```
 
+Then contribute from the directory you want to cover. `submit` scopes itself
+to the working directory's subtree: stand in one project to submit that
+project, or in the parent of several repos to submit all of them. It refuses
+to run from `$HOME` or a filesystem root, where the subtree would be every
+session on the machine; `--all` says that deliberately, `--project <path>`
+scopes somewhere you are not, and `--pick` brings back the per-session table.
+
+```bash
+cd ~/code/my-hackathon-project
+trace-commons-contributor submit          # summarises the batch, asks y/N
+```
+
+For a single submission with nothing to install first, `scripts/contribute.sh`
+fetches the verified binary into a cache directory, submits once, and exits —
+no PATH entry, no daemon, nothing that autostarts. Reading it before running it
+is encouraged, which is why the two-step form is first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh -o contribute.sh
+cd ~/code/my-hackathon-project
+TRACE_COMMONS_INVITE='<your invite link>' sh ~/contribute.sh
+```
+
+It leaves one thing behind, deliberately: a **keep** — a `0700` state
+directory holding the device key your account is minted from. That key is the
+only way to sign in and withdraw the traces the run uploaded, so there is no
+flag that suppresses it; the script prints where the keep is and how to delete
+it on every run. Put the invite in `TRACE_COMMONS_INVITE` rather than on the
+command line, where it would land in your shell history and in `ps`.
+
 The desktop app ships as a universal notarized DMG
 (`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows
 as a self-contained Authenticode-signed zip — unpack it and run
@@ -339,20 +369,49 @@ folder — delete it.
 
 #### Contributing sessions from other harnesses
 
-The CLI reads Claude Code and Codex sessions natively. For any other harness
-covered by [Letta Trajectory](https://github.com/letta-ai/trajectory) —
-Hermes, Letta Code, OpenClaw, OpenHands, Pi, or Deep Agents — normalize the
-session first, then point the CLI at the result:
+The CLI reads Claude Code, Codex and Gemini CLI sessions natively, straight
+from their local stores. Nothing below is needed for those.
+
+For any other harness [Letta Trajectory](https://github.com/letta-ai/trajectory)
+covers -- `atif`, `copilot-cli`, `cursor`, `droid`, `hermes`, `letta-code`,
+`omp`, `openclaw`, `opencode`, `openhands`, `pi` -- export the sessions first:
 
 ```bash
-npx @letta-ai/trajectory > session.json
-trace-commons-contributor submit --trajectory session.json
+cd ~/code/my-project
+npx @tracecommons/trajectory-export --all
+trace-commons-contributor submit
 ```
 
-`--trajectory` also accepts a directory, in which case every `*.json` and
-`*.jsonl` file directly inside it is offered. Trajectory files are never
-discovered implicitly; without `--trajectory` they are invisible to `list`
-and `submit`.
+The exporter writes `<source>-<id>.trajectory.json` into the working
+directory, which is the name `submit` looks for, so there is no flag to pass
+between the two commands.
+
+Some of those harnesses cannot be listed from disk -- upstream can normalize
+their transcripts but not enumerate their stores. The exporter names them and
+takes a file instead:
+
+```bash
+npx @tracecommons/trajectory-export --source cursor --input session.json
+```
+
+**Do not run `npx @letta-ai/trajectory`.** Earlier versions of this file told
+you to; it has never worked. That package is a library with no `bin`, so npx
+exits with "could not determine executable to run". `@tracecommons/trajectory-export`
+is the command that instruction assumed, and it wraps the same library.
+
+##### What `submit` will and will not pick up
+
+Trajectory files are discovered in exactly two places: the working directory,
+where the name must end `.trajectory.json` or `.trajectory.jsonl`, and
+`<state-dir>/trajectories/`, where any `*.json` or `*.jsonl` counts. Nothing
+else is scanned -- never `$HOME`, never recursively.
+
+The suffix is what keeps an unrelated `session.json` out of a submission.
+Putting a file in the staging directory is itself the opt-in, so it needs no
+suffix.
+
+`--trajectory <path>` still names a file or directory explicitly, and still
+treats a path that does not exist as an error rather than an empty result.
 
 Model reasoning is captured by default and redacted client-side like any
 other content. Pass `--no-reasoning` to exclude it from a submission.

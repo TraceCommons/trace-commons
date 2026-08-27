@@ -486,13 +486,9 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    let (near_ai, claude_source, codex_source) = {
+    let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.near_ai.clone(),
-            s.claude_source.clone(),
-            s.codex_source.clone(),
-        )
+        (s.near_ai.clone(), s.source_roots())
     };
     // These options are envelope-determining and are NOT covered by
     // `preview::input_fingerprint`, which fingerprints the config. They are
@@ -531,7 +527,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
 
-    let sources = crate::source::all_sources(claude_source, codex_source, None);
+    let sources = crate::source::all_sources(&source_roots);
     let mut changed = false;
     // Whether this pass put at least one trace on the wire. Drives both
     // halves of "sent, waiting to hear back": the local history rows, and

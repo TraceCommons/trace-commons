@@ -2,6 +2,7 @@
 //! per-agent adapters (Tasks 7-8), and deterministic hashing/id helpers.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use crate::daemon::settings::SourceDeclaration;
@@ -12,6 +13,7 @@ use sha2::{Digest, Sha256};
 pub mod claude_code;
 pub mod codex;
 pub mod discovery;
+pub mod gemini_cli;
 pub mod trajectory;
 
 /// A load declined because of what the session *is*, not because of what
@@ -46,6 +48,7 @@ pub struct SessionTooLarge {
 pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";
+pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
@@ -327,8 +330,104 @@ pub fn preview_submission_id_for(session_hash: &str) -> uuid::Uuid {
     uuid::Uuid::from_bytes(bytes)
 }
 
-/// Construct the set of available `TraceSource` adapters from what the
-/// contributor declared.
+/// What is constructed for a source the contributor has never been asked
+/// about.
+///
+/// The two answers are not a style choice. `Conventional` is what the
+/// claude-code and codex adapters have always done, and the application
+/// shells are stopped from reaching it by
+/// [`crate::daemon::settings::roots_declared`]; only
+/// `trace-commons-contributor daemon`, which is somebody typing a command
+/// on purpose, still gets those defaults. A source added AFTER those shells
+/// shipped cannot rely on that gate -- every installed client declares
+/// claude and codex and has no field for anything newer -- so it takes
+/// `Nothing`, and an absent declaration constructs no adapter and scans no
+/// directory. A contributor who wants it says so, either by declaring it or
+/// by using the CLI, which asks for [`SourceRoots::conventional`]
+/// explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Undeclared {
+    Conventional,
+    Nothing,
+}
+
+/// One native adapter's row in the registration table.
+///
+/// Adding an adapter is a new module, a name constant and a row here. It is
+/// deliberately not a parameter on [`all_sources`]: a positional parameter
+/// per source made adapter N+1 cost a signature change plus every call site
+/// in the daemon, the watcher, the preview scheduler and the CLI, which is
+/// the reason a harness nobody had written an adapter for stayed
+/// unsupported.
+struct SourceSpec {
+    name: &'static str,
+    /// The per-user store to use when the contributor has never been asked
+    /// and the caller accepts conventional locations.
+    conventional_root: fn() -> PathBuf,
+    build: fn(PathBuf) -> Box<dyn TraceSource>,
+    undeclared: Undeclared,
+}
+
+/// Every native adapter, in the order sources are offered.
+static NATIVE_SOURCES: &[SourceSpec] = &[
+    SourceSpec {
+        name: SOURCE_CLAUDE_CODE,
+        conventional_root: || {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".claude/projects")
+        },
+        build: |path| Box::new(claude_code::ClaudeCodeSource::new(path)),
+        undeclared: Undeclared::Conventional,
+    },
+    SourceSpec {
+        name: SOURCE_CODEX,
+        conventional_root: || dirs::home_dir().unwrap_or_default().join(".codex/sessions"),
+        build: |path| Box::new(codex::CodexSource::new(path)),
+        undeclared: Undeclared::Conventional,
+    },
+    SourceSpec {
+        name: SOURCE_GEMINI_CLI,
+        conventional_root: gemini_cli::conventional_root_this_machine,
+        build: |path| Box::new(gemini_cli::GeminiCliSource::new(path)),
+        // See `Undeclared`: every desktop client that has already shipped
+        // declares claude and codex and carries no gemini field, so an
+        // absent declaration must construct nothing rather than fall back
+        // to the contributor's real `~/.gemini`.
+        undeclared: Undeclared::Nothing,
+    },
+];
+
+/// The subdirectory of the contributor state directory that trajectory
+/// files may be staged in. Placing a file there IS the opt-in, which is why
+/// nothing in it needs a name suffix.
+pub const TRAJECTORY_STAGING_SUBDIR: &str = "trajectories";
+
+/// Which trajectory files, if any, this caller wants read.
+///
+/// Trajectory has no conventional per-user store, so unlike the native
+/// adapters it is not a row in `NATIVE_SOURCES`; it is asked for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TrajectorySelection {
+    /// No trajectory source at all. What the daemon asks for: its working
+    /// directory is whatever a service manager gave it and means nothing.
+    #[default]
+    None,
+    /// Exactly this file or directory, named by the contributor with
+    /// `--trajectory`. A file here that fails to parse is a hard error,
+    /// because the contributor said it was a trajectory.
+    Declared(PathBuf),
+    /// Bounded auto-discovery: the working directory, suffix-gated, plus
+    /// the state directory's staging folder. Never `$HOME` at large and
+    /// never a recursive walk. A file that fails to parse is skipped here,
+    /// because it never claimed to be a trajectory.
+    Auto {
+        working_dir: Option<PathBuf>,
+        staging_dir: Option<PathBuf>,
+    },
+}
+
+/// What the contributor declared, keyed by adapter name.
 ///
 /// Three states per source, and the difference between two of them is the
 /// whole point:
@@ -339,45 +438,116 @@ pub fn preview_submission_id_for(session_hash: &str) -> uuid::Uuid {
 ///   that previously did not exist, and its absence is what made "I don't
 ///   use Codex" indistinguishable from "nobody has asked yet" and therefore
 ///   equal to watching the real `~/.codex`.
-/// - `None` -- never asked. Only here does the conventional per-user
-///   location still apply, and only the CLI can reach it: every application
-///   shell refuses to start until both sources are declared
-///   (`daemon::settings::roots_declared`). `trace-commons-contributor daemon`
-///   is somebody typing a command on purpose and keeps its defaults.
+/// - absent -- never asked. What happens then is the adapter's own
+///   [`Undeclared`] policy, not one rule for everybody.
+#[derive(Debug, Clone, Default)]
+pub struct SourceRoots {
+    declared: BTreeMap<&'static str, SourceDeclaration>,
+    trajectory: TrajectorySelection,
+}
+
+impl SourceRoots {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record what the contributor said about one source. `None` leaves it
+    /// undeclared rather than declaring it off -- they are different
+    /// answers.
+    pub fn declare(mut self, name: &'static str, declaration: Option<SourceDeclaration>) -> Self {
+        match declaration {
+            Some(d) => {
+                self.declared.insert(name, d);
+            }
+            None => {
+                self.declared.remove(name);
+            }
+        }
+        self
+    }
+
+    pub fn with_trajectory(mut self, trajectory: TrajectorySelection) -> Self {
+        self.trajectory = trajectory;
+        self
+    }
+
+    /// Whether this source has been asked about at all.
+    pub fn is_declared(&self, name: &str) -> bool {
+        self.declared.contains_key(name)
+    }
+
+    /// Every native store at its conventional per-user location, declared
+    /// explicitly.
+    ///
+    /// This is the CLI's answer, and it is spelled as a declaration rather
+    /// than left to the undeclared fallback so that "the CLI keeps its
+    /// defaults" is a decision one caller makes out loud, not a property a
+    /// new adapter silently inherits.
+    pub fn conventional() -> Self {
+        let mut roots = Self::new();
+        for spec in NATIVE_SOURCES {
+            roots = roots.declare(
+                spec.name,
+                Some(SourceDeclaration::Watch {
+                    path: (spec.conventional_root)(),
+                }),
+            );
+        }
+        roots
+    }
+}
+
+/// The CLI's sources: every native store at its conventional location, plus
+/// trajectory files -- the path `--trajectory` named, or bounded
+/// auto-discovery when it did not.
 ///
-/// The trajectory source is included only when an explicit path is supplied,
-/// because trajectory files have no conventional local store.
-pub fn all_sources(
-    claude: Option<SourceDeclaration>,
-    codex: Option<SourceDeclaration>,
-    trajectory_path: Option<PathBuf>,
-) -> Vec<Box<dyn TraceSource>> {
+/// The staging directory is resolved through `ConfigStore`, so it honours
+/// `TRACE_COMMONS_CONTRIBUTOR_DIR`, inherits the state directory's `0700`
+/// mode, and is cleared by `logout` along with everything else there.
+pub fn cli_source_roots(trajectory: Option<&Path>) -> SourceRoots {
+    let selection = match trajectory {
+        Some(path) => TrajectorySelection::Declared(path.to_path_buf()),
+        None => TrajectorySelection::Auto {
+            working_dir: std::env::current_dir().ok(),
+            staging_dir: crate::config::ConfigStore::resolve(None)
+                .ok()
+                .map(|store| store.dir().join(TRAJECTORY_STAGING_SUBDIR)),
+        },
+    };
+    SourceRoots::conventional().with_trajectory(selection)
+}
+
+/// Construct the set of available `TraceSource` adapters from what the
+/// contributor declared.
+///
+/// See [`SourceRoots`] for the three declaration states and [`Undeclared`]
+/// for what an absent one means, which is per-adapter.
+pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
 
-    match claude {
-        Some(SourceDeclaration::Off) => {}
-        Some(SourceDeclaration::Watch { path }) => {
-            sources.push(Box::new(claude_code::ClaudeCodeSource::new(path)))
+    for spec in NATIVE_SOURCES {
+        match roots.declared.get(spec.name) {
+            Some(SourceDeclaration::Off) => {}
+            Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),
+            None => match spec.undeclared {
+                Undeclared::Conventional => sources.push((spec.build)((spec.conventional_root)())),
+                Undeclared::Nothing => {}
+            },
         }
-        None => sources.push(Box::new(claude_code::ClaudeCodeSource::new(
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".claude/projects"),
-        ))),
     }
 
-    match codex {
-        Some(SourceDeclaration::Off) => {}
-        Some(SourceDeclaration::Watch { path }) => {
-            sources.push(Box::new(codex::CodexSource::new(path)))
+    match &roots.trajectory {
+        TrajectorySelection::None => {}
+        TrajectorySelection::Declared(path) => {
+            sources.push(Box::new(trajectory::TrajectorySource::new(path.clone())))
         }
-        None => sources.push(Box::new(codex::CodexSource::new(
-            dirs::home_dir().unwrap_or_default().join(".codex/sessions"),
+        TrajectorySelection::Auto {
+            working_dir,
+            staging_dir,
+        } => sources.push(Box::new(trajectory::TrajectorySource::auto(
+            working_dir.clone(),
+            staging_dir.clone(),
         ))),
-    }
-
-    if let Some(path) = trajectory_path {
-        sources.push(Box::new(trajectory::TrajectorySource::new(path)));
     }
     sources
 }
@@ -411,6 +581,12 @@ mod tests {
         }
     }
 
+    fn watch(path: &str) -> Option<SourceDeclaration> {
+        Some(SourceDeclaration::Watch {
+            path: PathBuf::from(path),
+        })
+    }
+
     /// The fail-open this slice closes, stated as a test.
     ///
     /// "I don't use Codex" used to be spelled `codex_root: None`, which
@@ -419,11 +595,9 @@ mod tests {
     #[test]
     fn a_source_declared_off_is_not_constructed_at_all() {
         let sources = all_sources(
-            Some(SourceDeclaration::Watch {
-                path: PathBuf::from("/declared/claude"),
-            }),
-            Some(SourceDeclaration::Off),
-            None,
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch("/declared/claude"))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
         );
         let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
         assert_eq!(
@@ -437,9 +611,9 @@ mod tests {
     #[test]
     fn both_declared_off_watches_nothing() {
         let sources = all_sources(
-            Some(SourceDeclaration::Off),
-            Some(SourceDeclaration::Off),
-            None,
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
         );
         assert!(
             sources.is_empty(),
@@ -456,16 +630,14 @@ mod tests {
         let home = dirs::home_dir().unwrap_or_default();
         for sources in [
             all_sources(
-                Some(SourceDeclaration::Off),
-                Some(SourceDeclaration::Off),
-                None,
+                &SourceRoots::new()
+                    .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                    .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
             ),
             all_sources(
-                Some(SourceDeclaration::Off),
-                Some(SourceDeclaration::Watch {
-                    path: PathBuf::from("/declared/codex"),
-                }),
-                None,
+                &SourceRoots::new()
+                    .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                    .declare(SOURCE_CODEX, watch("/declared/codex")),
             ),
         ] {
             for source in &sources {
@@ -484,9 +656,91 @@ mod tests {
     fn never_asked_still_defaults_so_the_cli_is_unaffected() {
         // The application shells cannot reach this: roots_declared() gates
         // them. The CLI can, and deliberately keeps its defaults.
-        let sources = all_sources(None, None, None);
+        let sources = all_sources(&SourceRoots::new());
         let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
         assert_eq!(names, vec![SOURCE_CLAUDE_CODE, SOURCE_CODEX]);
+    }
+
+    /// The A2 rule, stated as a test.
+    ///
+    /// Every desktop client that has already shipped declares claude and
+    /// codex and has no gemini field at all. If an absent gemini
+    /// declaration fell back to the conventional store the way an absent
+    /// claude one does, the next release of those clients would start
+    /// reading `~/.gemini` on machines whose owner was never asked.
+    #[test]
+    fn an_absent_gemini_declaration_constructs_no_adapter() {
+        for roots in [
+            SourceRoots::new(),
+            SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch("/declared/claude"))
+                .declare(SOURCE_CODEX, watch("/declared/codex")),
+        ] {
+            assert!(
+                !all_sources(&roots)
+                    .iter()
+                    .any(|s| s.name() == SOURCE_GEMINI_CLI),
+                "an undeclared gemini source must construct nothing, not \
+                 fall back to {}",
+                gemini_cli::conventional_root_this_machine().display()
+            );
+        }
+
+        assert!(
+            !all_sources(
+                &SourceRoots::new().declare(SOURCE_GEMINI_CLI, Some(SourceDeclaration::Off))
+            )
+            .iter()
+            .any(|s| s.name() == SOURCE_GEMINI_CLI),
+            "and declaring it off must not construct one either"
+        );
+    }
+
+    /// A declared gemini root IS watched, and the CLI -- which declares
+    /// every conventional store explicitly rather than relying on the
+    /// undeclared fallback -- gets one too.
+    #[test]
+    fn a_declared_gemini_root_is_watched_and_the_cli_declares_one() {
+        let sources = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off))
+                .declare(SOURCE_GEMINI_CLI, watch("/declared/gemini")),
+        );
+        let names: Vec<&str> = sources.iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec![SOURCE_GEMINI_CLI]);
+
+        let names: Vec<&str> = all_sources(&SourceRoots::conventional())
+            .iter()
+            .map(|s| s.name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI],
+            "adding an adapter to the table must reach the CLI without a \
+             call-site change"
+        );
+    }
+
+    /// Trajectory is asked for, never inferred: the daemon's working
+    /// directory is whatever a service manager handed it.
+    #[test]
+    fn the_trajectory_source_is_only_constructed_when_it_is_asked_for() {
+        let has_trajectory = |roots: &SourceRoots| {
+            all_sources(roots)
+                .iter()
+                .any(|s| s.name() == SOURCE_TRAJECTORY)
+        };
+        assert!(!has_trajectory(&SourceRoots::new()));
+        assert!(has_trajectory(&SourceRoots::new().with_trajectory(
+            TrajectorySelection::Declared(PathBuf::from("/some/run.jsonl"))
+        )));
+        assert!(has_trajectory(&SourceRoots::new().with_trajectory(
+            TrajectorySelection::Auto {
+                working_dir: Some(PathBuf::from("/some/project")),
+                staging_dir: None,
+            }
+        )));
     }
 
     #[test]

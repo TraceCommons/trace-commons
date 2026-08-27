@@ -61,8 +61,15 @@ enum Command {
         #[arg(long)]
         trajectory: Option<PathBuf>,
     },
-    /// Redact and submit selected sessions
+    /// Redact and submit sessions from the current directory's subtree
+    ///
+    /// With no flags this covers the working directory and everything under
+    /// it, which is how you scope a run: stand in one project to submit that
+    /// project, or in the parent of several repos to submit all of them. It
+    /// refuses to run from `$HOME` or a filesystem root, where the subtree
+    /// would be every session on the machine; `--all` says that deliberately.
     Submit {
+        /// Every session on this machine, ignoring the working directory
         #[arg(long)]
         all: bool,
         /// Only sessions started within this duration (e.g. 2d, 12h)
@@ -74,9 +81,13 @@ enum Command {
         /// Restrict to one source: claude-code | codex | trajectory
         #[arg(long)]
         source: Option<String>,
-        /// Skip the interactive picker confirmation
+        /// Skip the confirmation and submit everything selected
         #[arg(long)]
         yes: bool,
+        /// Choose sessions individually from a numbered table, instead of
+        /// confirming the batch as a whole
+        #[arg(long)]
+        pick: bool,
         /// Run the full pipeline but upload nothing
         #[arg(long)]
         dry_run: bool,
@@ -86,6 +97,14 @@ enum Command {
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
         #[arg(long)]
         manifest: Option<PathBuf>,
+        /// Write the signed score attestation for this run's submissions to this path.
+        /// This is what a collector scores you on; an id list is not proof of authorship.
+        #[arg(long, conflicts_with = "dry_run")]
+        attest_out: Option<PathBuf>,
+        /// POST the attestation to this collector endpoint instead of carrying the file
+        /// yourself. Must be https, and the host must be on your allowlist.
+        #[arg(long, conflicts_with = "dry_run")]
+        attest_post: Option<String>,
         /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
         #[arg(long)]
         trajectory: Option<PathBuf>,
@@ -100,6 +119,13 @@ enum Command {
         /// outcome, which nothing else in a transcript can answer.
         #[arg(long)]
         outcome: Option<String>,
+        /// Invite link to enroll with if this machine is not enrolled yet.
+        /// Prefer `TRACE_COMMONS_INVITE`: an invite passed here lands in your
+        /// shell history and in `ps`.
+        /// Reading it from the environment is done in `commands::submit`, so
+        /// there is exactly one place the invite is sourced from.
+        #[arg(long)]
+        invite: Option<String>,
     },
     /// Show server-side status of previously submitted sessions
     Status,
@@ -349,13 +375,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             project,
             source,
             yes,
+            pick,
             dry_run,
             pii_filter,
             manifest,
+            attest_out,
+            attest_post,
             trajectory,
             no_reasoning,
             remediate_quarantined,
             outcome,
+            invite,
         } => {
             let sel = commands::SubmitSelection {
                 all,
@@ -363,14 +393,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 project: project.as_deref(),
                 source: source.as_deref(),
                 yes,
+                pick,
                 dry_run,
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
+                attest_out: attest_out.as_deref(),
+                attest_post: attest_post.as_deref(),
                 trajectory: trajectory.as_deref(),
                 json: cli.json,
                 no_reasoning,
                 remediate_quarantined,
                 verdict: outcome.as_deref(),
+                invite: invite.as_deref(),
             };
             commands::submit(&store, &sel).await
         }

@@ -1892,6 +1892,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&50_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V50__onboarding_invite_grant_consumption.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&50_i32, &"onboarding_invite_grant_consumption"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2784,6 +2805,54 @@ impl Database for PgBackend {
             }
             return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
         };
+
+        // Consume the invite's OWN allowance before the per-tenant one.
+        //
+        // V29's counter is keyed (tenant_id, invite_subject_hash), and under
+        // InviteTenantMode::Derived the tenant is computed from the redeemer's
+        // device key -- so each redeemer gets a fresh row at zero and the limit
+        // never binds. This counter is on the tenant-less grant row, so it
+        // binds whatever tenant the redeemer lands in.
+        //
+        // The GUC is set transaction-locally so the grant row for the code
+        // actually presented is visible and updatable, and no other; the
+        // policies in V42 and V50 are both predicated on it.
+        tx.execute(
+            "SELECT set_config('trace_commons.invite_subject', $1, true)",
+            &[&device_key.invite_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let has_grant = tx
+            .query_opt(
+                "SELECT 1 FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+                &[&device_key.invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .is_some();
+        if has_grant {
+            // Absent when the invite came from the file allowlist rather than
+            // the DB registry. That path has no grant row and no second
+            // counter, so "no row" must mean "not governed here" rather than
+            // "exhausted" -- conflating them would refuse every legacy invite.
+            let globally_consumed = tx
+                .query_opt(
+                    "UPDATE onboarding_invite_grants
+                        SET consumed_uses = consumed_uses + 1,
+                            updated_at = NOW()
+                      WHERE invite_subject_hash = $1
+                        AND revoked_at IS NULL
+                        AND consumed_uses < max_uses
+                      RETURNING consumed_uses",
+                    &[&device_key.invite_subject_hash],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            if globally_consumed.is_none() {
+                return Err(crate::db::OnboardDeviceKeyError::InviteAlreadyConsumed);
+            }
+        }
 
         let consumed = tx
             .query_opt(
@@ -4928,25 +4997,39 @@ impl Database for PgBackend {
         // `score_attestation_handler`).
         let rows = client
             .query(
-                "SELECT DISTINCT ON (d.submission_id)
-                    d.submission_id,
-                    d.credit_quality_micros,
-                    d.perplexity_micros,
-                    d.novelty_score_micros,
-                    d.perplexity_passed,
-                    d.novelty_passed,
-                    d.chunk_count,
-                    d.total_chunk_count,
-                    d.chunks_capped
-                 FROM trace_gate_decisions d
-                 JOIN trace_submissions s
-                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
-                 WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
-                 -- decision_id is the final, unique tiebreaker (mirrors
-                 -- list_scores_by_submission_ids) so decisions that share a
-                 -- decided_at sort deterministically instead of Postgres
-                 -- picking an arbitrary row among ties on repeated reads.
-                 ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                // The inner SELECT picks the LATEST decision per submission;
+                // the outer one orders those by recency and truncates. The
+                // two cannot be one statement: DISTINCT ON requires its
+                // leading ORDER BY term to be the distinct key, so a single
+                // query can only truncate in submission_id order — which is
+                // a random v4 per trace, making truncation an arbitrary slice
+                // of the UUID space rather than a comprehensible "your oldest
+                // scores fell off".
+                "SELECT * FROM (
+                    SELECT DISTINCT ON (d.submission_id)
+                        d.submission_id,
+                        d.credit_quality_micros,
+                        d.perplexity_micros,
+                        d.novelty_score_micros,
+                        d.perplexity_passed,
+                        d.novelty_passed,
+                        d.chunk_count,
+                        d.total_chunk_count,
+                        d.chunks_capped,
+                        d.decided_at
+                     FROM trace_gate_decisions d
+                     JOIN trace_submissions s
+                       ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                     WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                     -- decision_id is the final, unique tiebreaker (mirrors
+                     -- list_scores_by_submission_ids) so decisions that share a
+                     -- decided_at sort deterministically instead of Postgres
+                     -- picking an arbitrary row among ties on repeated reads.
+                     ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                 ) latest
+                 -- submission_id breaks decided_at ties so the truncated set
+                 -- is stable across repeated reads.
+                 ORDER BY latest.decided_at DESC, latest.submission_id DESC
                  LIMIT $3",
                 &[&tenant_id, &auth_principal_ref, &limit],
             )
@@ -4966,6 +5049,83 @@ impl Database for PgBackend {
                     chunk_count: row.get("chunk_count"),
                     total_chunk_count: row.get("total_chunk_count"),
                     chunks_capped: row.get("chunks_capped"),
+                }
+            })
+            .collect())
+    }
+
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // Same authorization story as `list_own_gate_decision_scores`: no
+        // tenant GUC, the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize the read, and the `s.tenant_id = $1 AND
+        // s.auth_principal_ref = $2` predicates are what scope it to the
+        // caller's own rows. $3 only NARROWS that set.
+        //
+        // The join is LEFT, and driven from trace_submissions rather than
+        // from trace_gate_decisions, precisely so an owned-but-unscored
+        // submission comes back with NULL score columns instead of
+        // vanishing. That absence is the defect this method exists to fix.
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (s.submission_id)
+                    s.submission_id,
+                    d.decision_id,
+                    d.credit_quality_micros,
+                    d.perplexity_micros,
+                    d.novelty_score_micros,
+                    d.perplexity_passed,
+                    d.novelty_passed,
+                    d.chunk_count,
+                    d.total_chunk_count,
+                    d.chunks_capped
+                 FROM trace_submissions s
+                 LEFT JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 WHERE s.tenant_id = $1
+                   AND s.auth_principal_ref = $2
+                   AND s.submission_id = ANY($3)
+                 ORDER BY s.submission_id, d.decided_at DESC NULLS LAST, d.decision_id DESC",
+                &[&tenant_id, &auth_principal_ref, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let decision_id: Option<Uuid> = row.get("decision_id");
+                let submission_id: Uuid = row.get("submission_id");
+                // Every score column is NULLable only because of the LEFT
+                // join; a present decision_id means the whole row is present.
+                let score = decision_id.map(|_| {
+                    let perplexity_passed: bool = row.get("perplexity_passed");
+                    let novelty_passed: bool = row.get("novelty_passed");
+                    crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                        submission_id,
+                        credit_quality_micros: row.get("credit_quality_micros"),
+                        perplexity_micros: row.get("perplexity_micros"),
+                        novelty_score_micros: row.get("novelty_score_micros"),
+                        gate_passed: perplexity_passed && novelty_passed,
+                        chunk_count: row.get("chunk_count"),
+                        total_chunk_count: row.get("total_chunk_count"),
+                        chunks_capped: row.get("chunks_capped"),
+                    }
+                });
+                crate::trace_corpus_storage::OwnSubmissionScoreRow {
+                    submission_id,
+                    score,
                 }
             })
             .collect())

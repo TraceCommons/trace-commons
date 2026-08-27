@@ -41,3 +41,12 @@ than a fixture:
 - **Both framings parse**: JSON Lines, or a single top-level JSON array.
 - A record that is valid JSON but not an object is `unknown_record`, not
   `malformed_json`; `malformed_json` is reserved for text that does not parse.
+- **`system` and `observation` are accepted, and are not equivalent.** An
+  observation keeps its content; a system record keeps only its position, on
+  the grounds that a system prompt is near-identical across a harness's
+  sessions and carries whatever project context that harness injected. Both
+  still require a well-formed `content` and `timestamp`. They were added to
+  trajectory-v1 upstream after this reader shipped, and until that was fixed
+  either one rejected the entire file as `unknown_record` -- which is the
+  reason to add a fixture here the next time upstream grows a role rather
+  than finding out from a contributor.

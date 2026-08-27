@@ -26,7 +26,7 @@ use crate::identity::{
 };
 use crate::issuer_client::IssuerClient;
 use crate::picker;
-use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources};
+use crate::source::{SessionRef, SessionTranscript, TraceSource, all_sources, cli_source_roots};
 use crate::submit::{self, SubmitOptions, SubmitOutcome};
 use trace_commons_protocol::trace_contribution::ConsentScope;
 
@@ -604,7 +604,7 @@ fn discover_filtered(
     let project_filter = resolved_project.as_deref();
 
     let mut refs = Vec::new();
-    for source in all_sources(None, None, trajectory.map(|p| p.to_path_buf())) {
+    for source in all_sources(&cli_source_roots(trajectory)) {
         if let Some(sf) = source_filter {
             if source.name() != sf {
                 continue;
@@ -642,7 +642,7 @@ fn discover_filtered(
 /// Build a fresh `TraceSource` instance for the adapter named `name` (used
 /// to pair a previously discovered `SessionRef` with a loadable source).
 fn source_for(name: &str, trajectory: Option<&Path>) -> Option<Box<dyn TraceSource>> {
-    all_sources(None, None, trajectory.map(|p| p.to_path_buf()))
+    all_sources(&cli_source_roots(trajectory))
         .into_iter()
         .find(|s| s.name() == name)
 }
@@ -760,6 +760,164 @@ pub fn list(trajectory: Option<&Path>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The three inputs that decide how much of the machine a `submit` run
+/// covers. Grouped so the decision is one testable function rather than a
+/// condition spread through `submit`.
+pub(crate) struct SubmitScopeInputs<'a> {
+    pub all: bool,
+    pub project: Option<&'a Path>,
+    pub json: bool,
+}
+
+/// Resolve the effective `--project` filter for a run. `None` means "no
+/// filter": everything this machine can discover.
+///
+/// Slice C's whole mechanism lives here. `cwd_matches_project` has always
+/// matched a path *subtree*, so scoping a run to where the contributor is
+/// standing needs nothing more than handing that filter the working
+/// directory instead of `None`.
+///
+/// `--json` is frozen: a collector driving this CLI programmatically must
+/// not have its result set silently narrowed, nor acquire a refusal, in a
+/// point release. It keeps the historical unscoped default.
+///
+/// The refusal is the one case a subtree does not bound. From `$HOME`, an
+/// ancestor of it, or a filesystem root the subtree is every session ever
+/// recorded -- so the run stops and names `--all`, rather than offering a
+/// whole contribution history behind one keystroke.
+pub(crate) fn resolve_submit_scope(
+    inputs: &SubmitScopeInputs<'_>,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<Option<std::path::PathBuf>> {
+    if inputs.all {
+        return Ok(None);
+    }
+    if let Some(p) = inputs.project {
+        return Ok(Some(p.to_path_buf()));
+    }
+    if inputs.json {
+        return Ok(None);
+    }
+    let at_root = cwd.parent().is_none();
+    // `home.starts_with(cwd)` covers both "this is $HOME" and "this is above
+    // $HOME"; either way the subtree contains every session store.
+    let above_home = home.map(|h| h.starts_with(cwd)).unwrap_or(false);
+    if at_root || above_home {
+        anyhow::bail!(
+            "refusing to submit from a directory that contains every session on this \
+             machine: run `submit` from a project directory, pass `--project <path>`, \
+             or pass `--all` if you really mean everything, everywhere"
+        );
+    }
+    Ok(Some(cwd.to_path_buf()))
+}
+
+/// The invite an auto-enroll may use, from `--invite` or
+/// `TRACE_COMMONS_INVITE`. `None` under `--json`: that surface is frozen and
+/// must never acquire an enrollment side effect.
+pub(crate) fn auto_enroll_invite(
+    flag: Option<&str>,
+    env: Option<&str>,
+    json: bool,
+) -> Option<String> {
+    if json {
+        return None;
+    }
+    flag.or(env)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// How a `submit` run decides which of the discovered sessions to send.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SubmitSelectionMode {
+    /// Everything discovered, no prompt.
+    All,
+    /// The y/N batch summary.
+    Summary,
+    /// The numbered per-session picker.
+    Picker,
+}
+
+/// Pick the selection mode. `--json` never reaches the summary: that surface
+/// is frozen on the picker branch it has always taken, so a collector driving
+/// this CLI programmatically sees no new prompt in a point release.
+pub(crate) fn submit_selection_mode(
+    all: bool,
+    yes: bool,
+    pick: bool,
+    json: bool,
+) -> SubmitSelectionMode {
+    if all || yes {
+        SubmitSelectionMode::All
+    } else if json || pick {
+        SubmitSelectionMode::Picker
+    } else {
+        SubmitSelectionMode::Summary
+    }
+}
+
+/// The summary a contributor confirms before anything uploads: how many
+/// sessions, which projects, over what dates, and under which consent
+/// scopes. It replaces the index picker for the common case -- at a deadline
+/// the question is "is this the right batch", not "which of these 40 rows".
+pub(crate) fn submit_summary_lines(
+    refs: &[SessionRef],
+    scope: Option<&Path>,
+    consent_scopes: &[String],
+) -> Vec<String> {
+    let mut projects: Vec<&str> = refs
+        .iter()
+        .map(|r| r.project.as_deref().unwrap_or("-"))
+        .collect();
+    projects.sort_unstable();
+    projects.dedup();
+
+    let mut stamps: Vec<chrono::DateTime<Utc>> = refs.iter().filter_map(|r| r.started_at).collect();
+    stamps.sort_unstable();
+    let dates = match (stamps.first(), stamps.last()) {
+        (Some(a), Some(b)) if a == b => a.format("%Y-%m-%d").to_string(),
+        (Some(a), Some(b)) => format!("{} to {}", a.format("%Y-%m-%d"), b.format("%Y-%m-%d")),
+        _ => "-".to_string(),
+    };
+
+    let scope_cell = match scope {
+        Some(p) => p.display().to_string(),
+        None => "everywhere (--all)".to_string(),
+    };
+    let consent_cell = if consent_scopes.is_empty() {
+        "-".to_string()
+    } else {
+        consent_scopes.join(", ")
+    };
+
+    vec![
+        format!("about to submit {} session(s)", refs.len()),
+        format!("  scope    : {scope_cell}"),
+        format!("  projects : {}", projects.join(", ")),
+        format!("  dates    : {dates}"),
+        format!("  consent  : {consent_cell}"),
+    ]
+}
+
+/// Read one y/N answer. Anything that is not an explicit yes -- including an
+/// empty line and a closed stdin -- is a no. The default answer to "upload
+/// these" must never be "yes".
+pub(crate) fn read_confirmation(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+) -> Result<bool> {
+    write!(writer, "submit these? [y/N] ").context("writing confirmation prompt")?;
+    writer.flush().context("flushing confirmation prompt")?;
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(reader), &mut line)
+        .context("reading confirmation from stdin")?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 /// Options controlling which local sessions `submit` considers and whether
 /// it prompts interactively before uploading.
 pub struct SubmitSelection<'a> {
@@ -768,9 +926,20 @@ pub struct SubmitSelection<'a> {
     pub project: Option<&'a Path>,
     pub source: Option<&'a str>,
     pub yes: bool,
+    /// Show the per-session index picker instead of the y/N summary. The
+    /// summary answers "is this the right batch"; this answers "which of
+    /// these", which is still worth having when the batch is not.
+    pub pick: bool,
     pub dry_run: bool,
     pub pii_filter: Option<&'a str>,
     pub manifest: Option<&'a Path>,
+    /// Where to write the signed score attestation for this run's
+    /// submissions. Absent leaves the standalone `attest` command as the only
+    /// way to get one.
+    pub attest_out: Option<&'a Path>,
+    /// Collector endpoint to POST the attestation to, so the contributor never
+    /// carries the file themselves. Host must be on the allowlist.
+    pub attest_post: Option<&'a str>,
     /// Path to a trajectory-v1 file or a directory of them. Trajectory
     /// sessions are only discoverable when this is set.
     pub trajectory: Option<&'a Path>,
@@ -786,6 +955,10 @@ pub struct SubmitSelection<'a> {
     /// Absent leaves `task_success` `Unknown`, as every envelope this client
     /// has ever sent carried.
     pub verdict: Option<&'a str>,
+    /// Invite link to enroll with when this machine has no config yet.
+    /// `TRACE_COMMONS_INVITE` is the equivalent, and is what the one-time
+    /// script uses so the invite never appears in argv.
+    pub invite: Option<&'a str>,
 }
 
 /// Drop reasoning events before envelope construction. Reasoning is captured
@@ -798,6 +971,20 @@ pub(crate) fn strip_reasoning(t: &mut SessionTranscript) {
 /// Discover, filter, (optionally) interactively pick, redact, and submit
 /// local sessions. Prints exactly one outcome line per session; returns an
 /// error (nonzero exit) if a real submission is refused or any run fails.
+/// How long `--attest-out` waits for the traces it just sent to be scored.
+///
+/// Deliberately short. The scoring driver runs a small batch on a fixed tick
+/// and may be disabled entirely, so a long wait buys nothing on a queue that
+/// is not moving, and a contributor at a deadline needs the artifact more than
+/// they need it complete. The document is written either way and says how much
+/// of it is still pending.
+const ATTEST_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How often to re-ask while waiting. One request per tick of the driver's
+/// default interval is enough; asking faster only adds load to the endpoint
+/// that is already the bottleneck.
+const ATTEST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()> {
     // A dry run mints envelope ids locally but delivers nothing, so its ids
     // do not exist server-side. Writing them would hand an external collector
@@ -808,7 +995,66 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
              so its envelope ids would never exist server-side"
         );
     }
-    let saved_cfg = store.load_config().context("loading contributor config")?;
+    // Same reasoning: a scoped attestation names submission ids, and a dry
+    // run's ids exist only in this process. The server would return a signed
+    // document listing every one of them as `unknown`, which is a worse thing
+    // to hand a collector than nothing at all.
+    if sel.attest_out.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--attest-out cannot be combined with --dry-run: a dry run uploads nothing, \
+             so the server could attest to none of its submission ids"
+        );
+    }
+    if sel.attest_post.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--attest-post cannot be combined with --dry-run: a dry run uploads nothing, \
+             so there would be no attestation to deliver"
+        );
+    }
+    // Validate the destination before discovering or uploading anything. A
+    // contributor who mistyped the collector, or named a host they never
+    // allowlisted, should find out before their traces are on the server and
+    // not after.
+    let attest_post_target = match sel.attest_post {
+        Some(raw) => {
+            let saved = store.load_config().ok().flatten();
+            let allowlist = crate::config::allowlist_for(
+                saved.as_ref().and_then(|c| c.allowed_hosts.as_deref()),
+            );
+            Some(submit::validate_attest_post_target(raw, &allowlist)?)
+        }
+        None => None,
+    };
+    // Refuse an unbounded run before anything else: enrolling, discovering,
+    // or loading transcripts for a run that is about to be refused is work
+    // done on the way to an error.
+    let cwd = std::env::current_dir().context("resolving the current working directory")?;
+    let scope = resolve_submit_scope(
+        &SubmitScopeInputs {
+            all: sel.all,
+            project: sel.project,
+            json: sel.json,
+        },
+        &cwd,
+        dirs::home_dir().as_deref(),
+    )?;
+
+    let mut saved_cfg = store.load_config().context("loading contributor config")?;
+    // Auto-enroll only when there is nothing to lose by it: no config yet, an
+    // invite actually supplied, and a run that means to upload. A dry run
+    // changes nothing server-side by definition, so it must not spend an
+    // invite use; it keeps the unenrolled-preview path below.
+    if saved_cfg.is_none() && !sel.dry_run {
+        let env_invite = std::env::var("TRACE_COMMONS_INVITE").ok();
+        if let Some(invite) = auto_enroll_invite(sel.invite, env_invite.as_deref(), sel.json) {
+            // Consent is asked in full here, exactly as `login` asks it.
+            // Pre-seeding scopes from an invite would be a dark pattern.
+            login(store, None, Some(&invite), None, None, false)
+                .await
+                .context("enrolling with the supplied invite")?;
+            saved_cfg = store.load_config().context("loading contributor config")?;
+        }
+    }
     let (cfg, unenrolled_preview) = match saved_cfg {
         Some(cfg) => (cfg, false),
         None if sel.dry_run => (unenrolled_preview_config(), true),
@@ -832,15 +1078,36 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     }
 
     let since = sel.since.map(picker::parse_since).transpose()?;
-    let mut refs = discover_filtered(sel.source, sel.project, since, sel.trajectory)?;
+    let mut refs = discover_filtered(sel.source, scope.as_deref(), since, sel.trajectory)?;
     refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
 
     if refs.is_empty() {
         println!("no sessions found");
+        // Say what was searched. Under subtree scoping the commonest cause of
+        // an empty run is standing one directory away from the project, and
+        // "no sessions found" alone reads as "this tool cannot see anything".
+        if let Some(p) = scope.as_deref() {
+            println!(
+                "  searched {} and everything under it; use `--project <path>` or `--all`",
+                p.display()
+            );
+        }
         return Ok(());
     }
 
-    let indices: Vec<usize> = if sel.all || sel.yes {
+    let mode = submit_selection_mode(sel.all, sel.yes, sel.pick, sel.json);
+    let indices: Vec<usize> = if mode == SubmitSelectionMode::All {
+        (0..refs.len()).collect()
+    } else if mode == SubmitSelectionMode::Summary {
+        for line in submit_summary_lines(&refs, scope.as_deref(), &cfg.consent_scopes) {
+            println!("{line}");
+        }
+        let confirmed = read_confirmation(&mut std::io::stdin(), &mut std::io::stdout())?;
+        println!();
+        if !confirmed {
+            println!("nothing submitted");
+            return Ok(());
+        }
         (0..refs.len()).collect()
     } else {
         let receipts = store.load_receipts().context("loading receipts")?;
@@ -906,13 +1173,62 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         println!("wrote {} envelope id(s) to manifest", entries.len());
     }
 
+    // The attestation covers what this run actually delivered, so it is built
+    // from the outcomes rather than from the sessions we set out to send:
+    // anything refused, quarantined or skipped is not something the server can
+    // attest to.
+    let scoped_attestation = match sel.attest_out {
+        Some(path) if !unenrolled_preview => {
+            let ids = submit::submitted_ids(&outcomes);
+            submit::emit_scoped_attestation(
+                store,
+                &cfg,
+                &ids,
+                path,
+                ATTEST_WAIT_TIMEOUT,
+                ATTEST_POLL_INTERVAL,
+            )
+            .await
+        }
+        _ => None,
+    };
+
+    let mut attestation_delivered = None;
+    if let (Some(target), Some(attested)) = (&attest_post_target, &scoped_attestation) {
+        attestation_delivered =
+            Some(submit::post_attestation(target, attested, cfg.allowed_hosts.as_deref()).await);
+    }
+
     if sel.json {
-        let document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        let mut document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        if let Some(delivered) = attestation_delivered {
+            if let Some(map) = document.as_object_mut() {
+                map.insert(
+                    "attestation_delivered".to_string(),
+                    serde_json::json!(delivered),
+                );
+            }
+        }
+        if let Some(attested) = &scoped_attestation {
+            submit::attach_attestation_to_json(&mut document, attested);
+        }
         println!("{}", serde_json::to_string_pretty(&document)?);
         if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
             return Err(RenderedSubmitFailure.into());
         }
         return Ok(());
+    }
+
+    if let Some(attested) = &scoped_attestation {
+        println!("{}", attested.progress_line());
+    }
+    match attestation_delivered {
+        Some(true) => println!("attestation delivered to the collector"),
+        Some(false) => {
+            println!("attestation NOT delivered; your traces are submitted regardless.");
+            println!("get it with: trace-commons-contributor attest --out attestation.jws");
+        }
+        None => {}
     }
 
     let preview_prefix = if unenrolled_preview {
@@ -1593,14 +1909,18 @@ mod project_filter_tests {
             project: None,
             source: None,
             yes: true,
+            pick: false,
             dry_run: true,
             pii_filter: None,
             manifest: Some(&manifest),
+            attest_out: None,
+            attest_post: None,
             trajectory: None,
             json: false,
             no_reasoning: false,
             remediate_quarantined: false,
             verdict: None,
+            invite: None,
         };
 
         let error = super::submit(&store, &sel).await.expect_err("refused");
@@ -1610,6 +1930,49 @@ mod project_filter_tests {
         );
         // Refused BEFORE the not-logged-in check, i.e. before any work.
         assert!(!manifest.exists(), "no manifest is written on refusal");
+    }
+
+    #[tokio::test]
+    async fn attest_out_with_dry_run_is_refused_before_any_upload() {
+        // Same reasoning as the manifest guard, and the same failure if it is
+        // missing. A scoped attestation asks the server to attest to specific
+        // submission ids; a dry run's ids were minted locally and delivered
+        // nowhere, so the server owns none of them and would answer with every
+        // one of them listed as `unknown`. Handing a collector a signed
+        // document that disclaims the entire submission is worse than handing
+        // them nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let attestation = dir.path().join("attestation.jws");
+        let sel = super::SubmitSelection {
+            all: true,
+            since: None,
+            project: None,
+            source: None,
+            yes: true,
+            pick: false,
+            dry_run: true,
+            pii_filter: None,
+            manifest: None,
+            attest_out: Some(&attestation),
+            attest_post: None,
+            trajectory: None,
+            json: false,
+            no_reasoning: false,
+            remediate_quarantined: false,
+            verdict: None,
+            invite: None,
+        };
+
+        let error = super::submit(&store, &sel).await.expect_err("refused");
+        assert!(
+            error.to_string().contains("--dry-run"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !attestation.exists(),
+            "no attestation is written on refusal"
+        );
     }
 
     #[test]
@@ -3009,5 +3372,280 @@ mod daemon_command_tests {
         });
         assert!(text.contains("installed"), "{text}");
         assert!(text.contains("0.2.0"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod submit_scope_tests {
+    use super::*;
+
+    // ---- Slice C: one-step submit, scoped by where you are ----------------
+
+    fn a_ref(cwd: &str, project: &str, at: &str) -> SessionRef {
+        SessionRef {
+            source: crate::source::SOURCE_CLAUDE_CODE,
+            path: Path::new("/store/s.jsonl").to_path_buf(),
+            project: Some(project.to_string()),
+            cwd: Some(cwd.to_string()),
+            started_at: Some(at.parse::<chrono::DateTime<Utc>>().unwrap()),
+            size_bytes: 1024,
+            group_modified_at: None,
+            group_member_count: 1,
+        }
+    }
+
+    #[test]
+    fn bare_submit_defaults_the_project_filter_to_the_working_directory() {
+        let cwd = Path::new("/Users/dev/code/myproj");
+        let scope = resolve_submit_scope(
+            &SubmitScopeInputs {
+                all: false,
+                project: None,
+                json: false,
+            },
+            cwd,
+            Some(Path::new("/Users/dev")),
+        )
+        .unwrap();
+        assert_eq!(scope.as_deref(), Some(cwd));
+    }
+
+    #[test]
+    fn an_explicit_project_wins_and_all_ignores_the_working_directory() {
+        let cwd = Path::new("/Users/dev/code/myproj");
+        let home = Some(Path::new("/Users/dev"));
+        let explicit = Path::new("/Users/dev/code/other");
+        assert_eq!(
+            resolve_submit_scope(
+                &SubmitScopeInputs {
+                    all: false,
+                    project: Some(explicit),
+                    json: false,
+                },
+                cwd,
+                home,
+            )
+            .unwrap()
+            .as_deref(),
+            Some(explicit)
+        );
+        assert_eq!(
+            resolve_submit_scope(
+                &SubmitScopeInputs {
+                    all: true,
+                    project: None,
+                    json: false,
+                },
+                cwd,
+                home,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_submit_refuses_at_home_and_names_all() {
+        let home = Path::new("/Users/dev");
+        let err = resolve_submit_scope(
+            &SubmitScopeInputs {
+                all: false,
+                project: None,
+                json: false,
+            },
+            home,
+            Some(home),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--all"), "got: {err}");
+    }
+
+    #[test]
+    fn bare_submit_refuses_at_a_filesystem_root() {
+        let root = Path::new("/");
+        let err = resolve_submit_scope(
+            &SubmitScopeInputs {
+                all: false,
+                project: None,
+                json: false,
+            },
+            root,
+            Some(Path::new("/Users/dev")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--all"), "got: {err}");
+    }
+
+    #[test]
+    fn an_ancestor_of_home_is_refused_too() {
+        // `/Users` is an ancestor of every session store under `/Users/dev`,
+        // so it is the same unbounded sweep `$HOME` is.
+        let err = resolve_submit_scope(
+            &SubmitScopeInputs {
+                all: false,
+                project: None,
+                json: false,
+            },
+            Path::new("/Users"),
+            Some(Path::new("/Users/dev")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--all"), "got: {err}");
+    }
+
+    #[test]
+    fn json_submit_keeps_the_unscoped_default_and_never_refuses() {
+        // Frozen: a collector driving --json must see today's behaviour.
+        let home = Path::new("/Users/dev");
+        for cwd in [Path::new("/Users/dev/code/myproj"), home, Path::new("/")] {
+            assert_eq!(
+                resolve_submit_scope(
+                    &SubmitScopeInputs {
+                        all: false,
+                        project: None,
+                        json: true,
+                    },
+                    cwd,
+                    Some(home),
+                )
+                .unwrap(),
+                None,
+                "cwd {}",
+                cwd.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_subtree_scope_matches_children_and_not_siblings() {
+        // The mechanism Slice C rests on: the scope is handed to the same
+        // `--project` predicate, which has always matched a subtree.
+        let scope = Path::new("/Users/dev/code/myproj");
+        assert!(cwd_matches_project(
+            Some("/Users/dev/code/myproj/crates/x"),
+            None,
+            Path::new("/store/s.jsonl"),
+            scope,
+        ));
+        assert!(!cwd_matches_project(
+            Some("/Users/dev/code/other"),
+            None,
+            Path::new("/store/s.jsonl"),
+            scope,
+        ));
+    }
+
+    #[test]
+    fn the_summary_reports_count_projects_dates_and_granted_scopes() {
+        let refs = vec![
+            a_ref("/Users/dev/code/myproj", "myproj", "2026-08-20T10:00:00Z"),
+            a_ref(
+                "/Users/dev/code/myproj/api",
+                "myproj",
+                "2026-08-27T10:00:00Z",
+            ),
+        ];
+        let text = submit_summary_lines(
+            &refs,
+            Some(Path::new("/Users/dev/code/myproj")),
+            &["debugging_evaluation".to_string()],
+        )
+        .join("\n");
+        assert!(text.contains('2'), "count missing: {text}");
+        assert!(text.contains("myproj"), "projects missing: {text}");
+        assert!(text.contains("2026-08-20"), "range start missing: {text}");
+        assert!(text.contains("2026-08-27"), "range end missing: {text}");
+        assert!(
+            text.contains("debugging_evaluation"),
+            "consent missing: {text}"
+        );
+    }
+
+    #[test]
+    fn the_summary_names_all_when_the_run_is_unscoped() {
+        let refs = vec![a_ref(
+            "/Users/dev/code/myproj",
+            "myproj",
+            "2026-08-20T10:00:00Z",
+        )];
+        let text = submit_summary_lines(&refs, None, &[]).join("\n");
+        assert!(text.contains("everywhere"), "got: {text}");
+    }
+
+    #[test]
+    fn the_confirm_defaults_to_no() {
+        for answer in ["\n", "\n", "n\n", "no\n", "maybe\n", ""] {
+            let mut out = Vec::new();
+            assert!(
+                !read_confirmation(&mut answer.as_bytes(), &mut out).unwrap(),
+                "answer {answer:?} must not confirm"
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirm_accepts_y_and_yes() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n"] {
+            let mut out = Vec::new();
+            assert!(
+                read_confirmation(&mut answer.as_bytes(), &mut out).unwrap(),
+                "answer {answer:?} must confirm"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invite_comes_from_the_flag_or_the_environment_but_never_from_json() {
+        assert_eq!(
+            auto_enroll_invite(Some("https://issuer.example/onboard#A"), Some("ENV"), false),
+            Some("https://issuer.example/onboard#A".to_string())
+        );
+        assert_eq!(
+            auto_enroll_invite(None, Some("ENV"), false),
+            Some("ENV".to_string())
+        );
+        assert_eq!(auto_enroll_invite(None, Some(""), false), None);
+        assert_eq!(auto_enroll_invite(None, None, false), None);
+        // --json is frozen: no auto-enroll path at all.
+        assert_eq!(
+            auto_enroll_invite(Some("https://issuer.example/onboard#A"), Some("ENV"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn json_submit_never_reaches_the_new_summary_prompt() {
+        // Frozen: every invocation in docs/collector-integration.md.
+        assert_eq!(
+            submit_selection_mode(false, false, false, true),
+            SubmitSelectionMode::Picker
+        );
+        assert_eq!(
+            submit_selection_mode(false, true, false, true),
+            SubmitSelectionMode::All
+        );
+    }
+
+    #[test]
+    fn the_summary_is_the_default_and_yes_all_and_pick_bypass_it() {
+        assert_eq!(
+            submit_selection_mode(false, false, false, false),
+            SubmitSelectionMode::Summary
+        );
+        assert_eq!(
+            submit_selection_mode(false, true, false, false),
+            SubmitSelectionMode::All
+        );
+        assert_eq!(
+            submit_selection_mode(true, false, false, false),
+            SubmitSelectionMode::All
+        );
+        assert_eq!(
+            submit_selection_mode(false, false, true, false),
+            SubmitSelectionMode::Picker
+        );
     }
 }
