@@ -1892,6 +1892,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&50_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V50__onboarding_invite_grant_consumption.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&50_i32, &"onboarding_invite_grant_consumption"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2784,6 +2805,54 @@ impl Database for PgBackend {
             }
             return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
         };
+
+        // Consume the invite's OWN allowance before the per-tenant one.
+        //
+        // V29's counter is keyed (tenant_id, invite_subject_hash), and under
+        // InviteTenantMode::Derived the tenant is computed from the redeemer's
+        // device key -- so each redeemer gets a fresh row at zero and the limit
+        // never binds. This counter is on the tenant-less grant row, so it
+        // binds whatever tenant the redeemer lands in.
+        //
+        // The GUC is set transaction-locally so the grant row for the code
+        // actually presented is visible and updatable, and no other; the
+        // policies in V42 and V50 are both predicated on it.
+        tx.execute(
+            "SELECT set_config('trace_commons.invite_subject', $1, true)",
+            &[&device_key.invite_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let has_grant = tx
+            .query_opt(
+                "SELECT 1 FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+                &[&device_key.invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .is_some();
+        if has_grant {
+            // Absent when the invite came from the file allowlist rather than
+            // the DB registry. That path has no grant row and no second
+            // counter, so "no row" must mean "not governed here" rather than
+            // "exhausted" -- conflating them would refuse every legacy invite.
+            let globally_consumed = tx
+                .query_opt(
+                    "UPDATE onboarding_invite_grants
+                        SET consumed_uses = consumed_uses + 1,
+                            updated_at = NOW()
+                      WHERE invite_subject_hash = $1
+                        AND revoked_at IS NULL
+                        AND consumed_uses < max_uses
+                      RETURNING consumed_uses",
+                    &[&device_key.invite_subject_hash],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            if globally_consumed.is_none() {
+                return Err(crate::db::OnboardDeviceKeyError::InviteAlreadyConsumed);
+            }
+        }
 
         let consumed = tx
             .query_opt(

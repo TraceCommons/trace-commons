@@ -4641,3 +4641,95 @@ async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
         "an id that does not exist must be absent, exactly like one we do not own"
     );
 }
+
+/// An invite's use limit must bind across derived tenants.
+///
+/// V29's counter is keyed `(tenant_id, invite_subject_hash)`. Under
+/// `InviteTenantMode::Derived` the tenant is computed from the redeemer's own
+/// device key, so before V50 each redeemer opened a fresh counter at zero and
+/// a `max_uses = 1` invite admitted as many devices as presented it. The limit
+/// lived on the tenant-less grant row and the counter lived per tenant, and in
+/// derived mode the two never met.
+///
+/// Two devices, two derived tenants, one single-use invite. The second must be
+/// refused.
+#[tokio::test]
+async fn pg_store_invite_max_uses_binds_across_derived_tenants() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let invite_hash = format!("sha256:{}", "b".repeat(64));
+
+    // The DB-authoritative grant row is what carries the limit. Written
+    // directly: this test is about consumption, not about the admin path that
+    // creates invites.
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get grant-provisioning connection");
+        client
+            .execute(
+                "INSERT INTO onboarding_invite_grants
+                     (invite_subject_hash, policy_label, tenant_mode,
+                      tenant_template_id, policy_version, max_uses,
+                      issuance_source)
+                 VALUES ($1, 'test-pool', 'derived', 'tpl', '2026-08-27', 1, 'test')
+                 ON CONFLICT (invite_subject_hash) DO NOTHING",
+                &[&invite_hash],
+            )
+            .await
+            .expect("insert invite grant");
+    }
+
+    let mut outcomes = Vec::new();
+    for n in 0..2 {
+        let tenant_id = format!("pg-derived-bind-{}-{}", n, Uuid::new_v4());
+        {
+            let client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("get tenant-provisioning connection");
+            client
+                .execute(
+                    "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    &[&tenant_id],
+                )
+                .await
+                .expect("provision derived tenant");
+        }
+        let device = trace_commons_server::db::DeviceKeyWrite {
+            device_key_id: format!(
+                "sha256:{}{}",
+                Uuid::new_v4().simple(),
+                Uuid::new_v4().simple()
+            ),
+            tenant_id,
+            public_key: format!("pk-bind-{n}"),
+            invite_subject_hash: invite_hash.clone(),
+            client_info: serde_json::json!({}),
+            allowed_consent_scopes: None,
+            allowed_uses: None,
+        };
+        outcomes.push(backend.onboard_device_key(device, 1).await);
+    }
+
+    assert!(
+        outcomes[0].is_ok(),
+        "the first redemption must succeed: {:?}",
+        outcomes[0].as_ref().err()
+    );
+    assert!(
+        matches!(
+            outcomes[1],
+            Err(trace_commons_server::db::OnboardDeviceKeyError::InviteAlreadyConsumed)
+        ),
+        "a single-use invite must refuse a second device even though that \
+         device derives a different tenant id, got {:?}",
+        outcomes[1]
+    );
+}
