@@ -81434,42 +81434,65 @@ fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
 }
 
 fn near_ai_classify_response(
-    input: &str,
+    inputs: &[String],
     marker: &str,
     mode: ClassifierMode,
 ) -> wiremock::ResponseTemplate {
     let canary_values =
         trace_commons_protocol::trace_contribution::synthetic_privacy_filter_canary_values();
-    let is_canary = canary_values
-        .iter()
-        .any(|value| input.contains(value.as_str()));
+    // The adapter batches windows into one request, so a status-level failure
+    // is a property of the whole request: it fires when ANY element in the
+    // batch is one the mode is meant to fail on.
+    let any_non_canary = inputs.iter().any(|input| {
+        !canary_values
+            .iter()
+            .any(|value| input.contains(value.as_str()))
+    });
+    let any_poisoned = inputs.iter().any(|input| {
+        input.contains(POISON_MARKER_NEEDLE)
+            && !canary_values
+                .iter()
+                .any(|value| input.contains(value.as_str()))
+    });
+
     match mode {
-        ClassifierMode::UnhealthyCanary => wiremock::ResponseTemplate::new(200)
-            .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
-        ClassifierMode::FailSubmission if !is_canary => wiremock::ResponseTemplate::new(500)
+        ClassifierMode::UnhealthyCanary => {
+            // Spans for nothing, so the canary's synthetic values survive.
+            let data: Vec<serde_json::Value> = (0..inputs.len())
+                .map(|index| serde_json::json!({"index": index, "spans": []}))
+                .collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": data}))
+        }
+        ClassifierMode::FailSubmission if any_non_canary => wiremock::ResponseTemplate::new(500)
             .set_body_json(serde_json::json!({"error": "synthetic upstream failure"})),
-        ClassifierMode::FailSubmissionPermanent if !is_canary => {
+        ClassifierMode::FailSubmissionPermanent if any_non_canary => {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
         }
-        ClassifierMode::FailPoisonedPermanent
-            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
-        {
+        ClassifierMode::FailPoisonedPermanent if any_poisoned => {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
         }
-        ClassifierMode::FailPoisonedTransient
-            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
-        {
+        ClassifierMode::FailPoisonedTransient if any_poisoned => {
             wiremock::ResponseTemplate::new(500)
                 .set_body_json(serde_json::json!({"error": "synthetic upstream failure"}))
         }
         _ => {
             let mut needles = canary_values;
             needles.push(marker.to_string());
-            let spans = near_ai_spans(input, &needles);
-            wiremock::ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"data": [{"spans": spans}]}))
+            // One entry per input, carrying its index -- the wire contract the
+            // adapter matches results back by.
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    serde_json::json!({
+                        "index": index,
+                        "spans": near_ai_spans(input, &needles),
+                    })
+                })
+                .collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": data}))
         }
     }
 }
@@ -81485,8 +81508,18 @@ async fn mount_near_ai_classifier(
         .respond_with(move |req: &wiremock::Request| {
             let body: serde_json::Value =
                 serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
-            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            near_ai_classify_response(input, &marker, mode)
+            // `input` is an array under the batched contract.
+            let inputs: Vec<String> = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            near_ai_classify_response(&inputs, &marker, mode)
         })
         .mount(server)
         .await;

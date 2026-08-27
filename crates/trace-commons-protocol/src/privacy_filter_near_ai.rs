@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::trace_contribution::{
@@ -71,17 +70,27 @@ const _: () = assert!(
     "CLASSIFY_CHUNK_BYTES leaves too little headroom under the measured cliff"
 );
 
-/// How many `privacy/classify` requests for a single field may be in flight
-/// at once.
+/// Maximum `input` elements per `privacy/classify` request.
 ///
-/// The windows of one field are independent, so classifying them serially made
-/// a field cost (windows x round-trip). Kept modest deliberately: the hosted
-/// endpoint is flaky under load (a ~12% 502 rate was measured below its size
-/// cliff on 2026-08-27), and this multiplies the offered rate, so a larger
-/// value trades throughput for retries.
-pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 8;
+/// The endpoint's size cap is per-INPUT, not per-request, and `input` accepts
+/// an array: 16 elements of 4 KB (64 KB total) classify fine, while a single
+/// 16 KB input is refused. Batching is therefore how a large field is
+/// classified cheaply.
+///
+/// It is also the only lever that helps. The endpoint rate-limits and signals
+/// it as a 502 with a generic body -- there is no 429 -- so classifying
+/// windows concurrently made throughput WORSE: at 8 in flight every
+/// PII-backstop tick returned `done=0 transient=3 breaker_tripped=true` and
+/// the pilot queue drained nothing. Batching cuts the request COUNT while
+/// lowering the request RATE, which works with the limit instead of against
+/// it. Held pilot envelopes are median 421 kB, so this turns ~53 requests per
+/// field into ~7.
+///
+/// Kept at half the measured ceiling (32 elements was refused) so a
+/// vendor-side tightening does not immediately break classification.
+pub const MAX_CLASSIFY_BATCH_INPUTS: usize = 8;
 
-/// How many times a single `privacy/classify` request is attempted before
+/// How many times a single `privacy/classify` request is attempted before/// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few
 /// times with exponential backoff before failing the window closed.
 pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
@@ -225,7 +234,7 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
 #[derive(Serialize)]
 struct ClassifyRequest<'a> {
     model: &'a str,
-    input: &'a str,
+    input: &'a [&'a str],
 }
 
 #[derive(Deserialize)]
@@ -235,6 +244,12 @@ struct ClassifyResponse {
 
 #[derive(Deserialize)]
 struct ClassifyEntry {
+    /// Which `input` element this entry describes. The endpoint returns one
+    /// entry per input, and results are matched by this rather than by
+    /// position -- position would silently misattribute spans to the wrong
+    /// window if the endpoint ever reordered or omitted entries.
+    #[serde(default)]
+    index: usize,
     #[serde(default)]
     spans: Vec<ClassifySpan>,
 }
@@ -288,50 +303,38 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             codepoints_so_far += text[range.clone()].chars().count();
         }
 
-        // Classify the windows concurrently. They are independent -- each is
-        // classified in its own coordinates and merged afterwards -- so the
-        // sequential loop this replaces made a field cost
-        // (windows x round-trip) for no reason. With pilot envelopes at a
-        // median 421 kB that was 50+ serialized requests per field, and the
-        // PII-backstop backlog drained at roughly nine minutes per trace.
-        //
-        // `buffered` preserves stream order, so `windows` is still ordered by
-        // range and `try_collect` surfaces the FIRST window's error in field
-        // order -- the same error the sequential loop would have returned.
-        // That matters: transient-vs-permanent classification drives whether
-        // the trace's attempt budget is charged.
-        let windows: Vec<(usize, Vec<ClassifySpan>)> =
-            futures::stream::iter(ranges.into_iter().zip(codepoint_starts).map(
-                |(range, codepoint_start)| {
-                    let window = &text[range];
-                    async move {
-                        self.classify_window(window)
-                            .await
-                            .map(|spans| (codepoint_start, spans))
-                    }
-                },
-            ))
-            .buffered(MAX_CONCURRENT_CLASSIFY_WINDOWS)
-            .try_collect()
-            .await?;
+        // Classify the windows in batches, one request per batch, batches
+        // issued SEQUENTIALLY. The endpoint rate-limits and reports it as a
+        // 502, so overlapping requests is counterproductive; sending fewer,
+        // larger requests is what actually raises throughput. See
+        // MAX_CLASSIFY_BATCH_INPUTS.
+        let window_texts: Vec<&str> = ranges.iter().map(|range| &text[range.clone()]).collect();
+        let mut windows: Vec<(usize, Vec<ClassifySpan>)> = Vec::with_capacity(window_texts.len());
+        for (batch_index, batch) in window_texts.chunks(MAX_CLASSIFY_BATCH_INPUTS).enumerate() {
+            let batch_spans = self.classify_batch(batch).await?;
+            for (offset_in_batch, spans) in batch_spans.into_iter().enumerate() {
+                let window_index = batch_index * MAX_CLASSIFY_BATCH_INPUTS + offset_in_batch;
+                windows.push((codepoint_starts[window_index], spans));
+            }
+        }
 
         apply_windowed_spans(text, &windows)
     }
 }
 
 impl NearAiPrivacyFilterAdapter {
-    /// POST one window of text to the classifier and return its raw spans
-    /// (in that window's codepoint coordinates). Fail-closed on any
-    /// transport error, non-2xx status, malformed body, or empty data
-    /// array.
-    async fn classify_window(
+    /// POST one batch of windows to the classifier and return each window's
+    /// raw spans, in the order the windows were given (each in that window's
+    /// own codepoint coordinates). Fail-closed on any transport error, non-2xx
+    /// status, malformed body, or a result missing for any input.
+    async fn classify_batch(
         &self,
-        text: &str,
-    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        windows: &[&str],
+    ) -> Result<Vec<Vec<ClassifySpan>>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
-            input: text,
+            input: windows,
         };
 
         let mut attempt = 0;
@@ -396,15 +399,39 @@ impl NearAiPrivacyFilterAdapter {
                     .map_err(|err| TraceContributionError::RedactionFailed {
                         reason: format!("near-ai privacy classifier response parse error: {}", err),
                     })?;
-            let entry =
-                parsed
-                    .data
-                    .into_iter()
-                    .next()
-                    .ok_or(TraceContributionError::RedactionFailed {
-                        reason: "near-ai privacy classifier returned empty data array".to_string(),
-                    })?;
-            return Ok(entry.spans);
+            // Match results to inputs by `index`, not by position. An entry
+            // naming an input we did not send is a contract violation, not
+            // something to route to an arbitrary window.
+            let mut by_index: Vec<Option<Vec<ClassifySpan>>> =
+                (0..windows.len()).map(|_| None).collect();
+            for entry in parsed.data {
+                let Some(slot) = by_index.get_mut(entry.index) else {
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: format!(
+                            "near-ai privacy classifier returned index {} for a batch of {}",
+                            entry.index,
+                            windows.len()
+                        ),
+                    });
+                };
+                *slot = Some(entry.spans);
+            }
+
+            // Fail closed on a short response. An empty span list means "this
+            // window is clean", so a MISSING entry must never be treated as
+            // one -- that would pass unexamined text off as scrubbed.
+            let mut spans_per_window = Vec::with_capacity(windows.len());
+            for (index, slot) in by_index.into_iter().enumerate() {
+                let spans = slot.ok_or_else(|| TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier response missing a result for input {} of {}",
+                        index,
+                        windows.len()
+                    ),
+                })?;
+                spans_per_window.push(spans);
+            }
+            return Ok(spans_per_window);
         }
     }
 }
