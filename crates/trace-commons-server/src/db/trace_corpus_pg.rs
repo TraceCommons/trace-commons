@@ -6228,6 +6228,57 @@ impl TraceCorpusStore for PgBackend {
         Ok(row.get(0))
     }
 
+    async fn list_quarantined_pii_backstop_exhausted(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT DISTINCT s.submission_id, s.received_at
+                 FROM trace_submissions s
+                 JOIN trace_audit_events a
+                   ON a.tenant_id = s.tenant_id
+                  AND a.submission_id = s.submission_id
+                  AND a.action = 'review'
+                  AND a.metadata_json->>'reason_code' = 'pii_backstop_attempts_exhausted'
+                 JOIN trace_object_refs o
+                   ON o.tenant_id = s.tenant_id
+                  AND o.submission_id = s.submission_id
+                  AND o.artifact_kind = 'submitted_envelope'
+                  AND o.invalidated_at IS NULL
+                  AND o.deleted_at IS NULL
+                 WHERE s.tenant_id = $1
+                   AND s.status = 'quarantined'
+                 ORDER BY s.received_at DESC
+                 LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn clear_pii_backstop_attempts(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "DELETE FROM trace_pii_backstop WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
     async fn touch_pii_backstop_attempt(
         &self,
         tenant_id: &str,
