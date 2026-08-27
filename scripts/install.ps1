@@ -5,7 +5,7 @@ Install the Trace Commons contributor CLI on Windows.
 .DESCRIPTION
 The PowerShell counterpart to scripts/install.sh.
 
-    irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+    irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
     .\install.ps1
 
 Reading it before running it is encouraged, which is why the two-step form is
@@ -46,7 +46,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'TraceCommons/trace-commons-server'
+$Repo = 'TraceCommons/trace-commons'
 
 # Match on the organisation rather than a full distinguished name: .NET's
 # rendering of the subject is not something to depend on, and O= is the part
