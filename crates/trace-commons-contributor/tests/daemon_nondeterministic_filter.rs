@@ -103,36 +103,50 @@ fn jittery_privacy_filter(generation: Arc<AtomicUsize>) -> Router {
         post(move |Json(body): Json<serde_json::Value>| {
             let generation = generation.clone();
             async move {
-                let input = body
+                // `input` is an array of windows; answer one `data` entry per
+                // element, carrying its `index`.
+                let inputs: Vec<String> = body
                     .get("input")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let chars: Vec<char> = input.chars().collect();
-                let mut spans = Vec::new();
-                for value in CANARY_VALUES {
-                    if let Some(byte_start) = input.find(value) {
-                        let start = input[..byte_start].chars().count();
-                        spans.push(serde_json::json!({
-                            "category": "private_name",
-                            "start": start,
-                            "end": start + value.chars().count(),
-                            "score": 0.99,
-                        }));
-                    }
-                }
-                if spans.is_empty() && chars.len() > 4 {
-                    // The jitter: the same field, classified twice, comes
-                    // back with a differently sized span.
-                    let end = 1 + generation.load(Ordering::SeqCst) % 3;
-                    spans.push(serde_json::json!({
-                        "category": "private_name",
-                        "start": 0,
-                        "end": end.min(chars.len()),
-                        "score": 0.9,
-                    }));
-                }
-                Json(serde_json::json!({ "data": [{ "spans": spans }] }))
+                    .and_then(|v| v.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|value| value.as_str().unwrap_or_default().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let data: Vec<serde_json::Value> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| {
+                        let chars: Vec<char> = input.chars().collect();
+                        let mut spans = Vec::new();
+                        for value in CANARY_VALUES {
+                            if let Some(byte_start) = input.find(value) {
+                                let start = input[..byte_start].chars().count();
+                                spans.push(serde_json::json!({
+                                    "category": "private_name",
+                                    "start": start,
+                                    "end": start + value.chars().count(),
+                                    "score": 0.99,
+                                }));
+                            }
+                        }
+                        if spans.is_empty() && chars.len() > 4 {
+                            // The jitter: the same field, classified twice,
+                            // comes back with a differently sized span.
+                            let end = 1 + generation.load(Ordering::SeqCst) % 3;
+                            spans.push(serde_json::json!({
+                                "category": "private_name",
+                                "start": 0,
+                                "end": end.min(chars.len()),
+                                "score": 0.9,
+                            }));
+                        }
+                        serde_json::json!({ "index": index, "spans": spans })
+                    })
+                    .collect();
+                Json(serde_json::json!({ "data": data }))
             }
         }),
     )

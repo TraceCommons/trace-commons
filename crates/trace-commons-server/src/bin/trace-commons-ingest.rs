@@ -12509,7 +12509,7 @@ async fn submit_trace_handler(
         if principal_can_remediate_quarantined(tenant.auth(), &existing) {
             Some(existing)
         } else {
-            let receipt = receipt_from_record(&existing);
+            let receipt = receipt_from_record(&existing, state.near_settlement_mode);
             append_audit_event(
                 &state.root,
                 tenant.tenant_id(),
@@ -12703,7 +12703,10 @@ async fn submit_trace_handler(
         }
     }
 
-    Ok(Json(receipt_from_record(&record)))
+    Ok(Json(receipt_from_record(
+        &record,
+        state.near_settlement_mode,
+    )))
 }
 
 async fn revoke_trace_handler(
@@ -13996,7 +13999,11 @@ async fn submission_status_handler(
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(record, &status_credit_events));
+            statuses.push(submission_status_from_record(
+                record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            ));
         }
     }
 
@@ -37618,7 +37625,7 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
     }
 
-    Ok(receipt_from_record(&record))
+    Ok(receipt_from_record(&record, state.near_settlement_mode))
 }
 
 fn ensure_review_decision_eligible(
@@ -41435,7 +41442,11 @@ async fn run_canary_read_drill(
                 &credit_view.records,
             )
             .await?;
-            let status = submission_status_from_record(status_record, &status_credit_events);
+            let status = submission_status_from_record(
+                status_record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            );
             submit_status_visible = status.submission_id == request.submission_id
                 && status.status == record.status.as_str();
         }
@@ -54687,10 +54698,41 @@ fn corpus_status_with_pii_backstop_hold(
     }
 }
 
-fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmissionReceipt {
+/// The contributor-facing sentence describing what will happen to the credit
+/// this receipt reports, given the deployment's settlement posture.
+///
+/// #445: a pilot ran for three months with 307 credit events stuck `pending`,
+/// because `NearSettlementMode::Disabled` makes the settlement worker a no-op
+/// and nothing said so. The contributor saw an accepted trace, a pending
+/// figure, and a blank `FINAL` column, and could not tell "switched off" from
+/// "still working on it". Whichever posture is configured, the receipt says
+/// it, so the two can never drift apart again.
+fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
+    match mode {
+        // Deliberate and fail-safe, not a fault. Say both halves: the credit
+        // is real and recorded, and nothing is going to settle it here.
+        NearSettlementMode::Disabled => {
+            "Credit is recorded but not settled: on-chain settlement is not \
+             enabled on this deployment, so this figure stays pending."
+        }
+        // The outbox advances with synthetic transaction hashes and no funds.
+        // A settled-looking row here is not an on-chain credit.
+        NearSettlementMode::DryRun => {
+            "Settlement is running in dry-run: the credit ledger advances with \
+             synthetic transaction hashes and no on-chain credit is issued."
+        }
+        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
+    }
+}
+
+fn receipt_from_record(
+    record: &TraceCommonsSubmissionRecord,
+    settlement_mode: NearSettlementMode,
+) -> TraceSubmissionReceipt {
     let explanation = match record.status {
         TraceCorpusStatus::Accepted => vec![
             "Accepted into the private redacted corpus.".to_string(),
+            settlement_posture_explanation(settlement_mode).to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Quarantined => vec![
@@ -54719,8 +54761,9 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
 fn submission_status_from_record(
     record: &TraceCommonsSubmissionRecord,
     credit_events: &[TraceCommonsCreditLedgerRecord],
+    settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionStatusUpdate {
-    let receipt = receipt_from_record(record);
+    let receipt = receipt_from_record(record, settlement_mode);
     let delayed_events = credit_events
         .iter()
         .filter(|event| event.submission_id == record.submission_id)

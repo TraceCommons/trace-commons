@@ -81438,42 +81438,65 @@ fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
 }
 
 fn near_ai_classify_response(
-    input: &str,
+    inputs: &[String],
     marker: &str,
     mode: ClassifierMode,
 ) -> wiremock::ResponseTemplate {
     let canary_values =
         trace_commons_protocol::trace_contribution::synthetic_privacy_filter_canary_values();
-    let is_canary = canary_values
+    // The adapter batches windows into one request, so a status-level failure
+    // is a property of the whole request: it fires when ANY element in the
+    // batch is one the mode is meant to fail on.
+    let is_canary = |input: &String| {
+        canary_values
+            .iter()
+            .any(|value| input.contains(value.as_str()))
+    };
+    let any_non_canary = inputs.iter().any(|input| !is_canary(input));
+    let any_poisoned = inputs
         .iter()
-        .any(|value| input.contains(value.as_str()));
+        .any(|input| input.contains(POISON_MARKER_NEEDLE) && !is_canary(input));
+
+    let spans_for_each = |needles: &[String]| -> Vec<serde_json::Value> {
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                serde_json::json!({
+                    "index": index,
+                    "spans": near_ai_spans(input, needles),
+                })
+            })
+            .collect()
+    };
+
     match mode {
-        ClassifierMode::UnhealthyCanary => wiremock::ResponseTemplate::new(200)
-            .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
-        ClassifierMode::FailSubmission if !is_canary => wiremock::ResponseTemplate::new(500)
+        ClassifierMode::UnhealthyCanary => {
+            // Spans for nothing, so the canary's synthetic values survive.
+            let data: Vec<serde_json::Value> = (0..inputs.len())
+                .map(|index| serde_json::json!({"index": index, "spans": []}))
+                .collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": data}))
+        }
+        ClassifierMode::FailSubmission if any_non_canary => wiremock::ResponseTemplate::new(500)
             .set_body_json(serde_json::json!({"error": "synthetic upstream failure"})),
-        ClassifierMode::FailSubmissionPermanent if !is_canary => {
+        ClassifierMode::FailSubmissionPermanent if any_non_canary => {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
         }
-        ClassifierMode::FailPoisonedPermanent
-            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
-        {
+        ClassifierMode::FailPoisonedPermanent if any_poisoned => {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
         }
-        ClassifierMode::FailPoisonedTransient
-            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
-        {
+        ClassifierMode::FailPoisonedTransient if any_poisoned => {
             wiremock::ResponseTemplate::new(500)
                 .set_body_json(serde_json::json!({"error": "synthetic upstream failure"}))
         }
         _ => {
-            let mut needles = canary_values;
+            let mut needles = canary_values.clone();
             needles.push(marker.to_string());
-            let spans = near_ai_spans(input, &needles);
             wiremock::ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"data": [{"spans": spans}]}))
+                .set_body_json(serde_json::json!({"data": spans_for_each(&needles)}))
         }
     }
 }
@@ -81489,8 +81512,18 @@ async fn mount_near_ai_classifier(
         .respond_with(move |req: &wiremock::Request| {
             let body: serde_json::Value =
                 serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
-            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            near_ai_classify_response(input, &marker, mode)
+            // `input` is an array under the batched contract.
+            let inputs: Vec<String> = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            near_ai_classify_response(&inputs, &marker, mode)
         })
         .mount(server)
         .await;
@@ -85641,5 +85674,70 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
             chunks_scored: 16,
         },
         "unknown-denominator coverage must not be confusable with a fully scored trace"
+    );
+}
+
+/// #445: 307 credit events sat `pending` for three months because settlement is
+/// deliberately disabled on the pilot, and nothing on the contributor-facing
+/// receipt said so. A contributor saw an accepted trace, a pending credit
+/// figure, and an empty `FINAL` column, with no way to learn that the settling
+/// path was switched off rather than merely slow.
+///
+/// The receipt must state the deployment's settlement posture in its own
+/// words. This is wording only -- no outbox row moves because of it.
+#[test]
+fn an_accepted_receipt_says_settlement_is_disabled_when_it_is() {
+    let record = submission_record_with_principal("principal_a");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::Disabled);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("not settled") && line.contains("not enabled")),
+        "a disabled-settlement deployment must say so on the receipt; got {:?}",
+        receipt.explanation
+    );
+}
+
+/// The converse, so the line cannot become a permanent falsehood the moment a
+/// deployment turns settlement on. An undocumented deliberate state drifting
+/// from what the contributor is told is the whole defect in #445; hardcoding
+/// the disabled wording would reintroduce it pointing the other way.
+#[test]
+fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
+    let record = submission_record_with_principal("principal_a");
+
+    for mode in [NearSettlementMode::Http, NearSettlementMode::DryRun] {
+        let receipt = receipt_from_record(&record, mode);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("not enabled")),
+            "mode {:?} must not claim settlement is disabled; got {:?}",
+            mode,
+            receipt.explanation
+        );
+    }
+}
+
+/// Dry-run advances the outbox with synthetic transaction hashes and no funds.
+/// A contributor must not read that as an on-chain credit.
+#[test]
+fn a_dry_run_receipt_does_not_imply_an_on_chain_credit() {
+    let record = submission_record_with_principal("principal_a");
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::DryRun);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("dry-run")),
+        "dry-run settlement must be named on the receipt; got {:?}",
+        receipt.explanation
     );
 }
