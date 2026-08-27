@@ -3456,3 +3456,150 @@ mod json_output_tests {
         );
     }
 }
+
+/// Validate a `--attest-post` target before anything is sent to it.
+///
+/// Fail-closed in a way the ingest path deliberately is not. `allowlist_for`
+/// returns a permissive allowlist when nobody configured one, which is fine
+/// for ingest -- that URL came from enrollment and is already trusted. This
+/// URL comes from the command line, and the payload is a signed statement
+/// about the contributor that whoever holds it can present. So an
+/// unconfigured allowlist means no egress, not any host.
+///
+/// The scheme check is separate from the host check and both must pass:
+/// allowlisting a collector says who may receive the attestation, not that it
+/// may cross the network in the clear.
+pub fn validate_attest_post_target(
+    raw: &str,
+    allowlist: &trace_commons_operator_client::host_allowlist::HostAllowlist,
+) -> anyhow::Result<reqwest::Url> {
+    let url =
+        reqwest::Url::parse(raw).with_context(|| format!("--attest-post is not a URL: {raw}"))?;
+    if url.scheme() != "https" {
+        anyhow::bail!(
+            "--attest-post must be https: an attestation is presentable by \
+             whoever holds it, so it does not cross the network in the clear"
+        );
+    }
+    if !allowlist.is_enforcing() {
+        anyhow::bail!(
+            "--attest-post needs an explicit host allowlist. Set --allowed-hosts \
+             at login, or TRACE_COMMONS_ALLOWED_HOSTS, naming the collector you \
+             mean to send the attestation to"
+        );
+    }
+    allowlist
+        .check(&url)
+        .context("--attest-post host is not on the allowlist")?;
+    Ok(url)
+}
+
+/// Deliver the attestation to a collector endpoint the contributor named.
+///
+/// Returns whether it was delivered. A failure here is reported and swallowed:
+/// the traces are already uploaded and the receipts already written, so
+/// exiting non-zero would tell a contributor their submission failed when it
+/// did not. The attestation is on disk if `--attest-out` was also given, and
+/// `attest` can always mint another.
+///
+/// Label-only on failure. The URL is the contributor's, but the response body
+/// is the collector's and may carry anything.
+pub async fn post_attestation(
+    target: &reqwest::Url,
+    attested: &ScopedAttestation,
+    allowed_hosts: Option<&str>,
+) -> bool {
+    let client = match reqwest::Client::builder()
+        .user_agent(concat!(
+            "trace-commons-contributor/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            tracing::warn!("attestation not delivered: http-client-unavailable");
+            return false;
+        }
+    };
+    // Re-check immediately before sending. The validator ran when the flag was
+    // parsed; this is the call that actually opens the connection, and a
+    // redirect could otherwise carry the document to a host nobody authorized.
+    let allowlist = crate::config::allowlist_for(allowed_hosts);
+    if validate_attest_post_target(target.as_str(), &allowlist).is_err() {
+        tracing::warn!("attestation not delivered: target-not-allowlisted");
+        return false;
+    }
+    let body = serde_json::json!({
+        "schema_version": "trace_commons.attestation_delivery.v1",
+        "attestations": attested.attestations,
+        "scored": attested.scored,
+        "pending": attested.pending,
+    });
+    match client.post(target.clone()).json(&body).send().await {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            // Status only. A collector's error body is not ours to print.
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "attestation not delivered: collector-rejected"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!("attestation not delivered: transport-failed");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod attest_post_tests {
+    use super::validate_attest_post_target;
+    use trace_commons_operator_client::host_allowlist::HostAllowlist;
+
+    #[test]
+    fn a_permissive_allowlist_refuses_rather_than_posting_anywhere() {
+        // The allowlist is permissive whenever nobody configured one, which is
+        // the common case. For ingest that is tolerable -- the URL came from
+        // enrollment. Here the URL comes from the command line, and the payload
+        // is a signed statement about the contributor, so "no allowlist" must
+        // mean "no egress" rather than "any host".
+        let err = validate_attest_post_target(
+            "https://collector.example/hook",
+            &HostAllowlist::permissive(),
+        )
+        .expect_err("permissive allowlist must refuse");
+        assert!(
+            err.to_string().contains("allowed-hosts"),
+            "the refusal must say how to authorize the host: {err}"
+        );
+    }
+
+    #[test]
+    fn a_host_outside_the_allowlist_is_refused() {
+        let allow = HostAllowlist::from_csv("collector.example");
+        let err = validate_attest_post_target("https://elsewhere.example/hook", &allow)
+            .expect_err("off-list host must refuse");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn plaintext_http_is_refused_even_when_allowlisted() {
+        // An attestation is a bearer-shaped artifact: whoever holds it can
+        // present it. Allowlisting a host says who may receive it, not that it
+        // may cross the network in the clear.
+        let allow = HostAllowlist::from_csv("collector.example");
+        let err = validate_attest_post_target("http://collector.example/hook", &allow)
+            .expect_err("http must refuse");
+        assert!(err.to_string().contains("https"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn an_allowlisted_https_target_is_accepted() {
+        let allow = HostAllowlist::from_csv("collector.example");
+        let url = validate_attest_post_target("https://collector.example/hook", &allow)
+            .expect("allowlisted https target");
+        assert_eq!(url.host_str(), Some("collector.example"));
+    }
+}

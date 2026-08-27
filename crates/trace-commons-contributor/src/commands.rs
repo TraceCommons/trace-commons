@@ -937,6 +937,9 @@ pub struct SubmitSelection<'a> {
     /// submissions. Absent leaves the standalone `attest` command as the only
     /// way to get one.
     pub attest_out: Option<&'a Path>,
+    /// Collector endpoint to POST the attestation to, so the contributor never
+    /// carries the file themselves. Host must be on the allowlist.
+    pub attest_post: Option<&'a str>,
     /// Path to a trajectory-v1 file or a directory of them. Trajectory
     /// sessions are only discoverable when this is set.
     pub trajectory: Option<&'a Path>,
@@ -1002,6 +1005,26 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
              so the server could attest to none of its submission ids"
         );
     }
+    if sel.attest_post.is_some() && sel.dry_run {
+        anyhow::bail!(
+            "--attest-post cannot be combined with --dry-run: a dry run uploads nothing, \
+             so there would be no attestation to deliver"
+        );
+    }
+    // Validate the destination before discovering or uploading anything. A
+    // contributor who mistyped the collector, or named a host they never
+    // allowlisted, should find out before their traces are on the server and
+    // not after.
+    let attest_post_target = match sel.attest_post {
+        Some(raw) => {
+            let saved = store.load_config().ok().flatten();
+            let allowlist = crate::config::allowlist_for(
+                saved.as_ref().and_then(|c| c.allowed_hosts.as_deref()),
+            );
+            Some(submit::validate_attest_post_target(raw, &allowlist)?)
+        }
+        None => None,
+    };
     // Refuse an unbounded run before anything else: enrolling, discovering,
     // or loading transcripts for a run that is about to be refused is work
     // done on the way to an error.
@@ -1170,8 +1193,22 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         _ => None,
     };
 
+    let mut attestation_delivered = None;
+    if let (Some(target), Some(attested)) = (&attest_post_target, &scoped_attestation) {
+        attestation_delivered =
+            Some(submit::post_attestation(target, attested, cfg.allowed_hosts.as_deref()).await);
+    }
+
     if sel.json {
         let mut document = submit::outcomes_to_json(&outcomes, unenrolled_preview, &notices);
+        if let Some(delivered) = attestation_delivered {
+            if let Some(map) = document.as_object_mut() {
+                map.insert(
+                    "attestation_delivered".to_string(),
+                    serde_json::json!(delivered),
+                );
+            }
+        }
         if let Some(attested) = &scoped_attestation {
             submit::attach_attestation_to_json(&mut document, attested);
         }
@@ -1184,6 +1221,14 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
 
     if let Some(attested) = &scoped_attestation {
         println!("{}", attested.progress_line());
+    }
+    match attestation_delivered {
+        Some(true) => println!("attestation delivered to the collector"),
+        Some(false) => {
+            println!("attestation NOT delivered; your traces are submitted regardless.");
+            println!("get it with: trace-commons-contributor attest --out attestation.jws");
+        }
+        None => {}
     }
 
     let preview_prefix = if unenrolled_preview {
@@ -1869,6 +1914,7 @@ mod project_filter_tests {
             pii_filter: None,
             manifest: Some(&manifest),
             attest_out: None,
+            attest_post: None,
             trajectory: None,
             json: false,
             no_reasoning: false,
@@ -1909,6 +1955,7 @@ mod project_filter_tests {
             pii_filter: None,
             manifest: None,
             attest_out: Some(&attestation),
+            attest_post: None,
             trajectory: None,
             json: false,
             no_reasoning: false,

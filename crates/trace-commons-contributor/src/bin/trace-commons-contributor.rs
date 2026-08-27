@@ -101,6 +101,10 @@ enum Command {
         /// This is what a collector scores you on; an id list is not proof of authorship.
         #[arg(long, conflicts_with = "dry_run")]
         attest_out: Option<PathBuf>,
+        /// POST the attestation to this collector endpoint instead of carrying the file
+        /// yourself. Must be https, and the host must be on your allowlist.
+        #[arg(long, conflicts_with = "dry_run")]
+        attest_post: Option<String>,
         /// Path to a trajectory-v1 file or directory of them (from `npx @letta-ai/trajectory`)
         #[arg(long)]
         trajectory: Option<PathBuf>,
@@ -376,6 +380,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             pii_filter,
             manifest,
             attest_out,
+            attest_post,
             trajectory,
             no_reasoning,
             remediate_quarantined,
@@ -393,6 +398,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
                 attest_out: attest_out.as_deref(),
+                attest_post: attest_post.as_deref(),
                 trajectory: trajectory.as_deref(),
                 json: cli.json,
                 no_reasoning,
