@@ -1,0 +1,37 @@
+-- Why a submission is in the status it is in, on the submission itself.
+--
+-- Until now the reason for a status transition was written only into
+-- trace_audit_events.metadata_json and then dropped. That made the review
+-- queue unable to distinguish two very different things that both land in
+-- `quarantined`:
+--
+--   * a privacy finding -- the filter examined the trace and found something;
+--   * a processing failure -- `pii_backstop_attempts_exhausted`, where the
+--     classifier was unreachable, the retry budget ran out, and NOTHING is
+--     known about the trace's contents.
+--
+-- On 2026-08-27 the pilot held 177 quarantined traces, 112 of them the second
+-- kind, and a reviewer opening the queue had no way to tell them apart without
+-- hand-joining the audit trail.
+--
+-- LABEL-ONLY BY CONSTRUCTION. This column stores an allowlisted reason label,
+-- never caller-supplied text. Trace revocation accepts a free-text reason from
+-- the API caller, and the audit trail deliberately stores only
+-- sha256(reason) for it; writing that text here verbatim would put arbitrary
+-- caller input -- potentially PII or operator-secret material -- into a
+-- plainly-readable column and breach the repo's hash-only/label-only rule.
+-- `safe_status_reason_label` in trace_corpus_storage.rs is the choke point
+-- that enforces this: anything unrecognised is stored as 'other'.
+--
+-- Nullable and backfill-free on purpose: every row predating this migration
+-- keeps NULL, which reads as "reason not recorded" rather than as a claim
+-- about why the trace is where it is. Do not backfill it by guessing from
+-- status.
+--
+-- No RLS change (a column on an already-RLS-forced table inherits the tenant
+-- predicate). No column-level SELECT grant is added: neither
+-- trace_gate_driver nor trace_pii_backstop_driver reads this column, and both
+-- hold column-scoped grants (V45), so adding one here would widen a reader
+-- role for no reason.
+ALTER TABLE trace_submissions
+    ADD COLUMN IF NOT EXISTS last_status_reason TEXT;

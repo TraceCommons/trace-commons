@@ -343,6 +343,7 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         revoked_at: row.get("revoked_at"),
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
+        last_status_reason: row.get("last_status_reason"),
     })
 }
 
@@ -1476,7 +1477,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,
@@ -1525,7 +1526,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
@@ -1553,7 +1554,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason
                  FROM trace_submissions
                  WHERE tenant_id = $1
                  ORDER BY received_at ASC",
@@ -1593,7 +1594,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at";
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason";
         let rows = match cursor {
             Some(cursor) => {
                 let sql = format!(
@@ -1876,6 +1877,9 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_value = enum_to_storage(status)?;
+        // Allowlisted label only -- never the caller's text. See
+        // `safe_status_reason_label`.
+        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
         let updated = tx
             .execute(
                 "UPDATE trace_submissions
@@ -1914,9 +1918,10 @@ impl TraceCorpusStore for PgBackend {
                      credit_points_final = CASE
                          WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
                          ELSE credit_points_final
-                     END
+                     END,
+                     last_status_reason = $4
                  WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, &submission_id, &status_value],
+                &[&tenant_id, &submission_id, &status_value, &reason_label],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -1963,6 +1968,9 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let status_value = enum_to_storage(status)?;
+        // Allowlisted label only -- never the caller's text. See
+        // `safe_status_reason_label`.
+        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
         let updated = tx
             .execute(
                 "UPDATE trace_submissions
@@ -2001,9 +2009,10 @@ impl TraceCorpusStore for PgBackend {
                      credit_points_final = CASE
                          WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
                          ELSE credit_points_final
-                     END
+                     END,
+                     last_status_reason = $4
                  WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, &submission_id, &status_value],
+                &[&tenant_id, &submission_id, &status_value, &reason_label],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
@@ -2098,7 +2107,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
                 &[
                     &tenant_id,
                     &submission_id,
@@ -2143,7 +2152,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
                 &[&tenant_id, &submission_id, &actor_principal_ref],
             )
             .await
