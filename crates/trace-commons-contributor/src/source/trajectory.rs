@@ -122,6 +122,53 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
         let role = record.get("role").and_then(|v| v.as_str()).unwrap_or("");
         match role {
             "meta" => bail!("duplicate_meta_record"),
+            // Upstream added `system` and `observation` to trajectory-v1 after
+            // this reader was written, and the catch-all below rejects the
+            // whole file on an unrecognised role. A contributor with a valid,
+            // schema-conforming trajectory was being refused, so both are
+            // mapped rather than tolerated: silently dropping them would lose
+            // an observation's content, which is real work.
+            //
+            // Both land on `Opaque` rather than earning their own
+            // `SessionEventKind`. A new kind would shift
+            // `canonical_whole_trace_representation`, which renders the event
+            // type and truncates at twelve events, creating a second
+            // novelty-comparison cohort boundary for no gain.
+            "observation" => {
+                // Content is kept. An observation is environment output --
+                // test results, command output -- and is redacted on the way
+                // out like every other content field.
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Opaque,
+                    timestamp: parse_timestamp(record)?,
+                    content: Some(required_str(record, "content")?),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
+            "system" => {
+                // Content is deliberately dropped: a system prompt is harness
+                // boilerplate that is near-identical across every session of a
+                // given harness, so it adds nothing to novelty while carrying
+                // whatever project context the harness injected into it. The
+                // record is still required to be well formed -- a missing
+                // content or timestamp is a malformed file, not a shrug.
+                let timestamp = parse_timestamp(record)?;
+                let _ = required_str(record, "content")?;
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Opaque,
+                    timestamp,
+                    content: None,
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
             "user" | "reasoning" => {
                 let kind = if role == "user" {
                     SessionEventKind::User
