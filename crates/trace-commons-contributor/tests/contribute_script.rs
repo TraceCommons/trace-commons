@@ -113,3 +113,33 @@ fn every_run_names_the_keep_its_purpose_and_how_to_delete_it() {
         "there is deliberately no --no-keep"
     );
 }
+
+/// `--no-cache` removes the binary and nothing else.
+///
+/// The distinction is the whole point of the flag. Someone asking for "no
+/// installation" means the program, and that is safe to give them. Reading it
+/// as "no state" would take the keep with it, and the keep is the device key
+/// the account is minted from -- discarding it is what leaves a contributor
+/// unable to withdraw what they just uploaded. One of those is a preference
+/// about disk; the other is a consent failure.
+#[test]
+fn no_cache_removes_the_binary_and_leaves_the_keep() {
+    let s = script();
+    assert!(s.contains("--no-cache"), "the flag exists");
+    assert!(
+        s.contains(r#"trap 'rm -rf "$bin_dir"' EXIT INT TERM"#),
+        "the temporary bin dir is removed on every exit path, including a signal"
+    );
+    // The trap must name bin_dir and never keep_dir: a cleanup that took the
+    // keep with it would silently make the run's traces unwithdrawable.
+    for line in s.lines().filter(|l| l.contains("trap ")) {
+        assert!(
+            !line.contains("keep_dir"),
+            "no cleanup path may remove the keep: {line}"
+        );
+    }
+    assert!(
+        s.contains("It does NOT touch the keep"),
+        "the script says which of the two --no-cache applies to"
+    );
+}

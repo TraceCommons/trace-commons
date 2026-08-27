@@ -16,9 +16,14 @@
 #
 # WHAT THIS LEAVES BEHIND
 #
-# The binary is ephemeral: it goes in a cache directory, not on your PATH, and
-# no daemon, autostart, or login item is created. But one thing does persist,
-# deliberately -- the keep: a device key and the coordinates needed to use it.
+# The binary goes in a cache directory, not on your PATH, and no daemon,
+# autostart, or login item is created. Pass --no-cache to put it in a temporary
+# directory that is removed when the run ends, leaving nothing of the program
+# behind at all; the default keeps it so a second run costs no download.
+#
+# But one thing does persist either way, deliberately -- the keep: a device key
+# and the coordinates needed to use it. --no-cache does not touch it, and
+# nothing else should be read as promising to.
 #
 # The device key IS your identity here, not merely a credential for it. Your
 # account is minted from it. Delete it and there is no way to sign in, and
@@ -56,13 +61,38 @@ tc_contribute_main() {
   cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/tracecommons"
   bin_dir="$cache_root/bin"
   keep_dir="${TRACE_COMMONS_KEEP_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tracecommons/keep}"
+  no_cache=""
 
   say() { printf '%s\n' "$*"; }
   die() { printf 'contribute failed: %s\n' "$*" >&2; exit 1; }
   need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"; }
 
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-cache) no_cache=1; shift ;;
+      -h|--help) sed -n '2,45p' "$0" 2>/dev/null || say "see scripts/contribute.sh"; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
   need curl
   need mkdir
+
+  # --no-cache: keep the binary for exactly this run and take it with us.
+  #
+  # By default the verified binary is cached, so a second run costs no
+  # download. That is a convenience, not a requirement, and someone who asked
+  # for a one-time script may well mean it literally. This leaves nothing of
+  # the program behind.
+  #
+  # It does NOT touch the keep. The keep is the device key your account is
+  # minted from, and discarding it is what makes the traces you just uploaded
+  # unwithdrawable -- a different thing entirely from where the binary lives.
+  if [ -n "$no_cache" ]; then
+    need mktemp
+    bin_dir="$(mktemp -d)" || die "could not create a temporary directory"
+    trap 'rm -rf "$bin_dir"' EXIT INT TERM
+  fi
 
   # ---- refuse the unbounded run early ---------------------------------
   # The CLI refuses this too (see `resolve_submit_scope`), but refusing here
