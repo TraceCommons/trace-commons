@@ -236,8 +236,9 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
 /// Every other matcher here mirrors a detector exactly, which makes a
 /// post-redaction hit a genuine leak. `bearer value` is different by design:
 /// production covers bearer tokens through the cue-gated entropy rule, and
-/// #193 closed the short-cued and cued-hex evasions, but UUID-shaped and
-/// low-entropy tokens still evade (plus accepted zero-separator glue).
+/// #193 closed the short-cued and cued-hex evasions -- the latter having since
+/// regressed and been restored (#432) -- but UUID-shaped and low-entropy
+/// tokens still evade (plus accepted zero-separator glue).
 /// This matcher exists to make that residual visible, so its hits are
 /// expected until a dedicated bearer rule lands. Reporting them as hard
 /// failures would leave the audit permanently red and train everyone to
@@ -245,8 +246,17 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
 /// unexamined. They are printed for triage instead.
 const ADVISORY_PATTERNS: &[&str] = &["bearer value"];
 
+// Hand-written mirror of the detector's constants in
+// `trace-commons-protocol/src/trace_contribution.rs`. Parity is this file's
+// entire purpose: a mirror that disagrees with the detector reports on inputs
+// the detector never considered.
+//
+// ENTROPY_MIN_LEN was left at 8 when #225 raised the detector to 16, so the
+// audit over-reported every 8-to-15 character value the detector had no
+// intention of redacting (#432). Advisory-only, so it cost noise rather than a
+// missed secret -- but noise in an audit is how real findings get ignored.
 const CUE_WINDOW: usize = 48;
-const ENTROPY_MIN_LEN: usize = 8;
+const ENTROPY_MIN_LEN: usize = 16;
 const ENTROPY_BITS_MIN: f64 = 3.2;
 
 /// True for the detector cue regex's separator class: `[\x22'`:=\s]`.
@@ -954,7 +964,13 @@ fn scan_still_counts_real_credential_shapes() {
 const BEARER_EVASIONS: &str = concat!(
     // UUID-shaped: explicitly allowlisted by is_allowlisted_entropy_candidate.
     "Authorization: Bearer 3f2504e0-4f89-11d3-9a0c-0305e82c3301\n",
-    // Lowercase hex, 32+ chars: treated as a content hash, allowlisted.
+    // Lowercase hex, 32+ chars. NO LONGER a detector evasion: the cued-hex
+    // narrowing (#432) removed the content-hash allowlist from the cued path,
+    // and production now redacts this. Kept here because this fixture measures
+    // the audit matcher's own breadth, not the detector's -- the matcher must
+    // still surface it. The regression case proving the detector catches it is
+    // `a_cued_lowercase_hex_bearer_value_is_no_longer_an_evasion` in
+    // trace-commons-protocol.
     "Authorization: Bearer 9f86d081884c7d659a2feaa0c55ad015\n",
     // Under the 16-char entropy-candidate minimum.
     "Authorization: Bearer Tk9QRTEyMw\n",

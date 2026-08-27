@@ -3113,8 +3113,31 @@ fn is_pure_hex(s: &str) -> bool {
 }
 
 /// True when the candidate token is a structural identifier (UUID, known ID
-/// prefix, hex hash/sha, or this module's own report-metric label) rather
+/// prefix, short git SHA, or this module's own report-metric label) rather
 /// than an opaque secret.
+///
+/// # Precondition: this is the CUED path only
+///
+/// The sole caller is [`is_cued_secret`], which returns early unless
+/// [`has_secret_cue`] already matched. Every token reaching here therefore sits
+/// immediately after `api_key`, `secret`, `token`, `password`, `authorization`
+/// or a sibling cue word. That is what licenses the omissions below, and it is
+/// why a new caller on an uncued path would be a behaviour change rather than a
+/// refactor.
+///
+/// Full-length content hashes are deliberately NOT allowlisted here. A 40- or
+/// 64-character hex value is a plausible sha1/sha256 in the abstract, but after
+/// an explicit credential cue it is overwhelmingly a hex-encoded key, and the
+/// uncued reading is unaffected because uncued tokens never reach this function
+/// at all -- `commit <sha>` and `digest <sha>` are safe because `commit` and
+/// `digest` are not cue words, not because of anything here. Allowlisting them
+/// on the cued path let `api_key=<40-hex>` and `secret=<64-hex>` through the
+/// redactor untouched, with `blocked_secret_detected` false (#432).
+///
+/// Short git SHAs (7-8 hex) stay allowlisted even when cued: `api_key: deadbeef`
+/// is common enough in real transcripts that the false-positive rate dominates
+/// recall at that length. That boundary is pinned by
+/// `contextual_entropy_fp_budget_for_cued_shape_changes`.
 fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if uuid_regex().is_match(token) {
         return true;
@@ -3128,16 +3151,7 @@ fn is_allowlisted_entropy_candidate(token: &str) -> bool {
     if REPORT_METRIC_LABELS.contains(&token) {
         return true;
     }
-    if is_pure_hex(token) && matches!(token.len(), 7 | 8 | 40 | 64) {
-        return true;
-    }
-    // All-lowercase-hex of length >= 32 with no uppercase and no non-hex
-    // chars reads as a content hash (e.g. sha256/git blob), not a secret.
-    if token.len() >= 32
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
+    if is_pure_hex(token) && matches!(token.len(), 7 | 8) {
         return true;
     }
     false
@@ -6205,6 +6219,8 @@ pub fn apply_credit_estimate_to_envelope(envelope: &mut TraceContributionEnvelop
 
 #[cfg(test)]
 mod training_dynamics_tests {
+    #![deny(dead_code)]
+
     use super::{CartographyBucket, TrainingDynamicsSignals, reduce_token_confidences};
 
     fn approx(actual: Option<f32>, expected: f32) {
@@ -6404,6 +6420,18 @@ mod training_dynamics_tests {
 
 #[cfg(test)]
 mod tests {
+    // The file-level `#![allow(dead_code)]` above is for production code that
+    // is constructed only through serde or feature-gated paths. Inside a test
+    // module it is actively harmful: it silences the one lint that reports a
+    // test-shaped function nobody calls and nobody registered with `#[test]`.
+    //
+    // Two such functions sat here unrun -- one of them asserting
+    // `len < 16 && len >= 16`, unsatisfiable for every input -- and a third
+    // pair had already been found in the scorecard tests. That is twice, in a
+    // suite whose whole job is to notice things (#432). Denying the lint here
+    // makes the next one a build failure instead of a discovery.
+    #![deny(dead_code)]
+
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Pins what each consent scope PERMITS, not merely what it is called.
@@ -6864,7 +6892,7 @@ mod tests {
     #[test]
     fn contextual_entropy_redacts_unspaced_assignment() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         // Same secret and cue as the spaced case above; only the space is gone.
         // The cue is inside the candidate, so the window check cannot see it.
@@ -6902,7 +6930,7 @@ mod tests {
     #[test]
     fn contextual_entropy_redacts_cue_named_values_consistently_across_spellings() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // Opaque cursors carry the `token` cue and are now redacted in the
         // glued spelling too. That is over-redaction of non-secret content,
         // which the redaction policy accepts: over-redaction is tolerable,
@@ -6921,7 +6949,7 @@ mod tests {
     #[test]
     fn contextual_entropy_still_redacts_credential_named_tokens_when_glued() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         for name in ["access_token", "refresh_token", "client_secret"] {
             let (out, rep) = r.redact_text(&format!("{name}={secret}"));
@@ -6933,7 +6961,7 @@ mod tests {
     #[test]
     fn contextual_entropy_split_restores_the_identifier_allowlist() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // None of these has a cue before the whole candidate (the key name is
         // glued to the value, so the candidate itself starts at the key
         // name), so `redact_text` alone cannot tell whether the value
@@ -6948,7 +6976,13 @@ mod tests {
         for text in [
             "token=550e8400-e29b-41d4-a716-446655440000",
             "api_key=550e8400-e29b-41d4-a716-446655440000",
-            "secret=0123456789abcdef0123456789abcdef01234567",
+            // A cued 40-hex value used to sit here as a fourth allowlisted
+            // identifier. It is no longer allowlisted when cued (#432), and it
+            // has no like-for-like replacement: UUIDs and prefixed IDs are now
+            // the only classes both long enough to pass the ENTROPY_MIN_LEN
+            // gate and still allowlisted, and both are already covered above.
+            // A short git SHA would not exercise this path at all -- it exits
+            // at the length check before the allowlist is consulted.
             "access_token=msg_01ABCDEFghijklmnopqrstuvwx",
         ] {
             let split = text.find('=').map(|i| i + 1).expect("fixture has an =");
@@ -6969,7 +7003,7 @@ mod tests {
     #[test]
     fn contextual_entropy_reads_past_junk_assignments_to_reach_the_cue() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // Readings are not capped. A cap would let an attacker push the real
         // cue past it with junk `k0=k1=...` prefixes and keep the secret,
         // which the fail-closed rule forbids.
@@ -6988,7 +7022,7 @@ mod tests {
     #[test]
     fn contextual_entropy_measures_material_beyond_the_sample_window() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // A value whose entropy sits past ENTROPY_SAMPLE_BYTES. The whole-token
         // reading measures the whole token, so the spaced form keeps the
         // decision it had before sampling existed; the re-anchored reading
@@ -7018,7 +7052,7 @@ mod tests {
     #[test]
     fn contextual_entropy_measures_both_ends_of_a_long_value() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // A single sample anchor has a blind spot at the opposite end. These
         // three arrangements put the opaque material at the start, the end, and
         // either side of a flat middle; all must be treated as secrets.
@@ -7054,7 +7088,7 @@ mod tests {
         // sampled at all. Use the glued (self-cue) form so the reading that
         // measures this is the bounded, windowed one
         // (`entropy_sample_bits`), not the whole-token unbounded reading.
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let filler = "a".repeat(250_000);
         let body = format!("{filler}{secret}{filler}");
@@ -7081,7 +7115,7 @@ mod tests {
     #[test]
     fn contextual_entropy_stays_bounded_on_many_separate_assignments() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // Thousands of separate glued assignments, at the tripwire size.
         // Each one contributes a range, and comparing every new range against
         // every accumulated range was quadratic: a megabyte produced tens of
@@ -7102,7 +7136,7 @@ mod tests {
     #[test]
     fn contextual_entropy_stays_bounded_on_equals_dense_input() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // At only 1024 repetitions these payloads are far too small to
         // distinguish "entropy is bounded per reading" from "entropy is
         // gated behind the cheap checks": both the sampled-but-ungated and
@@ -7126,7 +7160,7 @@ mod tests {
     #[test]
     fn contextual_entropy_gates_on_cue_before_entropy_on_equals_dense_input_near_max_size() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // Every `=` in the input starts another reading in
         // `contextual_entropy_secret_ranges`, and the regex class
         // ([A-Za-z0-9+/=_.\-]) means a run of `x=` pairs is ONE candidate
@@ -7164,7 +7198,7 @@ mod tests {
     #[test]
     fn contextual_entropy_stays_bounded_when_a_cue_repeats_densely_through_a_long_candidate() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         // Gating entropy on `has_secret_cue` (the fix above) only removes the
         // cost when there is no cue at all. An attacker can trivially make a
         // cue precede nearly every `=` in one long candidate just by
@@ -7276,7 +7310,7 @@ mod tests {
     #[test]
     fn contextual_entropy_keeps_cue_name_when_redacting_assigned_value() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
         let secret = "Zx9Qk2Lm7Pv4Rt8Wy1Nb6Hd3Fg5Jc0Ae";
         let (out, _) = r.redact_text(&format!("api_key={secret}"));
         // The field name is diagnostic, not sensitive: keep it readable.
@@ -7316,7 +7350,7 @@ mod tests {
     #[test]
     fn contextual_entropy_documents_the_glued_assignment_boundary() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let r = DeterministicTraceRedactor::bare();
 
         // 1. Zero-separator glue: no `=` between the cue word and the value,
         //    so there is nothing for this pass's re-anchoring to split on.
@@ -7339,10 +7373,20 @@ mod tests {
         let (out, _) = r.redact_text("api_key=550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(out, "api_key=550e8400-e29b-41d4-a716-446655440000");
 
-        // 3. Lowercase hex, length >= 32: intentionally treated as a content
-        //    hash (sha256/git blob), not a secret, even when cued.
-        let (out, _) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(out, "secret=0123456789abcdef0123456789abcdef01234567");
+        // 3. Lowercase hex, length >= 32, CUED: redacted. This case used to
+        //    read the other way -- "intentionally treated as a content hash
+        //    (sha256/git blob), not a secret, even when cued" -- which let
+        //    `secret=<40-hex>` and `api_key=<64-hex>` through the redactor
+        //    untouched. The dead cue-boundary table asserted the opposite all
+        //    along; nothing reconciled them because that table never ran
+        //    (#432). Resolved in favour of redacting: after an explicit
+        //    credential cue, long hex is far more often a hex-encoded key than
+        //    a digest, and the uncued reading is untouched because `commit`
+        //    and `digest` are not cue words. Short git SHAs stay allowlisted;
+        //    see `contextual_entropy_fp_budget_for_cued_shape_changes`.
+        let (out, rep) = r.redact_text("secret=0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(out, "secret=[REDACTED]");
+        assert!(rep.blocked_secret_detected);
 
         // 4. Shorter than `ENTROPY_MIN_LEN` (16 chars): intentionally too
         //    short to gate reliably, even when cued and opaque.
@@ -7623,7 +7667,7 @@ mod tests {
         env.replay
             .expected_assertions
             .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
-        let redactor = DeterministicTraceRedactor::new(vec![]).unwrap();
+        let redactor = DeterministicTraceRedactor::bare();
 
         // Sanity: confirm the scan itself actually fails on this fixture,
         // otherwise the test would vacuously pass for the wrong reason.
@@ -8774,6 +8818,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn deterministic_only_constructor_ignores_inherited_backend() {
         use super::DeterministicTraceRedactor;
 
@@ -8794,9 +8839,13 @@ mod tests {
         assert!(!redacted.contains("/Users/preview/private"));
     }
 
+    #[test]
     fn contextual_entropy_applies_cued_secret_shape_decisions() {
         use super::*;
-        let r = DeterministicTraceRedactor::new(vec![]).unwrap();
+        // `bare()` rather than `new()`: this test asserts redaction shape, for
+        // which the env-selected privacy filter is irrelevant. `new()` reads
+        // process env and would race the fail-closed tests (#431).
+        let r = DeterministicTraceRedactor::bare();
 
         // Row 1 — Accept, documented. No separator means no boundary without
         // splitting inside arbitrary identifiers; FP cost is too high.
@@ -8810,13 +8859,45 @@ mod tests {
             );
         }
 
-        // Row 2 — Redact. Cue + short opaque value; floor is 8, not 16.
-        let short = "Q7vM2xP9sL4nR8k"; // 15
-        assert!(short.len() < 16 && short.len() >= ENTROPY_MIN_LEN);
-        for text in [format!("api_key: {short}"), format!("api_key={short}")] {
+        // Row 2 — Redact at the cue floor, and not one byte below it.
+        //
+        // This row used to read "floor is 8, not 16" and assert
+        // `len < 16 && len >= ENTROPY_MIN_LEN`. #225 raised ENTROPY_MIN_LEN
+        // from 8 to 16, which made that assertion unsatisfiable for every
+        // input -- and because the function had no `#[test]` attribute,
+        // nothing reported it (#432). The premise was wrong as well as
+        // impossible: a cue widens the *candidate* class, it does not lower
+        // the minimum length, so there is no separate shorter floor for cued
+        // values.
+        //
+        // Re-derived by measuring the current detector: a cued opaque value is
+        // redacted at exactly ENTROPY_MIN_LEN and survives at one byte below.
+        // Both sides are pinned and expressed in terms of the constant, so
+        // moving it fails here loudly instead of rotting silently again.
+        let pool = "Q7vM2xP9sL4nR8kT6wZ3bY5uH1cJ0dG9fA8eK4mN2pS7";
+        let at_floor = &pool[..ENTROPY_MIN_LEN];
+        let below_floor = &pool[..ENTROPY_MIN_LEN - 1];
+        for text in [
+            format!("api_key: {at_floor}"),
+            format!("api_key={at_floor}"),
+        ] {
             let (out, rep) = r.redact_text(&text);
-            assert!(!out.contains(short), "short cued secret survived: {out}");
+            assert!(
+                !out.contains(at_floor),
+                "cued secret at the entropy floor survived: {out}"
+            );
             assert!(rep.blocked_secret_detected);
+        }
+        for text in [
+            format!("api_key: {below_floor}"),
+            format!("api_key={below_floor}"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                out.contains(below_floor),
+                "cued value one byte below the entropy floor was redacted: {out}"
+            );
+            assert!(!rep.blocked_secret_detected);
         }
 
         // Row 3 — Keep allowlisted. ~105k structural IDs vs ~20 real secrets.
@@ -8841,6 +8922,29 @@ mod tests {
         assert_eq!(out, "api_key=aaaaaaaaaaaaaaaaaaaa");
     }
 
+    /// Regression for the cued-hex narrowing (#432).
+    ///
+    /// `local_redaction_audit.rs` carried this exact value in its
+    /// `BEARER_EVASIONS` fixture, annotated "lowercase hex, 32+ chars: treated
+    /// as a content hash, allowlisted", with a docstring promising that if the
+    /// detector were ever hardened these would become the regression cases
+    /// proving it. The detector has now been hardened, so here is that case.
+    #[test]
+    fn a_cued_lowercase_hex_bearer_value_is_no_longer_an_evasion() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        let value = "9f86d081884c7d659a2feaa0c55ad015";
+        assert_eq!(value.len(), 32);
+        let (out, rep) = r.redact_text(&format!("Authorization: Bearer {value}"));
+        assert!(
+            !out.contains(value),
+            "cued 32-char lowercase-hex bearer value survived: {out}"
+        );
+        assert!(rep.blocked_secret_detected);
+    }
+
+    #[test]
     fn contextual_entropy_fp_budget_for_cued_shape_changes() {
         use super::*;
         let r = DeterministicTraceRedactor::bare();
