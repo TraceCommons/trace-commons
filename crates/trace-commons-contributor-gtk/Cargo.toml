@@ -13,7 +13,7 @@ version = "0.7.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zmanian/trace-commons-server"
+repository = "https://github.com/TraceCommons/trace-commons"
 description = "GTK 4 contributor shell for Trace Commons (Linux)"
 
 [[bin]]

@@ -23,7 +23,7 @@ Unauthenticated. No tenant context. Outside every fail-closed gate. Returns:
 ```json
 {
   "license": "AGPL-3.0-or-later",
-  "source_url": "https://github.com/zmanian/trace-commons-server",
+  "source_url": "https://github.com/TraceCommons/trace-commons",
   "build_commit": "93f06c00",
   "build_time": "2026-08-28T00:00:00Z",
   "build_version": "0.6.0"
