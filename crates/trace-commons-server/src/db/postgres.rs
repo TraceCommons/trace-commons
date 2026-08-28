@@ -1913,6 +1913,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&51_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V51__privacy_classify_window_cache.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&51_i32, &"privacy_classify_window_cache"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5537,6 +5558,61 @@ mod tests {
         assert!(
             !V49.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
             "V49 must not weaken forced RLS"
+        );
+    }
+
+    /// V51 stores classifier output for reuse. The properties that keep it
+    /// from becoming a content store, or a cross-tenant one, are pinned here
+    /// because they are the whole basis on which the cache was accepted.
+    #[test]
+    fn v51_cache_is_tenant_scoped_and_stores_no_text() {
+        const V51: &str =
+            include_str!("../../../../migrations/V51__privacy_classify_window_cache.sql");
+        assert!(
+            V51.contains("FORCE ROW LEVEL SECURITY"),
+            "V51 must force RLS like every other Trace Commons table"
+        );
+        assert!(
+            V51.contains("tenant_id = trace_current_tenant_id()"),
+            "V51 must isolate by tenant; a cross-tenant cache needs a promotion rule"
+        );
+        assert!(
+            V51.contains("PRIMARY KEY (tenant_id, filter_version, window_hash)"),
+            "filter_version must be in the key, or a model change reads stale spans"
+        );
+        // The value column holds offsets and labels. A column that could hold
+        // trace text -- redacted or otherwise -- would make this a content
+        // store rather than a span cache. Check the SCHEMA, not the prose:
+        // the comments discuss text precisely because storing it is what the
+        // design rules out.
+        let schema: String = V51
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["redacted_text", "content", "plaintext", "window_text"] {
+            assert!(
+                !schema.contains(banned),
+                "V51 must not store trace text; found a {banned:?} column"
+            );
+        }
+        assert!(
+            schema.contains("spans") && schema.contains("window_hash"),
+            "V51 must key on a hash and store spans"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v51_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V51__privacy_classify_window_cache.sql"),
+            "V51 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&51_i32"),
+            "V51 must record itself in _trace_commons_migrations"
         );
     }
 
