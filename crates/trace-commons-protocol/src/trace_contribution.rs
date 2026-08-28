@@ -2639,6 +2639,53 @@ pub fn privacy_filter_adapter_from_env() -> Result<
     }
 }
 
+/// Which events the NEAR AI privacy classifier is asked to examine.
+///
+/// Throughput is `windows x round-trip` and the round trip is ~4.5 s, so the
+/// only lever that moves it is issuing fewer windows. Contributor and model
+/// prose are ~10% of trace volume; tool traffic is the other ~90%.
+///
+/// Defaults to `AllEvents`: an operator who has not made this decision keeps
+/// today's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PiiClassifyPolicy {
+    /// Examine every event. Today's behaviour.
+    #[default]
+    AllEvents,
+    /// Examine only prose-bearing events; tool traffic relies on the
+    /// deterministic detectors, which still run over everything.
+    ProseOnly,
+}
+
+impl PiiClassifyPolicy {
+    /// The stable label used for both configuration and the recorded value,
+    /// so the configured and recorded policy cannot drift apart.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::AllEvents => "all-events",
+            Self::ProseOnly => "prose-only",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim() {
+            "all-events" => Some(Self::AllEvents),
+            "prose-only" => Some(Self::ProseOnly),
+            _ => None,
+        }
+    }
+
+    /// Reads `TRACE_COMMONS_PII_CLASSIFY_POLICY`. An unset or unparseable
+    /// value yields `AllEvents`: a typo must not silently narrow what the
+    /// classifier examines.
+    pub fn from_env() -> Self {
+        std::env::var("TRACE_COMMONS_PII_CLASSIFY_POLICY")
+            .ok()
+            .and_then(|raw| Self::from_label(&raw))
+            .unwrap_or_default()
+    }
+}
+
 /// Resolve which privacy-filter backend the environment configures, without
 /// keeping the adapter.
 ///
@@ -11683,5 +11730,37 @@ mod tests {
         }
         assert_eq!(ResidualRiskCondition::from_label("other"), None);
         assert_eq!(ResidualRiskCondition::from_label(""), None);
+    }
+
+    #[test]
+    fn pii_classify_policy_parses_known_labels() {
+        use super::*;
+        assert_eq!(
+            PiiClassifyPolicy::from_label("prose-only"),
+            Some(PiiClassifyPolicy::ProseOnly)
+        );
+        assert_eq!(
+            PiiClassifyPolicy::from_label("all-events"),
+            Some(PiiClassifyPolicy::AllEvents)
+        );
+        // Unknown values do not silently become the fast policy.
+        assert_eq!(PiiClassifyPolicy::from_label("nonsense"), None);
+    }
+
+    #[test]
+    fn pii_classify_policy_label_round_trips() {
+        use super::*;
+        for policy in [PiiClassifyPolicy::AllEvents, PiiClassifyPolicy::ProseOnly] {
+            assert_eq!(
+                PiiClassifyPolicy::from_label(policy.as_label()),
+                Some(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn pii_classify_policy_defaults_to_all_events() {
+        use super::*;
+        assert_eq!(PiiClassifyPolicy::default(), PiiClassifyPolicy::AllEvents);
     }
 }
