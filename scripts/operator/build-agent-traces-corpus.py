@@ -1,23 +1,85 @@
 #!/usr/bin/env python3
-"""Build an agent-traces bake-off corpus tarball for A2.6.
+"""Build an agent-traces bake-off corpus tarball.
 
-This is the A2.6a operator addendum: it builds a corpus tarball
-compatible with the existing `trace-commons-gate-calibrate bake-off`
-binary's loader (`crates/trace-commons-server/src/bin/gate_calibrate/
-bakeoff_corpus.rs`). The novel slice is swapped from OASST2 chat
-(A2.3c/A2.4) to agent-traces drawn from a HuggingFace dataset; the
-duplicate slice and the paraphrase slice are reused verbatim from an
-existing A2.4-era `corpus-wiki.tar.zst`.
+Compatible with the `trace-commons-gate-calibrate bake-off` loader
+(`crates/trace-commons-server/src/bin/gate_calibrate/
+bakeoff_corpus.rs`).
 
-Default source dataset is `jedisct1/agent-traces-swival` — MIT-
-licensed agent traces produced by the Swival harness.
+WHAT CHANGED, AND WHY (#204, #205)
+----------------------------------
+
+The A2.6 version of this script built the novel slice from agent
+traces and reused the duplicate and paraphrase slices verbatim from a
+separate `corpus-wiki.tar.zst`. Novel and duplicate therefore came
+from different source populations, and every property that tracks
+source separated the classes: paragraph count scored AUC 1.000 on the
+resulting corpus, because all 300 duplicate files had exactly one
+paragraph and every novel file had between 7 and 163. Six no-model
+measures beat the model that corpus was used to select. What the
+bake-off measured was a source-format detector.
+
+That path is gone. Both slices are now drawn from the same
+population and differ only in novelty:
+
+    novel[i]      = an agent trace
+    duplicate[i]  = a transformed version of THAT SAME trace
+
+so source, format, subject matter and length distribution are held
+constant by construction rather than by hope. #204's second finding
+is why length is enforced rather than assumed: the A2.6 paraphrase
+slice held the source constant and still left a length confound just
+as strong, because 299 of its 300 paraphrases were shorter than their
+original (median length ratio 0.282). `--length-band` rejects any
+pair the transform did not keep the length of.
+
+Two transforms ship:
+
+  * `shuffle-paragraphs` (default) -- model-free and deterministic.
+    Permutes the trace's paragraphs. The multiset of paragraphs, the
+    byte count and the line count are preserved exactly, so it needs
+    no GPU, no weights and no network. Be honest about what this
+    buys: because it is byte-preserving, the trivial-measure battery
+    is satisfied by construction on this transform, not by luck. It
+    is a structural control -- a duplicate that is genuinely the same
+    content -- and it is the right shape for a redundancy gate, but
+    it is not a semantic-difficulty benchmark.
+  * `external` -- back-translation or paraphrase through a helper
+    subprocess (`scripts/operator/bakeoff_paraphrase.py` implements
+    the contract). Reads `{"original": ...}` JSONL on stdin, writes
+    `{"original": ..., "paraphrase": ...}` JSONL on stdout. Pairs
+    outside `--length-band` are rejected and backfilled from the
+    pool; if the transform cannot produce enough length-matched
+    pairs the build fails rather than emitting a length-confounded
+    corpus.
+
+THE VALIDITY GATE
+-----------------
+
+After packing, and before the tarball is moved into place, the
+trivial-measure battery runs against it via
+`trace-commons-gate-calibrate corpus-validity`. Paragraph count,
+line count, distinct word count, UTF-8 byte count, whitespace word
+count and mean word length must all land near AUC 0.5 under the
+repository's own tie convention. A corpus a single integer can
+classify is not written. The gate is fail-closed: if the binary
+cannot be found, no corpus is produced.
+
+SOURCES
+-------
+
+`--source` pulls sessions from a HuggingFace dataset (default
+`jedisct1/agent-traces-swival`, MIT-licensed, produced by the Swival
+harness). `--novel-corpus` instead takes the novel slice from an
+existing corpus tarball, which is how a corrected corpus is built
+over the same traces an earlier one used -- no network, and the
+novel slice stays comparable to the archived bake-off.
 
 Swival schema (authoritative):
 
     The dataset is a collection of `*.jsonl` files at the repo root.
     Each file is one session (~3,330 sessions total). Each line in a
     file is one event in that session. Event rows do NOT share a
-    common schema across files — columns drift per session, so
+    common schema across files -- columns drift per session, so
     `datasets.load_dataset(..., streaming=True)` raises a CastError
     when it tries to enforce a single Arrow schema across the file
     set. Avoid that path; download the raw `.jsonl` files and parse
@@ -26,20 +88,7 @@ Swival schema (authoritative):
     Event row fields observed in practice include `uuid`,
     `parentUuid`, `sessionId`, `harness`, `type`, `content`, and a
     nested `message` object whose `content` is either a string or a
-    list of `{type, text, ...}` chunks. The narrative-field schema
-    used by an earlier draft (`title`, `severity`, `proof`,
-    `fix_outline`, etc.) does NOT exist on disk and was never
-    correct.
-
-This script flattens each session into one trace by concatenating
-every non-empty text snippet found on `message.content` (string or
-chunk list) and on the top-level `content` field, joined by double
-newlines. The result is a multi-paragraph body that resembles the
-kind of trace Trace Commons is intended to gate.
-
-The `--format` flag selects the session-to-text mapping. v1 ships
-"swival" only; additional dataset formats can be added without
-changing the tarball contract.
+    list of `{type, text, ...}` chunks.
 
 Tarball layout (matches the Rust loader exactly):
 
@@ -47,9 +96,10 @@ Tarball layout (matches the Rust loader exactly):
                                   "novel_sha256":"sha256:...",
                                   "duplicate_sha256":"sha256:...",
                                   "paraphrase_sha256":"sha256:..."}
-    novel/novel-NNNN.txt         one entry per file, UTF-8
-    duplicate/dup-NNNN.txt       reused from --duplicate-corpus
-    paraphrase/paraphrase.jsonl  reused from --duplicate-corpus
+    novel/novel-NNNN.txt         one entry per trace, UTF-8
+    duplicate/dup-NNNN.txt       transform of novel-NNNN.txt
+    paraphrase/paraphrase.jsonl  the same pairs, as
+                                 {"original","paraphrase"}
 
 Hash convention:
   * novel + duplicate slice sha256 is over the concatenated raw bytes
@@ -66,13 +116,14 @@ Error convention: `BakeoffAgentTracesFailure: <label>`.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import glob
 import hashlib
 import io
 import json
 import os
 import random
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -89,6 +140,17 @@ DEFAULT_COUNT = 300
 DEFAULT_SEED = 42
 MIN_WORDS = 200
 MAX_WORDS = 2000
+
+# Maximum tolerated relative word-count difference between a trace and its
+# transformed duplicate. The A2.6 paraphrase slice sat at a median ratio of
+# 0.282 -- a length confound strong enough that byte count out-scored the
+# selected model by 0.24 AUC on the source-controlled pair (#204).
+DEFAULT_LENGTH_BAND = 0.10
+
+# How many extra candidates to draw so rejected pairs can be backfilled.
+DEFAULT_OVERSAMPLE = 3
+
+DEFAULT_VALIDITY_BINARY = "trace-commons-gate-calibrate"
 
 # ---------------------------------------------------------------------------
 # Errors / logging helpers
@@ -107,6 +169,54 @@ def step(phase: str, **kv: object) -> None:
         print(f"BakeoffAgentTracesStep: phase={phase} {pairs}", file=sys.stderr)
     else:
         print(f"BakeoffAgentTracesStep: phase={phase}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# zstd: module when present, CLI otherwise
+# ---------------------------------------------------------------------------
+
+
+def _zstd_module():
+    try:
+        import zstandard  # type: ignore
+
+        return zstandard
+    except ImportError:
+        return None
+
+
+def zstd_compress(raw: bytes) -> bytes:
+    """Compress with the `zstandard` module, falling back to the `zstd` CLI.
+
+    `build-bakeoff-corpus.sh` already requires the `zstd` binary, so the
+    fallback adds no dependency the operator flow did not have; it only lets
+    this script run on hosts without the Python package.
+    """
+    mod = _zstd_module()
+    if mod is not None:
+        return mod.ZstdCompressor().compress(raw)
+    exe = shutil.which("zstd")
+    if exe is None:
+        raise bail("zstd_unavailable_no_module_and_no_binary")
+    proc = subprocess.run([exe, "-q", "-c", "-"], input=raw, stdout=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise bail(f"zstd_compress_failed rc={proc.returncode}")
+    return proc.stdout
+
+
+def zstd_decompress(path: Path) -> bytes:
+    """Decompress a .zst file to bytes, module first then `zstd` CLI."""
+    mod = _zstd_module()
+    if mod is not None:
+        with open(path, "rb") as fh:
+            return mod.ZstdDecompressor().stream_reader(fh).read()
+    exe = shutil.which("zstd")
+    if exe is None:
+        raise bail("zstd_unavailable_no_module_and_no_binary")
+    proc = subprocess.run([exe, "-d", "-q", "-c", str(path)], stdout=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise bail(f"zstd_decompress_failed rc={proc.returncode}")
+    return proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -228,13 +338,29 @@ def collect_novel_texts(
     seed: int,
     pool_cap: int,
 ) -> list[str]:
-    """Filter session traces to 200-2000 words and deterministically sample `count`.
+    """Deterministically sample exactly `count` in-band traces.
+
+    Thin wrapper over `collect_pool` kept for callers that want the slice
+    itself rather than a pool to draw duplicates from.
+    """
+    return collect_pool(session_paths, formatter, count, seed, pool_cap)[:count]
+
+
+def collect_pool(
+    session_paths: Iterable[Path],
+    formatter,
+    count: int,
+    seed: int,
+    pool_cap: int,
+) -> list[str]:
+    """Filter session traces to 200-2000 words and shuffle up to `pool_cap`.
 
     Each yielded path is one swival session `.jsonl`. We flatten each
     session into one trace via `formatter`, then filter by word
-    count, accumulate up to `pool_cap` entries, and draw `count` of
-    them with the given seed. This gives reproducible output without
-    materializing every session in memory at once.
+    count, accumulate up to `pool_cap` entries, and draw them in a
+    seeded order. Returning more than `count` gives `build_pairs`
+    room to backfill pairs a transform failed to length-match,
+    without materializing every session in memory at once.
     """
     if count <= 0:
         raise bail("count_must_be_positive")
@@ -263,71 +389,167 @@ def collect_novel_texts(
         raise bail(f"insufficient_filtered_sessions pool={len(pool)} target={count}")
 
     rng = random.Random(seed)
-    sampled = rng.sample(pool, count)
-    return sampled
+    return rng.sample(pool, min(len(pool), pool_cap))
 
 
-# ---------------------------------------------------------------------------
-# Duplicate-corpus reuse
-# ---------------------------------------------------------------------------
+def read_novel_slice(tarball: Path) -> list[str]:
+    """Read the `novel/` slice out of an existing corpus tarball.
 
-
-@dataclasses.dataclass
-class ReusedSlices:
-    duplicate_files: list[tuple[str, bytes]]  # (filename, raw bytes), sorted
-    paraphrase_jsonl: bytes
-
-
-def extract_duplicate_corpus(tarball: Path) -> ReusedSlices:
-    """Open an existing corpus-wiki.tar.zst and return its duplicate + paraphrase bytes.
-
-    The novel/ directory of the source tarball is ignored; only the
-    duplicate slice (per-file bodies, sorted by filename) and the
-    paraphrase slice (single JSONL) are extracted. Hashes are
-    recomputed by the caller from these raw bytes so the new manifest
-    is internally consistent.
+    Sorted by filename, matching the Rust loader's order, so a corpus built
+    this way lines up with per-trace scores captured against the source
+    corpus.
     """
+    step("novel_corpus_open", tarball_label=_short_label(str(tarball)))
     try:
-        import zstandard  # type: ignore
-    except ImportError as exc:
-        raise bail(f"zstandard_package_missing detail={type(exc).__name__}")
-
-    step("duplicate_corpus_open", tarball_label=_short_label(str(tarball)))
-    try:
-        with open(tarball, "rb") as fh:
-            dctx = zstandard.ZstdDecompressor()
-            raw = dctx.stream_reader(fh)
-            tf = tarfile.open(fileobj=raw, mode="r|")
-
-            duplicate_files: dict[str, bytes] = {}
-            paraphrase_jsonl: bytes | None = None
-            for member in tf:
-                if not member.isfile():
+        raw = zstd_decompress(tarball)
+        tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:")
+        bodies: dict[str, bytes] = {}
+        for member in tf:
+            if not member.isfile():
+                continue
+            name = member.name.lstrip("./")
+            if name.startswith("novel/"):
+                fh = tf.extractfile(member)
+                if fh is None:
                     continue
-                name = member.name.lstrip("./")
-                if name.startswith("duplicate/"):
-                    fh2 = tf.extractfile(member)
-                    if fh2 is None:
-                        continue
-                    duplicate_files[name] = fh2.read()
-                elif name == "paraphrase/paraphrase.jsonl":
-                    fh2 = tf.extractfile(member)
-                    if fh2 is None:
-                        continue
-                    paraphrase_jsonl = fh2.read()
+                bodies[name] = fh.read()
+    except SystemExit:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise bail(f"duplicate_corpus_read_failed detail={type(exc).__name__}")
+        raise bail(f"novel_corpus_read_failed detail={type(exc).__name__}")
+    if not bodies:
+        raise bail("novel_slice_empty_in_source")
+    ordered = [bodies[k] for k in sorted(bodies)]
+    return [b.decode("utf-8", errors="replace") for b in ordered]
 
-    if not duplicate_files:
-        raise bail("duplicate_slice_empty_in_source")
-    if paraphrase_jsonl is None or not paraphrase_jsonl:
-        raise bail("paraphrase_slice_missing_in_source")
 
-    ordered = sorted(duplicate_files.items(), key=lambda kv: kv[0])
-    return ReusedSlices(
-        duplicate_files=[(name.split("/", 1)[1], body) for name, body in ordered],
-        paraphrase_jsonl=paraphrase_jsonl,
-    )
+# ---------------------------------------------------------------------------
+# Duplicate construction: same source, transformed
+# ---------------------------------------------------------------------------
+
+
+def shuffle_paragraphs(text: str, seed: int) -> str:
+    """Permute a trace's paragraphs, preserving every trivial measure exactly.
+
+    Splitting on `"\\n\\n"` and rejoining with `"\\n\\n"` moves no bytes and
+    changes no newline count, so byte count, line count, paragraph count, word
+    count, distinct word count and mean word length are all identical to the
+    original. That is the point: the duplicate differs from the novel trace in
+    content order alone, which is what a redundancy gate is supposed to catch
+    and what no structural measure can see.
+
+    A permutation can come back as the identity; we retry a few times before
+    accepting it, because an unchanged body is a weaker duplicate than a
+    reordered one, not because an exact duplicate would be invalid.
+    """
+    blocks = text.split("\n\n")
+    if len(blocks) < 2:
+        return text
+    rng = random.Random(seed)
+    for _ in range(8):
+        shuffled = blocks[:]
+        rng.shuffle(shuffled)
+        out = "\n\n".join(shuffled)
+        if out != text:
+            return out
+    return "\n\n".join(blocks)
+
+
+def run_external_transform(cmd: str, originals: list[str]) -> dict[str, str]:
+    """Pipe originals through a paraphrase/back-translation helper.
+
+    Contract matches `scripts/operator/bakeoff_paraphrase.py`: JSONL
+    `{"original": ...}` on stdin, JSONL `{"original": ..., "paraphrase": ...}`
+    on stdout. The helper's stderr is passed through so its own label-only
+    diagnostics reach the operator; we never echo trace text ourselves.
+    """
+    payload = "".join(json.dumps({"original": o}) + "\n" for o in originals)
+    step("external_transform_begin", rows=len(originals))
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            input=payload.encode("utf-8"),
+            stdout=subprocess.PIPE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise bail(f"external_transform_spawn_failed detail={type(exc).__name__}")
+    if proc.returncode != 0:
+        raise bail(f"external_transform_failed rc={proc.returncode}")
+
+    out: dict[str, str] = {}
+    for lineno, line in enumerate(proc.stdout.decode("utf-8", errors="replace").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+            out[obj["original"]] = obj["paraphrase"]
+        except Exception:  # noqa: BLE001 — label only, never the row body
+            raise bail(f"external_transform_bad_row row={lineno}")
+    step("external_transform_done", rows=len(out))
+    return out
+
+
+def length_matched(original: str, transformed: str, band: float) -> bool:
+    """True when the transform kept the trace's length inside `band`.
+
+    Relative word-count difference. #204's diagnosis of the A2.6 paraphrase
+    slice is the reason this is enforced rather than assumed: a paraphraser
+    that systematically shortens its input hands back a corpus separable by
+    byte count, with the source confound removed and a length confound left
+    in its place.
+    """
+    ow = len(original.split())
+    if ow == 0:
+        return False
+    tw = len(transformed.split())
+    return abs(tw - ow) / ow <= band
+
+
+def build_pairs(
+    pool: list[str],
+    count: int,
+    transform: str,
+    transform_cmd: str | None,
+    seed: int,
+    band: float,
+) -> list[tuple[str, str]]:
+    """Return `count` (novel, duplicate) pairs drawn from one population.
+
+    Pairs whose duplicate falls outside the length band are dropped and
+    backfilled from the rest of the pool. Running out is a hard failure: a
+    short corpus is recoverable, a length-confounded one is not.
+    """
+    if transform == "shuffle-paragraphs":
+        pairs = []
+        for i, original in enumerate(pool):
+            dup = shuffle_paragraphs(original, seed + i)
+            if length_matched(original, dup, band):
+                pairs.append((original, dup))
+            if len(pairs) >= count:
+                break
+    elif transform == "external":
+        if not transform_cmd:
+            raise bail("transform_cmd_required_for_external")
+        mapped = run_external_transform(transform_cmd, pool)
+        pairs = []
+        for original in pool:
+            dup = mapped.get(original)
+            if dup is None or not dup.strip():
+                continue
+            if length_matched(original, dup, band):
+                pairs.append((original, dup))
+            if len(pairs) >= count:
+                break
+    else:
+        raise bail(f"unknown_transform label={transform}")
+
+    if len(pairs) < count:
+        raise bail(
+            f"insufficient_length_matched_pairs accepted={len(pairs)} "
+            f"target={count} band={band}"
+        )
+    return pairs[:count]
 
 
 # ---------------------------------------------------------------------------
@@ -361,31 +583,74 @@ def write_slice_files(out_dir: Path, prefix: str, bodies: list[bytes]) -> list[P
     return paths
 
 
-def write_reused_duplicate(out_dir: Path, files: list[tuple[str, bytes]]) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, body in files:
-        with open(out_dir / name, "wb") as fh:
-            fh.write(body)
-
-
 def pack_tarball(staging: Path, output: Path) -> None:
-    try:
-        import zstandard  # type: ignore
-    except ImportError as exc:
-        raise bail(f"zstandard_package_missing detail={type(exc).__name__}")
+    """Pack the staging tree, byte-reproducibly.
 
-    # Build the inner tar in memory (corpus is small: ~300 entries × <2 KB).
+    Entry metadata is normalised -- zero mtime, zero uid/gid, fixed mode, no
+    owner names -- because `tarfile.add` would otherwise stamp the build host
+    and the wall clock into the archive, and a corpus whose sha256 changes on
+    every run cannot be cited in a report. The slice hashes in `manifest.json`
+    cover file bodies only, so this is the only thing standing behind a stable
+    tarball digest.
+    """
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tf:
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tf:
         for entry in sorted(staging.rglob("*")):
             rel = entry.relative_to(staging)
-            arcname = "./" + str(rel).replace(os.sep, "/")
-            tf.add(str(entry), arcname=arcname, recursive=False)
-    raw = buf.getvalue()
-
-    cctx = zstandard.ZstdCompressor()
+            info = tarfile.TarInfo("./" + str(rel).replace(os.sep, "/"))
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            if entry.is_dir():
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                tf.addfile(info)
+                continue
+            body = entry.read_bytes()
+            info.type = tarfile.REGTYPE
+            info.mode = 0o644
+            info.size = len(body)
+            tf.addfile(info, io.BytesIO(body))
     with open(output, "wb") as out_fh:
-        out_fh.write(cctx.compress(raw))
+        out_fh.write(zstd_compress(buf.getvalue()))
+
+
+# ---------------------------------------------------------------------------
+# The validity gate
+# ---------------------------------------------------------------------------
+
+
+def run_validity_gate(binary: str, corpus: Path, ceiling: float) -> None:
+    """Refuse a corpus a trivial measure can classify.
+
+    Shells out to `trace-commons-gate-calibrate corpus-validity`, which runs
+    the six preregistered no-model measures through the repository's own
+    `discrimination_auc`. Fail-closed: a missing binary produces no corpus,
+    because a corpus nobody checked is exactly what #204 is about.
+    """
+    exe = shutil.which(binary) or (binary if Path(binary).exists() else None)
+    if exe is None:
+        raise bail(f"validity_gate_binary_missing label={_short_label(binary)}")
+    step("validity_gate_begin", ceiling=ceiling)
+    proc = subprocess.run(
+        [
+            exe,
+            "corpus-validity",
+            "--corpus",
+            str(corpus),
+            "--ceiling",
+            str(ceiling),
+        ],
+        stdout=subprocess.PIPE,
+    )
+    # The battery's table is counts, ranges and AUCs only -- no trace text --
+    # so it is safe to surface, and it is the evidence the corpus is sound.
+    sys.stderr.write(proc.stdout.decode("utf-8", errors="replace"))
+    if proc.returncode != 0:
+        raise bail("corpus_failed_trivial_measure_battery")
+    step("validity_gate_passed")
 
 
 # ---------------------------------------------------------------------------
@@ -397,9 +662,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="build-agent-traces-corpus.py",
         description=(
-            "Build an A2.6 bake-off corpus tarball with an agent-traces "
-            "novel slice and the duplicate + paraphrase slices reused "
-            "from an existing A2.4 corpus tarball."
+            "Build a bake-off corpus whose novel and duplicate slices come "
+            "from the same population and differ only in novelty (#204)."
         ),
     )
     p.add_argument(
@@ -408,22 +672,54 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"HuggingFace dataset id (default: {DEFAULT_SOURCE})",
     )
     p.add_argument(
+        "--novel-corpus",
+        type=Path,
+        default=None,
+        help=(
+            "Take the novel slice from an existing corpus tarball instead of "
+            "downloading --source. Use this to rebuild a corrected corpus "
+            "over the same traces an earlier corpus used."
+        ),
+    )
+    p.add_argument(
         "--format",
         choices=sorted(FORMATS.keys()),
         default="swival",
         help="Row-to-text mapping (default: swival)",
     )
     p.add_argument(
-        "--duplicate-corpus",
-        required=True,
-        type=Path,
-        help="Path to an existing corpus-wiki.tar.zst to reuse duplicate + paraphrase slices from.",
+        "--transform",
+        choices=["shuffle-paragraphs", "external"],
+        default="shuffle-paragraphs",
+        help=(
+            "How the duplicate slice is derived from the novel slice. "
+            "shuffle-paragraphs is model-free and length-exact; external "
+            "pipes through --transform-cmd (back-translation or paraphrase)."
+        ),
+    )
+    p.add_argument(
+        "--transform-cmd",
+        default=None,
+        help=(
+            "Shell command implementing the paraphrase contract "
+            '(JSONL {"original"} in, {"original","paraphrase"} out). '
+            "Required with --transform external."
+        ),
+    )
+    p.add_argument(
+        "--length-band",
+        type=float,
+        default=DEFAULT_LENGTH_BAND,
+        help=(
+            "Maximum relative word-count difference between a trace and its "
+            f"duplicate (default: {DEFAULT_LENGTH_BAND})."
+        ),
     )
     p.add_argument(
         "--count",
         type=int,
         default=DEFAULT_COUNT,
-        help=f"Novel-slice entry count (default: {DEFAULT_COUNT})",
+        help=f"Pair count (default: {DEFAULT_COUNT})",
     )
     p.add_argument(
         "--seed",
@@ -437,8 +733,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help=(
             "Cap on the filtered pool size before sampling. "
-            "0 means count*10 (default)."
+            f"0 means count*{DEFAULT_OVERSAMPLE} (default)."
         ),
+    )
+    p.add_argument(
+        "--validity-binary",
+        default=os.environ.get("TRACE_COMMONS_GATE_CALIBRATE", DEFAULT_VALIDITY_BINARY),
+        help=(
+            "Path to trace-commons-gate-calibrate, used to run the "
+            "trivial-measure battery before the corpus is written."
+        ),
+    )
+    p.add_argument(
+        "--validity-ceiling",
+        type=float,
+        default=0.15,
+        help="Maximum tolerated |auc-0.5| for any trivial measure (default: 0.15).",
     )
     p.add_argument(
         "--out",
@@ -452,64 +762,84 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    if args.out.suffix not in (".zst",) or not str(args.out).endswith(".tar.zst"):
+    if not str(args.out).endswith(".tar.zst"):
         raise bail("output_must_end_with_tar_zst")
-    if not args.duplicate_corpus.exists():
-        raise bail("duplicate_corpus_missing")
+    if args.length_band < 0:
+        raise bail("length_band_must_be_non_negative")
 
     formatter = FORMATS[args.format]
-    pool_cap = args.pool_cap if args.pool_cap > 0 else max(args.count * 10, args.count)
+    pool_cap = (
+        args.pool_cap
+        if args.pool_cap > 0
+        else max(args.count * DEFAULT_OVERSAMPLE, args.count)
+    )
 
     step(
         "begin",
         format=args.format,
+        transform=args.transform,
         count=args.count,
         seed=args.seed,
         pool_cap=pool_cap,
+        length_band=args.length_band,
     )
 
-    # 1. Pull duplicate + paraphrase slices from the existing tarball.
-    reused = extract_duplicate_corpus(args.duplicate_corpus)
-    step(
-        "duplicate_corpus_loaded",
-        duplicate_entries=len(reused.duplicate_files),
-        paraphrase_bytes=len(reused.paraphrase_jsonl),
-    )
+    # 1. Assemble the candidate pool -- one population, one format.
+    if args.novel_corpus is not None:
+        if not args.novel_corpus.exists():
+            raise bail("novel_corpus_missing")
+        pool = read_novel_slice(args.novel_corpus)
+        if len(pool) < args.count:
+            raise bail(f"insufficient_novel_slice pool={len(pool)} target={args.count}")
+        step("pool_from_corpus", pool=len(pool))
+    else:
+        pool = collect_pool(
+            session_paths=iter_session_files(args.source),
+            formatter=formatter,
+            count=args.count,
+            seed=args.seed,
+            pool_cap=pool_cap,
+        )
+        step("pool_from_dataset", pool=len(pool))
 
-    # 2. Stream the source dataset and assemble the novel slice.
-    session_paths = iter_session_files(args.source)
-    novel_texts = collect_novel_texts(
-        session_paths=session_paths,
-        formatter=formatter,
+    # 2. Derive each duplicate from its own novel trace.
+    pairs = build_pairs(
+        pool=pool,
         count=args.count,
+        transform=args.transform,
+        transform_cmd=args.transform_cmd,
         seed=args.seed,
-        pool_cap=pool_cap,
+        band=args.length_band,
     )
-    step("novel_slice_assembled", count=len(novel_texts))
+    step("pairs_built", pairs=len(pairs))
 
-    # 3. Stage to disk, hash, manifest, pack.
-    with tempfile.TemporaryDirectory(prefix="bakeoff-a26-") as tmpdir:
-        staging = Path(tmpdir)
+    # 3. Stage, hash, manifest, pack -- to a temporary path.
+    with tempfile.TemporaryDirectory(prefix="bakeoff-corpus-") as tmpdir:
+        staging = Path(tmpdir) / "staging"
         novel_dir = staging / "novel"
         duplicate_dir = staging / "duplicate"
         paraphrase_dir = staging / "paraphrase"
 
-        novel_bodies = [t.encode("utf-8") for t in novel_texts]
+        novel_bodies = [o.encode("utf-8") for o, _ in pairs]
+        duplicate_bodies = [d.encode("utf-8") for _, d in pairs]
         write_slice_files(novel_dir, "novel", novel_bodies)
-        write_reused_duplicate(duplicate_dir, reused.duplicate_files)
-        paraphrase_dir.mkdir(parents=True, exist_ok=True)
-        with open(paraphrase_dir / "paraphrase.jsonl", "wb") as fh:
-            fh.write(reused.paraphrase_jsonl)
+        write_slice_files(duplicate_dir, "dup", duplicate_bodies)
 
-        novel_sha = sha256_label_of_chunks(novel_bodies)
-        duplicate_sha = sha256_label_of_chunks(b for _, b in reused.duplicate_files)
-        paraphrase_sha = sha256_label_of_chunks([reused.paraphrase_jsonl])
+        # The paraphrase slice carries the same pairs, so the paraphrase
+        # metric and the discrimination metric are computed over one
+        # construction rather than two unrelated ones.
+        paraphrase_dir.mkdir(parents=True, exist_ok=True)
+        paraphrase_jsonl = "".join(
+            json.dumps({"original": o, "paraphrase": d}) + "\n" for o, d in pairs
+        ).encode("utf-8")
+        with open(paraphrase_dir / "paraphrase.jsonl", "wb") as fh:
+            fh.write(paraphrase_jsonl)
 
         manifest = {
             "version": MANIFEST_VERSION,
-            "novel_sha256": novel_sha,
-            "duplicate_sha256": duplicate_sha,
-            "paraphrase_sha256": paraphrase_sha,
+            "novel_sha256": sha256_label_of_chunks(novel_bodies),
+            "duplicate_sha256": sha256_label_of_chunks(duplicate_bodies),
+            "paraphrase_sha256": sha256_label_of_chunks([paraphrase_jsonl]),
         }
         with open(staging / "manifest.json", "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, separators=(",", ":"))
@@ -517,13 +847,19 @@ def main(argv: list[str] | None = None) -> int:
 
         step(
             "manifest_emitted",
-            novel_sha=novel_sha[:19],
-            duplicate_sha=duplicate_sha[:19],
-            paraphrase_sha=paraphrase_sha[:19],
+            novel_sha=manifest["novel_sha256"][:19],
+            duplicate_sha=manifest["duplicate_sha256"][:19],
+            paraphrase_sha=manifest["paraphrase_sha256"][:19],
         )
 
+        pending = Path(tmpdir) / "pending.tar.zst"
+        pack_tarball(staging, pending)
+
+        # 4. Gate. Nothing is written to --out until the battery passes.
+        run_validity_gate(args.validity_binary, pending, args.validity_ceiling)
+
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        pack_tarball(staging, args.out)
+        shutil.copyfile(pending, args.out)
 
     tar_sha = sha256_label_of_file(args.out)
     print(f"BakeoffAgentTracesOK output_sha256={tar_sha}")

@@ -39,10 +39,14 @@ mod bakeoff_metrics;
 mod bakeoff_report;
 #[path = "gate_calibrate/canonical_text.rs"]
 mod canonical_text;
+#[path = "gate_calibrate/corpus_validity.rs"]
+mod corpus_validity;
 #[path = "gate_calibrate/run_candidate_eval.rs"]
 mod run_candidate_eval;
 #[path = "gate_calibrate/tail_floor.rs"]
 mod tail_floor;
+#[path = "gate_calibrate/trivial_measures.rs"]
+mod trivial_measures;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -82,6 +86,13 @@ enum Cmd {
     /// Tests hypothesis H1 of the novelty-signal scoping spec. Offline, no DB,
     /// no embedder, no model weights.
     CanonicalText(canonical_text::CanonicalTextArgs),
+    /// Run the trivial-measure battery against a bake-off corpus tarball and
+    /// refuse the corpus if a no-model score classifies it (#204). Paragraph
+    /// count, line count, distinct word count, UTF-8 byte count, whitespace
+    /// word count and mean word length must all land near AUC 0.5, using the
+    /// repository's own tie convention. A non-zero exit means the corpus
+    /// cannot support a statement about novelty. Offline, no model, no GPU.
+    CorpusValidity(corpus_validity::CorpusValidityArgs),
 }
 
 #[derive(Args, Debug)]
@@ -273,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::BakeOff(args) => run_bakeoff(args).await,
         Cmd::TailFloor(args) => tail_floor::run(args).await,
         Cmd::CanonicalText(args) => canonical_text::run(args),
+        Cmd::CorpusValidity(args) => corpus_validity::run(args),
     }
 }
 

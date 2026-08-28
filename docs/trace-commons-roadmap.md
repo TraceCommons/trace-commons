@@ -60,6 +60,12 @@ Ordered. Top item is the active blocker.
    ("at least one candidate AUC > 0.5") with three of four candidates
    complete: Llama-3.1-8B-Instruct AUC 0.342, Qwen3-8B-Base AUC 0.243,
    **Qwen 3.6 27B Dense AUC 0.936** (crosses the 0.5 threshold).
+   **That 0.936 is not evidence about the model.** #204 shows the A2.6
+   corpus drew its novel and duplicate slices from different source
+   populations, so six no-model measures beat the selected candidate on
+   it and paragraph count classified it without error. The 27B selection
+   is retained as unproven-but-inherited; "why this model" is formally
+   unanswered. See docs/operator/corpus-validity-battery.md.
    Outcome 1 fires the full A2.7 path per the A2.6 spec's outcome map.
    The A2.7 plan stub (PR #74) is ready to promote to the active plan
    pending the final Gemma 4 31B candidate. Calibration targets a
