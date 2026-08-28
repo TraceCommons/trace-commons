@@ -124,6 +124,11 @@ carries the full statement of it; the essentials are repeated here.
   `-build-info`). These ship inside proprietary agent harnesses and must stay
   permissive.
 
+**Contributions are licensed inbound under `MIT OR Apache-2.0`**, including to
+the AGPL crates -- deliberately not "inbound = outbound", so the project keeps
+the right to relicense what it distributes. Stated in `CONTRIBUTING.md`, the PR
+template, `LICENSE`, and the README; keep those four consistent.
+
 **Permissive code may flow into the AGPL crates. Never the reverse.** Do not add
 `trace-commons-gate-api`, `-gate-enclave`, or `-server` to a permissive crate's
 dependencies -- not even to reuse a single trait. That silently makes a shipped
@@ -133,8 +138,8 @@ dev-dependencies across the boundary are permitted but pinned in that same file.
 
 Note that `trace-commons-gate-api`'s traits being AGPL is deliberate: the
 proprietary-backend seam described below is available to the copyright holder
-and closed to third parties. There is no CLA, so an outside contribution to
-either gate crate would end the ability to grant an exception on it.
+and closed to third parties. The inbound MIT/Apache term is what keeps that
+possible -- an outside contribution offered under other terms would end it.
 
 AGPL section 13 obliges a network operator to offer the Corresponding Source.
 `trace-commons-ingest` does this at `GET /v1/source` -- unauthenticated, no

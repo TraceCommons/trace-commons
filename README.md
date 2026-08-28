@@ -433,6 +433,12 @@ deployment.
 
 ## Contributing
 
+**By opening a pull request you license your contribution under
+`MIT OR Apache-2.0`**, including contributions to the AGPL-licensed server
+crates. You keep your copyright. Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
+before your first PR — it explains why the inbound license differs from the
+outbound one and what that means for you.
+
 Branch protection on `main` requires:
 
 - All CI checks green (`cargo fmt --check`, three `cargo check` variants,
@@ -513,6 +519,13 @@ from. If you deploy a modified build, point that constant at your own source.
 These stay permissive on purpose. The contributor CLI, the desktop apps, and
 the envelope protocol are meant to be embedded in proprietary agent harnesses —
 Ironclaw consumes `trace-commons-protocol` directly.
+
+**Contributions are licensed inbound under MIT OR Apache-2.0**, including
+contributions to the AGPL crates. Contributors keep their copyright; nothing is
+assigned, and there is no CLA to sign. This deliberately departs from
+"inbound = outbound" so the project retains the ability to relicense what it
+distributes — what downstream recipients get is unchanged, since the server
+crates ship AGPL either way. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Permissive code may flow into the AGPL crates; the reverse is a license
 violation no compiler will report, so it is enforced by

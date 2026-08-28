@@ -67,6 +67,21 @@ never reach a published artifact. The existing set is pinned in that same test
 file (`trace-commons-contributor` takes one on `trace-commons-server` under
 `cfg(not(windows))`). Adding a new one requires updating that list on purpose.
 
+### Inbound contributions are MIT/Apache, outbound is AGPL
+
+Contributions arrive under `MIT OR Apache-2.0` — including contributions to the
+three AGPL crates. Recipients of those crates still get them under AGPL; only
+the inbound direction is permissive, so the project keeps the ability to
+relicense what it distributes.
+
+This is stated in `CONTRIBUTING.md`, in the PR template checklist, in `LICENSE`,
+and in the README. If you touch any of those, keep them consistent — a
+contributor who reads only one of them must not come away with a different
+answer.
+
+An AGPL header on a file is about how that file is *distributed*. It says
+nothing about the inbound terms, and adding one does not change them.
+
 ### Why the gate crates are AGPL
 
 `crates/trace-commons-gate-api/README.md` describes the gate traits as a seam
@@ -74,9 +89,10 @@ where a proprietary scoring backend substitutes. Putting that seam under AGPL is
 deliberate: it is available to the copyright holder, who can license itself, and
 closed to third parties.
 
-There is no CLA. An outside contribution to either gate crate would permanently
-end the ability to grant a proprietary exception on it. If someone proposes one,
-raise it rather than merging it quietly.
+There is no CLA, but the inbound MIT/Apache term above is what preserves this:
+without it, a single outside contribution to either gate crate would end the
+ability to grant a proprietary exception on it permanently. Do not accept a
+contribution to these crates offered under other terms without raising it.
 
 ### AGPL section 13
 

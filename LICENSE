@@ -57,3 +57,19 @@ AGPL obligation on the contributor crate.
 
 Contributions made before this split remain available under the MIT and
 Apache-2.0 terms that applied when they were published.
+
+
+Inbound contributions
+---------------------
+
+Contributions to this repository are licensed to the project under
+`MIT OR Apache-2.0` -- including contributions to the AGPL-licensed server
+crates. Contributors retain their copyright; nothing is assigned.
+
+This is intentionally not "inbound = outbound". Recipients of the server crates
+still receive them under the AGPL and owe its obligations. Licensing
+contributions in permissively means the project keeps the ability to relicense
+what it distributes, which a single outside contribution under AGPL-only terms
+would otherwise remove permanently.
+
+See CONTRIBUTING.md.
