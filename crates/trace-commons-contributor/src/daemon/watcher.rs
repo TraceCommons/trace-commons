@@ -705,6 +705,23 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
         changed = true;
     }
 
+    // Release stored preview envelopes nobody is waiting on: pending
+    // previews the contributor never acted on, and, if the store is over
+    // its ceiling, the oldest pending previews until it is not. This runs
+    // whether or not the tick found anything, because a queue that has
+    // stopped changing is exactly the state in which stale previews
+    // accumulate -- every entry pending, nothing resolving, the files kept
+    // forever. Releasing a pin is a change the sweep below acts on, so it
+    // sets `changed`.
+    {
+        let mut queue = shared.queue.lock().expect("queue lock");
+        if !crate::daemon::approved_envelope::release_stale_pins(&shared.store, &mut queue)
+            .is_empty()
+        {
+            changed = true;
+        }
+    }
+
     if changed {
         {
             let queue = shared.queue.lock().expect("queue lock");
