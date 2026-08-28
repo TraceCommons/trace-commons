@@ -184,7 +184,7 @@ verifies it, and puts it in `~/.local/bin` — no `sudo`, nothing outside your
 home directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
 sh install.sh
 ```
 
@@ -207,7 +207,7 @@ On Windows, in PowerShell — same verification policy, installs to
 reopen the terminal afterwards:
 
 ```powershell
-irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
@@ -271,7 +271,7 @@ cargo build --release --bin trace-commons-contributor
 ./target/release/trace-commons-contributor login
 ```
 
-[releases]: https://github.com/TraceCommons/trace-commons-server/releases/tag/contributor-v0.4.6
+[releases]: https://github.com/TraceCommons/trace-commons/releases/tag/contributor-v0.4.6
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 for the full quickstart, consent model, and subcommand reference. Consent is

@@ -1113,6 +1113,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// gate-driver pool (e.g. test doubles). [`postgres::PgBackend`] overrides
     /// this with the real query and its own "pool not configured" check when
     /// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset.
+    /// How many submissions the enumeration above would eventually return,
+    /// ignoring its `LIMIT`. The driver's backlog depth.
+    ///
+    /// Deliberately the SAME predicate as `list_submissions_needing_gate_decision`,
+    /// so the number answers "work this driver can actually pick up" rather
+    /// than "rows with no decision". Two exclusions follow from that and are
+    /// worth knowing before reading a zero as "nothing outstanding":
+    ///
+    /// - Submissions in exponential backoff are excluded until their next
+    ///   attempt is due. They come back on their own.
+    /// - Submissions at or past `max_attempts` are excluded permanently. They
+    ///   do not come back without an operator resetting their attempt row, so
+    ///   a backlog of zero can coexist with traces that will never be scored.
+    async fn count_submissions_needing_gate_decision(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "gate-driver pool not configured".to_string(),
+        ))
+    }
+
     async fn list_submissions_needing_gate_decision(
         &self,
         _now: chrono::DateTime<chrono::Utc>,

@@ -45,7 +45,7 @@
   <launchable type="desktop-id">ai.tracecommons.Contributor.desktop</launchable>
 
   <url type="homepage">https://tracecommons.ai/</url>
-  <url type="bugtracker">https://github.com/TraceCommons/trace-commons-server/issues</url>
+  <url type="bugtracker">https://github.com/TraceCommons/trace-commons/issues</url>
 
   <developer id="ai.tracecommons">
     <name>Trace Commons</name>

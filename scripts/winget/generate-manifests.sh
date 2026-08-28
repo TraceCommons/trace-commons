@@ -26,7 +26,7 @@ set -euo pipefail
 
 VERSION="${1:?usage: generate-manifests.sh <version> [asset-url]   e.g. 0.1.1}"
 TAG="contributor-v$VERSION"
-REPO="TraceCommons/trace-commons-server"
+REPO="TraceCommons/trace-commons"
 ASSET="trace-commons-contributor-x86_64-pc-windows-msvc.zip"
 URL="${2:-https://github.com/$REPO/releases/download/$TAG/$ASSET}"
 

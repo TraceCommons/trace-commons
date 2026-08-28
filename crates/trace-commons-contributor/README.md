@@ -15,7 +15,7 @@ for macOS:
 
 ```bash
 # macOS, Linux
-curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
 sh install.sh
 
 # macOS, via the tap
@@ -26,7 +26,7 @@ brew install trace-commons-contributor
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 

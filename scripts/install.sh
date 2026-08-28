@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the Trace Commons contributor CLI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
 #   sh install.sh
 #
 # Reading it before running it is encouraged and is why the two-step form is
@@ -27,7 +27,7 @@
 # somebody else.
 set -eu
 
-REPO="TraceCommons/trace-commons-server"
+REPO="TraceCommons/trace-commons"
 TEAM_ID="KXSWJN7WY8"
 EXPECTED_AUTHORITY="Developer ID Application: Iqlusion Inc ($TEAM_ID)"
 INSTALL_DIR="${TC_INSTALL_DIR:-$HOME/.local/bin}"

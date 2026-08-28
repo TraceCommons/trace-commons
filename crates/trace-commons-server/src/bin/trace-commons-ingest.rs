@@ -1738,6 +1738,21 @@ struct PerplexityDriverTickSummary {
     failed: usize,
     transient: usize,
     breaker_tripped: bool,
+    /// Wall time for the tick body, excluding the interval slept before it.
+    ///
+    /// The loop sleeps THEN ticks, so cycle time is interval + this. Without
+    /// it, per-trace latency can only be inferred from the gap between
+    /// consecutive log lines minus an interval that may have been retuned,
+    /// which is how this number came to be unknown in the first place.
+    tick_duration_ms: u64,
+    /// Submissions the enumeration would return with no `LIMIT`, measured
+    /// after the tick's work. See
+    /// `Database::count_submissions_needing_gate_decision` for the two things
+    /// it deliberately excludes -- a zero here is not "nothing outstanding".
+    ///
+    /// `None` when the count itself failed: a backlog probe must never turn a
+    /// tick that scored traces into a tick that reports an error.
+    backlog: Option<i64>,
 }
 
 /// In-process PII-backstop driver loop config (server-side NEAR AI PII
@@ -9222,6 +9237,8 @@ fn spawn_perplexity_score_driver_task(
                         failed = summary.failed,
                         transient = summary.transient,
                         breaker_tripped = summary.breaker_tripped,
+                        tick_duration_ms = summary.tick_duration_ms,
+                        backlog = summary.backlog,
                         "Trace Commons perplexity score driver tick completed"
                     );
                 }
@@ -39397,6 +39414,7 @@ async fn run_perplexity_score_driver_tick(
             config.batch_size,
         )
         .await?;
+    let tick_started = std::time::Instant::now();
     let mut summary = PerplexityDriverTickSummary::default();
     // Consecutive per-item failures, reset by any success. See
     // `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`.
@@ -39442,6 +39460,20 @@ async fn run_perplexity_score_driver_tick(
              remainder of the batch left untouched"
         );
     }
+    summary.tick_duration_ms = tick_started.elapsed().as_millis() as u64;
+    // After the work, so the number is what remains rather than what was
+    // waiting when the tick began. Failure is swallowed to a `None`: the
+    // driver's job is scoring, and losing a diagnostic must not turn a
+    // productive tick into a reported error and trip the caller's breaker.
+    summary.backlog = db
+        .count_submissions_needing_gate_decision(
+            Utc::now(),
+            config.knobs.max_attempts,
+            config.backoff_base_seconds,
+        )
+        .await
+        .ok();
+
     Ok(summary)
 }
 
