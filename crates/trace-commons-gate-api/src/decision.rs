@@ -24,6 +24,16 @@ pub struct EnclaveGateOrchestratorConfig {
     /// Per-chunk index-insert dedup threshold: a chunk whose novelty is
     /// below this is a near-duplicate and is not inserted. Default 50000.
     pub embed_insert_novelty_micros: u64,
+    /// Per-chunk perplexity bar for `qualifying_token_fraction_micros`: a
+    /// chunk at or above this counts its tokens toward the qualifying mass.
+    ///
+    /// Deliberately a separate knob from `perplexity_floor_micros` rather
+    /// than a reuse of it. Coupling them would mean recalibrating the
+    /// whole-trace floor silently moves the composition statistic — the
+    /// failure mode #478 describes for the chunk cap, which changed
+    /// character without its constant changing. Defaults to the same value
+    /// so an operator who sets neither gets the obvious behaviour.
+    pub qualifying_chunk_floor_micros: u64,
 }
 
 impl EnclaveGateOrchestratorConfig {
@@ -42,6 +52,7 @@ impl EnclaveGateOrchestratorConfig {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             embed_insert_novelty_micros: 50_000,
+            qualifying_chunk_floor_micros: 0,
         }
     }
 }

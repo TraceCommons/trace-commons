@@ -114,6 +114,7 @@ where
         let perp_agg = crate::chunk_aggregate::aggregate_chunked_perplexity(
             &chunk_scores,
             self.cfg.chunk_min_tokens,
+            self.cfg.qualifying_chunk_floor_micros,
         );
         Ok((plan, chunk_scores, perp_agg))
     }
