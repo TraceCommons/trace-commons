@@ -54,6 +54,25 @@ deploy this for real. Everything else is polish.
 
 ### Production Gap Queue (2026-05-14, post A2.6 outcome routing)
 
+> **Superseded in part, 2026-08-28.** Items 1-3 below rest on the A2.6
+> bake-off's `discrimination_auc` figures, and #204 shows that metric scored
+> *source format* rather than novelty on that corpus: novel and duplicate
+> slices were drawn from different sources by construction, and six trivial
+> measures -- paragraph count at AUC 1.000 among them -- beat every candidate
+> model. The "AUC 0.936" figure below is therefore **not** evidence that
+> Qwen 3.6 27B Dense discriminates novel from duplicate traces.
+>
+> The model remains deployed and is retained as **inherited but unvalidated**;
+> re-running the bake-off is deliberately out of scope for now. What that
+> figure cannot do is settle the question it is cited for. See
+> `docs/superpowers/specs/2026-08-28-gate-validity-program.md`, which
+> decomposes #204, #205, #210, #211, #446, #474, #478 and #199 into five
+> sub-projects, and note that a corpus which cannot discriminate is still
+> consistent with a model that can -- #204 invalidates the measurement, not
+> the model.
+>
+> This queue also predates the pilot. Treat its ordering as historical.
+
 Ordered. Top item is the active blocker.
 
 1. **A2.7 perplexity floor calibration.** A2.6 trends toward Outcome 1
@@ -92,7 +111,8 @@ Ordered. Top item is the active blocker.
    real users.
 
 Recently closed: A2.6 outcome-routing question (settled by Qwen 3.6
-27B's AUC 0.936 — see "Deferred" below for the parked Phase A.5 work);
+27B's AUC 0.936, a figure #204 shows measured source format rather than
+novelty — see "Deferred" below for the parked Phase A.5 work);
 tail_floor credentials-leak pilot blocker (PR #86); CI clippy
 enforcement (PR #78); Actions Node 24 + pilot-bootstrap smoke job
 (PR #79); A2.6 corpus archived for A.5a reuse (PR #83); A.5a rarity
