@@ -14,7 +14,6 @@ use crate::trace_corpus_storage::{
 };
 use crate::trace_invite_registry::InviteTenantMode;
 
-pub mod classify_window_cache;
 pub mod postgres;
 
 mod trace_corpus_common;

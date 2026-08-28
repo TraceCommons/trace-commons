@@ -112,41 +112,6 @@ pub struct NearAiPrivacyFilterAdapter {
     /// The key is a hash and the value is offsets and labels, so the cache
     /// holds no plaintext.
     window_cache: std::sync::Mutex<ClassifyWindowCache>,
-    /// Optional durable tier behind the in-process memo. Absent by default,
-    /// so nothing changes for callers that do not wire one up.
-    window_store: Option<std::sync::Arc<dyn ClassifyWindowStore>>,
-    /// Identifies the classifier configuration these spans came from. A model
-    /// or endpoint change must not read spans produced by the previous one,
-    /// so it participates in the store key.
-    filter_version: String,
-}
-
-/// A durable place to keep classifications between driver ticks.
-///
-/// The in-process memo below covers repeats within one tick. A tick has been
-/// observed running for nine hours on a large envelope, so an in-memory-only
-/// cache dies before most of its value is realised; this trait is the seam
-/// where a persistent tier plugs in.
-///
-/// Values are opaque bytes deliberately. The adapter serialises span offsets
-/// and labels; the store never sees trace text and never needs to know the
-/// span type, so persistence carries no dependency on this crate's wire
-/// contract.
-///
-/// Implementations must be cheap on the read path -- it is called once per
-/// window, potentially thousands of times per envelope -- and must never
-/// panic or block indefinitely: a store failure has to degrade to "classify
-/// it again", never to a stalled tick or a wrong answer.
-#[async_trait]
-pub trait ClassifyWindowStore: Send + Sync {
-    /// Fetch a previously stored classification, or `None` on miss or error.
-    /// Errors are indistinguishable from misses on purpose: a broken cache
-    /// must cost throughput, never correctness.
-    async fn get(&self, filter_version: &str, window_hash: &[u8; 32]) -> Option<Vec<u8>>;
-
-    /// Record a classification. Failures are silently dropped for the same
-    /// reason: not caching is always safe.
-    async fn put(&self, filter_version: &str, window_hash: &[u8; 32], value: &[u8]);
 }
 
 /// Per-adapter memo table. The adapter is constructed once per driver tick,
@@ -226,73 +191,7 @@ impl NearAiPrivacyFilterAdapter {
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
-            window_store: None,
-            filter_version: String::new(),
         })
-    }
-}
-
-impl NearAiPrivacyFilterAdapter {
-    /// A sibling adapter bound to a durable store, sharing this one's HTTP
-    /// client (and therefore its connection pool).
-    ///
-    /// The store is tenant-bound by its implementation, and the tenant is not
-    /// available at `redact_text` time, so scoping happens by constructing a
-    /// scoped adapter per submission. Config validation and the canary stay
-    /// on the per-tick adapter, so a misconfiguration still fails the whole
-    /// tick before any trace is touched rather than failing traces one by
-    /// one.
-    ///
-    /// The in-process memo is NOT inherited: it is deliberately fresh per
-    /// scoped adapter, so windows from one tenant's trace can never be served
-    /// to another's, whatever the store does.
-    pub fn scoped_to_store(
-        &self,
-        store: std::sync::Arc<dyn ClassifyWindowStore>,
-        filter_version: impl Into<String>,
-    ) -> Self {
-        Self {
-            client: self.client.clone(),
-            base_url: self.base_url.clone(),
-            model: self.model.clone(),
-            api_key: self.api_key.clone(),
-            max_input_bytes: self.max_input_bytes,
-            window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
-            window_store: Some(store),
-            filter_version: filter_version.into(),
-        }
-    }
-
-    /// The durable tier, consulted on an in-process miss.
-    async fn stored_window(&self, key: &[u8; 32]) -> Option<Vec<ClassifySpan>> {
-        let store = self.window_store.as_ref()?;
-        let raw = store.get(&self.filter_version, key).await?;
-        match serde_json::from_slice::<Vec<ClassifySpan>>(&raw) {
-            Ok(spans) => Some(spans),
-            // A malformed entry is a cache bug, not a trace problem: drop it
-            // and classify again rather than fail the window.
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "near-ai classify window store returned an undecodable entry"
-                );
-                None
-            }
-        }
-    }
-
-    /// Persist a classification for later ticks. Best-effort by contract.
-    async fn store_window(&self, key: &[u8; 32], spans: &[ClassifySpan]) {
-        let Some(store) = self.window_store.as_ref() else {
-            return;
-        };
-        match serde_json::to_vec(spans) {
-            Ok(raw) => store.put(&self.filter_version, key, &raw).await,
-            Err(err) => tracing::warn!(
-                error = %err,
-                "near-ai classify spans could not be serialised for the window store"
-            ),
-        }
     }
 }
 
@@ -369,7 +268,7 @@ struct ClassifyEntry {
     spans: Vec<ClassifySpan>,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Clone)]
 struct ClassifySpan {
     category: String,
     start: usize,
@@ -380,16 +279,6 @@ struct ClassifySpan {
 
 #[async_trait]
 impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
-    fn scoped_to_window_store(
-        &self,
-        store: std::sync::Arc<dyn ClassifyWindowStore>,
-        filter_version: &str,
-    ) -> Option<std::sync::Arc<dyn PrivacyFilterAdapter>> {
-        Some(std::sync::Arc::new(
-            self.scoped_to_store(store, filter_version),
-        ))
-    }
-
     async fn redact_text(
         &self,
         text: &str,
@@ -543,13 +432,6 @@ impl NearAiPrivacyFilterAdapter {
         if let Some(hit) = self.cached_window(&key) {
             return Ok(hit);
         }
-        // In-process miss: try the durable tier before paying the round trip.
-        // A hit is promoted into the in-process memo so a window repeated
-        // many times in one envelope costs at most one store read.
-        if let Some(hit) = self.stored_window(&key).await {
-            self.remember_window(key, &hit);
-            return Ok(hit);
-        }
 
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
@@ -655,7 +537,6 @@ impl NearAiPrivacyFilterAdapter {
                         reason: "near-ai privacy classifier returned empty data array".to_string(),
                     })?;
             self.remember_window(key, &entry.spans);
-            self.store_window(&key, &entry.spans).await;
             return Ok(entry.spans);
         }
     }

@@ -2437,24 +2437,6 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         &self,
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
-
-    /// A sibling adapter bound to a durable classification cache for one
-    /// tenant, or `None` for backends that do not memoize.
-    ///
-    /// This exists because the tenant is not available at `redact_text` time
-    /// but the cache must be tenant-scoped, so the caller scopes by building
-    /// a per-submission adapter. Returning `None` is always correct: it
-    /// simply means every window is classified.
-    ///
-    /// Default: no caching, so a backend that has not opted in cannot
-    /// accidentally share state between tenants.
-    fn scoped_to_window_store(
-        &self,
-        _store: std::sync::Arc<dyn crate::privacy_filter_near_ai::ClassifyWindowStore>,
-        _filter_version: &str,
-    ) -> Option<std::sync::Arc<dyn PrivacyFilterAdapter>> {
-        None
-    }
 }
 
 pub struct NoopPrivacyFilterAdapter;
