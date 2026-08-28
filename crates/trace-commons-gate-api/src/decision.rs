@@ -24,6 +24,16 @@ pub struct EnclaveGateOrchestratorConfig {
     /// Per-chunk index-insert dedup threshold: a chunk whose novelty is
     /// below this is a near-duplicate and is not inserted. Default 50000.
     pub embed_insert_novelty_micros: u64,
+    /// Per-chunk perplexity bar for `qualifying_token_fraction_micros`: a
+    /// chunk at or above this counts its tokens toward the qualifying mass.
+    ///
+    /// Deliberately a separate knob from `perplexity_floor_micros` rather
+    /// than a reuse of it. Coupling them would mean recalibrating the
+    /// whole-trace floor silently moves the composition statistic — the
+    /// failure mode #478 describes for the chunk cap, which changed
+    /// character without its constant changing. Defaults to the same value
+    /// so an operator who sets neither gets the obvious behaviour.
+    pub qualifying_chunk_floor_micros: u64,
 }
 
 impl EnclaveGateOrchestratorConfig {
@@ -42,6 +52,7 @@ impl EnclaveGateOrchestratorConfig {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             embed_insert_novelty_micros: 50_000,
+            qualifying_chunk_floor_micros: 0,
         }
     }
 }
@@ -80,6 +91,10 @@ pub struct OrchestrationDecision {
     pub total_chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
+    /// Token-weighted share of the scored trace sitting in chunks that clear
+    /// `qualifying_chunk_floor_micros`. Shadow mode: recorded, gates nothing.
+    /// See `ChunkedPerplexityAggregate::qualifying_token_fraction_micros`.
+    pub qualifying_token_fraction_micros: u64,
     /// Every chunk entry inserted into the vector index (both gates passed,
     /// per-chunk novelty at or above the insert threshold). Empty on fail.
     pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
@@ -112,6 +127,8 @@ pub struct PerplexityOnlyOutcome {
     pub chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
+    /// Token-weighted share of the scored trace clearing the per-chunk floor.
+    pub qualifying_token_fraction_micros: u64,
 }
 
 /// A per-chunk vector-index entry the orchestrator inserted. The host maps

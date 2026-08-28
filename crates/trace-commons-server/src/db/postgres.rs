@@ -1983,6 +1983,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&54_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V54__trace_gate_decision_qualifying_mass.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&54_i32, &"trace_gate_decision_qualifying_mass"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5747,6 +5768,51 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V53 must record itself in _trace_commons_migrations"
+        );
+    }
+
+    /// V54 records the composition statistic for large traces (#478). Shadow
+    /// mode, and prospective for a harder reason than V53: per-chunk logprobs
+    /// are never persisted, so it cannot be recomputed for a decision already
+    /// taken at any price. NULL must stay distinct from 0 -- a trace where no
+    /// chunk clears the floor genuinely scores 0, while a pre-V54 row and any
+    /// deterministic-service decision have no value at all.
+    #[test]
+    fn v54_adds_a_nullable_qualifying_mass_column() {
+        const V54: &str =
+            include_str!("../../../../migrations/V54__trace_gate_decision_qualifying_mass.sql");
+        assert!(
+            V54.contains("ADD COLUMN IF NOT EXISTS qualifying_token_fraction_micros BIGINT"),
+            "V54 must add the qualifying-mass column"
+        );
+        assert!(
+            !V54.contains("NOT NULL") && !V54.contains("DEFAULT"),
+            "V54 must stay nullable and backfill-free: a zero default would \
+             enrol every historical row into the calibration sample as a real \
+             observation of the worst possible score"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47 and V53: wiring, pinned.
+    /// Counted rather than merely present, for the reason V53's test records
+    /// -- a literal in the assertion would otherwise satisfy itself.
+    #[test]
+    fn v54_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!(
+            "migrations/V{}__trace_gate_decision_qualifying_mass.sql",
+            54
+        );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V54 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 54);
+        assert!(
+            THIS_FILE.contains(&version_marker),
+            "V54 must record itself in _trace_commons_migrations"
         );
     }
 

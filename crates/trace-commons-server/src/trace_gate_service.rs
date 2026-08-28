@@ -110,6 +110,15 @@ pub struct GateDecision {
     pub total_chunk_count: u32,
     /// True when the per-trace chunk cap dropped trailing chunks.
     pub chunks_capped: bool,
+    /// Token-weighted share of the scored trace sitting in chunks that clear
+    /// the per-chunk perplexity floor. Shadow mode: recorded, gates nothing.
+    ///
+    /// `None` from a deterministic service, which scores the whole trace as
+    /// one chunk and holds no per-chunk floor: it cannot compute the
+    /// statistic, and reporting 0 would claim that none of the trace
+    /// qualifies. Unknown and zero are different facts, and the column is
+    /// nullable so it can say so.
+    pub qualifying_token_fraction_micros: Option<u64>,
     /// Every per-chunk vector-index entry the gate inserted. Empty for
     /// deterministic/legacy services and failed gates. The host persists
     /// these as (submission_id, chunk_index)-tagged rows for revocation.
@@ -370,6 +379,7 @@ fn build_deterministic_decision(
         chunk_count: 1,
         total_chunk_count: 1,
         chunks_capped: false,
+        qualifying_token_fraction_micros: None,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
         // Deterministic services never see plaintext (see `dedup_simhash`
@@ -708,6 +718,7 @@ where
             chunk_count: decision.chunk_count,
             total_chunk_count: decision.total_chunk_count,
             chunks_capped: decision.chunks_capped,
+            qualifying_token_fraction_micros: Some(decision.qualifying_token_fraction_micros),
             chunk_vector_entries: decision
                 .inserted_chunk_entries
                 .iter()
