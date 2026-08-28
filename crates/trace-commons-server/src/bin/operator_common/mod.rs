@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Helpers shared by the operator binaries (`trace-commons-review`,
 //! `trace-commons-admin`). Brought into each binary via
 //! `#[path = "operator_common/mod.rs"] mod operator_common;`.

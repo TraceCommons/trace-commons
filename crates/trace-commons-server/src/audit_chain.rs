@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Audit hash-chain verification helpers shared between the ingest binary and
 //! tests.
 //!

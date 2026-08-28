@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration tests for the bake-off `run_candidate_eval` glue.
 //!
 //! Pulls the same `gate_calibrate/` submodules used by the binary in via

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Enclave-side abstractions for the Trace Commons gate service.
 //!
 //! This crate is the structural seam between code that would run inside a

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Server-signed score attestations.
 //!
 //! See `docs/superpowers/specs/2026-07-29-score-attestation-design.md` for

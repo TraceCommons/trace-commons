@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Compose `PerplexityScorer` + `Embedder` + `VectorIndex` into a single
 //! gate-decision pipeline.
 

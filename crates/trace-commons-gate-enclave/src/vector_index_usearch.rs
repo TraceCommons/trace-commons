@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `UsearchVectorIndex` — production-shape `VectorIndex` impl backed by the
 //! `usearch` HNSW library (Phase A4).
 //!

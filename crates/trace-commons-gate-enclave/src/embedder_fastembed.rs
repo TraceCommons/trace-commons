@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! fastembed-rs-backed `Embedder` (Phase A3).
 //!
 //! Loads a configured sentence-embedding model via `fastembed::TextEmbedding`

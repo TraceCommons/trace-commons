@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Unit-level coverage for the on-write DB audit chain verification (Gap 2).
 //!
 //! The verification helper is pure: given the expected `event_hash` /

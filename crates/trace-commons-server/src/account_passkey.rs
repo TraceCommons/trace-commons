@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Slice 2 passkey scaffolding: the WebAuthn relying-party instance and the
 //! in-process ceremony store.
 //!

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Local perplexity scorer (Phase A2.3).
 //!
 //! Loads a base language model via [`mistralrs`] and scores plaintext traces

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pure whole-trace aggregation over per-chunk scoring results.
 //!
 //! Representative = token-weighted whole-trace values (equal to a single

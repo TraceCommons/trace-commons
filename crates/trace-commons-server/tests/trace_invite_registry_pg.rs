@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Postgres-backed tests for the V42 invite-grant table.
 //!
 //! Skipped unless TRACE_COMMONS_PG_TEST_DATABASE_URL (or DATABASE_URL) is set.

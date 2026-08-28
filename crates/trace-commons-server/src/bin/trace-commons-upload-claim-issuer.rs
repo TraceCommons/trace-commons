@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use chrono::{Duration as ChronoDuration, Utc};
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;

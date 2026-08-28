@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! PostgreSQL backend for TraceCommons server storage.
 
 use std::collections::HashSet;

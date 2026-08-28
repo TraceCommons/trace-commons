@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Public contracts for the Trace Commons gate.
 //!
 //! This crate is the stable seam between the open protocol server and any

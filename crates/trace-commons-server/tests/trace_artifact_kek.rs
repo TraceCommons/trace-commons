@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use secrecy::SecretString;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{KekContext, KmsKeyWrapper, LocalMasterKeyWrapper};
