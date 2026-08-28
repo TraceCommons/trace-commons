@@ -5789,7 +5789,7 @@ impl TraceCorpusStore for PgBackend {
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
                         vector_entry_id, credit_withheld_reason, \
                         peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped, \
-                        total_chunk_count, composite_score_micros, \
+                        total_chunk_count, qualifying_token_fraction_micros, composite_score_micros, \
                         vector_index_snapshot_id, index_cardinality_at_scoring \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
@@ -5809,7 +5809,7 @@ impl TraceCorpusStore for PgBackend {
                         embedding_evidence_hash, attestation_chain_hash, decided_at, \
                         vector_entry_id, credit_withheld_reason, \
                         peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped, \
-                        total_chunk_count, composite_score_micros, \
+                        total_chunk_count, qualifying_token_fraction_micros, composite_score_micros, \
                         vector_index_snapshot_id, index_cardinality_at_scoring \
                  FROM trace_gate_decisions \
                  WHERE tenant_id = $1 \
@@ -5844,6 +5844,7 @@ impl TraceCorpusStore for PgBackend {
                 chunk_count: row.get("chunk_count"),
                 total_chunk_count: row.get("total_chunk_count"),
                 chunks_capped: row.get("chunks_capped"),
+                qualifying_token_fraction_micros: row.get("qualifying_token_fraction_micros"),
                 composite_score_micros: row.get("composite_score_micros"),
                 vector_index_snapshot_id: row.get("vector_index_snapshot_id"),
                 index_cardinality_at_scoring: row.get("index_cardinality_at_scoring"),
@@ -5898,9 +5899,10 @@ impl TraceCorpusStore for PgBackend {
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
                  decided_at, vector_entry_id, credit_withheld_reason,
                  peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped,
-                 total_chunk_count, composite_score_micros,
+                 total_chunk_count, qualifying_token_fraction_micros,
+                 composite_score_micros,
                  vector_index_snapshot_id, index_cardinality_at_scoring
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5923,6 +5925,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.chunk_count,
                 &decision.chunks_capped,
                 &decision.total_chunk_count,
+                &decision.qualifying_token_fraction_micros,
                 &decision.composite_score_micros,
                 &decision.vector_index_snapshot_id,
                 &decision.index_cardinality_at_scoring,
@@ -5950,9 +5953,10 @@ impl TraceCorpusStore for PgBackend {
                  novelty_passed, embedding_evidence_hash, attestation_chain_hash,
                  decided_at, vector_entry_id, credit_withheld_reason,
                  peak_perplexity_micros, peak_novelty_micros, chunk_count, chunks_capped,
-                 total_chunk_count, composite_score_micros,
+                 total_chunk_count, qualifying_token_fraction_micros,
+                 composite_score_micros,
                  vector_index_snapshot_id, index_cardinality_at_scoring
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             &[
                 &tenant_id,
                 &decision.decision_id,
@@ -5975,6 +5979,7 @@ impl TraceCorpusStore for PgBackend {
                 &decision.chunk_count,
                 &decision.chunks_capped,
                 &decision.total_chunk_count,
+                &decision.qualifying_token_fraction_micros,
                 &decision.composite_score_micros,
                 &decision.vector_index_snapshot_id,
                 &decision.index_cardinality_at_scoring,
@@ -6378,7 +6383,8 @@ impl TraceCorpusStore for PgBackend {
                         d.vector_entry_id, d.credit_withheld_reason,
                         d.peak_perplexity_micros, d.peak_novelty_micros, d.chunk_count, d.chunks_capped,
                         d.total_chunk_count, d.composite_score_micros,
-                        d.vector_index_snapshot_id, d.index_cardinality_at_scoring
+                        d.vector_index_snapshot_id, d.index_cardinality_at_scoring,
+                        d.qualifying_token_fraction_micros
                  FROM trace_gate_decisions d
                  JOIN trace_submissions s
                    ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
@@ -6416,6 +6422,10 @@ impl TraceCorpusStore for PgBackend {
             composite_score_micros: row.get(20),
             vector_index_snapshot_id: row.get(21),
             index_cardinality_at_scoring: row.get(22),
+            // Appended last in the SELECT rather than kept in column order:
+            // every read here is positional, so inserting mid-list would
+            // silently re-point the indices above it.
+            qualifying_token_fraction_micros: row.get(23),
         }))
     }
 }

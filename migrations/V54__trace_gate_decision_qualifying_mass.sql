@@ -1,0 +1,69 @@
+-- A composition statistic for large traces, recorded in shadow mode (#478).
+--
+-- Admission is decided on representative_perplexity_micros, which is
+-- exp(sum_c sum_nll_c / sum_c n_c) -- a token-weighted geometric mean over
+-- the scored chunks. Two properties of that statistic fail on the traces the
+-- pilot now receives.
+--
+-- It regresses toward the global mean as traces grow: a short trace is
+-- homogeneous and can score extreme, while a 176-chunk session mixes reading,
+-- editing, tool output and prose and lands near the average of agent text. A
+-- floor calibrated when traces were ~9 chunks therefore passes essentially
+-- every long trace -- 98% of uncapped and 93% of capped decisions, measured
+-- 2026-08-28.
+--
+-- And its resolution is exponentially compressed exactly where the decisions
+-- are. The mean is monotone in composition, but a trace that is a fraction s
+-- substantive scores exp(hi*s + lo*(1-s)), so with substantive chunks at
+-- mean_nll 3.0 against boilerplate at 0.5, a quarter-substantive trace sits
+-- 7.8% of the way up the statistic's range. Boilerplate-heavy traces are all
+-- crushed into the bottom few percent, where a fixed floor cannot separate
+-- them.
+--
+-- qualifying_token_fraction_micros is the token-weighted share of the scored
+-- trace sitting in chunks whose OWN perplexity clears a per-chunk floor:
+--
+--     sum{ n_c : ppl_c >= floor } / sum_c n_c
+--
+-- linear in composition across the whole range, and a proportion rather than
+-- an average, so it does not regress with trace length.
+--
+-- SHADOW MODE. Nothing reads this column to decide anything. It may not
+-- become a floor until calibration over a real corpus shows non-degenerate
+-- spread: fewer than 25% of traces at exactly 0 and fewer than 25% at exactly
+-- 1. That bar exists because tail_fraction_micros is already a mass-shaped
+-- statistic that failed -- 81% of pilot traces score exactly 0 and its floor
+-- is disabled -- not because the shape is wrong but because tail_tokens
+-- counts individual TOKENS below logprob -8.0 (p < 3.4e-4), which against a
+-- 27B model on agent text is a numerator that is empty by construction. This
+-- column's unit is a ~2048-token chunk and its bar is a perplexity floor
+-- whose live region is known. That is an argument, not a proof, which is why
+-- the calibration gate is mandatory.
+--
+-- PROSPECTIVE BY CONSTRUCTION, for a harder reason than V53's. Per-chunk
+-- logprobs are never persisted -- only the aggregates derived from them -- so
+-- this cannot be recomputed for a decision already taken at any price. Every
+-- existing row is permanently unknown, and calibration data accrues only
+-- forward from deploy.
+--
+-- Nullable and backfill-free, like V47's total_chunk_count and V53's
+-- instrumentation. NULL is distinct from 0 and the distinction is
+-- load-bearing: a trace where no chunk clears the floor has a genuine
+-- qualifying mass of 0, while a pre-V54 row and any decision from a
+-- deterministic service (one chunk, no per-chunk floor) have no value at all.
+-- A zero default would enrol both into the calibration sample as real
+-- observations of the worst possible score.
+--
+-- Hash-only/label-only discipline is unaffected: a fraction in micros. No
+-- trace content, no contributor identity, no operator-secret material.
+--
+-- No RLS change (a column on an already-RLS-forced table inherits the tenant
+-- predicate). No column-level SELECT grant: trace_gate_driver holds
+-- column-scoped grants (V45/V47) and nothing in the credit, dedup, cap or
+-- attestation passes reads this, so granting it would widen a reader role for
+-- no reason. Calibration reads it through an operator connection.
+--
+-- This column changes nothing about which traces pass the gate, what any
+-- contributor is paid, or what any attestation says.
+ALTER TABLE trace_gate_decisions
+    ADD COLUMN IF NOT EXISTS qualifying_token_fraction_micros BIGINT;

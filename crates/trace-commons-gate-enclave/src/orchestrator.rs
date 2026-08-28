@@ -145,6 +145,7 @@ where
             perplexity_passed,
             chunk_count: plan.chunks.len() as u32,
             chunks_capped: plan.chunks_capped,
+            qualifying_token_fraction_micros: perp_agg.qualifying_token_fraction_micros,
         })
     }
 
@@ -260,6 +261,7 @@ where
             // coverage.
             total_chunk_count: (plan.chunks.len() as u32).saturating_add(plan.dropped_chunk_count),
             chunks_capped: plan.chunks_capped,
+            qualifying_token_fraction_micros: perp_agg.qualifying_token_fraction_micros,
             inserted_chunk_entries,
             vector_index_snapshot_id: index_snapshot.map(|s| s.snapshot_id),
             index_cardinality_at_scoring: index_snapshot.map(|s| s.cardinality),

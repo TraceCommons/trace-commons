@@ -5646,6 +5646,7 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
                 peak_novelty_micros: None,
                 chunk_count: None,
                 total_chunk_count: None,
+                qualifying_token_fraction_micros: None,
                 chunks_capped: None,
                 composite_score_micros: None,
                 vector_index_snapshot_id: None,

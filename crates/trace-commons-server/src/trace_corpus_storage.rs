@@ -1903,6 +1903,19 @@ pub struct TraceGateDecisionRow {
     /// True when the per-trace chunk cap dropped trailing chunks
     /// (migration V37). `None` reads as false.
     pub chunks_capped: Option<bool>,
+    /// Token-weighted share of the scored trace sitting in chunks that clear
+    /// the per-chunk perplexity floor, * 1e6 (migration V54, #478). Shadow
+    /// mode: recorded, gates nothing.
+    ///
+    /// `None` means no value exists, and unlike most of this struct that is
+    /// permanent: per-chunk logprobs are never persisted, so a decision
+    /// written before V54 can never be given one. `None` also covers a
+    /// deterministic service, which scores the whole trace as one chunk and
+    /// holds no per-chunk floor. It is not `Some(0)` — a trace where no chunk
+    /// clears the floor earns a genuine 0 — and readers MUST NOT default it,
+    /// or calibration will read every unmeasured row as the worst possible
+    /// observation.
+    pub qualifying_token_fraction_micros: Option<i64>,
     /// The composite credit-quality score `q` * 1e6 as computed at scoring
     /// time under the calibration active then (migration V53, #199).
     ///

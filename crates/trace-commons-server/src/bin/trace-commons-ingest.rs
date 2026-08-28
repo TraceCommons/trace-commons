@@ -273,6 +273,14 @@ const TRACE_COMMONS_GATE_CHUNK_MIN_TOKENS: &str = "TRACE_COMMONS_GATE_CHUNK_MIN_
 #[allow(dead_code)]
 const TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS: &str =
     "TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS";
+/// Per-chunk perplexity bar for the shadow-mode qualifying-mass statistic
+/// (#478). Unset means "use `perplexity_floor_micros`", which is the obvious
+/// behaviour for an operator who sets neither; it is a separate variable so
+/// that recalibrating the whole-trace floor does not silently move the
+/// composition statistic underneath it.
+#[allow(dead_code)]
+const TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS: &str =
+    "TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS";
 #[allow(dead_code)]
 const TRACE_COMMONS_GATE_DEFAULT_CHUNK_TARGET_TOKENS: usize = 2048;
 #[allow(dead_code)]
@@ -294,6 +302,11 @@ struct GateChunkingEnvConfig {
     chunk_cap: usize,
     chunk_min_tokens: u64,
     embed_insert_novelty_micros: u64,
+    /// `None` when the operator set no explicit bar: the caller substitutes
+    /// `perplexity_floor_micros`. Not defaulted to 0 here, because 0 is a
+    /// legitimate setting meaning "every chunk qualifies" and a sentinel that
+    /// collides with a real value cannot be told apart from one.
+    qualifying_chunk_floor_micros: Option<u64>,
 }
 
 /// Parse and validate the chunk-knob env vars, reusing `parse_usize_env` for
@@ -329,6 +342,16 @@ fn parse_gate_chunking_config_from_env() -> anyhow::Result<GateChunkingEnvConfig
         TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
         TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
     )?;
+    let qualifying_chunk_floor_micros =
+        match std::env::var(TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS) {
+            Ok(raw) if !raw.trim().is_empty() => Some(raw.trim().parse::<u64>().map_err(|_| {
+                anyhow::anyhow!(
+                    "{TRACE_COMMONS_GATE_QUALIFYING_CHUNK_FLOOR_MICROS} must be a \
+                     non-negative integer in micros"
+                )
+            })?),
+            _ => None,
+        };
     validate_gate_chunking_knobs(chunk_target_tokens, chunk_max_tokens, chunk_cap)?;
     Ok(GateChunkingEnvConfig {
         chunk_target_tokens,
@@ -336,6 +359,7 @@ fn parse_gate_chunking_config_from_env() -> anyhow::Result<GateChunkingEnvConfig
         chunk_cap,
         chunk_min_tokens: chunk_min_tokens as u64,
         embed_insert_novelty_micros: embed_insert_novelty_micros as u64,
+        qualifying_chunk_floor_micros,
     })
 }
 
@@ -5365,6 +5389,9 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
         chunk_cap: chunking.chunk_cap,
         chunk_min_tokens: chunking.chunk_min_tokens,
         embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
+        qualifying_chunk_floor_micros: chunking
+            .qualifying_chunk_floor_micros
+            .unwrap_or(perplexity_floor_micros),
     };
     let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
@@ -5641,6 +5668,9 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         chunk_cap: chunking.chunk_cap,
         chunk_min_tokens: chunking.chunk_min_tokens,
         embed_insert_novelty_micros: chunking.embed_insert_novelty_micros,
+        qualifying_chunk_floor_micros: chunking
+            .qualifying_chunk_floor_micros
+            .unwrap_or(perplexity_floor_micros),
     };
     let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
     Ok(Arc::new(EnclaveGateService::new(
@@ -50144,6 +50174,13 @@ async fn evaluate_and_record_gate(
         // instead of leaving a reader to assume the whole trace was scored.
         total_chunk_count: Some(i32::try_from(decision.total_chunk_count).unwrap_or(i32::MAX)),
         chunks_capped: Some(decision.chunks_capped),
+        // Composition statistic for large traces (migration V54, #478).
+        // Shadow mode: recorded here, read by nothing that decides anything.
+        // `None` from a deterministic service, which has no per-chunk floor
+        // to hold a chunk to — unknown, not a qualifying mass of zero.
+        qualifying_token_fraction_micros: decision
+            .qualifying_token_fraction_micros
+            .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
         // Prospective gate-utility instrumentation (#199).
         composite_score_micros: Some(composite.q_micros),
         // Reported by the index, not derived here: `None` when the configured
@@ -51387,6 +51424,9 @@ async fn score_one_submission(
                             chunk_count: None,
                             total_chunk_count: None,
                             chunks_capped: None,
+                            // Same: no chunks were scored, so there is no
+                            // per-chunk distribution to take a share of.
+                            qualifying_token_fraction_micros: None,
                             // Not instrumented, and it never can be: this
                             // branch short-circuits before the gate service
                             // runs, so no composite was computed and no index
@@ -51654,6 +51694,10 @@ async fn gate_evaluate_worker_handler(
             chunk_count: 1,
             total_chunk_count: 1,
             chunks_capped: false,
+            // Same reason as the hashes below: this copy never touches the
+            // per-chunk scores the statistic is computed from, and the real
+            // decision row already carries it. Unknown, not zero.
+            qualifying_token_fraction_micros: None,
             chunk_vector_entries: Vec::new(),
             // This is a synthetic re-hydration of the already-persisted
             // decision for the credit-emission call below (no ciphertext or

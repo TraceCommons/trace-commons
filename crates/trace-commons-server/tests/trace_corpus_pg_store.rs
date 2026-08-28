@@ -3344,6 +3344,7 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         peak_novelty_micros: None,
         chunk_count: None,
         total_chunk_count: None,
+        qualifying_token_fraction_micros: None,
         chunks_capped: None,
         composite_score_micros: None,
         vector_index_snapshot_id: None,
