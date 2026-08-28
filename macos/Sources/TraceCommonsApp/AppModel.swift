@@ -75,7 +75,9 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var status: DaemonStatus = .unknown
-    @Published private(set) var pending: [QueueEntry] = []
+    @Published private(set) var pending: [QueueEntry] = [] {
+        didSet { recomputeWaiting() }
+    }
     @Published private(set) var summaries: [String: PreviewSummary] = [:]
     @Published private(set) var summaryErrors: [String: String] = [:]
     /// A session the daemon's preview scheduler refused to parse for being
@@ -117,14 +119,56 @@ final class AppModel: ObservableObject {
 
     // MARK: - Derived state the shell renders
 
+    /// What is waiting for a yes or no, and how that splits by project.
+    ///
+    /// Both are *stored*, recomputed only when `pending` actually changes
+    /// (see `recomputeWaiting`), because both used to be computed
+    /// properties that a SwiftUI body evaluated afresh every single time.
+    /// `QueueContent` alone read `awaitingDecision` to test emptiness, read
+    /// `decisionsOwed` for its headline, read `waitingByProject` for its
+    /// group headers -- which walked `awaitingDecision` again -- and then
+    /// filtered `awaitingDecision` once more *per group* to find that
+    /// group's rows. At the 500-entry cap the queue runs at, that was tens
+    /// of thousands of entry visits and a dozen freshly allocated arrays on
+    /// the main thread for every redraw, however small the thing that
+    /// prompted it. See #388.
+    ///
+    /// A fresh array every time also denied SwiftUI any chance of deciding
+    /// a group had not changed; a stored one at least holds still.
+    @Published private(set) var awaitingDecision: [QueueEntry] = []
+
+    /// What is waiting, per project, with sizes, its own entries, and the
+    /// id `submitProject` takes.
+    ///
+    /// Grouped by `projectID`, not `projectLabel`: a label is a display
+    /// name only, not guaranteed unique across two different projects, and
+    /// grouping by it here would silently merge them into one bucket with
+    /// one Submit button that could approve the wrong project's entries.
+    /// Order is first-seen, which is also `awaitingDecision`'s order, so
+    /// this reshuffles nothing a contributor has already scanned.
+    @Published private(set) var waitingByProject: [QueueGroup<QueueEntry>] = []
+
     /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
     /// or no -- not sessions found and not queue total.
     var decisionsOwed: Int {
-        pending.filter { $0.state == .pending }.count
+        awaitingDecision.count
     }
 
-    var awaitingDecision: [QueueEntry] {
-        pending.filter { $0.state == .pending }
+    /// The single place the two derived queue views are rebuilt. Called
+    /// from `pending`'s `didSet`, so it runs when the queue moved and never
+    /// when a view merely redrew.
+    private func recomputeWaiting() {
+        let waiting = pending.filter { $0.state == .pending }
+        publishIfChanged(\.awaitingDecision, waiting)
+        publishIfChanged(
+            \.waitingByProject,
+            QueueGrouping.groups(
+                waiting,
+                projectID: \.projectID,
+                projectLabel: \.projectLabel,
+                sizeBytes: \.sizeBytes
+            )
+        )
     }
 
     var armedProjects: [ProjectRow] {
@@ -149,29 +193,6 @@ final class AppModel: ObservableObject {
     /// also wrong.
     var budgetHealth: HealthCopy? {
         HealthCopy.forBudget(status.dailyBudget)
-    }
-
-    /// What is waiting, per project, with sizes and the id `submitProject`
-    /// takes.
-    ///
-    /// Grouped by `projectID`, not `projectLabel`: a label is a display name
-    /// only, not guaranteed unique across two different projects, and
-    /// grouping by it here would silently merge them into one bucket with
-    /// one Submit button that could approve the wrong project's entries.
-    var waitingByProject: [(id: String, label: String, count: Int, bytes: Int)] {
-        var order: [String] = []
-        var labels: [String: String] = [:]
-        var counts: [String: (Int, Int)] = [:]
-        for entry in awaitingDecision {
-            if counts[entry.projectID] == nil {
-                order.append(entry.projectID)
-                counts[entry.projectID] = (0, 0)
-                labels[entry.projectID] = entry.projectLabel
-            }
-            let current = counts[entry.projectID]!
-            counts[entry.projectID] = (current.0 + 1, current.1 + entry.sizeBytes)
-        }
-        return order.map { (id: $0, label: labels[$0]!, count: counts[$0]!.0, bytes: counts[$0]!.1) }
     }
 
     // MARK: - Lifecycle
