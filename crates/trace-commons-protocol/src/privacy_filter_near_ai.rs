@@ -850,6 +850,9 @@ fn apply_spans(
             span_count,
             by_label,
             decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
         },
         report,
     }))

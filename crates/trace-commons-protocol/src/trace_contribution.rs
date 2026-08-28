@@ -428,6 +428,14 @@ pub struct SafePrivacyFilterSummary {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub by_label: BTreeMap<String, u32>,
     pub decoded_mismatch: bool,
+    /// Which classify policy produced this result, so decisions made under
+    /// different policies stay distinguishable after the fact. Label only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classify_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub events_examined: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub events_skipped_by_policy: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2221,6 +2229,9 @@ pub fn safe_privacy_filter_redaction_from_output(
             span_count: detected_spans.len() as u32,
             by_label,
             decoded_mismatch,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
         },
         report,
     })
@@ -2351,6 +2362,9 @@ fn merge_privacy_filter_summary(
         span_count: 0,
         by_label: BTreeMap::new(),
         decoded_mismatch: false,
+        classify_policy: None,
+        events_examined: 0,
+        events_skipped_by_policy: 0,
     });
     target.schema_version = target.schema_version.max(next.schema_version);
     target.span_count = target.span_count.saturating_add(next.span_count);
@@ -2358,6 +2372,13 @@ fn merge_privacy_filter_summary(
     for (label, count) in &next.by_label {
         *target.by_label.entry(label.clone()).or_insert(0) += count;
     }
+    if next.classify_policy.is_some() {
+        target.classify_policy = next.classify_policy.clone();
+    }
+    target.events_examined = target.events_examined.saturating_add(next.events_examined);
+    target.events_skipped_by_policy = target
+        .events_skipped_by_policy
+        .saturating_add(next.events_skipped_by_policy);
 }
 
 fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
@@ -4375,11 +4396,6 @@ pub async fn rescrub_envelope_prose_pii_with(
         }
     }
 
-    // `examined_events` / `skipped_events` are policy-coverage counters kept
-    // for future observability; nothing consumes them yet.
-    let _ = examined_events;
-    let _ = skipped_events;
-
     // Second pass: no awaits below this line, so the updates collected
     // above are applied atomically.
     for (index, redacted_text) in event_updates {
@@ -4401,9 +4417,24 @@ pub async fn rescrub_envelope_prose_pii_with(
             envelope.privacy.pii_labels_present.push(label.clone());
         }
     }
-    if let Some(summary) = &summary {
-        merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, summary);
-    }
+    // Policy and coverage counts are recorded unconditionally, even when the
+    // adapter found nothing to redact: a summary is the only place these
+    // survive, and "which policy examined this trace" must stay answerable
+    // regardless of whether that policy found anything.
+    let mut summary = summary.unwrap_or_else(|| SafePrivacyFilterSummary {
+        schema_version: 1,
+        output_mode: "redacted_text_only".to_string(),
+        span_count: 0,
+        by_label: BTreeMap::new(),
+        decoded_mismatch: false,
+        classify_policy: None,
+        events_examined: 0,
+        events_skipped_by_policy: 0,
+    });
+    summary.classify_policy = Some(policy.as_label().to_string());
+    summary.events_examined = examined_events;
+    summary.events_skipped_by_policy = skipped_events;
+    merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, &summary);
 
     // Zero-finding responses are not automatically trustworthy (Task 2): a
     // 200 with an empty span list is indistinguishable, on its own, from an
@@ -8093,6 +8124,9 @@ mod tests {
                                 1,
                             )]),
                             decoded_mismatch: false,
+                            classify_policy: None,
+                            events_examined: 0,
+                            events_skipped_by_policy: 0,
                         },
                         report,
                     }))
@@ -8272,6 +8306,9 @@ mod tests {
                         span_count: 0,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report: RedactionReport::default(),
                 }))
@@ -8367,6 +8404,9 @@ mod tests {
                         span_count: canary_values.len() as u32,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8438,6 +8478,9 @@ mod tests {
                         span_count: canary_values.len() as u32,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8507,6 +8550,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8579,6 +8625,9 @@ mod tests {
                                 1,
                             )]),
                             decoded_mismatch: false,
+                            classify_policy: None,
+                            events_examined: 0,
+                            events_skipped_by_policy: 0,
                         },
                         report,
                     }))
@@ -9111,6 +9160,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::from([("person_name".into(), 1)]),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -9223,6 +9275,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::from([("private_email".into(), 1)]),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -9355,6 +9410,65 @@ mod tests {
                 .any(|t| t.contains("12 Oak Street")),
             "all-events must preserve today's behaviour exactly"
         );
+    }
+
+    #[test]
+    fn summary_without_policy_serializes_unchanged() {
+        use super::*;
+        // The envelope digest is pinned in the contributor crate. A summary
+        // that does not set the new fields must serialize byte-identically
+        // to before.
+        let summary = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "spans".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
+        };
+        let json = serde_json::to_string(&summary).expect("serializes");
+        assert!(
+            !json.contains("classify_policy"),
+            "absent policy must not serialize"
+        );
+        assert!(
+            !json.contains("events_examined"),
+            "zero counts must not serialize"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn prose_only_records_policy_and_counts() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![
+            (
+                TraceContributionEventType::UserMessage,
+                "my name is Dana Ruiz",
+            ),
+            (
+                TraceContributionEventType::ToolResult,
+                "file says Dana Ruiz, 12 Oak Street",
+            ),
+            (TraceContributionEventType::ToolCall, "grep -rn Dana"),
+        ]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::ProseOnly)
+            .await
+            .expect("rescrub succeeds");
+
+        let summary = envelope
+            .privacy
+            .privacy_filter_summary
+            .as_ref()
+            .expect("summary recorded");
+        assert_eq!(summary.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(summary.events_examined, 1);
+        assert_eq!(summary.events_skipped_by_policy, 2);
     }
 
     // The envelope-level re-scrub is the second site, and it gets the same

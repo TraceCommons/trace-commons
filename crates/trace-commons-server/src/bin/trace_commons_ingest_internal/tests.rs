@@ -81158,6 +81158,9 @@ impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for Backst
                 span_count: 1,
                 by_label: BTreeMap::from([("private_email".to_string(), 1)]),
                 decoded_mismatch: false,
+                classify_policy: None,
+                events_examined: 0,
+                events_skipped_by_policy: 0,
             },
             report,
         }))
