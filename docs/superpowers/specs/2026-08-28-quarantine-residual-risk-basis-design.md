@@ -78,6 +78,7 @@ pub enum ResidualRiskCondition {
     KeyFinding,
     CoverageIncomplete,
     ResidualSurvivor,
+    ResidualScanUnavailable,
     FoundAndRemoved,
     ConsentContentFlag,
 }
@@ -95,7 +96,15 @@ means "no residual scan was run", which is not the same as "the residual scan
 was clean" and must never be recorded as `ResidualSurvivor`'s absence being
 evidence of anything.
 
-The first three force High. The last two are the Medium floor, recorded
+`ResidualScanUnavailable` is a distinct condition, not a flavour of
+`CoverageIncomplete`. Both `rescrub_trace_envelope_with` and
+`rescrub_envelope_prose_pii_with` force High in an `Err(_)` arm when
+`residual_envelope_scan` could not run at all, and that arm never constructs a
+`PostScrubAssessment`, so no flag on `RedactionReport` records it. It is
+invisible to any basis derived only from the report -- and it is an outage
+signature, exactly the kind #474 is trying to separate from real findings.
+
+The first four force High. The last two are the Medium floor, recorded
 because a calibration pass needs the denominator as much as the numerator:
 "how many Mediums were driven only by a consent flag" is the same shape of
 question as the one motivating this work.
@@ -145,11 +154,24 @@ reuses the `json_array_strings` reader in `trace_corpus_pg.rs`.
 
 ## 3. Write paths: both, and server-computed
 
-The server writes `privacy_risk` in two places, and both must write the basis:
+The server resolves `residual_pii_risk` in **three** places, not two. All
+three must write the basis:
 
-- **Initial ingest**, where the submission record is built.
-- **The PII-backstop re-scrub**, which releases a held trace to `Accepted` or
-  `Quarantined` and overwrites `record.privacy_risk`.
+| Site | Function | Pass |
+|---|---|---|
+| `trace-commons-ingest.rs:12650` | `submit_trace_handler` | `rescrub_trace_envelope` |
+| `trace-commons-ingest.rs:19199` | `operator_rescrub_quarantined_submission` | `rescrub_trace_envelope` |
+| `trace-commons-ingest.rs:40366` | `process_one_pii_backstop` | `rescrub_envelope_prose_pii_with` |
+
+The third is the PII-backstop driver -- the one that releases held traces and
+produces the population #474 is about. It goes through the async NEAR AI prose
+path, **not** `rescrub_trace_envelope`. An implementation that instruments only
+`rescrub_trace_envelope` would miss precisely the traces the issue is asking
+about while appearing to work.
+
+The second is an admin route rather than the driver. It is included because it
+overwrites `record.privacy_risk` too, and a stale basis beside a fresh risk is
+the failure this design exists to prevent.
 
 Writing at ingest alone is not a smaller version of this change; it is a
 broken one. The re-scrub would overwrite the risk and leave a stale basis
@@ -163,6 +185,29 @@ hypothesis concerns classifier errors, which is precisely what that path hits.
 
 The basis is computed from the server's own redaction pass. It is never read
 from the envelope.
+
+**Enforce this in the type system, not by convention.** The basis must be a
+*return value* of each pass, never a field on `PrivacyMetadata`:
+
+```rust
+pub fn rescrub_trace_envelope(envelope: &mut TraceContributionEnvelope)
+    -> Result<Vec<ResidualRiskCondition>, PrivacyFilterConfigError>;
+
+pub fn rescrub_trace_envelope_with(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &mut TraceContributionEnvelope,
+) -> Vec<ResidualRiskCondition>;
+
+pub async fn rescrub_envelope_prose_pii_with(
+    adapter: &dyn PrivacyFilterAdapter,
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<Vec<ResidualRiskCondition>, TraceContributionError>;
+```
+
+Putting the basis on the envelope would make it client-supplied by
+construction, since the envelope is deserialised from contributor input.
+Returning it makes that structurally impossible: there is no field for a
+client to populate.
 
 The client computes its own `residual_pii_risk` during its local pass, and
 that value is attribution, in the same sense the envelope's tenant fields are.
