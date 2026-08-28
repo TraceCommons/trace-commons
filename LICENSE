@@ -1,6 +1,53 @@
-TraceCommons Server is licensed under either of:
+Copyright (C) 2026 K&Z Partners LLC
+
+TraceCommons is licensed in two parts. Which licence applies depends on which
+crate the code lives in.
+
+
+Server components -- GNU Affero General Public License v3.0 or later
+--------------------------------------------------------------------
+
+- crates/trace-commons-server
+- crates/trace-commons-gate-api
+- crates/trace-commons-gate-enclave
+
+These are licensed under the GNU Affero General Public License, version 3 or
+(at your option) any later version, in LICENSE-AGPL.
+
+Because these components are normally operated as a network service, section 13
+of that licence applies: if you run a modified version and let others interact
+with it over a network, you must offer those users the Corresponding Source.
+The hosted ingest binary answers `GET /v1/source` for this purpose.
+
+
+Client and protocol components -- MIT OR Apache-2.0
+---------------------------------------------------
+
+- crates/trace-commons-protocol
+- crates/trace-commons-contributor
+- crates/trace-commons-contributor-ffi
+- crates/trace-commons-contributor-gtk
+- crates/trace-commons-operator-client
+- crates/trace-commons-mark
+- crates/trace-commons-build-info
+
+These are licensed under either of:
 
 - Apache License, Version 2.0, in LICENSE-APACHE
 - MIT license, in LICENSE-MIT
 
-at your option.
+at your option. They may be embedded in proprietary software.
+
+
+Notes
+-----
+
+The server components depend on several of the permissively licensed crates.
+Combining MIT or Apache-2.0 code into an AGPL-3.0 work is permitted; the
+resulting combined work is AGPL-3.0-or-later, while those crates remain
+available on their own terms. The dependency never runs the other way: no
+client or protocol crate depends on an AGPL-licensed crate, and none may be
+made to.
+
+Contributions made before this split remain available under the MIT and
+Apache-2.0 terms that applied when they were published.

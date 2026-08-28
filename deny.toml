@@ -1,0 +1,53 @@
+# Licence audit for the AGPL split.
+#
+# `trace-commons-server`, `-gate-api`, and `-gate-enclave` are AGPL-3.0-or-later.
+# Everything they link must therefore be under a licence that can be combined
+# into an AGPL-3.0 work. The allow list below is exactly that set; a dependency
+# under GPL-2.0-only, SSPL, or a proprietary licence is a hard conflict.
+#
+# Run: cargo deny check licenses
+#      cargo deny --all-features check licenses
+
+[graph]
+all-features = false
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    # NCSA (libfuzzer-sys, via rav1e). BSD/MIT-style, FSF-listed as
+    # GPL-compatible.
+    "NCSA",
+    "Unicode-3.0",
+    "Zlib",
+    # 0BSD (recvmsg, via interprocess under local-gpu-models). Public-domain
+    # equivalent.
+    "0BSD",
+    # Our own crates, once the split lands.
+    "AGPL-3.0",
+    # webpki-roots. A data licence over the Mozilla CA root store, not code:
+    # permissive, no copyleft or attribution obligation that conflicts with
+    # AGPL-3.0. Combinable into an AGPL work.
+    "CDLA-Permissive-2.0",
+]
+# Our own crates are not published, so an allowed licence with no match in the
+# graph is expected while the split is in progress.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "allow"
+
+[advisories]
+version = 2
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "allow"
