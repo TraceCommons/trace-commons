@@ -124,6 +124,43 @@ jobs:
       - run: cargo check -p trace-commons-server --bins
       - run: cargo check -p trace-commons-contributor
 
+  cargo-check-permissive-standalone:
+    name: cargo check (permissive crates, standalone)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-permissive-standalone-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-permissive-standalone-
+      # The MIT OR Apache-2.0 crates ship inside third-party agent harnesses,
+      # which depend on them one at a time and enable none of this workspace's
+      # optional features. Every other job here builds the workspace or the
+      # server crate, and cargo unifies features across such a build, so a
+      # permissive crate can come to depend on a feature-gated module without
+      # anything noticing. #481 did exactly that: a default method on the
+      # public PrivacyFilterAdapter trait took a type from a module gated
+      # behind near-ai-privacy-filter, and `cargo build -p
+      # trace-commons-protocol` stopped compiling for an outside consumer
+      # while all sixteen jobs stayed green. See #485 and #486.
+      #
+      # --no-default-features is the point: it is the configuration an
+      # external consumer gets, and the one nothing else here exercises.
+      - run: cargo check -p trace-commons-protocol --no-default-features
+      - run: cargo check -p trace-commons-contributor --no-default-features
+      - run: cargo check -p trace-commons-contributor-ffi --no-default-features
+      - run: cargo check -p trace-commons-operator-client --no-default-features
+      - run: cargo check -p trace-commons-mark --no-default-features
+      - run: cargo check -p trace-commons-build-info --no-default-features
+
   cargo-check-local-gpu-models:
     name: cargo check (local-gpu-models, non-CUDA)
     runs-on: ubuntu-latest

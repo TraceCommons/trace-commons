@@ -73,8 +73,8 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Every job in `.github/workflows/ci.yml` gates every PR. There are sixteen
-as of 2026-08-25; the list below covers the long-standing ones and is not
+Every job in `.github/workflows/ci.yml` gates every PR. There are seventeen
+as of 2026-08-28; the list below covers the long-standing ones and is not
 a full inventory -- read the workflow for that. (It said "nine" while the
 file held fifteen, so treat any count here as stale until re-checked.)
 
@@ -91,6 +91,12 @@ file held fifteen, so treat any count here as stale until re-checked.)
   fail here.
 - `cargo check (near-ai-scorer)` (with `RUSTFLAGS=-D warnings`). This is the
   configuration the pilot builds.
+- `cargo check (permissive crates, standalone)` — builds each MIT/Apache crate
+  alone with `--no-default-features`. Every other job builds the workspace or
+  the server crate, and cargo unifies features across those, so a permissive
+  crate can silently come to need one of this workspace's optional features.
+  That is the configuration a third-party harness gets, and this job is the
+  only thing that exercises it. See #486.
 - `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path. Do not break it.
