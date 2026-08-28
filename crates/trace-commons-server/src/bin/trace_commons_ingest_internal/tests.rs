@@ -27,6 +27,47 @@ async fn health_endpoint_reports_build_identity_additively() {
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
 }
 
+/// AGPL-3.0 section 13: a user who interacts with this program over a network
+/// must be offered the Corresponding Source. Pilot contributors reach the
+/// ingest API and never see the repository, so the offer has to be on the wire
+/// and it has to be reachable by someone holding no credentials at all --
+/// which is precisely the person section 13 is written for.
+#[tokio::test]
+async fn source_offer_is_served_without_credentials() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/source")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the section 13 source offer must not require authentication"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("source offer serialises");
+
+    assert_eq!(value["license"], "AGPL-3.0-or-later");
+    assert_eq!(value["source_url"], TRACE_COMMONS_SOURCE_URL);
+    assert_eq!(value["build_commit"], trace_commons_build_info::COMMIT);
+    assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
+}
+
 fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }

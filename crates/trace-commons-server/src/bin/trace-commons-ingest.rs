@@ -7228,6 +7228,7 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/v1/source", get(source_offer_handler))
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -11026,6 +11027,43 @@ fn insert_token_with_expiry(
         },
     );
     Ok(())
+}
+
+/// Where the Corresponding Source lives. A constant rather than configuration:
+/// AGPL section 13 obliges the operator of a *modified* version to point at
+/// their own source, and an operator who modifies this binary is already
+/// editing it. A knob here would only let an unmodified deploy point somewhere
+/// wrong.
+const TRACE_COMMONS_SOURCE_URL: &str = "https://github.com/zmanian/trace-commons-server";
+
+/// The AGPL section 13 source offer.
+///
+/// Carries the build commit rather than the version alone, because the commit
+/// is what identifies the running code -- the same reason `/health` reports it.
+/// A user exercising section 13 needs the source *of the version they are
+/// talking to*, and the version string does not move when a deploy does.
+#[derive(Debug, Serialize)]
+struct SourceOfferResponse {
+    license: &'static str,
+    source_url: &'static str,
+    build_commit: &'static str,
+    build_time: &'static str,
+    build_version: &'static str,
+}
+
+/// Answers `GET /v1/source`. Unauthenticated by design: section 13 is written
+/// for the remote user, and requiring a credential to learn where the source
+/// lives would defeat it. Nothing here is tenant-scoped, so this handler must
+/// not consult `trace_current_tenant_id()`; it reveals only what a published
+/// release already reveals.
+async fn source_offer_handler() -> Json<SourceOfferResponse> {
+    Json(SourceOfferResponse {
+        license: "AGPL-3.0-or-later",
+        source_url: TRACE_COMMONS_SOURCE_URL,
+        build_commit: trace_commons_build_info::COMMIT,
+        build_time: trace_commons_build_info::BUILD_TIME,
+        build_version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 #[derive(Debug, Serialize)]
