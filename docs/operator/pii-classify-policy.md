@@ -35,7 +35,11 @@ event volume breaks down as:
 
 Contributor and model prose together are 10.3% of trace volume. Restricting
 classification to prose-bearing events is therefore roughly a 10x reduction
-in round trips against the same trace population.
+in round trips against the same trace population. This breakdown was
+measured on local agent-trace transcripts; the reduction realised on any
+given deployment depends on that deployment's own mix of tool traffic to
+prose, so confirm it against the recorded `events_examined` /
+`events_skipped_by_policy` counts rather than assuming this figure holds.
 
 ## The two policies
 
