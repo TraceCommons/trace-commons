@@ -632,3 +632,171 @@ async fn different_windows_get_their_own_classification() {
         "a distinct window must not inherit another window's spans"
     );
 }
+
+/// A durable store spares the round trip across adapter lifetimes -- which is
+/// the point of the tier, since the in-process memo dies with each driver
+/// tick and a tick has run for nine hours on a large envelope.
+#[tokio::test]
+async fn a_stored_classification_survives_a_new_adapter() {
+    use std::sync::{Arc, Mutex};
+    use trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore;
+
+    #[derive(Default)]
+    struct MemStore {
+        entries: Mutex<std::collections::HashMap<(String, [u8; 32]), Vec<u8>>>,
+        gets: Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl ClassifyWindowStore for MemStore {
+        async fn get(&self, version: &str, key: &[u8; 32]) -> Option<Vec<u8>> {
+            *self.gets.lock().unwrap() += 1;
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&(version.to_string(), *key))
+                .cloned()
+        }
+        async fn put(&self, version: &str, key: &[u8; 32], value: &[u8]) {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert((version.to_string(), *key), value.to_vec());
+        }
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        // One request total, across two separate adapters.
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let store: Arc<MemStore> = Arc::new(MemStore::default());
+    let text = "email me at alice@example.com please";
+    let expected = "email me at [REDACTED:private_email] please";
+
+    // First adapter classifies and populates the store.
+    let first = adapter(server.uri()).scoped_to_store(store.clone(), "near-ai-v1");
+    assert_eq!(
+        first
+            .redact_text(text)
+            .await
+            .unwrap()
+            .unwrap()
+            .redacted_text,
+        expected
+    );
+
+    // A fresh adapter -- as the next tick would build -- must not re-classify.
+    let second = adapter(server.uri()).scoped_to_store(store.clone(), "near-ai-v1");
+    assert_eq!(
+        second
+            .redact_text(text)
+            .await
+            .unwrap()
+            .unwrap()
+            .redacted_text,
+        expected
+    );
+    assert!(
+        *store.gets.lock().unwrap() >= 1,
+        "the store must be consulted"
+    );
+}
+
+/// A different `filter_version` must not read the previous version's spans.
+/// Without this, a model change silently keeps applying the old model's
+/// judgement forever -- the one way this cache can produce a wrong redaction.
+#[tokio::test]
+async fn a_filter_version_change_does_not_reuse_old_spans() {
+    use std::sync::{Arc, Mutex};
+    use trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore;
+
+    #[derive(Default)]
+    struct MemStore {
+        entries: Mutex<std::collections::HashMap<(String, [u8; 32]), Vec<u8>>>,
+    }
+    #[async_trait::async_trait]
+    impl ClassifyWindowStore for MemStore {
+        async fn get(&self, version: &str, key: &[u8; 32]) -> Option<Vec<u8>> {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&(version.to_string(), *key))
+                .cloned()
+        }
+        async fn put(&self, version: &str, key: &[u8; 32], value: &[u8]) {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert((version.to_string(), *key), value.to_vec());
+        }
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        // Once per version, not once overall.
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let store: Arc<MemStore> = Arc::new(MemStore::default());
+    let text = "email me at alice@example.com please";
+
+    let v1 = adapter(server.uri()).scoped_to_store(store.clone(), "near-ai-v1");
+    v1.redact_text(text).await.unwrap();
+
+    let v2 = adapter(server.uri()).scoped_to_store(store.clone(), "near-ai-v2");
+    v2.redact_text(text).await.unwrap();
+}
+
+/// A store that fails or returns garbage must cost throughput, never
+/// correctness: the window is simply classified again.
+#[tokio::test]
+async fn an_unusable_store_entry_falls_back_to_classifying() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore;
+
+    struct GarbageStore;
+    #[async_trait::async_trait]
+    impl ClassifyWindowStore for GarbageStore {
+        async fn get(&self, _v: &str, _k: &[u8; 32]) -> Option<Vec<u8>> {
+            Some(b"not json at all".to_vec())
+        }
+        async fn put(&self, _v: &str, _k: &[u8; 32], _value: &[u8]) {}
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        .mount(&server)
+        .await;
+
+    let scoped = adapter(server.uri()).scoped_to_store(Arc::new(GarbageStore), "near-ai-v1");
+    let result = scoped
+        .redact_text("email me at alice@example.com please")
+        .await
+        .expect("an undecodable cache entry must not fail the window")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        "email me at [REDACTED:private_email] please"
+    );
+}

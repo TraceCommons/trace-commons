@@ -6237,6 +6237,20 @@ impl TraceCorpusStore for PgBackend {
         Ok(row.get(0))
     }
 
+    fn classify_window_store(
+        &self,
+        tenant_id: &str,
+    ) -> Option<
+        std::sync::Arc<dyn trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore>,
+    > {
+        Some(std::sync::Arc::new(
+            crate::db::classify_window_cache::PostgresClassifyWindowStore::new(
+                self.trace_pool(),
+                tenant_id,
+            ),
+        ))
+    }
+
     async fn list_quarantined_pii_backstop_exhausted(
         &self,
         tenant_id: &str,
