@@ -4315,6 +4315,7 @@ fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
 pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
 ) -> Result<Vec<ResidualRiskCondition>, TraceContributionError> {
     // Same concordance floor as the sync server re-scrub: under-reported
     // consent must not survive into residual_risk / status decisions.
@@ -4325,11 +4326,18 @@ pub async fn rescrub_envelope_prose_pii_with(
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
     let mut structured_complete = true;
+    let mut examined_events: u32 = 0;
+    let mut skipped_events: u32 = 0;
 
     for (index, event) in envelope.events.iter().enumerate() {
+        if !policy_examines_event(policy, event.event_type) {
+            skipped_events += 1;
+            continue;
+        }
         let Some(content) = event.redacted_content.as_deref() else {
             continue;
         };
+        examined_events += 1;
         if let Some(redaction) = adapter.redact_text(content).await? {
             merge_privacy_filter_summary(&mut summary, &redaction.summary);
             report.merge(redaction.report);
@@ -4349,6 +4357,9 @@ pub async fn rescrub_envelope_prose_pii_with(
     {
         let mut budget = StructuredPayloadBudget::default();
         for (index, event) in envelope.events.iter().enumerate() {
+            if !policy_examines_event(policy, event.event_type) {
+                continue;
+            }
             if event.structured_payload.is_null() {
                 continue;
             }
@@ -4363,6 +4374,11 @@ pub async fn rescrub_envelope_prose_pii_with(
             }
         }
     }
+
+    // `examined_events` / `skipped_events` are policy-coverage counters kept
+    // for future observability; nothing consumes them yet.
+    let _ = examined_events;
+    let _ = skipped_events;
 
     // Second pass: no awaits below this line, so the updates collected
     // above are applied atomically.
@@ -8086,7 +8102,7 @@ mod tests {
             }
         }
         let mut env = sample_envelope_with_event_content("email jane@example.com now");
-        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert!(
@@ -8122,7 +8138,7 @@ mod tests {
         let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
         assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
         // Idempotent suffix: running again does not double-append.
-        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -8214,9 +8230,13 @@ mod tests {
             .expected_assertions
             .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
 
-        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &NeverFindsAnything,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8262,7 +8282,7 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env)
+        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
 
@@ -8296,9 +8316,13 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &NeverFindsAnything,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8357,9 +8381,13 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &CanaryHealthyButFindsNoRealPii,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8428,9 +8456,13 @@ mod tests {
         }
         env.events[0].structured_payload = nested;
 
-        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &CanaryHealthyButFindsNoRealPii,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8494,7 +8526,7 @@ mod tests {
         // the only difference between the two cases is the note.
         let mut clean = build();
         clean.replay.replay_notes.clear();
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean)
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_ne!(
@@ -8506,7 +8538,7 @@ mod tests {
         let mut gapped = build();
         gapped.replay.replay_notes =
             vec!["they asked about their mother Mary in Baltimore".to_string()];
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped)
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -8561,7 +8593,7 @@ mod tests {
             "reviewer_alice@example.com": "argument value with alice@example.com inside",
         });
 
-        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env)
+        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
 
@@ -9201,7 +9233,7 @@ mod tests {
         let mut envelope = sample_envelope_with_event_content("email jane@example.com now");
         envelope.outcome.human_correction = Some(correction.to_string());
 
-        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope)
+        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope, PiiClassifyPolicy::AllEvents)
             .await
             .expect("the backstop pass succeeds");
 
@@ -9217,6 +9249,111 @@ mod tests {
             envelope.outcome.human_correction.as_deref(),
             Some(correction),
             "the backstop must not rewrite a correction"
+        );
+    }
+
+    /// Records every string handed to the classifier so a test can assert
+    /// what was and was not submitted.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    use super::*;
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct RecordingAdapter {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for RecordingAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            self.seen.lock().unwrap().push(text.to_string());
+            Ok(None)
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn envelope_with_events(
+        events: Vec<(TraceContributionEventType, &str)>,
+    ) -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        // The fixture ships exactly one UserMessage event; reuse it as a
+        // template so every required field stays populated.
+        let template = envelope.events[0].clone();
+        envelope.events = events
+            .into_iter()
+            .map(|(event_type, text)| {
+                let mut event = template.clone();
+                event.event_id = Uuid::new_v4();
+                event.event_type = event_type;
+                event.redacted_content = Some(text.to_string());
+                event.structured_payload = Value::Null;
+                event
+            })
+            .collect();
+        envelope
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn prose_only_policy_does_not_submit_tool_result_text() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![
+            (
+                TraceContributionEventType::UserMessage,
+                "my name is Dana Ruiz",
+            ),
+            (
+                TraceContributionEventType::ToolResult,
+                "file says Dana Ruiz, 12 Oak Street",
+            ),
+        ]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::ProseOnly)
+            .await
+            .expect("rescrub succeeds");
+
+        let seen = adapter.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|t| t.contains("my name is")),
+            "prose event must be submitted"
+        );
+        // The accepted gap, asserted deliberately: unpatterned PII reaching
+        // the trace through tool output is NOT model-examined under this
+        // policy.
+        assert!(
+            !seen.iter().any(|t| t.contains("12 Oak Street")),
+            "tool result must not be submitted under prose-only"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn all_events_policy_still_submits_tool_result_text() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![(
+            TraceContributionEventType::ToolResult,
+            "file says Dana Ruiz, 12 Oak Street",
+        )]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::AllEvents)
+            .await
+            .expect("rescrub succeeds");
+
+        assert!(
+            adapter
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.contains("12 Oak Street")),
+            "all-events must preserve today's behaviour exactly"
         );
     }
 
