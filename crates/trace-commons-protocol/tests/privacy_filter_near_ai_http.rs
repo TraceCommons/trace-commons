@@ -514,3 +514,121 @@ async fn window_offsets_stay_correct_across_multibyte_windows() {
     );
     assert_eq!(result.summary.span_count, 1);
 }
+
+/// The same window text is classified ONCE, however many times it appears.
+///
+/// Measured across 40 real contributor sessions: 42,441 windows, 18,039
+/// distinct -- 57.5% of classify round trips re-send text already sent,
+/// because agent traces re-read the same files and echo the same tool output
+/// across events. This is the exact half of that saving: reusing a real
+/// classification of identical bytes, never asserting anything about text the
+/// model has not seen.
+#[tokio::test]
+async fn identical_windows_are_classified_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        // One request, not four.
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let adapter = adapter(server.uri());
+    let text = "email me at alice@example.com please";
+    for _ in 0..4 {
+        let result = adapter
+            .redact_text(text)
+            .await
+            .expect("call succeeds")
+            .expect("non-empty redaction");
+        assert_eq!(
+            result.redacted_text, "email me at [REDACTED:private_email] please",
+            "a cached classification must redact identically to a fresh one"
+        );
+    }
+    // MockServer::verify runs on drop and asserts expect(1).
+}
+
+/// A failed classification is never cached. Caching a failure would turn one
+/// transient upstream error into a permanent wrong answer for every later
+/// occurrence of that window -- and since an empty span list means "clean",
+/// a cached failure could pass unexamined text off as scrubbed.
+#[tokio::test]
+async fn a_failed_classification_is_not_cached() {
+    let server = MockServer::start().await;
+    // First attempt group fails; a later one succeeds. If the failure were
+    // cached, the retry could never reach the success.
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("nope"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "spans": [
+                {"category": "private_email", "start": 12, "end": 29, "score": 0.99, "text": "alice@example.com"}
+            ]}]
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let adapter = adapter(server.uri());
+    let text = "email me at alice@example.com please";
+    adapter
+        .redact_text(text)
+        .await
+        .expect_err("first call fails");
+    let result = adapter
+        .redact_text(text)
+        .await
+        .expect("second call must re-classify, not replay a cached failure")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        "email me at [REDACTED:private_email] please"
+    );
+}
+
+/// Different windows must not collide. The cache is keyed on a content hash,
+/// so a bug here would silently apply one window's spans to another's text --
+/// wrong offsets, wrong redaction, no error.
+#[tokio::test]
+async fn different_windows_get_their_own_classification() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(email_span_at_actual_offset)
+        .mount(&server)
+        .await;
+
+    let adapter = adapter(server.uri());
+    let with_email = adapter
+        .redact_text("please contact bob@example.com now")
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
+    assert_eq!(
+        with_email.redacted_text,
+        "please contact [REDACTED:private_email] now"
+    );
+
+    // Different text, no needle: must be classified separately and come back
+    // clean rather than inheriting the previous window's span.
+    let without = adapter
+        .redact_text("a completely different line with no address in it")
+        .await
+        .expect("call succeeds");
+    assert!(
+        without.is_none() || !without.unwrap().redacted_text.contains("[REDACTED"),
+        "a distinct window must not inherit another window's spans"
+    );
+}
