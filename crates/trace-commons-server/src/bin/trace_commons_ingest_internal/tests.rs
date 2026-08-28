@@ -4684,6 +4684,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
+        driver_liveness: Arc::new(
+            trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
+        ),
         tokens: Arc::new(tokens),
         signed_token_verifier: None,
         managed_eddsa_keyset_refresh: None,
@@ -25512,6 +25515,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
+        driver_liveness: Arc::new(
+            trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
+        ),
         tokens: Arc::new(tokens),
         signed_token_verifier: None,
         managed_eddsa_keyset_refresh: None,
@@ -85949,6 +85955,199 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
     );
 }
 
+/// #438: the failure label must be read off the error's TYPE, never parsed
+/// from its message, matching the discipline the per-driver transient
+/// classifiers already use.
+#[test]
+fn driver_failures_classify_from_typed_markers_not_message_text() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let transient_scorer = anyhow::Error::new(
+        trace_commons_gate_enclave::ScorerFailure::TransientScorerFailed {
+            reason: "upstream_unavailable".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&transient_scorer),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // Context layers must not hide the marker: anyhow preserves the concrete
+    // type underneath, which is what the existing downcasts rely on.
+    let wrapped = transient_scorer.context("PerplexityScorerInferenceFailed");
+    assert_eq!(
+        classify_driver_failure(&wrapped),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // The permanent variant is the content's fault, not the system's.
+    let permanent_scorer =
+        anyhow::Error::new(trace_commons_gate_enclave::ScorerFailure::ScorerFailed {
+            reason: "prompt_too_long".to_string(),
+        });
+    assert_eq!(
+        classify_driver_failure(&permanent_scorer),
+        DriverFailureClass::ContentRejected
+    );
+
+    // An unrecognised error is Unclassified, never a guess. The message here
+    // deliberately contains the words of another label, to prove nothing is
+    // parsed out of message text.
+    let opaque = anyhow::anyhow!("something went wrong upstream and unavailable");
+    assert_eq!(
+        classify_driver_failure(&opaque),
+        DriverFailureClass::Unclassified,
+        "classification must not be inferred from message text"
+    );
+}
+
+/// #438 fix round 1, Finding A: the drivers' own typed failures must reach
+/// `classify_driver_failure` intact. Every arm here corresponds to a real
+/// error the two converted drivers can raise; before this round each of them
+/// arrived stringified and logged as `unclassified`.
+#[test]
+fn driver_failures_classify_the_drivers_own_typed_errors() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // The NEAR-AI-unavailable path -- the actual #438 incident path. The
+    // driver wraps it with `.context(...)`, which must not hide the marker.
+    let transient_upstream = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::TraceContributionError::TransientRedactionFailed {
+            reason: "upstream 503".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&transient_upstream),
+        DriverFailureClass::UpstreamUnavailable
+    );
+    let contextualized = transient_upstream.context("PII backstop canary errored");
+    assert_eq!(
+        classify_driver_failure(&contextualized),
+        DriverFailureClass::UpstreamUnavailable,
+        "`.context()` must preserve the concrete type the classifier downcasts to"
+    );
+
+    // The trace's own fault, not the system's.
+    let permanent_upstream = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+            reason: "oversized input".to_string(),
+        },
+    );
+    assert_eq!(
+        classify_driver_failure(&permanent_upstream),
+        DriverFailureClass::ContentRejected
+    );
+
+    // A missing API key: config, not an outage.
+    let missing_key = anyhow::Error::new(
+        trace_commons_protocol::trace_contribution::PrivacyFilterConfigError::MissingEnv {
+            backend: "near-ai",
+            var: "TRACE_PRIVACY_FILTER_NEAR_AI_API_KEY",
+        },
+    )
+    .context("PII backstop adapter unavailable");
+    assert_eq!(
+        classify_driver_failure(&missing_key),
+        DriverFailureClass::ConfigMissing
+    );
+
+    // An unconfigured driver pool reaches the loop as a typed DatabaseError
+    // through `?`, not as a string.
+    let db_down = anyhow::Error::new(trace_commons_server::error::DatabaseError::Pool(
+        "gate-driver pool not configured".to_string(),
+    ));
+    assert_eq!(
+        classify_driver_failure(&db_down),
+        DriverFailureClass::DependencyUnavailable
+    );
+
+    // The drivers' own typed refusals.
+    let no_mirror = anyhow::Error::new(DriverTickError::MissingDbMirror {
+        driver: PERPLEXITY_SCORE_DRIVER_NAME,
+    });
+    assert_eq!(
+        classify_driver_failure(&no_mirror),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// #438 fix round 1, Finding B: a tick that trips its consecutive-failure
+/// breaker is a failed tick. Before this, it returned `Ok`, refreshed
+/// `last_success_at` on every pass, and a driver whose upstream had no credit
+/// left never went stale and never escalated.
+#[test]
+fn a_breaker_tripped_perplexity_tick_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let tripped = PerplexityDriverTickSummary {
+        breaker_tripped: true,
+        failed: 3,
+        ..Default::default()
+    };
+    let error = perplexity_tick_outcome(&tripped)
+        .expect_err("a tick that gave up after repeated failures is not a success");
+    assert_ne!(
+        classify_driver_failure(&error),
+        DriverFailureClass::Unclassified,
+        "the breaker failure must carry a usable label, not fall through to unclassified"
+    );
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::UpstreamUnavailable,
+        "a tripped breaker means the upstream failed repeatedly"
+    );
+
+    // An empty queue is still a success: a driver with nothing to do is
+    // working, and must not be reported as dead.
+    assert!(
+        perplexity_tick_outcome(&PerplexityDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // So is a tick that did real work and hit some ordinary per-item failures
+    // without giving up.
+    let partial = PerplexityDriverTickSummary {
+        scored: 4,
+        failed: 1,
+        ..Default::default()
+    };
+    assert!(
+        perplexity_tick_outcome(&partial).is_ok(),
+        "per-item failures below the breaker threshold are not a tick failure"
+    );
+}
+
+/// #438: the shared wrapper keys liveness by name. Two drivers sharing a name
+/// would silently report one driver's health for the other -- a worse failure
+/// than the one this work fixes, because it would look like it was working.
+#[test]
+fn every_driver_registers_a_distinct_name() {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in ALL_DRIVER_NAMES {
+        assert!(
+            seen.insert(*name),
+            "duplicate driver name {name}; liveness would be reported for the wrong driver"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        12,
+        "every spawned driver loop must register; got {seen:?}"
+    );
+}
+
+/// The names are an operator-facing grep target and an admin API field, so
+/// they are a wire format.
+#[test]
+fn driver_names_are_snake_case_and_stable() {
+    for name in ALL_DRIVER_NAMES {
+        assert!(
+            name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "driver name {name} must be snake_case"
+        );
+    }
+}
+
 /// #445: 307 credit events sat `pending` for three months because settlement is
 /// deliberately disabled on the pilot, and nothing on the contributor-facing
 /// receipt said so. A contributor saw an accepted trace, a pending credit
@@ -85993,6 +86192,650 @@ fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
             mode,
             receipt.explanation
         );
+    }
+}
+
+/// #438: the give-up rule the batch-draining schedulers share. A tick that
+/// claimed work and had every single attempt fail has not done its job, and
+/// through `spawn_driver_loop` a bare `Ok(())` there would refresh
+/// `last_success_at` forever -- the same invisibility the perplexity breaker
+/// bug had.
+#[test]
+fn a_tick_whose_every_attempt_failed_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Nothing to do is not a failure: an idle driver is a working driver.
+    assert!(
+        all_attempts_failed_outcome(
+            EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+            "run_queued",
+            0,
+            0,
+            DriverFailureClass::DependencyUnavailable,
+        )
+        .is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // Partial failure is ordinary per-item noise, not a driver outage.
+    assert!(
+        all_attempts_failed_outcome(
+            EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+            "run_queued",
+            4,
+            1,
+            DriverFailureClass::DependencyUnavailable,
+        )
+        .is_ok(),
+        "per-item failures alongside successes are not a tick failure"
+    );
+
+    // Every attempt failed: the driver gave up on the whole batch.
+    let error = all_attempts_failed_outcome(
+        EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+        "run_queued",
+        0,
+        3,
+        DriverFailureClass::DependencyUnavailable,
+    )
+    .expect_err("a tick where nothing succeeded is not a success");
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::DependencyUnavailable,
+        "the call site names the dependency it gave up on"
+    );
+
+    // The same rule, a different dependency: an outbox drains to a chain RPC.
+    let upstream = all_attempts_failed_outcome(
+        NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+        "submit",
+        0,
+        2,
+        DriverFailureClass::UpstreamUnavailable,
+    )
+    .expect_err("a submit stage where every item failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&upstream),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// A scheduler that refuses to act because a control is not configured is
+/// stalled, not healthy. It reports `config_missing` so the log names the
+/// thing an operator has to change.
+#[test]
+fn a_policy_refusal_is_a_failed_tick_classified_as_config() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let refused = anyhow::Error::new(DriverTickError::RefusedByPolicy {
+        driver: CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
+        control: "credit_settlement_allowed_policy_versions",
+    });
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// The ten worker-route schedulers reach the wrapper through a typed error
+/// rather than a stringified one, so the status they failed with still
+/// decides the class. Before this the whole tuple was formatted into a
+/// message and every one of them logged `unclassified`.
+#[test]
+fn a_worker_route_rejection_is_classified_by_its_status() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let server_error = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "db mirror unavailable"),
+    );
+    assert_eq!(
+        classify_driver_failure(&server_error),
+        DriverFailureClass::DependencyUnavailable
+    );
+
+    let unauthorized = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::UNAUTHORIZED, "worker token rejected"),
+    );
+    assert_eq!(
+        classify_driver_failure(&unauthorized),
+        DriverFailureClass::ConfigMissing,
+        "a worker token the route will not accept is a configuration problem"
+    );
+
+    let bad_request = worker_route_error(
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        api_error(StatusCode::BAD_REQUEST, "unsupported dataset kind"),
+    );
+    assert_eq!(
+        classify_driver_failure(&bad_request),
+        DriverFailureClass::ContentRejected
+    );
+}
+
+/// #438 fix round 2, Important 1: the credit cycle scheduler drives its own
+/// NEAR outbox submit and confirm stages. Their counters are the give-up
+/// signal; the top-level `started_count` says nothing about them, so a cycle
+/// pointed at a dead RPC failed every submit on every tick and still looked
+/// healthy.
+#[test]
+fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    fn submit(submitted: usize, failed: usize) -> TraceNearCreditOutboxSubmitWorkerResponse {
+        TraceNearCreditOutboxSubmitWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            dry_run: false,
+            checked: submitted + failed,
+            submitted,
+            failed,
+            skipped: 0,
+            pending: failed,
+        }
+    }
+    fn confirm(confirmed: usize, failed: usize) -> TraceNearCreditOutboxConfirmWorkerResponse {
+        TraceNearCreditOutboxConfirmWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            dry_run: false,
+            checked: confirmed + failed,
+            confirmed,
+            failed,
+            skipped: 0,
+            pending: failed,
+        }
+    }
+
+    // A cycle that did nothing on either stage is idle, not dead.
+    assert!(
+        credit_cycle_sub_run_outcome(&submit(0, 0), &confirm(0, 0), true).is_ok(),
+        "an idle cycle must count as a success"
+    );
+
+    // Partial progress is progress.
+    assert!(
+        credit_cycle_sub_run_outcome(&submit(3, 1), &confirm(2, 1), true).is_ok(),
+        "per-item outbox failures alongside successes are not a tick failure"
+    );
+
+    // Every submit failed: the RPC is not answering.
+    let submit_swept = credit_cycle_sub_run_outcome(&submit(0, 4), &confirm(0, 0), true)
+        .expect_err("a cycle whose every submit failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&submit_swept),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // The confirm stage is read too, not just the first one.
+    let confirm_swept = credit_cycle_sub_run_outcome(&submit(2, 0), &confirm(0, 3), true)
+        .expect_err("a cycle whose every confirm failed is not a success");
+    assert_eq!(
+        classify_driver_failure(&confirm_swept),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // And the cycle's settlement step stalls exactly like the standalone
+    // settlement scheduler's does.
+    let refused = credit_cycle_sub_run_outcome(&submit(1, 0), &confirm(1, 0), false)
+        .expect_err("a cycle settling under a disallowed policy version settles nothing");
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ConfigMissing
+    );
+}
+
+/// A scheduler tick that started no cycles at all has no sub-runs to judge and
+/// must stay a success -- an idle driver is a working driver.
+#[test]
+fn a_credit_cycle_tick_with_no_cycles_is_a_success() {
+    let idle = TraceCreditCycleSchedulerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        preflight_only: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: None,
+        policy_version: None,
+        reason_hash: "sha256:0".to_string(),
+        limit: 8,
+        checked_count: 0,
+        eligible_count: 0,
+        started_count: 0,
+        skipped_active_count: 0,
+        skipped_count: 0,
+        pending_after_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        decisions: Vec::new(),
+        cycles: Vec::new(),
+    };
+    assert!(
+        credit_cycle_scheduler_tick_outcome(&idle).is_ok(),
+        "a tick that started no cycles must count as a success"
+    );
+}
+
+/// #438 fix round 2, Important 2: the PII backstop sorts everything it could
+/// not release into three disjoint counters, and the earlier version read only
+/// one of them. A tick that quarantined its whole batch reported `done=0,
+/// failed=0, exhausted=N` and passed as healthy -- the exhausted counter the
+/// brief names verbatim as a give-up signal.
+#[test]
+fn each_pii_backstop_give_up_counter_fails_the_tick_with_its_own_class() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Nothing to do, and partial progress, are both successes.
+    assert!(
+        pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+    assert!(
+        pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+            done: 2,
+            failed: 1,
+            transient: 1,
+            exhausted: 1,
+            ..Default::default()
+        })
+        .is_ok(),
+        "a tick that released submissions is a success even with failures beside it"
+    );
+
+    // The whole batch quarantined: the driver stopped retrying those
+    // submissions for good, and it is the trace content that was refused.
+    let exhausted = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        exhausted: 3,
+        ..Default::default()
+    })
+    .expect_err("a tick that exhausted its whole batch is not a success");
+    assert_eq!(
+        classify_driver_failure(&exhausted),
+        DriverFailureClass::ContentRejected
+    );
+
+    // A permanent re-redaction sweep is the upstream ANSWERING and refusing,
+    // so it must not point the operator at NEAR AI availability.
+    let refused = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        failed: 3,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed permanently is not a success");
+    assert_eq!(
+        classify_driver_failure(&refused),
+        DriverFailureClass::ContentRejected,
+        "a non-transient sweep is the trace's fault, not the vendor's"
+    );
+
+    // The genuinely-upstream sweep. A short batch never reaches the breaker
+    // threshold, so without this the #438 incident itself still reads healthy.
+    let transient = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        transient: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick that held its whole batch on upstream errors is not a success");
+    assert_eq!(
+        classify_driver_failure(&transient),
+        DriverFailureClass::UpstreamUnavailable
+    );
+
+    // Mixed and terminal: the outage is the more actionable label.
+    let mixed = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        transient: 1,
+        exhausted: 2,
+        ..Default::default()
+    })
+    .expect_err("a swept tick is not a success");
+    assert_eq!(
+        classify_driver_failure(&mixed),
+        DriverFailureClass::UpstreamUnavailable,
+        "triage order puts the outage ahead of the symptom"
+    );
+
+    // The breaker still wins outright.
+    let tripped = pii_backstop_tick_outcome(&PiiBackstopDriverTickSummary {
+        done: 1,
+        transient: 4,
+        breaker_tripped: true,
+        ..Default::default()
+    })
+    .expect_err("a tripped breaker is a failed tick even when something landed");
+    assert_eq!(
+        classify_driver_failure(&tripped),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// #438: liveness answers "when did this last work?" in one read. It is
+/// admin-gated on purpose -- see the companion test below for why.
+#[tokio::test]
+async fn driver_liveness_reports_registered_drivers_to_an_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let Json(drivers) =
+        driver_liveness_handler(State(state.clone()), auth_headers("admin-token-a"))
+            .await
+            .expect("admin may read driver liveness");
+
+    assert_eq!(drivers.len(), 1);
+    assert_eq!(drivers[0].driver, "example_driver");
+    assert_eq!(drivers[0].consecutive_failures, 0);
+    assert_eq!(drivers[0].stale_after_seconds, 300);
+    assert!(!drivers[0].stale, "a just-registered driver is not stale");
+}
+
+/// A contributor must not learn which subsystem is currently dead. That is
+/// operational intelligence: it says when the PII backstop is not running.
+#[tokio::test]
+async fn driver_liveness_is_refused_to_a_non_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let error = driver_liveness_handler(State(state), auth_headers("token-a"))
+        .await
+        .expect_err("a contributor token must be refused");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+/// The route is actually registered, not merely a reachable function.
+#[tokio::test]
+async fn driver_liveness_route_is_wired_and_requires_auth() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let anonymous = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/admin/driver-liveness")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("anonymous response");
+    assert_eq!(
+        anonymous.status(),
+        StatusCode::UNAUTHORIZED,
+        "the route must exist and refuse an unauthenticated caller"
+    );
+}
+
+/// #438 proposed putting liveness on `/health`. It is unauthenticated, so
+/// this test exists to stop that being "fixed" back later.
+#[tokio::test]
+async fn health_does_not_expose_driver_liveness() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    state
+        .driver_liveness
+        .register("example_driver", 45, Utc::now());
+
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("health response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body reads");
+    let text = String::from_utf8(body.to_vec()).expect("health body is utf8");
+    assert!(
+        !text.contains("example_driver") && !text.contains("driver"),
+        "unauthenticated /health must not name a driver: {text}"
+    );
+}
+
+/// #438 final round: the breaker alone let a live outage through. It trips at
+/// `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`, so a queue holding fewer items
+/// than that could fail every one of them transiently, never reach the
+/// threshold, and refresh `last_success_at` on every tick. Each branch below
+/// asserts a DISTINCT class, so an implementation that folds the wrong
+/// counter fails a named assertion rather than passing by coincidence.
+#[test]
+fn perplexity_tick_outcome_folds_each_counter_with_its_own_class() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    // Idle: nothing to do is not a failure.
+    assert!(
+        perplexity_tick_outcome(&PerplexityDriverTickSummary::default()).is_ok(),
+        "an idle tick must count as a success"
+    );
+
+    // Progress alongside failures, in each of the three success dispositions.
+    for progress in [
+        PerplexityDriverTickSummary {
+            scored: 2,
+            failed: 1,
+            transient: 1,
+            ..Default::default()
+        },
+        PerplexityDriverTickSummary {
+            skipped_duplicate: 1,
+            failed: 2,
+            ..Default::default()
+        },
+        PerplexityDriverTickSummary {
+            cached: 1,
+            transient: 2,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            perplexity_tick_outcome(&progress).is_ok(),
+            "a tick that moved a trace forward is a success: {progress:?}"
+        );
+    }
+
+    // A short all-transient batch: the incident, below the breaker threshold.
+    let transient = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        transient: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed transiently is not a success");
+    assert_eq!(
+        classify_driver_failure(&transient),
+        DriverFailureClass::UpstreamUnavailable,
+        "a transient sweep is the scorer being unreachable"
+    );
+
+    // A permanent sweep: the scorer answered and refused the content.
+    let failed = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        failed: 2,
+        ..Default::default()
+    })
+    .expect_err("a tick whose whole batch failed permanently is not a success");
+    assert_eq!(
+        classify_driver_failure(&failed),
+        DriverFailureClass::ContentRejected,
+        "a permanent sweep must not point the operator at vendor availability"
+    );
+
+    // Both, no progress: the outage outranks the symptom.
+    let mixed = perplexity_tick_outcome(&PerplexityDriverTickSummary {
+        failed: 1,
+        transient: 1,
+        ..Default::default()
+    })
+    .expect_err("a swept tick is not a success");
+    assert_eq!(
+        classify_driver_failure(&mixed),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// The all-failed assertions live on `credit_cycle_sub_run_outcome`, so
+/// nothing else pins the fold that feeds it. Deleting the loop, or the
+/// `settlement.policy_version_allowed` argument, would still compile and would
+/// silently reintroduce the finding this closed.
+#[test]
+fn the_credit_cycle_fold_reaches_its_sub_runs() {
+    use trace_commons_server::driver_liveness::DriverFailureClass;
+
+    let swept = TraceCreditCycleSchedulerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        preflight_only: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: None,
+        policy_version: None,
+        reason_hash: "sha256:0".to_string(),
+        limit: 8,
+        checked_count: 1,
+        eligible_count: 1,
+        started_count: 1,
+        skipped_active_count: 0,
+        skipped_count: 0,
+        pending_after_count: 0,
+        skipped_reason_counts: BTreeMap::new(),
+        decisions: Vec::new(),
+        cycles: vec![credit_cycle_response_with_failed_submits(3)],
+    };
+    let error = credit_cycle_scheduler_tick_outcome(&swept)
+        .expect_err("a cycle whose every submit failed must reach the top-level fold");
+    assert_eq!(
+        classify_driver_failure(&error),
+        DriverFailureClass::UpstreamUnavailable
+    );
+}
+
+/// One cycle sub-run whose NEAR outbox submits all failed. Only the outbox and
+/// settlement fields carry meaning here; the ranking sub-runs are filled with
+/// their idle shapes so the fold has a real `TraceCreditCycleWorkerRunResponse`
+/// to walk.
+fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleWorkerRunResponse {
+    TraceCreditCycleWorkerRunResponse {
+        tenant_id: "tenant".to_string(),
+        tenant_storage_ref: "tenant_storage_ref".to_string(),
+        dry_run: false,
+        submit_near_outbox: true,
+        confirm_near_outbox: true,
+        target_use: TraceAllowedUse::RankingModelTraining,
+        model_version: "model-v1".to_string(),
+        policy_version: "policy-v1".to_string(),
+        reason_hash: "sha256:0".to_string(),
+        near_contract_id: None,
+        calibration: TraceRankingCalibrationRunWorkerResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            limit: 0,
+            target_use: TraceAllowedUse::RankingModelTraining,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            policy_version: None,
+            checked_count: 0,
+            calibrated_count: 0,
+            skipped_existing_count: 0,
+            skipped_ineligible_count: 0,
+            skipped_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+            calibration_runs: Vec::new(),
+        },
+        model_promotion: TraceRankingModelPromotionRunResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            limit: 0,
+            target_use: TraceAllowedUse::RankingModelTraining,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            policy_version: None,
+            checked_count: 0,
+            promoted_count: 0,
+            skipped_ineligible_count: 0,
+            skipped_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+            promotions: Vec::new(),
+        },
+        prediction_credit: TraceRankingPredictionCreditRunResponse {
+            ranking_worker_run_id: Uuid::nil(),
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            dry_run: false,
+            allow_at_risk_models: false,
+            limit: 0,
+            reason_hash: "sha256:0".to_string(),
+            model_version: None,
+            target_use: None,
+            policy_version: None,
+            checked_count: 0,
+            credited_count: 0,
+            skipped_existing_count: 0,
+            skipped_model_risk_count: 0,
+            skipped_ineligible_count: 0,
+            blocked_model_risk_reason_counts: BTreeMap::new(),
+            pending_after_count: 0,
+        },
+        settlement: TraceCreditSettlementRunResponse {
+            tenant_id: "tenant".to_string(),
+            tenant_storage_ref: "tenant_storage_ref".to_string(),
+            settlement_batch_id: Uuid::nil(),
+            dry_run: false,
+            policy_version: "policy-v1".to_string(),
+            policy_version_allowed: true,
+            source_list_hash: "sha256:0".to_string(),
+            issuer_approval_evidence_hash: None,
+            limit: None,
+            settled_source_event_count: 0,
+            eligible_source_event_count: 0,
+            pending_after_count: 0,
+            settled_account_count: 0,
+            settled_credit_points: 0.0,
+            near_outbox_item_count: 0,
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+            settlement_max_credit_micros_per_account: None,
+            settlement_policy_excluded_source_event_count: 0,
+            settlement_policy_excluded_reason_counts: BTreeMap::new(),
+        },
+        near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            dry_run: false,
+            checked: failed,
+            submitted: 0,
+            failed,
+            skipped: 0,
+            pending: failed,
+        },
+        near_outbox_confirm: TraceNearCreditOutboxConfirmWorkerResponse {
+            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            dry_run: false,
+            checked: 0,
+            confirmed: 0,
+            failed: 0,
+            skipped: 0,
+            pending: 0,
+        },
     }
 }
 
