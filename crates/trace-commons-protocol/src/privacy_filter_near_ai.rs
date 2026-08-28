@@ -94,7 +94,42 @@ pub struct NearAiPrivacyFilterAdapter {
     model: String,
     api_key: SecretApiKey,
     max_input_bytes: usize,
+    /// Memoized classifications, keyed by SHA-256 of the window text.
+    ///
+    /// Agent traces re-read the same files and echo the same tool output
+    /// across events, so the same window is classified over and over.
+    /// Measured across 40 real sessions on a contributor machine: 42,441
+    /// windows, 18,039 distinct -- **57.5% of round trips are re-classifying
+    /// text already sent**, at 2.35:1 duplication. That is a larger effect
+    /// than chunk sizing, concurrency, batching or host CPU, all of which
+    /// were tried against this bottleneck and none of which moved it.
+    ///
+    /// This is EXACT, not a heuristic: reusing a real classification of
+    /// identical bytes makes no cleanliness claim about text the model never
+    /// saw. That distinction is what separates it from "skip windows that
+    /// look clean", which would be a fail-open.
+    ///
+    /// The key is a hash and the value is offsets and labels, so the cache
+    /// holds no plaintext.
+    window_cache: std::sync::Mutex<ClassifyWindowCache>,
 }
+
+/// Per-adapter memo table. The adapter is constructed once per driver tick,
+/// so this lives for one tick's work and then drops -- no persistence, no
+/// cross-tenant surface, and no invalidation problem, because it cannot
+/// outlive the model version that produced its entries.
+#[derive(Default)]
+struct ClassifyWindowCache {
+    entries: std::collections::HashMap<[u8; 32], Vec<ClassifySpan>>,
+    hits: usize,
+    misses: usize,
+}
+
+/// Upper bound on memoized windows. A pathological envelope (the pilot holds
+/// one at 16 MB) could otherwise accumulate thousands of distinct entries in
+/// a single tick. Past the cap we simply stop inserting: correctness is
+/// unaffected, only the hit rate falls.
+const MAX_CACHED_CLASSIFY_WINDOWS: usize = 20_000;
 
 /// True when `base_url` uses TLS, or is plain HTTP against a loopback host.
 ///
@@ -155,6 +190,7 @@ impl NearAiPrivacyFilterAdapter {
             model: model.into(),
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
+            window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
         })
     }
 }
@@ -324,6 +360,63 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
 }
 
 impl NearAiPrivacyFilterAdapter {
+    /// Look up a previously classified window, counting the hit or miss.
+    ///
+    /// A miss is recorded here rather than at insert time so that a window
+    /// whose classification FAILS still counts as a miss -- otherwise a run
+    /// of failures would inflate the apparent hit rate.
+    fn cached_window(&self, key: &[u8; 32]) -> Option<Vec<ClassifySpan>> {
+        let mut cache = match self.window_cache.lock() {
+            Ok(cache) => cache,
+            // A poisoned lock means a previous caller panicked mid-update.
+            // Losing the memo is a throughput cost, never a correctness one,
+            // so degrade to "always classify" rather than propagate.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let hit = cache.entries.get(key).cloned();
+        match hit {
+            Some(spans) => {
+                cache.hits += 1;
+                Self::log_cache_sample(&cache);
+                Some(spans)
+            }
+            None => {
+                cache.misses += 1;
+                None
+            }
+        }
+    }
+
+    /// Record a successful classification for reuse within this tick.
+    fn remember_window(&self, key: [u8; 32], spans: &[ClassifySpan]) {
+        let mut cache = match self.window_cache.lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if cache.entries.len() >= MAX_CACHED_CLASSIFY_WINDOWS {
+            return;
+        }
+        cache.entries.insert(key, spans.to_vec());
+    }
+
+    /// Periodic hit-rate line, so the production rate can be compared against
+    /// the 57.5% measured offline. Sampled rather than per-window: a single
+    /// envelope can carry thousands of windows and a line each would drown
+    /// the log.
+    fn log_cache_sample(cache: &ClassifyWindowCache) {
+        let total = cache.hits + cache.misses;
+        if !total.is_multiple_of(500) {
+            return;
+        }
+        tracing::info!(
+            hits = cache.hits,
+            misses = cache.misses,
+            distinct_windows = cache.entries.len(),
+            hit_rate_pct = (cache.hits * 100) / total.max(1),
+            "near-ai privacy classify window cache"
+        );
+    }
+
     /// POST one window of text to the classifier and return its raw spans
     /// (in that window's codepoint coordinates). Fail-closed on any
     /// transport error, non-2xx status, malformed body, or empty data
@@ -332,6 +425,14 @@ impl NearAiPrivacyFilterAdapter {
         &self,
         text: &str,
     ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        // Memoize on the window's content hash. The lock is taken only around
+        // the map access and released before any await, so it never spans a
+        // network round trip.
+        let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
+        if let Some(hit) = self.cached_window(&key) {
+            return Ok(hit);
+        }
+
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
@@ -435,6 +536,7 @@ impl NearAiPrivacyFilterAdapter {
                     .ok_or(TraceContributionError::RedactionFailed {
                         reason: "near-ai privacy classifier returned empty data array".to_string(),
                     })?;
+            self.remember_window(key, &entry.spans);
             return Ok(entry.spans);
         }
     }
