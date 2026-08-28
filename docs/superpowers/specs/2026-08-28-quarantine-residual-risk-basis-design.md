@@ -166,7 +166,7 @@ High, and if the basis is empty then `residual_risk` must return Low. The two
 functions are then pinned to each other, and a future edit to one that does
 not touch the other fails the suite.
 
-## 2. Storage: migration V51
+## 2. Storage: migration V52
 
 ```sql
 ALTER TABLE trace_submissions
@@ -286,7 +286,9 @@ TDD -- tests written first, then implementation.
 
 Note that CI never runs the PostgreSQL suite, so tests 3 and 4 gate nothing in
 CI and must be run locally. The shared `trace_commons_test` database already
-has migrations 30-34 applied; V51 is clear of that range.
+has migrations 30-34 applied; V52 is clear of that range. It was authored as
+V51 and renumbered when #481 took that number on main first -- the hand-rolled
+`run_migrations` makes the number a code change, not just a filename.
 
 **The pg suite reports `ok` when it skips.** Every test in
 `trace_corpus_pg_store.rs` opens with

@@ -1468,6 +1468,28 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
             }
         }
     }
+
+    // #444: coverage. The server scores a bounded number of sections of a long
+    // trace, so a gate result on a capped trace speaks for the part that was
+    // read, not the whole. Say so, or a contributor reads it as a verdict on
+    // their work.
+    //
+    // Best-effort by construction: this is one extra read of an endpoint the
+    // CLI already calls, and a caveat is worth less than the table above. Any
+    // failure -- offline, an older server, an attestation shape this build
+    // does not know -- leaves `status` exactly as it was.
+    if let Ok(attestation) = submit::fetch_score_attestation(store, &cfg).await {
+        if let Some(lines) = partial_coverage_lines(&attestation) {
+            if !lines.is_empty() {
+                println!();
+                println!("coverage:");
+                for (submission_id, sentence) in lines {
+                    println!("  {submission_id}: {sentence}");
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2157,6 +2179,70 @@ async fn enroll_with_invite_core(
 /// submission ids. An id list is forgeable by anyone who learns the ids --
 /// they have been published in plain text before now -- whereas forging an
 /// attestation requires the server's signing key.
+/// Coverage caveats to print under the `status` table, as
+/// `(submission_id, sentence)` pairs, for submissions only partly scored.
+///
+/// #444: the gate can only afford to score a bounded number of sections of a
+/// long trace. Measured on the pilot, a capped decision reads about a third
+/// of its trace, and one carried 2,362 sections against a cap of 16. A
+/// contributor seeing a bare gate result has no way to know their work was
+/// not read in full, which reads as a verdict on the work rather than on our
+/// budget.
+///
+/// The attestation already carries this per submission, but `attest` prints
+/// the raw signed JWT -- a thing to hand a collector, not to read.
+///
+/// **Display only.** The signature is deliberately NOT verified here: this is
+/// a contributor reading their own scores back from their own server over an
+/// already-authenticated call. Verification is the collector's job and that
+/// path is untouched. Nothing here is a trust boundary, which is why a
+/// malformed attestation returns `None` rather than erroring -- showing the
+/// submission table matters more than showing a caveat.
+fn partial_coverage_lines(attestation: &str) -> Option<Vec<(String, String)>> {
+    use base64::Engine as _;
+
+    let payload = attestation.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let submissions = claims.get("submissions")?.as_array()?;
+
+    let mut lines = Vec::new();
+    for entry in submissions {
+        let Some(coverage) = entry.get("coverage") else {
+            continue;
+        };
+        let Some(scored) = coverage.get("chunks_scored").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let sentence = match coverage.get("coverage_state").and_then(|v| v.as_str()) {
+            // A fully scored trace needs no caveat.
+            Some("complete") | None => continue,
+            Some("partial") => match coverage.get("chunks_total").and_then(|v| v.as_u64()) {
+                Some(total) => format!(
+                    "scored {scored} of {total} sections; the rest was not read, so any gate result covers only the part that was scored"
+                ),
+                // State says partial but no denominator survived: report what
+                // is known rather than inventing one.
+                None => format!(
+                    "scored {scored} sections; the rest was not read, so any gate result covers only the part that was scored"
+                ),
+            },
+            Some(_) => format!(
+                "scored {scored} sections; the rest was not read, and how many there were was not recorded for this submission"
+            ),
+        };
+        let id = entry
+            .get("submission_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown submission)")
+            .to_string();
+        lines.push((id, sentence));
+    }
+    Some(lines)
+}
+
 pub async fn attest(store: &ConfigStore, out: Option<&Path>, json: bool) -> Result<()> {
     let cfg = store
         .load_config()
@@ -3372,6 +3458,76 @@ mod daemon_command_tests {
         });
         assert!(text.contains("installed"), "{text}");
         assert!(text.contains("0.2.0"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    /// #444: the score attestation already carries how much of each trace was
+    /// actually scored, but `attest` prints the raw signed JWT -- a thing to
+    /// hand a collector, not to read. `status` is what a contributor looks at,
+    /// and it says nothing about coverage.
+    ///
+    /// The decode here is DISPLAY ONLY and deliberately does not verify the
+    /// signature: this is the contributor reading their own scores back. The
+    /// signature is what a collector checks, and that path is unchanged.
+    #[test]
+    fn coverage_is_read_from_the_attestation_for_display() {
+        // payload segment only; header and signature are not inspected.
+        let payload = serde_json::json!({
+            "submissions": [
+                {"submission_id": "11111111-1111-1111-1111-111111111111",
+                 "coverage": {"coverage_state": "partial",
+                              "chunks_scored": 16, "chunks_total": 2362}},
+                {"submission_id": "22222222-2222-2222-2222-222222222222",
+                 "coverage": {"coverage_state": "complete",
+                              "chunks_scored": 4, "chunks_total": 4}},
+                {"submission_id": "33333333-3333-3333-3333-333333333333",
+                 "coverage": {"coverage_state": "partial_unknown_total",
+                              "chunks_scored": 16}}
+            ]
+        });
+        let jwt = fake_compact_jws(&payload);
+
+        let lines = partial_coverage_lines(&jwt).expect("payload decodes");
+
+        // Only the two partial ones are reported. A complete trace needs no
+        // caveat, and one on every row would train people to skip the line.
+        assert_eq!(lines.len(), 2, "got {lines:?}");
+
+        let partial = &lines[0];
+        assert!(partial.0.starts_with("11111111"));
+        assert!(
+            partial.1.contains("16") && partial.1.contains("2362"),
+            "both numbers must be shown: {}",
+            partial.1
+        );
+
+        let unknown = &lines[1];
+        assert!(unknown.0.starts_with("33333333"));
+        assert!(
+            unknown.1.contains("16") && !unknown.1.contains("2362"),
+            "an unknown total must not be fabricated: {}",
+            unknown.1
+        );
+    }
+
+    /// A malformed or unexpected attestation must not break `status`. Showing
+    /// the submission table matters more than showing a coverage caveat.
+    #[test]
+    fn a_undecodable_attestation_yields_no_lines_rather_than_an_error() {
+        assert!(partial_coverage_lines("not-a-jwt").is_none());
+        assert!(partial_coverage_lines("").is_none());
+        assert!(partial_coverage_lines("a.!!!notbase64!!!.c").is_none());
+    }
+
+    fn fake_compact_jws(payload: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).expect("payload serializes"));
+        format!("ignored-header.{body}.ignored-signature")
     }
 }
 

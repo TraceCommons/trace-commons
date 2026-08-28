@@ -433,6 +433,12 @@ deployment.
 
 ## Contributing
 
+**By opening a pull request you license your contribution under
+`MIT OR Apache-2.0`**, including contributions to the AGPL-licensed server
+crates. You keep your copyright. Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
+before your first PR — it explains why the inbound license differs from the
+outbound one and what that means for you.
+
 Branch protection on `main` requires:
 
 - All CI checks green (`cargo fmt --check`, three `cargo check` variants,
@@ -490,3 +496,40 @@ they live inline in `docs/`:
   submit/confirm. All adapters are operator-owned; the server only records
   `configured` / `not_configured` readiness fields in
   `/v1/admin/config-status`.
+
+## License
+
+TraceCommons is licensed in two parts, split along the client/server seam.
+
+**Server components — AGPL-3.0-or-later** (`LICENSE-AGPL`):
+`trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`.
+
+These are normally operated as a network service, so section 13 applies: run a
+modified version and let others reach it over a network, and you owe those
+users the Corresponding Source. `trace-commons-ingest` answers `GET /v1/source`
+with the license, the source URL, and the commit the running binary was built
+from. If you deploy a modified build, point that constant at your own source.
+
+**Client and protocol components — MIT OR Apache-2.0** (`LICENSE-MIT`,
+`LICENSE-APACHE`): `trace-commons-protocol`, `trace-commons-contributor`,
+`trace-commons-contributor-ffi`, `trace-commons-contributor-gtk`,
+`trace-commons-operator-client`, `trace-commons-mark`,
+`trace-commons-build-info`.
+
+These stay permissive on purpose. The contributor CLI, the desktop apps, and
+the envelope protocol are meant to be embedded in proprietary agent harnesses —
+Ironclaw consumes `trace-commons-protocol` directly.
+
+**Contributions are licensed inbound under MIT OR Apache-2.0**, including
+contributions to the AGPL crates. Contributors keep their copyright; nothing is
+assigned, and there is no CLA to sign. This deliberately departs from
+"inbound = outbound" so the project retains the ability to relicense what it
+distributes — what downstream recipients get is unchanged, since the server
+crates ship AGPL either way. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Permissive code may flow into the AGPL crates; the reverse is a license
+violation no compiler will report, so it is enforced by
+`crates/trace-commons-server/tests/license_boundary.rs`. Adding an AGPL crate
+to a client to reuse one trait will fail that test. See `LICENSE` for the full
+statement and `deny.toml` for the dependency-license audit
+(`cargo deny check licenses`).

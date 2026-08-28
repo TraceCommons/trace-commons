@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Acceptance test for novelty-corpus durability: a real process, killed by a
 //! real SIGTERM, must leave the corpus on disk.
 //!

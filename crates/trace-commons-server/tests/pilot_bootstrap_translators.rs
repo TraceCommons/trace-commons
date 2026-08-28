@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration tests for the per-dataset translators that the
 //! `trace-commons-pilot-bootstrap` binary uses. Modules under `src/bin/` aren't
 //! reachable through the library crate, so we pull them in here via

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! In-process invite registry: cache, invalidation, and code generation.
 //!
 //! The cache is a latency optimization and never a correctness boundary.

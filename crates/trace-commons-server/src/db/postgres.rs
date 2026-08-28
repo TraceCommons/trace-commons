@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! PostgreSQL backend for TraceCommons server storage.
 
 use std::collections::HashSet;
@@ -1924,13 +1927,34 @@ impl Database for PgBackend {
         if !already_applied {
             client
                 .batch_execute(include_str!(
-                    "../../../../migrations/V51__trace_submission_residual_risk_basis.sql"
+                    "../../../../migrations/V51__privacy_classify_window_cache.sql"
                 ))
                 .await?;
             client
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
-                    &[&51_i32, &"trace_submission_residual_risk_basis"],
+                    &[&51_i32, &"privacy_classify_window_cache"],
+                )
+                .await?;
+        }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&52_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V52__trace_submission_residual_risk_basis.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&52_i32, &"trace_submission_residual_risk_basis"],
                 )
                 .await?;
         }
@@ -5561,7 +5585,48 @@ mod tests {
         );
     }
 
-    /// V51 records WHICH residual-risk conditions held when a submission's
+    /// V51 stores classifier output for reuse. The properties that keep it
+    /// from becoming a content store, or a cross-tenant one, are pinned here
+    /// because they are the whole basis on which the cache was accepted.
+    #[test]
+    fn v51_cache_is_tenant_scoped_and_stores_no_text() {
+        const V51: &str =
+            include_str!("../../../../migrations/V51__privacy_classify_window_cache.sql");
+        assert!(
+            V51.contains("FORCE ROW LEVEL SECURITY"),
+            "V51 must force RLS like every other Trace Commons table"
+        );
+        assert!(
+            V51.contains("tenant_id = trace_current_tenant_id()"),
+            "V51 must isolate by tenant; a cross-tenant cache needs a promotion rule"
+        );
+        assert!(
+            V51.contains("PRIMARY KEY (tenant_id, filter_version, window_hash)"),
+            "filter_version must be in the key, or a model change reads stale spans"
+        );
+        // The value column holds offsets and labels. A column that could hold
+        // trace text -- redacted or otherwise -- would make this a content
+        // store rather than a span cache. Check the SCHEMA, not the prose:
+        // the comments discuss text precisely because storing it is what the
+        // design rules out.
+        let schema: String = V51
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["redacted_text", "content", "plaintext", "window_text"] {
+            assert!(
+                !schema.contains(banned),
+                "V51 must not store trace text; found a {banned:?} column"
+            );
+        }
+        assert!(
+            schema.contains("spans") && schema.contains("window_hash"),
+            "V51 must key on a hash and store spans"
+        );
+    }
+
+    /// V52 records WHICH residual-risk conditions held when a submission's
     /// privacy risk was decided (#474 proposal 4). Same shape as V49 and for
     /// the same reason: at review time a coverage gap forced High is
     /// indistinguishable from a filter that looked and found a secret, and
@@ -5571,28 +5636,42 @@ mod tests {
     /// from `status` would fabricate exactly the data this column exists to
     /// obtain.
     #[test]
-    fn v51_adds_a_nullable_label_only_residual_risk_basis_column() {
-        const V51: &str =
-            include_str!("../../../../migrations/V51__trace_submission_residual_risk_basis.sql");
+    fn v52_adds_a_nullable_label_only_residual_risk_basis_column() {
+        const V52: &str =
+            include_str!("../../../../migrations/V52__trace_submission_residual_risk_basis.sql");
         assert!(
-            V51.contains("ADD COLUMN IF NOT EXISTS residual_risk_basis JSONB"),
-            "V51 must add the residual-risk basis column"
+            V52.contains("ADD COLUMN IF NOT EXISTS residual_risk_basis JSONB"),
+            "V52 must add the residual-risk basis column"
         );
         assert!(
-            !V51.to_uppercase().contains("NOT NULL"),
-            "V51 must leave pre-existing rows NULL rather than assert a basis for them"
+            !V52.to_uppercase().contains("NOT NULL"),
+            "V52 must leave pre-existing rows NULL rather than assert a basis for them"
         );
         assert!(
-            !V51.to_uppercase().contains("UPDATE TRACE_SUBMISSIONS"),
-            "V51 must not backfill a guessed basis onto historical rows"
+            !V52.to_uppercase().contains("UPDATE TRACE_SUBMISSIONS"),
+            "V52 must not backfill a guessed basis onto historical rows"
         );
         assert!(
-            !V51.contains("GRANT SELECT (residual_risk_basis)"),
-            "V51 must not widen a column-scoped reader role for a column it does not read"
+            !V52.contains("GRANT SELECT (residual_risk_basis)"),
+            "V52 must not widen a column-scoped reader role for a column it does not read"
         );
         assert!(
-            !V51.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
-            "V51 must not weaken forced RLS"
+            !V52.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V52 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v52_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V52__trace_submission_residual_risk_basis.sql"),
+            "V52 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&52_i32"),
+            "V52 must record itself in _trace_commons_migrations"
         );
     }
 
@@ -5601,7 +5680,7 @@ mod tests {
     fn v51_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
         assert!(
-            THIS_FILE.contains("migrations/V51__trace_submission_residual_risk_basis.sql"),
+            THIS_FILE.contains("migrations/V51__privacy_classify_window_cache.sql"),
             "V51 must be wired into run_migrations with an include_str!"
         );
         assert!(

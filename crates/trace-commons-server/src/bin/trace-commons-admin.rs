@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `trace-commons-admin` — admin-audience operator CLI.
 //!
 //! Twelve subcommands matching the admin-bearer endpoints on

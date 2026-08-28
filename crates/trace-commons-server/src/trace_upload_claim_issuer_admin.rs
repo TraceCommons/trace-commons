@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Operator admin endpoint for the upload-claim issuer.
 //!
 //! Mounted on an optional second `axum::serve` bind (defaults to

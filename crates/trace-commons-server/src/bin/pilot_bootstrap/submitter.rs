@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Rate-limited HTTP submitter. Wraps a [`SubmissionDraft`] into a full
 //! `TraceContributionEnvelope` via the protocol crate's redactor and POSTs it
 //! to the running `trace-commons-ingest` binary's `/v1/traces` endpoint.

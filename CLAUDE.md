@@ -111,6 +111,48 @@ GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
 those versions unless intentionally upgrading.
 
+## Licensing
+
+This repo is **split-licensed**, and the split is load-bearing. `AGENTS.md`
+carries the full statement of it; the essentials are repeated here.
+
+- **AGPL-3.0-or-later**: `trace-commons-server`, `trace-commons-gate-api`,
+  `trace-commons-gate-enclave`. Copyright K&Z Partners LLC. Every `.rs` file in
+  these crates carries a two-line copyright + SPDX header; new files need one.
+- **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
+  `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
+  `-build-info`). These ship inside proprietary agent harnesses and must stay
+  permissive.
+
+**Contributions are licensed inbound under `MIT OR Apache-2.0`**, including to
+the AGPL crates -- deliberately not "inbound = outbound", so the project keeps
+the right to relicense what it distributes. Stated in `CONTRIBUTING.md`, the PR
+template, `LICENSE`, and the README; keep those four consistent.
+
+**Permissive code may flow into the AGPL crates. Never the reverse.** Do not add
+`trace-commons-gate-api`, `-gate-enclave`, or `-server` to a permissive crate's
+dependencies -- not even to reuse a single trait. That silently makes a shipped
+client copyleft. `crates/trace-commons-server/tests/license_boundary.rs` fails
+if you do; do not "fix" it by editing the expected sets. Test-only
+dev-dependencies across the boundary are permitted but pinned in that same file.
+
+Note that `trace-commons-gate-api`'s traits being AGPL is deliberate: the
+proprietary-backend seam described below is available to the copyright holder
+and closed to third parties. The inbound MIT/Apache term is what keeps that
+possible -- an outside contribution offered under other terms would end it.
+
+AGPL section 13 obliges a network operator to offer the Corresponding Source.
+`trace-commons-ingest` does this at `GET /v1/source` -- unauthenticated, no
+tenant context, outside every fail-closed gate. Do not put it behind auth.
+
+`cargo deny check licenses` audits dependency licenses against `deny.toml`; run
+it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
+those pull in different trees. A new dependency must be combinable into an
+AGPL-3.0 work: GPL-2.0-only, SSPL, or proprietary is a hard conflict.
+
+If the boundary test fails, remove the dependency. Do not edit the expected sets
+in `license_boundary.rs` to match your diff -- those sets are the specification.
+
 ## Conventions specific to this repo
 
 - **Hash-only audit and logging.** Audit rows, error logs, and operational

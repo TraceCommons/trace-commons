@@ -678,6 +678,35 @@ impl Queue {
         true
     }
 
+    /// Drop the preview pin from a `Pending` entry, so the redacted
+    /// envelope it names stops being kept on disk. Returns whether
+    /// anything changed.
+    ///
+    /// This is the release valve for
+    /// `daemon::approved_envelope::release_stale_pins`: a preview the
+    /// contributor never acted on is content at rest with nobody waiting
+    /// on it, and an unpinned `Pending` entry is exactly the state an
+    /// entry that was never previewed is already in -- the next preview or
+    /// approval rebuilds and re-pins it. Nothing about the offer changes,
+    /// so no `reason_label` is set: the contributor has not been told
+    /// anything and has nothing to react to.
+    ///
+    /// `Pending` only, deliberately. On an `Approved` or `Uploading` entry
+    /// the stored bytes are the bytes the upload will send; releasing the
+    /// pin there would either send something the contributor was never
+    /// shown or fail the upload closed. Those are released by the entry
+    /// resolving, never by age or by pressure on the store.
+    pub fn release_preview_pin(&mut self, entry_id: Uuid) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending || e.previewed_envelope_digest.is_none() {
+            return false;
+        }
+        e.previewed_envelope_digest = None;
+        true
+    }
+
     /// Claim an approved entry for upload, atomically, under the caller's
     /// existing lock. Returns false when the entry is no longer `Approved`
     /// -- because a `cancel` landed after the caller snapshotted the
@@ -1913,6 +1942,36 @@ mod tests {
             !q.pinned_entry_ids().contains(&id),
             "and the bytes it named must stop being kept on disk"
         );
+    }
+
+    #[test]
+    fn release_preview_pin_drops_a_pending_entrys_pin() {
+        // The pin is what keeps a redacted envelope on disk. Releasing it
+        // on an entry nobody is waiting on is how the store stops growing;
+        // the next preview rebuilds and re-pins.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.release_preview_pin(id));
+        assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
+        assert!(!q.pinned_entry_ids().contains(&id));
+    }
+
+    #[test]
+    fn release_preview_pin_refuses_an_entry_that_is_not_pending() {
+        // An approved entry's stored bytes are the bytes the upload will
+        // send. Dropping that pin would either send something nobody was
+        // shown or fail the upload closed, so it must be impossible.
+        let mut q = Queue::new();
+        q.upsert(entry("sha256:aa", "2026-08-08T12:00:00Z"), 500)
+            .unwrap();
+        let id = entry_id_for("sha256:aa");
+        assert!(q.record_previewed_envelope(id, "sha256:envelope"));
+        assert!(q.approve(id, &[], None, None, None, None));
+        assert!(!q.release_preview_pin(id));
+        assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());
     }
 
     #[test]

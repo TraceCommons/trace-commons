@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -7225,6 +7228,7 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/v1/source", get(source_offer_handler))
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -11023,6 +11027,48 @@ fn insert_token_with_expiry(
         },
     );
     Ok(())
+}
+
+/// Where the Corresponding Source lives. This is the canonical URL, not the
+/// pre-rename one: GitHub still redirects `zmanian/trace-commons-server`, but a
+/// redirect is broken the moment anyone creates a repository at the old name,
+/// and a section 13 offer is a bad place to depend on one.
+///
+/// A constant rather than configuration:
+/// AGPL section 13 obliges the operator of a *modified* version to point at
+/// their own source, and an operator who modifies this binary is already
+/// editing it. A knob here would only let an unmodified deploy point somewhere
+/// wrong.
+const TRACE_COMMONS_SOURCE_URL: &str = "https://github.com/TraceCommons/trace-commons";
+
+/// The AGPL section 13 source offer.
+///
+/// Carries the build commit rather than the version alone, because the commit
+/// is what identifies the running code -- the same reason `/health` reports it.
+/// A user exercising section 13 needs the source *of the version they are
+/// talking to*, and the version string does not move when a deploy does.
+#[derive(Debug, Serialize)]
+struct SourceOfferResponse {
+    license: &'static str,
+    source_url: &'static str,
+    build_commit: &'static str,
+    build_time: &'static str,
+    build_version: &'static str,
+}
+
+/// Answers `GET /v1/source`. Unauthenticated by design: section 13 is written
+/// for the remote user, and requiring a credential to learn where the source
+/// lives would defeat it. Nothing here is tenant-scoped, so this handler must
+/// not consult `trace_current_tenant_id()`; it reveals only what a published
+/// release already reveals.
+async fn source_offer_handler() -> Json<SourceOfferResponse> {
+    Json(SourceOfferResponse {
+        license: "AGPL-3.0-or-later",
+        source_url: TRACE_COMMONS_SOURCE_URL,
+        build_commit: trace_commons_build_info::COMMIT,
+        build_time: trace_commons_build_info::BUILD_TIME,
+        build_version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -40178,7 +40224,16 @@ async fn run_pii_backstop_driver_tick(
     // `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES`.
     let mut consecutive_failures = 0usize;
     for item in &items {
-        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
+        // Scope the adapter to this submission's tenant so the durable
+        // classify cache (V51) is tenant-isolated. The per-tick adapter keeps
+        // owning config validation and the canary, so a misconfiguration
+        // still fails the whole tick before any trace is touched; this only
+        // adds a cache binding, and falls back to the unscoped adapter when
+        // no DB mirror or no caching backend is available.
+        let scoped =
+            pii_backstop_adapter_for_tenant(state.as_ref(), adapter.as_ref(), &item.tenant_id);
+        let effective = scoped.as_deref().unwrap_or(adapter.as_ref());
+        match process_one_pii_backstop(state.as_ref(), db, item, effective).await {
             Ok(()) => {
                 summary.done += 1;
                 consecutive_failures = 0;
@@ -40314,6 +40369,20 @@ async fn run_pii_backstop_driver_tick(
         );
     }
     Ok(summary)
+}
+
+/// Bind the classify-window cache to one tenant, if the deployment has one.
+///
+/// Returns `None` when there is no Postgres backend to cache in, which is the
+/// correct degradation: every window is classified, exactly as before the
+/// cache existed.
+fn pii_backstop_adapter_for_tenant(
+    state: &AppState,
+    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
+    tenant_id: &str,
+) -> Option<std::sync::Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter>> {
+    let store = state.db_mirror.as_ref()?.classify_window_store(tenant_id)?;
+    adapter.scoped_to_window_store(store, PII_BACKSTOP_REDACTION_LABEL)
 }
 
 /// Terminal disposition for a submission that has exhausted its PII-backstop
@@ -49827,6 +49896,65 @@ struct TraceGateEvaluateWorkerResponse {
     /// `"non_production_gate"`, `"submission_not_accepted"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     credit_withheld_reason: Option<String>,
+    /// #444: how much of the trace this decision read, in words, when it read
+    /// less than all of it. Absent for a fully scored trace -- a caveat on
+    /// every response is noise. Derived from the same three columns the score
+    /// attestation signs, so the two surfaces cannot disagree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_explanation: Option<String>,
+}
+
+/// Stable, label-only `credit_withheld_reason` written when a decision failed
+/// a gate floor and the trace was chunk-capped.
+///
+/// #444: credit is withheld either way -- we cannot vouch for what we did not
+/// read -- but the reason matters. A capped decision is a judgement about the
+/// prefix of the trace we could afford to score, not about the trace. Measured
+/// on the pilot, capped decisions read 32.9% of their trace on average, and
+/// one carried 2,362 chunks against a cap of 16. Recording that as an
+/// unexplained failure tells a contributor their work fell short when most of
+/// it was never read.
+const INSUFFICIENT_COVERAGE_LABEL: &str = "insufficient_coverage";
+
+/// Why credit was withheld from a decision that did not pass both floors.
+///
+/// `None` when the trace was fully scored: the gate genuinely judged all of
+/// it, so the failure is a statement about the trace and needs no excuse.
+/// NULL `chunks_capped` reads as false, matching migration V37.
+fn gate_failure_withheld_reason(chunks_capped: Option<bool>) -> Option<String> {
+    chunks_capped
+        .unwrap_or(false)
+        .then(|| INSUFFICIENT_COVERAGE_LABEL.to_string())
+}
+
+/// Render coverage as a sentence for the contributor.
+///
+/// `None` for a fully scored trace: a caveat on every receipt is noise that
+/// trains people to skip the line. Only says something when there is
+/// something to say, and never characterises the work -- the numbers are the
+/// message.
+///
+/// The type and its derivation already existed for the score attestation, but
+/// that attestation is a signed JWT handed to a collector; nothing rendered it
+/// for the person who submitted the trace.
+fn coverage_explanation(coverage: ScoreAttestationCoverage) -> Option<String> {
+    match coverage {
+        ScoreAttestationCoverage::Complete { .. } => None,
+        ScoreAttestationCoverage::Partial {
+            chunks_scored,
+            chunks_total,
+        } => Some(format!(
+            "Scored {chunks_scored} of {chunks_total} sections of this trace; \
+             the rest was not read. Any gate result reflects only the part \
+             that was scored."
+        )),
+        ScoreAttestationCoverage::PartialUnknownTotal { chunks_scored } => Some(format!(
+            "Scored {chunks_scored} sections of this trace; the rest was not \
+             read, and this decision predates recording how many sections \
+             there were. Any gate result reflects only the part that was \
+             scored."
+        )),
+    }
 }
 
 /// Stable, label-only `credit_withheld_reason` sentinel written to the
@@ -49864,6 +49992,12 @@ enum GateOutcome {
         vector_entry_id: Option<Uuid>,
         gate_policy_version: String,
         gate_version_hash: String,
+        /// #444: how much of the trace this decision actually read. Carried
+        /// so a failing decision can say whether the gate judged the trace or
+        /// only the part of it we could afford to score.
+        chunk_count: u32,
+        total_chunk_count: u32,
+        chunks_capped: bool,
     },
     SkippedDuplicate {
         decision_id: Uuid,
@@ -50220,6 +50354,9 @@ async fn evaluate_and_record_gate(
         vector_entry_id: decision.vector_entry_id,
         gate_policy_version: decision.gate_policy_version,
         gate_version_hash: decision.gate_version_hash,
+        chunk_count: decision.chunk_count,
+        total_chunk_count: decision.total_chunk_count,
+        chunks_capped: decision.chunks_capped,
     })
 }
 
@@ -51438,6 +51575,9 @@ async fn gate_evaluate_worker_handler(
         vector_entry_id,
         gate_policy_version,
         gate_version_hash,
+        chunk_count,
+        total_chunk_count,
+        chunks_capped,
     ) = match outcome {
         GateOutcome::Scored {
             decision_id,
@@ -51446,6 +51586,9 @@ async fn gate_evaluate_worker_handler(
             vector_entry_id,
             gate_policy_version,
             gate_version_hash,
+            chunk_count,
+            total_chunk_count,
+            chunks_capped,
         } => (
             decision_id,
             perplexity_passed,
@@ -51453,6 +51596,9 @@ async fn gate_evaluate_worker_handler(
             vector_entry_id,
             gate_policy_version,
             gate_version_hash,
+            chunk_count,
+            total_chunk_count,
+            chunks_capped,
         ),
         GateOutcome::Failed { label } => {
             return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, label));
@@ -51556,7 +51702,13 @@ async fn gate_evaluate_worker_handler(
         }
         (emitted, withheld_reason)
     } else {
-        (false, None)
+        // #444: the decision did not pass a floor. Say WHY credit is withheld.
+        // A capped decision judged only the part of the trace we could afford
+        // to score, so an unexplained failure misrepresents it as a verdict on
+        // the whole. Credit is withheld either way -- we cannot vouch for what
+        // we did not read -- but the label makes the two distinguishable in
+        // the audit row and to the contributor.
+        (false, gate_failure_withheld_reason(Some(chunks_capped)))
     };
 
     Ok(Json(TraceGateEvaluateWorkerResponse {
@@ -51570,6 +51722,13 @@ async fn gate_evaluate_worker_handler(
         vector_entry_id,
         credit_emitted,
         credit_withheld_reason,
+        coverage_explanation: coverage_explanation(
+            ScoreAttestationCoverage::from_decision_columns(
+                Some(chunk_count as i32),
+                Some(total_chunk_count as i32),
+                Some(chunks_capped),
+            ),
+        ),
     }))
 }
 

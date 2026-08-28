@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! TraceCommons server-owned database facade.
 
 use std::sync::Arc;
@@ -11,6 +14,7 @@ use crate::trace_corpus_storage::{
 };
 use crate::trace_invite_registry::InviteTenantMode;
 
+pub mod classify_window_cache;
 pub mod postgres;
 
 mod trace_corpus_common;

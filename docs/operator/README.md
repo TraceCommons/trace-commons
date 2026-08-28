@@ -63,6 +63,10 @@ Every runbook in this directory, with a one-line description.
   the strong-auth-gated stage-then-execute merge flow, its irreversibility, the
   single-use-link burn gotcha, and the hash-only `account_merge_started` /
   `account_merged` audit surface. Includes the V34 edited-migration note.
+- [`./agpl-source-offer.md`](./agpl-source-offer.md) — the AGPL section 13
+  source offer at `GET /v1/source`: why it must stay unauthenticated and
+  publicly reachable, what it returns, and what changes if you deploy a
+  modified build.
 - [`./settlement-mode.md`](./settlement-mode.md) — `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`
   (`disabled` / `dry_run` / `http`), the per-request `dry_run` preview flag,
   payout designation, fail-closed holds (NoneEnrolled / AmbiguousNoDesignation),

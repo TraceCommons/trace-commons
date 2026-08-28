@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -6264,6 +6267,20 @@ impl TraceCorpusStore for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(row.get(0))
+    }
+
+    fn classify_window_store(
+        &self,
+        tenant_id: &str,
+    ) -> Option<
+        std::sync::Arc<dyn trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore>,
+    > {
+        Some(std::sync::Arc::new(
+            crate::db::classify_window_cache::PostgresClassifyWindowStore::new(
+                self.trace_pool(),
+                tenant_id,
+            ),
+        ))
     }
 
     async fn list_quarantined_pii_backstop_exhausted(

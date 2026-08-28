@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pure, deterministic per-decision credit-quality score `q in [0,1]`, computed
 //! from the gate's stored numeric signals. Multiplicative and log-concave
 //! (anti-Goodhart), with a peak-vs-representative anomaly term used ONLY as a

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Process-local enrollment guards: nonce replay cache + per-instance token
 //! bucket. Restart-resets (matching the allowlist DenialCounter posture); the
 //! attestation `exp` and derived-tenant idempotency are the durable backstop.

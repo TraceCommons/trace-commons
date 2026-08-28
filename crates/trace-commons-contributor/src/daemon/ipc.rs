@@ -414,6 +414,14 @@ impl DaemonShared {
         if regroup_subagent_entries(&mut queue) {
             queue.save(&store)?;
         }
+        // Release the pins on stored previews nobody is waiting on before
+        // sweeping, so a store left over from an earlier version of the
+        // daemon -- previews written for entries the contributor never
+        // asked about, all of them still pending -- drains on the first
+        // start rather than waiting for a tick.
+        if !super::approved_envelope::release_stale_pins(&store, &mut queue).is_empty() {
+            queue.save(&store)?;
+        }
         // Sweep stored preview envelopes on the way up. A daemon that died
         // between resolving an entry and sweeping, or one whose queue file
         // was replaced underneath it, would otherwise leave redacted trace

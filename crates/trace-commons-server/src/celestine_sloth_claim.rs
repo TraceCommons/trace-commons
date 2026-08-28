@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Self-serve invite claims for Celestine Sloth Society holders.
 //!
 //! A holder proves control of a Cosmos account with an ADR-036 `signArbitrary`

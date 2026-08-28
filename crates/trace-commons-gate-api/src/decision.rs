@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use uuid::Uuid;
 
 /// Config for `EnclaveGateOrchestrator`. Floors are inclusive lower bounds in

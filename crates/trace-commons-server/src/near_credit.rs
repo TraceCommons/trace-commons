@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! NEAR non-transferable credit receipt payloads.
 //!
 //! The server keeps the off-chain settlement ledger authoritative. These types

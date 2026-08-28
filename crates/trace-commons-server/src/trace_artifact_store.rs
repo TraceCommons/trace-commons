@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Encrypted local artifact storage primitives for Trace Commons.
 //!
 //! The ingestion MVP currently writes JSON files directly. This module is the

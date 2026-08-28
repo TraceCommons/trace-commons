@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Backend-agnostic storage contracts for Trace Commons corpus metadata.
 //!
 //! These types describe the DB-backed production storage surface without
@@ -2926,6 +2929,21 @@ pub trait TraceCorpusStore: Send + Sync {
         Err(DatabaseError::Query(
             "bump_pii_backstop_attempt not implemented for this backend".to_string(),
         ))
+    }
+
+    /// A durable classify-window cache bound to `tenant_id`, when the backend
+    /// has one.
+    ///
+    /// `None` is always correct and is the default: it means every window is
+    /// sent to the classifier, exactly as before the cache existed. Only the
+    /// Postgres backend implements it (migration V51).
+    fn classify_window_store(
+        &self,
+        _tenant_id: &str,
+    ) -> Option<
+        std::sync::Arc<dyn trace_commons_protocol::privacy_filter_near_ai::ClassifyWindowStore>,
+    > {
+        None
     }
 
     /// List quarantined submissions in `tenant_id` whose quarantine was a

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /// Output of scoring a plaintext for perplexity.
 ///
 /// The fields are kept in fixed-point micros so the host can persist them
