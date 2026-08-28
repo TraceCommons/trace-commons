@@ -492,6 +492,12 @@ mod calibrate_impl {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             embed_insert_novelty_micros: 50_000,
+            // Zero for the same reason the floors above are zero: calibration
+            // is what chooses this bar, so it cannot presuppose one. At zero
+            // every chunk qualifies and the recorded mass is 1.0, which is a
+            // constant rather than a measurement — the qualifying-mass
+            // calibration pass has to sweep the bar itself.
+            qualifying_chunk_floor_micros: 0,
         };
         let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, index, cfg);
 
