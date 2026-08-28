@@ -96,6 +96,46 @@ means "no residual scan was run", which is not the same as "the residual scan
 was clean" and must never be recorded as `ResidualSurvivor`'s absence being
 evidence of anything.
 
+### Two entry points, because one signature cannot say three things
+
+That signature alone is not sufficient, and an earlier revision of this
+document was wrong to imply it was. It distinguishes only two states -- a scan
+ran and produced findings, or no scan ran -- while the design requires three.
+A scan that was *attempted and failed* is a third fact, and it is the one
+`ResidualScanUnavailable` exists to record. There is only one way to spell
+`None`, so the failed case is inexpressible in that signature.
+
+The resolution is a second entry point rather than a wider first one:
+
+```rust
+pub fn residual_risk_basis_for_failed_scan(
+    consent: &ConsentMetadata,
+    report: &RedactionReport,
+) -> Vec<ResidualRiskCondition>;
+```
+
+It delegates to `residual_risk_basis(consent, report, None)` and appends
+`ResidualScanUnavailable`. Both `Err(_)` arms -- in
+`rescrub_trace_envelope_with` and `rescrub_envelope_prose_pii_with` -- call it.
+Routing both through one named function is the point: the condition is never
+constructed ad hoc at a call site, so a third failure arm added later cannot
+quietly omit it.
+
+### `ResidualSurvivor` is scoped to `blocked_secret_detected`
+
+`ResidualSurvivor` is set from `residual.blocked_secret_detected` alone, not
+from any non-empty residual report.
+
+This follows from the consistency property. `blocked_secret_detected` is the
+only residual flag that *forces* High in `resolve_post_scrub_risk`; residual
+counts on their own merely block a downgrade, leaving the row at Medium.
+Scoping the condition wider would therefore put a forces-High label on a
+Medium row and break the very property section 1 requires.
+
+Residual `key_finding_detected` and `coverage_incomplete` are not lost by this
+narrowing -- they map to `KeyFinding` and `CoverageIncomplete`, which are
+evaluated against both the pass's own report and the residual report.
+
 `ResidualScanUnavailable` is a distinct condition, not a flavour of
 `CoverageIncomplete`. Both `rescrub_trace_envelope_with` and
 `rescrub_envelope_prose_pii_with` force High in an `Err(_)` arm when
@@ -245,8 +285,51 @@ TDD -- tests written first, then implementation.
 5. **No unallowlisted label can be stored.** The choke point holds.
 
 Note that CI never runs the PostgreSQL suite, so tests 3 and 4 gate nothing in
-CI and must be run locally against `trace_commons_test`. The shared test
-database already has migrations 30-34 applied; V51 is clear of that range.
+CI and must be run locally. The shared `trace_commons_test` database already
+has migrations 30-34 applied; V51 is clear of that range.
+
+**The pg suite reports `ok` when it skips.** Every test in
+`trace_corpus_pg_store.rs` opens with
+
+```rust
+let Some(backend) = postgres_backend().await else {
+    return;
+};
+```
+
+so an unconfigured environment yields a green result that proves nothing. The
+variable is `TRACE_COMMONS_PG_TEST_DATABASE_URL` (or `DATABASE_URL`) -- a near
+miss silently skips. This was hit during verification of this very design: a
+run against `TRACE_COMMONS_TEST_DATABASE_URL` reported
+`1 passed` in 0.00s while the column did not exist in the target database.
+
+A pg result is therefore only evidence when corroborated. Two cheap checks:
+the run takes measurable time rather than 0.00s, and
+
+```sql
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name='trace_submissions' AND column_name='residual_risk_basis';
+```
+
+returns `residual_risk_basis | jsonb` against the database the test used.
+
+## Known sharp edge: the upsert is COALESCE-free
+
+The `DO UPDATE` writes `residual_risk_basis` unconditionally rather than
+`COALESCE`-ing it with the stored value. This is deliberate, and it is the
+right default: it guarantees the basis can never be stale relative to the
+`privacy_risk` written beside it, which is the failure section 3 exists to
+prevent.
+
+The cost is that an upsert path which refreshes a submission *without* running
+a scrub pass would null the column rather than preserve the prior basis. No
+current path does this -- every one loads the file record, which carries the
+basis forward -- but the callers were not exhaustively enumerated, and nothing
+in the type system prevents a future one.
+
+A null basis reads as "not recorded", which is honest rather than wrong, so
+this degrades to lost data and never to a false claim. Worth knowing before
+adding an upsert path.
 
 ## What this does not do
 
