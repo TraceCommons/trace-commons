@@ -131,6 +131,21 @@ struct ClassifyWindowCache {
 /// unaffected, only the hit rate falls.
 const MAX_CACHED_CLASSIFY_WINDOWS: usize = 20_000;
 
+/// Lookups between hit-rate samples.
+const CACHE_SAMPLE_INTERVAL: usize = 500;
+
+/// Lookups before the first sample, so a deploy is observable quickly rather
+/// than only once 500 windows have gone by.
+const FIRST_CACHE_SAMPLE_AFTER: usize = 25;
+
+// The first sample must precede the steady-state interval, or a deploy shows
+// no cache activity until 500 windows have gone by -- which is the silence
+// this schedule exists to remove. Enforced at compile time.
+const _: () = assert!(
+    FIRST_CACHE_SAMPLE_AFTER > 0 && FIRST_CACHE_SAMPLE_AFTER < CACHE_SAMPLE_INTERVAL,
+    "the first cache sample must land after some work but before a full interval"
+);
+
 /// True when `base_url` uses TLS, or is plain HTTP against a loopback host.
 ///
 /// Loopback is exempt because such a request never leaves the machine: local
@@ -374,17 +389,16 @@ impl NearAiPrivacyFilterAdapter {
             Err(poisoned) => poisoned.into_inner(),
         };
         let hit = cache.entries.get(key).cloned();
-        match hit {
-            Some(spans) => {
-                cache.hits += 1;
-                Self::log_cache_sample(&cache);
-                Some(spans)
-            }
-            None => {
-                cache.misses += 1;
-                None
-            }
+        match &hit {
+            Some(_) => cache.hits += 1,
+            None => cache.misses += 1,
         }
+        // Sample on BOTH outcomes. Sampling only on hits meant a cold cache
+        // -- every lookup a miss -- logged nothing at all, so "no telemetry"
+        // was indistinguishable from "no lookups" and the first tick after a
+        // deploy reported silence either way.
+        Self::log_cache_sample(&cache);
+        hit
     }
 
     /// Record a successful classification for reuse within this tick.
@@ -403,9 +417,16 @@ impl NearAiPrivacyFilterAdapter {
     /// the 57.5% measured offline. Sampled rather than per-window: a single
     /// envelope can carry thousands of windows and a line each would drown
     /// the log.
+    ///
+    /// Fires on hits AND misses. A cold cache is all misses, so sampling only
+    /// hits produced no output until the cache was already working -- exactly
+    /// when the measurement is least needed. The first sample is emitted
+    /// early so a deploy shows signs of life without waiting a full interval.
     fn log_cache_sample(cache: &ClassifyWindowCache) {
         let total = cache.hits + cache.misses;
-        if !total.is_multiple_of(500) {
+        // An early first sample confirms the cache is being consulted at all;
+        // after that, one line per interval.
+        if total != FIRST_CACHE_SAMPLE_AFTER && !total.is_multiple_of(CACHE_SAMPLE_INTERVAL) {
             return;
         }
         tracing::info!(
@@ -1052,6 +1073,33 @@ mod tests {
             let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
             assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
         }
+    }
+
+    /// A cold cache is all misses. Sampling only on hits meant the telemetry
+    /// stayed silent exactly when it was most needed -- right after a deploy
+    /// -- and "no telemetry" could not be distinguished from "no lookups".
+    /// The counters must advance on both outcomes.
+    #[test]
+    fn cache_counters_advance_on_misses_not_only_hits() {
+        let mut cache = ClassifyWindowCache::default();
+        assert_eq!((cache.hits, cache.misses), (0, 0));
+
+        // Simulate the miss path: nothing stored, so a lookup must count.
+        cache.misses += 1;
+        assert_eq!(
+            (cache.hits, cache.misses),
+            (0, 1),
+            "a miss must be counted, or hit rate is unmeasurable on a cold cache"
+        );
+
+        // And the sampler must be reachable with zero hits.
+        let total = cache.hits + cache.misses;
+        assert!(
+            total == FIRST_CACHE_SAMPLE_AFTER
+                || total.is_multiple_of(CACHE_SAMPLE_INTERVAL)
+                || total < FIRST_CACHE_SAMPLE_AFTER,
+            "sampling schedule must be defined for an all-miss cache"
+        );
     }
 
     #[test]
