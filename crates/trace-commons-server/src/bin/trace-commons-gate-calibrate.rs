@@ -34,6 +34,8 @@ mod bakeoff_manifest;
 mod bakeoff_metrics;
 #[path = "gate_calibrate/bakeoff_report.rs"]
 mod bakeoff_report;
+#[path = "gate_calibrate/canonical_text.rs"]
+mod canonical_text;
 #[path = "gate_calibrate/run_candidate_eval.rs"]
 mod run_candidate_eval;
 #[path = "gate_calibrate/tail_floor.rs"]
@@ -71,6 +73,12 @@ enum Cmd {
     /// observed `tail_fraction_micros` distribution. Operator-only; no
     /// tenant scoping (every matching decision row contributes).
     TailFloor(tail_floor::TailFloorArgs),
+    /// Measure what the embedder is actually asked to tell apart: how much of
+    /// each trace's canonical rendering is scaffolding rather than content,
+    /// and how often structurally different events render identically (#211).
+    /// Tests hypothesis H1 of the novelty-signal scoping spec. Offline, no DB,
+    /// no embedder, no model weights.
+    CanonicalText(canonical_text::CanonicalTextArgs),
 }
 
 #[derive(Args, Debug)]
@@ -261,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Calibrate => run_calibrate().await,
         Cmd::BakeOff(args) => run_bakeoff(args).await,
         Cmd::TailFloor(args) => tail_floor::run(args).await,
+        Cmd::CanonicalText(args) => canonical_text::run(args),
     }
 }
 

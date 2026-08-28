@@ -1,0 +1,21 @@
+{
+  "sessionId": "22222222-2222-4222-8222-222222222222",
+  "projectHash": "a1b2c3d4e5f6",
+  "kind": "subagent",
+  "startTime": "2026-08-25T10:00:10.000Z",
+  "lastUpdated": "2026-08-25T10:00:40.000Z",
+  "summary": "Delegated: check the fixture loader",
+  "messages": [
+    {
+      "type": "user",
+      "content": "check the fixture loader",
+      "timestamp": "2026-08-25T10:00:11.000Z"
+    },
+    {
+      "type": "gemini",
+      "content": "The loader reads one file per session.",
+      "model": "gemini-3-flash",
+      "timestamp": "2026-08-25T10:00:39.000Z"
+    }
+  ]
+}

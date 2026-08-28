@@ -1952,3 +1952,94 @@ fn workflow_parsing_survives_a_crlf_checkout() {
         );
     }
 }
+
+/// The flatpak's vendored source set must name exactly the crates the GTK
+/// lockfile does.
+///
+/// The flatpak build runs `cargo --offline build` against `cargo-sources.json`,
+/// so a crate in the lockfile with no vendor entry fails there and only there.
+/// That is a bad place to find out: the GTK crate is a separate workspace
+/// excluded from the root one, nothing in normal CI builds it, and the failure
+/// surfaces on an `app-v*` tag after the release has already started.
+///
+/// It has now happened twice for the same reason. A dependency lands in a crate
+/// the shell depends on -- `near-ai-privacy-filter` picking up `futures`, then
+/// `tiktoken-rs` -- the lockfile is regenerated, and the vendor set is not.
+/// Regenerating one without the other is invisible until the tag.
+///
+/// Checked in both directions. A missing entry breaks the build; a stale one is
+/// harmless but means the set was hand-edited against a lockfile that has since
+/// moved, which is the state this test exists to catch early.
+#[test]
+fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lock =
+        std::fs::read_to_string(root.join("crates/trace-commons-contributor-gtk/Cargo.lock"))
+            .expect("GTK Cargo.lock is readable");
+    let sources = std::fs::read_to_string(
+        root.join("crates/trace-commons-contributor-gtk/flatpak/cargo-sources.json"),
+    )
+    .expect("cargo-sources.json is readable");
+
+    // Only packages carrying a checksum come from a registry; path and git
+    // dependencies (the workspace crates themselves) are not vendored.
+    let mut wanted: Vec<String> = Vec::new();
+    for block in lock.split("[[package]]") {
+        let field = |key: &str| -> Option<String> {
+            block.lines().find_map(|line| {
+                line.strip_prefix(&format!("{key} = \""))
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_string)
+            })
+        };
+        if field("checksum").is_some() {
+            if let (Some(name), Some(version)) = (field("name"), field("version")) {
+                wanted.push(format!("cargo/vendor/{name}-{version}"));
+            }
+        }
+    }
+    assert!(
+        wanted.len() > 100,
+        "parsed only {} locked packages; the lockfile format probably changed",
+        wanted.len()
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&sources).expect("cargo-sources.json is valid JSON");
+    let have: Vec<String> = parsed
+        .as_array()
+        .expect("cargo-sources.json is an array")
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|t| t.as_str()) == Some("archive"))
+        .filter_map(|entry| {
+            entry
+                .get("dest")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    let missing: Vec<&String> = wanted.iter().filter(|w| !have.contains(w)).collect();
+    let stale: Vec<&String> = have.iter().filter(|h| !wanted.contains(h)).collect();
+
+    assert!(
+        missing.is_empty(),
+        "locked crates with no vendor entry -- the flatpak build will fail on these:\n  {}\n\
+         Regenerate: see the comment above `cargo-sources.json` in \
+         crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "vendor entries for crates no longer in the lockfile:\n  {}",
+        stale
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}

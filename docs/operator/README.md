@@ -47,6 +47,7 @@ the link.
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
 | Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
+| Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
@@ -259,6 +260,11 @@ operator-constrained trust model is Phase B work (dstack), not Phase A.
   `export_manifest_items`, `derived_records`, `benchmark_artifacts`,
   `ranker_artifacts`, `credit_settlements`, `worker_queues`,
   `physical_delete_receipts`), gate service status reflection, etc.
+- **`driver-liveness.md`** — reading
+  `/v1/admin/driver-liveness`: when each background driver last
+  actually succeeded, the failure-class labels and what each means
+  for triage, and why `stale` catches a driver whose task died
+  silently. Admin-gated on purpose; nothing alerts on it yet.
 - **`drills.md`** — the full set of `/v1/admin/*-drill` endpoints,
   what each one validates, and how often to run each. Calls out
   which drills are required for promotion vs nice-to-have.

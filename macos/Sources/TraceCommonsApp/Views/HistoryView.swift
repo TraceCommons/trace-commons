@@ -107,30 +107,80 @@ struct HistoryView: View {
         .accessibilityLabel("\(title): \(count)")
     }
 
+    /// What holds a trace, and what happens to it while it is held.
+    ///
+    /// An AGENT inspects these. Not a person at Trace Commons -- that phrasing
+    /// shipped here and was wrong in the direction that alarms: it invites a
+    /// contributor to picture a staff member with their session open. Kept as
+    /// named values so `QuarantineExplanationTests` can assert on them; the
+    /// warm-sounding version is exactly the kind of thing a later copy pass
+    /// reintroduces.
+    static let heldReviewLede = """
+        An agent inspects these before they enter the commons. \
+        It happens when automated checks see something that might be personal \
+        or sensitive and can't decide on its own.
+        """
+
+    static let heldReviewAssurance = """
+        These have not been rejected, and they have not been shared with \
+        anyone but the agent that inspects them. They are sitting still.
+        """
+
+    static var heldReviewBody: String { heldReviewLede + " " + heldReviewAssurance }
+
+    /// The distinct, contributor-meaningful explanation lines across a set of
+    /// records, in first-seen order.
+    ///
+    /// Two rules, both learned from what this section actually rendered:
+    ///
+    /// 1. **Distinct.** These lines come from the server per RECORD, and this
+    ///    section spans every held record at once. The server writes the same
+    ///    sentence for every trace held for the same reason, so the flat list
+    ///    repeated two sentences once per trace. Order is preserved so the
+    ///    first reason a contributor sees is the first one that occurred.
+    /// 2. **No opaque digests.** Every receipt carries `Attributed to tenant
+    ///    tenant_sha256:<64 hex>`. True, and unreadable: a digest the reader
+    ///    cannot act on, above the sentence that says what happened. The rule
+    ///    keys on the digest rather than the sentence so a future line
+    ///    carrying a hash is caught without a list to maintain.
+    ///
+    /// A display filter, deliberately, not a server change: the receipt is an
+    /// API surface other consumers read, and tenant attribution is real
+    /// information there. It is only this screen that has no use for it.
+    static func contributorFacingExplanations(in records: [HistoryRecord]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for record in records {
+            for line in record.explanations where !line.contains("sha256:") {
+                if seen.insert(line).inserted {
+                    out.append(line)
+                }
+            }
+        }
+        return out
+    }
+
     private func quarantine(_ rollup: HistoryRollup) -> some View {
         DisclosureGroup(isExpanded: $quarantineExpanded) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("""
-                A person at Trace Commons reads these before they enter the commons. \
-                It happens when automated checks see something that might be personal \
-                or sensitive and can't decide on its own.
-                """)
-                Text("""
-                These have not been rejected, and they have not been shared with \
-                anyone but the reviewer. They are sitting still.
-                """)
+                Text(Self.heldReviewLede)
+                Text(Self.heldReviewAssurance)
                 .fontWeight(.semibold)
                 // Never state a turnaround time that cannot be honoured.
                 Text("Typical wait: we don't have a reliable number yet.")
                     .foregroundStyle(.secondary)
 
-                let explanations = model.history
-                    .filter { $0.status == "quarantined" }
-                    .flatMap(\.explanations)
+                // Rendered verbatim: the server's own prose beats a status
+                // word every time. But this is a SECTION over every held
+                // trace, not one card, so the raw flatMap printed the same
+                // two server sentences once per trace -- 210 traces gave 420
+                // lines, of which two were distinct. Distinct lines only, and
+                // no opaque digests: see `contributorFacingExplanations`.
+                let explanations = Self.contributorFacingExplanations(
+                    in: model.history.filter { $0.status == "quarantined" }
+                )
                 if !explanations.isEmpty {
-                    // Rendered verbatim: the server's own prose beats a
-                    // status word every time.
-                    ForEach(Array(explanations.enumerated()), id: \.offset) { _, text in
+                    ForEach(explanations, id: \.self) { text in
                         Text(text).font(.callout).foregroundStyle(.secondary)
                     }
                 }

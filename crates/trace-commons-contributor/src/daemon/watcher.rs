@@ -115,20 +115,11 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 /// is a blocking filesystem or lock operation) and why `tick` runs it
 /// through `run_blocking`.
 fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
-    let (max_queue_entries, claude_source, codex_source) = {
+    let (max_queue_entries, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.max_queue_entries,
-            s.claude_source.clone(),
-            s.codex_source.clone(),
-        )
+        (s.max_queue_entries, s.source_roots())
     };
-    tick_over(
-        shared,
-        now,
-        all_sources(claude_source, codex_source, None),
-        max_queue_entries,
-    )
+    tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
 }
 
 /// The pass itself, over an explicit source list.
@@ -198,19 +189,15 @@ pub async fn tick_paths(
     if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
-    let (max_queue_entries, claude_source, codex_source) = {
+    let (max_queue_entries, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.max_queue_entries,
-            s.claude_source.clone(),
-            s.codex_source.clone(),
-        )
+        (s.max_queue_entries, s.source_roots())
     };
     super::run_blocking(|| {
         tick_over_paths(
             shared,
             now,
-            all_sources(claude_source, codex_source, None),
+            all_sources(&source_roots),
             max_queue_entries,
             paths,
             session_at,
@@ -1004,15 +991,11 @@ mod tests {
         /// One pass -- the same `tick_over` `tick` runs -- over sources that
         /// count their `load` calls.
         fn tick_counted(&self, now: DateTime<Utc>, loads: &Arc<AtomicUsize>) -> TickReport {
-            let (max_queue_entries, claude_source, codex_source) = {
+            let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (
-                    s.max_queue_entries,
-                    s.claude_source.clone(),
-                    s.codex_source.clone(),
-                )
+                (s.max_queue_entries, s.source_roots())
             };
-            let sources = all_sources(claude_source, codex_source, None)
+            let sources = all_sources(&source_roots)
                 .into_iter()
                 .map(|inner| {
                     Box::new(CountingSource {
@@ -1040,15 +1023,11 @@ mod tests {
             discovers: &Arc<AtomicUsize>,
             paths: &[PathBuf],
         ) -> TickReport {
-            let (max_queue_entries, claude_source, codex_source) = {
+            let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (
-                    s.max_queue_entries,
-                    s.claude_source.clone(),
-                    s.codex_source.clone(),
-                )
+                (s.max_queue_entries, s.source_roots())
             };
-            let sources = all_sources(claude_source.clone(), codex_source.clone(), None)
+            let sources = all_sources(&source_roots)
                 .into_iter()
                 .map(|inner| {
                     Box::new(CountingSource {
@@ -1058,18 +1037,17 @@ mod tests {
                     }) as Box<dyn TraceSource>
                 })
                 .collect();
-            let known: Vec<(&'static str, SessionRef)> =
-                all_sources(claude_source, codex_source, None)
-                    .iter()
-                    .flat_map(|s| {
-                        let name = s.name();
-                        s.discover()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(move |r| (name, r))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
+            let known: Vec<(&'static str, SessionRef)> = all_sources(&source_roots)
+                .iter()
+                .flat_map(|s| {
+                    let name = s.name();
+                    s.discover()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(move |r| (name, r))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
             let session_at = |source: &dyn TraceSource, path: &Path| {
                 known
                     .iter()
@@ -2026,15 +2004,11 @@ mod tests {
     impl WatcherFixture {
         /// One pass over sources that refuse every `load` with `err`.
         fn tick_refusing(&self, now: DateTime<Utc>, err: fn() -> anyhow::Error) -> TickReport {
-            let (max_queue_entries, claude_source, codex_source) = {
+            let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (
-                    s.max_queue_entries,
-                    s.claude_source.clone(),
-                    s.codex_source.clone(),
-                )
+                (s.max_queue_entries, s.source_roots())
             };
-            let sources = all_sources(claude_source, codex_source, None)
+            let sources = all_sources(&source_roots)
                 .into_iter()
                 .map(|inner| Box::new(RefusingSource { inner, err }) as Box<dyn TraceSource>)
                 .collect();

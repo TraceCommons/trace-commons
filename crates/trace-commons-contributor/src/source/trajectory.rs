@@ -122,6 +122,53 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
         let role = record.get("role").and_then(|v| v.as_str()).unwrap_or("");
         match role {
             "meta" => bail!("duplicate_meta_record"),
+            // Upstream added `system` and `observation` to trajectory-v1 after
+            // this reader was written, and the catch-all below rejects the
+            // whole file on an unrecognised role. A contributor with a valid,
+            // schema-conforming trajectory was being refused, so both are
+            // mapped rather than tolerated: silently dropping them would lose
+            // an observation's content, which is real work.
+            //
+            // Both land on `Opaque` rather than earning their own
+            // `SessionEventKind`. A new kind would shift
+            // `canonical_whole_trace_representation`, which renders the event
+            // type and truncates at twelve events, creating a second
+            // novelty-comparison cohort boundary for no gain.
+            "observation" => {
+                // Content is kept. An observation is environment output --
+                // test results, command output -- and is redacted on the way
+                // out like every other content field.
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Opaque,
+                    timestamp: parse_timestamp(record)?,
+                    content: Some(required_str(record, "content")?),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
+            "system" => {
+                // Content is deliberately dropped: a system prompt is harness
+                // boilerplate that is near-identical across every session of a
+                // given harness, so it adds nothing to novelty while carrying
+                // whatever project context the harness injected into it. The
+                // record is still required to be well formed -- a missing
+                // content or timestamp is a malformed file, not a shrug.
+                let timestamp = parse_timestamp(record)?;
+                let _ = required_str(record, "content")?;
+                events.push(SessionEvent {
+                    kind: SessionEventKind::Opaque,
+                    timestamp,
+                    content: None,
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
             "user" | "reasoning" => {
                 let kind = if role == "user" {
                     SessionEventKind::User
@@ -227,16 +274,58 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
     })
 }
 
-/// Reads trajectory-v1 files from an explicitly supplied path. Unlike the
-/// native adapters there is no conventional local store to scan, so this
-/// source is only constructed when the contributor passes `--trajectory`.
+/// One place trajectory files may be read from.
+///
+/// Trajectory has no conventional per-user store, so unlike the native
+/// adapters every location here was either named by the contributor or is
+/// one of the two bounded defaults. There is deliberately no scope that
+/// means `$HOME`, and none that recurses.
+#[derive(Debug, Clone)]
+enum Scope {
+    /// The path `--trajectory` named: a file, or a directory whose direct
+    /// `.json`/`.jsonl` children are all offered. The contributor named it,
+    /// so no suffix is required and nothing is silently skipped -- a file
+    /// that will not parse is offered and fails loudly at load.
+    Declared(PathBuf),
+    /// The working directory, direct children only, and only files whose
+    /// name ends `.trajectory.json` or `.trajectory.jsonl`.
+    ///
+    /// The suffix is what keeps a stray `session.json` out of a submission:
+    /// nobody opted this directory in, so the file has to say what it is.
+    WorkingDirectory(PathBuf),
+    /// The staging folder inside the contributor state directory, direct
+    /// children only, any `.json`/`.jsonl`.
+    ///
+    /// No suffix required, because putting a file THERE is the opt-in. It
+    /// inherits the state directory's `0700` mode, honours
+    /// `TRACE_COMMONS_CONTRIBUTOR_DIR`, and `logout` clears it.
+    Staging(PathBuf),
+}
+
+/// Reads trajectory-v1 files from the locations this source was built over.
 pub struct TrajectorySource {
-    path: PathBuf,
+    scopes: Vec<Scope>,
 }
 
 impl TrajectorySource {
+    /// The path the contributor named with `--trajectory`.
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            scopes: vec![Scope::Declared(path)],
+        }
+    }
+
+    /// Bounded auto-discovery over the working directory and the staging
+    /// folder, for a contributor who passed no `--trajectory` at all.
+    /// Either location may be absent.
+    pub fn auto(working_dir: Option<PathBuf>, staging_dir: Option<PathBuf>) -> Self {
+        Self {
+            scopes: working_dir
+                .map(Scope::WorkingDirectory)
+                .into_iter()
+                .chain(staging_dir.map(Scope::Staging))
+                .collect(),
+        }
     }
 }
 
@@ -245,6 +334,63 @@ fn is_trajectory_file(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("json") | Some("jsonl")
     )
+}
+
+/// The name a file must carry to be auto-discovered from a directory nobody
+/// opted in -- the working directory.
+fn has_trajectory_suffix(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.ends_with(".trajectory.json") || name.ends_with(".trajectory.jsonl")
+}
+
+/// The largest file auto-discovery will read to decide whether it is a
+/// trajectory at all.
+///
+/// Only auto-discovery is bounded by it: a path the contributor named is
+/// still read whole, because they said what it was. Here the read is a
+/// guess about an unrelated file that happened to be sitting in a
+/// directory, and a guess must not be able to pull an arbitrarily large
+/// file into memory.
+const AUTO_PARSE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+
+/// Whether a file auto-discovery found really is a trajectory.
+///
+/// A file under an auto scope never claimed to be one, so it is skipped
+/// rather than refused -- the opposite of the explicit path, which
+/// hard-rejects with its reason label because the contributor named it.
+/// Checked here rather than at load so the skip happens before a session is
+/// ever offered.
+fn parses_as_a_trajectory(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() <= AUTO_PARSE_BUDGET => {}
+        _ => return false,
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    parse_trajectory(&bytes).is_ok()
+}
+
+impl Scope {
+    /// Whether this scope offers `path`, given that it is a real file
+    /// directly inside the scope's directory.
+    fn accepts(&self, path: &Path) -> bool {
+        match self {
+            Scope::Declared(_) => is_trajectory_file(path),
+            Scope::WorkingDirectory(_) => {
+                has_trajectory_suffix(path) && parses_as_a_trajectory(path)
+            }
+            Scope::Staging(_) => is_trajectory_file(path) && parses_as_a_trajectory(path),
+        }
+    }
+
+    fn dir(&self) -> &Path {
+        match self {
+            Scope::Declared(p) | Scope::WorkingDirectory(p) | Scope::Staging(p) => p,
+        }
+    }
 }
 
 fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
@@ -277,26 +423,34 @@ impl TraceSource for TrajectorySource {
     }
 
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
-        if self.path.is_file() {
-            return Ok(session_ref_for(self.path.clone()).into_iter().collect());
-        }
-        let Ok(entries) = std::fs::read_dir(&self.path) else {
-            return Ok(Vec::new());
-        };
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        for entry in entries {
-            let Ok(entry) = entry else {
-                skipped += 1;
-                continue;
-            };
-            let path = entry.path();
-            if !path.is_file() || !is_trajectory_file(&path) {
+        for scope in &self.scopes {
+            // A declared path that names a file IS the session; every other
+            // scope is a directory read non-recursively.
+            if matches!(scope, Scope::Declared(_)) && scope.dir().is_file() {
+                match session_ref_for(scope.dir().to_path_buf()) {
+                    Some(r) => sessions.push(r),
+                    None => skipped += 1,
+                }
                 continue;
             }
-            match session_ref_for(path) {
-                Some(r) => sessions.push(r),
-                None => skipped += 1,
+            let Ok(entries) = std::fs::read_dir(scope.dir()) else {
+                continue;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    skipped += 1;
+                    continue;
+                };
+                let path = entry.path();
+                if !path.is_file() || !scope.accepts(&path) {
+                    continue;
+                }
+                match session_ref_for(path) {
+                    Some(r) => sessions.push(r),
+                    None => skipped += 1,
+                }
             }
         }
         if skipped > 0 {
@@ -310,17 +464,31 @@ impl TraceSource for TrajectorySource {
 
     /// A changed trajectory file is its own session, on exactly the terms
     /// `discover` uses: the declared path itself when it names a file, and
-    /// otherwise a `.json`/`.jsonl` file sitting DIRECTLY in the declared
-    /// directory. Trajectory discovery does not recurse, so neither does
-    /// this -- a nested file the walk never sees must not be addressable.
+    /// otherwise a file sitting DIRECTLY in one of this source's scopes and
+    /// accepted by that scope's own rule -- suffix and parse included.
+    /// Trajectory discovery does not recurse, so neither does this: a
+    /// nested file the walk never sees must not be addressable, and a
+    /// mapping laxer than discovery would be a way to name a file the
+    /// contributor never agreed to.
     fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
-        if self.path.is_file() {
-            // A single declared file is the whole source. Compared rather
-            // than resolved: the contributor named this exact path.
-            return (path == self.path).then(|| self.path.clone());
+        for scope in &self.scopes {
+            if matches!(scope, Scope::Declared(_)) && scope.dir().is_file() {
+                // A single declared file is the whole scope. Compared
+                // rather than resolved: the contributor named this exact
+                // path.
+                if path == scope.dir() {
+                    return Some(scope.dir().to_path_buf());
+                }
+                continue;
+            }
+            let Some(real) = real_file_within_root(scope.dir(), path) else {
+                continue;
+            };
+            if real.parent() == Some(scope.dir()) && scope.accepts(&real) {
+                return Some(real);
+            }
         }
-        let path = real_file_within_root(&self.path, path)?;
-        (path.parent() == Some(self.path.as_path()) && is_trajectory_file(&path)).then_some(path)
+        None
     }
 
     /// The ref for whichever trajectory file a changed path names.
@@ -497,6 +665,132 @@ mod tests {
             None
         );
         assert_eq!(source.session_for_path(&real), Some(real.clone()));
+    }
+
+    /// Auto-discovery in the working directory is suffix-gated. A stray
+    /// `session.json` sitting in a repo is not a trajectory and must not
+    /// join a submission just because it parses.
+    #[test]
+    fn the_working_directory_yields_only_suffixed_files() {
+        let cwd = tempfile::tempdir().unwrap();
+        for name in [
+            "run.trajectory.json",
+            "run.trajectory.jsonl",
+            "session.json",
+            "notes.jsonl",
+            "notes.txt",
+        ] {
+            std::fs::write(cwd.path().join(name), SAMPLE).unwrap();
+        }
+        let nested = cwd.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("deep.trajectory.json"), SAMPLE).unwrap();
+
+        let source = TrajectorySource::auto(Some(cwd.path().to_path_buf()), None);
+        let mut names: Vec<String> = source
+            .discover()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["run.trajectory.json", "run.trajectory.jsonl"]);
+        assert_eq!(
+            source.session_for_path(&nested.join("deep.trajectory.json")),
+            None,
+            "auto-discovery never recurses, so a nested file is not addressable"
+        );
+        assert_eq!(
+            source.session_for_path(&cwd.path().join("session.json")),
+            None
+        );
+    }
+
+    /// The staging directory needs no suffix: putting a file there IS the
+    /// opt-in, and it is inside the contributor's own 0700 state directory.
+    #[test]
+    fn the_staging_directory_yields_any_json_or_jsonl() {
+        let staging = tempfile::tempdir().unwrap();
+        for name in ["one.json", "two.jsonl", "notes.txt"] {
+            std::fs::write(staging.path().join(name), SAMPLE).unwrap();
+        }
+        let source = TrajectorySource::auto(None, Some(staging.path().to_path_buf()));
+        let mut names: Vec<String> = source
+            .discover()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["one.json", "two.jsonl"]);
+    }
+
+    /// A file that does not parse is skipped under auto-discovery, because
+    /// it never claimed to be a trajectory -- and still hard-rejects under
+    /// an explicit `--trajectory`, because the contributor named it.
+    #[test]
+    fn auto_discovery_skips_what_does_not_parse_and_an_explicit_path_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.trajectory.json");
+        let bad = dir.path().join("bad.trajectory.json");
+        std::fs::write(&good, SAMPLE).unwrap();
+        std::fs::write(&bad, br#"{"not":"a trajectory"}"#).unwrap();
+
+        let auto = TrajectorySource::auto(Some(dir.path().to_path_buf()), None);
+        let found = auto.discover().unwrap();
+        assert_eq!(found.len(), 1, "the unparseable file is skipped");
+        assert_eq!(found[0].path, good);
+        assert_eq!(
+            auto.session_for_path(&bad),
+            None,
+            "and it is not addressable either"
+        );
+
+        let declared = TrajectorySource::new(bad.clone());
+        let r = declared
+            .discover()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("a named file is offered even when it will not parse");
+        let err = declared.load(&r).unwrap_err();
+        assert_eq!(err.to_string(), "missing_meta_record");
+    }
+
+    /// Auto-discovery is two locations and no more. Neither an absent
+    /// working directory nor an absent staging directory is an error, and
+    /// nothing outside them is ever read.
+    #[test]
+    fn auto_discovery_is_bounded_to_the_two_locations_it_was_given() {
+        let cwd = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("a.trajectory.json"), SAMPLE).unwrap();
+        std::fs::write(staging.path().join("b.json"), SAMPLE).unwrap();
+        std::fs::write(elsewhere.path().join("c.trajectory.json"), SAMPLE).unwrap();
+
+        let source = TrajectorySource::auto(
+            Some(cwd.path().to_path_buf()),
+            Some(staging.path().to_path_buf()),
+        );
+        assert_eq!(source.discover().unwrap().len(), 2);
+        assert_eq!(
+            source.session_for_path(&elsewhere.path().join("c.trajectory.json")),
+            None
+        );
+
+        // A location that does not exist is simply empty.
+        let missing = TrajectorySource::auto(
+            Some(cwd.path().join("gone")),
+            Some(staging.path().join("gone")),
+        );
+        assert!(missing.discover().unwrap().is_empty());
+        assert!(
+            TrajectorySource::auto(None, None)
+                .discover()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     const SAMPLE: &str = r#"[

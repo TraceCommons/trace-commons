@@ -61,6 +61,9 @@ use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
 };
+use trace_commons_server::driver_liveness::{
+    DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
+};
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
@@ -182,8 +185,8 @@ use trace_commons_server::trace_gate_service::{
     TenantCtx as GateTenantCtx, TraceGateService,
 };
 use trace_commons_server::trace_score_attestation::{
-    AttestationConfig, AttestationSigningState, ScoreAttestationCoverage,
-    ScoreAttestationSubmissionEntry, sign_score_attestation,
+    AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
+    ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
 };
 use uuid::Uuid;
 
@@ -1368,6 +1371,9 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 #[derive(Clone)]
 struct AppState {
     root: PathBuf,
+    /// #438: per-driver liveness, so a background loop that has been failing
+    /// for days is visible as such instead of only as a repeating WARN.
+    driver_liveness: Arc<DriverLivenessRegistry>,
     tokens: Arc<BTreeMap<String, TenantAuth>>,
     signed_token_verifier: Option<SharedTraceCommonsSignedTokenVerifier>,
     managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
@@ -1738,6 +1744,21 @@ struct PerplexityDriverTickSummary {
     failed: usize,
     transient: usize,
     breaker_tripped: bool,
+    /// Wall time for the tick body, excluding the interval slept before it.
+    ///
+    /// The loop sleeps THEN ticks, so cycle time is interval + this. Without
+    /// it, per-trace latency can only be inferred from the gap between
+    /// consecutive log lines minus an interval that may have been retuned,
+    /// which is how this number came to be unknown in the first place.
+    tick_duration_ms: u64,
+    /// Submissions the enumeration would return with no `LIMIT`, measured
+    /// after the tick's work. See
+    /// `Database::count_submissions_needing_gate_decision` for the two things
+    /// it deliberately excludes -- a zero here is not "nothing outstanding".
+    ///
+    /// `None` when the count itself failed: a backlog probe must never turn a
+    /// tick that scored traces into a tick that reports an error.
+    backlog: Option<i64>,
 }
 
 /// In-process PII-backstop driver loop config (server-side NEAR AI PII
@@ -3808,6 +3829,7 @@ impl AppState {
 
         Ok(Self {
             root,
+            driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
             managed_eddsa_keyset_refresh,
@@ -7230,7 +7252,7 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/contributors/me/score-attestation",
-            get(score_attestation_handler),
+            get(score_attestation_handler).post(scoped_score_attestation_handler),
         )
         .route(
             "/.well-known/trace-commons-attestation-keyset.json",
@@ -7445,6 +7467,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/admin/rollout-smoke/preflight",
             get(rollout_smoke_preflight_handler),
         )
+        .route("/v1/admin/driver-liveness", get(driver_liveness_handler))
         .route("/v1/admin/rollback-drill", post(rollback_drill_handler))
         .route(
             "/v1/admin/key-rotation-drill",
@@ -9021,7 +9044,6 @@ fn spawn_trace_export_job_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     let dataset_kind = config.dataset_kind.as_deref().unwrap_or("all");
     tracing::info!(
         dataset_kind,
@@ -9031,32 +9053,31 @@ fn spawn_trace_export_job_scheduler_task(
         retry_failed_max_retry_count = config.retry_failed_max_retry_count,
         "Trace Commons export job scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_export_job_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
-                        dataset_kind = ?summary.run_queued.requested_dataset_kind,
-                        retried_count = summary.retry_failed.retried_count,
-                        claimed_count = summary.run_queued.claimed_count,
-                        completed_count = summary.run_queued.completed_count,
-                        failed_count = summary.run_queued.failed_count,
-                        pending_after_count = summary.run_queued.pending_after_count,
-                        "Trace Commons export job scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons export job scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_export_job_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| worker_route_error(EXPORT_JOB_SCHEDULER_DRIVER_NAME, error))?;
+                tracing::info!(
+                    tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
+                    dataset_kind = ?summary.run_queued.requested_dataset_kind,
+                    retried_count = summary.retry_failed.retried_count,
+                    claimed_count = summary.run_queued.claimed_count,
+                    completed_count = summary.run_queued.completed_count,
+                    failed_count = summary.run_queued.failed_count,
+                    pending_after_count = summary.run_queued.pending_after_count,
+                    "Trace Commons export job scheduler tick completed"
+                );
+                export_job_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_near_credit_outbox_scheduler_task(
@@ -9066,7 +9087,6 @@ fn spawn_trace_near_credit_outbox_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         submit_limit = config.submit_limit,
@@ -9074,34 +9094,35 @@ fn spawn_trace_near_credit_outbox_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons NEAR credit outbox scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_near_credit_outbox_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        submit_checked = summary.submit.checked,
-                        submitted = summary.submit.submitted,
-                        submit_failed = summary.submit.failed,
-                        confirm_checked = summary.confirm.checked,
-                        confirmed = summary.confirm.confirmed,
-                        confirm_failed = summary.confirm.failed,
-                        submit_pending = summary.submit.pending,
-                        confirm_pending = summary.confirm.pending,
-                        dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                        "Trace Commons NEAR credit outbox scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons NEAR credit outbox scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_near_credit_outbox_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    submit_checked = summary.submit.checked,
+                    submitted = summary.submit.submitted,
+                    submit_failed = summary.submit.failed,
+                    confirm_checked = summary.confirm.checked,
+                    confirmed = summary.confirm.confirmed,
+                    confirm_failed = summary.confirm.failed,
+                    submit_pending = summary.submit.pending,
+                    confirm_pending = summary.confirm.pending,
+                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                    "Trace Commons NEAR credit outbox scheduler tick completed"
+                );
+                near_credit_outbox_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_retention_maintenance_scheduler_task(
@@ -9111,7 +9132,6 @@ fn spawn_trace_retention_maintenance_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         dry_run = config.dry_run,
@@ -9120,33 +9140,34 @@ fn spawn_trace_retention_maintenance_scheduler_task(
         purge_expired_before_configured = config.purge_expired_before.is_some(),
         "Trace Commons retention maintenance scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_retention_maintenance_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tenant_storage_ref = %summary.run.tenant_storage_ref,
-                        records_marked_revoked = summary.run.records_marked_revoked,
-                        records_marked_expired = summary.run.records_marked_expired,
-                        records_marked_purged = summary.run.records_marked_purged,
-                        export_cache_files_pruned = summary.run.export_cache_files_pruned,
-                        trace_object_files_deleted = summary.run.trace_object_files_deleted,
-                        encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
-                        dry_run = summary.run.dry_run,
-                        "Trace Commons retention maintenance scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons retention maintenance scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_retention_maintenance_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    tenant_storage_ref = %summary.run.tenant_storage_ref,
+                    records_marked_revoked = summary.run.records_marked_revoked,
+                    records_marked_expired = summary.run.records_marked_expired,
+                    records_marked_purged = summary.run.records_marked_purged,
+                    export_cache_files_pruned = summary.run.export_cache_files_pruned,
+                    trace_object_files_deleted = summary.run.trace_object_files_deleted,
+                    encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
+                    dry_run = summary.run.dry_run,
+                    "Trace Commons retention maintenance scheduler tick completed"
+                );
+                retention_maintenance_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_vector_index_scheduler_task(
@@ -9156,36 +9177,127 @@ fn spawn_trace_vector_index_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         limit = config.limit,
         dry_run = config.dry_run,
         "Trace Commons vector index scheduler enabled"
     );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_vector_index_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(VECTOR_INDEX_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    tenant_storage_ref = %summary.tenant_storage_ref,
+                    checked_count = summary.checked_count,
+                    vector_entries_indexed = summary.vector_entries_indexed,
+                    skipped_existing_count = summary.skipped_existing_count,
+                    pending_after_count = summary.pending_after_count,
+                    dry_run = summary.dry_run,
+                    "Trace Commons vector index scheduler tick completed"
+                );
+                // No give-up signal: indexing has no failure counter at all --
+                // an item either indexes, is already indexed, or stays
+                // pending, and a failure aborts the whole tick through `?`
+                // above. Any tick that reaches here is a live tick.
+                Ok(())
+            }
+        },
+    );
+}
+
+/// Stable, label-only driver names. These appear in logs and in the liveness
+/// registry, so they must not change once an operator has learned them.
+const PERPLEXITY_SCORE_DRIVER_NAME: &str = "perplexity_score_driver";
+const PII_BACKSTOP_DRIVER_NAME: &str = "pii_backstop_driver";
+const EXPORT_JOB_SCHEDULER_DRIVER_NAME: &str = "export_job_scheduler";
+const NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME: &str = "near_credit_outbox_scheduler";
+const RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME: &str = "retention_maintenance_scheduler";
+const VECTOR_INDEX_SCHEDULER_DRIVER_NAME: &str = "vector_index_scheduler";
+const BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME: &str = "benchmark_registry_scheduler";
+const BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME: &str = "benchmark_pipeline_scheduler";
+const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
+const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
+const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
+const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
+
+/// Every driver the liveness registry knows about. The distinctness test
+/// reads this; keep it in sync when adding a driver.
+const ALL_DRIVER_NAMES: &[&str] = &[
+    PERPLEXITY_SCORE_DRIVER_NAME,
+    PII_BACKSTOP_DRIVER_NAME,
+    EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+    NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+    RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME,
+    VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
+    BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
+    BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME,
+    CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+    CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
+    PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
+    REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+];
+
+/// Run `tick` forever on `interval`, recording liveness and emitting the
+/// escalation decision.
+///
+/// #438: twelve loops each hand-rolled `loop { sleep; match tick { info!,
+/// warn! } }`, so every one of them had the same blind spot and the two that
+/// happened to point at a vendor that ran out of credit were dead for days
+/// behind nothing louder than a repeating WARN. The liveness bookkeeping
+/// lives here so a new driver gets it by calling one function rather than by
+/// remembering to repeat it. Nothing forces a periodic loop through here,
+/// though: three predate this work and are knowingly out of scope --
+/// `spawn_community_snapshot_recompute_task`,
+/// `spawn_managed_eddsa_keyset_refresh_task`, and
+/// `spawn_community_snapshot_invalidation_scheduler_task`. The last
+/// has the same incident shape as the twelve and differs only in its error
+/// type; converting it is future work, not an oversight.
+///
+/// `tick` returns `Result<()>` and owns its own success logging, because the
+/// summary fields differ per driver and are worth keeping verbatim. Only the
+/// failure path is shared -- that is the part that was uniform and broken.
+fn spawn_driver_loop<F, Fut>(
+    state: &Arc<AppState>,
+    driver: &'static str,
+    interval: StdDuration,
+    tick: F,
+) where
+    F: Fn(Arc<AppState>) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
+    // A driver that is spawned but missing from `ALL_DRIVER_NAMES` escapes
+    // the distinctness test, which is the only thing standing between two
+    // drivers and a shared liveness key.
+    debug_assert!(
+        ALL_DRIVER_NAMES.contains(&driver),
+        "driver {driver} must be listed in ALL_DRIVER_NAMES"
+    );
+    state
+        .driver_liveness
+        .register(driver, interval.as_secs(), Utc::now());
+    let state = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_vector_index_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tenant_storage_ref = %summary.tenant_storage_ref,
-                        checked_count = summary.checked_count,
-                        vector_entries_indexed = summary.vector_entries_indexed,
-                        skipped_existing_count = summary.skipped_existing_count,
-                        pending_after_count = summary.pending_after_count,
-                        dry_run = summary.dry_run,
-                        "Trace Commons vector index scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons vector index scheduler tick failed"
-                    );
-                }
-            }
+            tokio::time::sleep(interval).await;
+            let outcome = match tick(state.clone()).await {
+                Ok(()) => DriverTickOutcome::Success,
+                Err(error) => DriverTickOutcome::Failure {
+                    class: classify_driver_failure(&error),
+                    error_hash: safe_display_error_hash(&error),
+                },
+            };
+            let action = state.driver_liveness.observe(driver, outcome, Utc::now());
+            emit_driver_log_action(driver, action);
         }
     });
 }
@@ -9202,7 +9314,6 @@ fn spawn_perplexity_score_driver_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         batch_size = config.batch_size,
@@ -9210,30 +9321,30 @@ fn spawn_perplexity_score_driver_task(
         skip_duplicates = config.knobs.skip_duplicates,
         "Trace Commons perplexity score driver enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_perplexity_score_driver_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        scored = summary.scored,
-                        skipped_duplicate = summary.skipped_duplicate,
-                        cached = summary.cached,
-                        failed = summary.failed,
-                        transient = summary.transient,
-                        breaker_tripped = summary.breaker_tripped,
-                        "Trace Commons perplexity score driver tick completed"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error_hash = %safe_display_error_hash(&error),
-                        "Trace Commons perplexity score driver tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_perplexity_score_driver_tick(state, &config).await?;
+                tracing::info!(
+                    scored = summary.scored,
+                    skipped_duplicate = summary.skipped_duplicate,
+                    cached = summary.cached,
+                    failed = summary.failed,
+                    transient = summary.transient,
+                    breaker_tripped = summary.breaker_tripped,
+                    tick_duration_ms = summary.tick_duration_ms,
+                    backlog = summary.backlog,
+                    "Trace Commons perplexity score driver tick completed"
+                );
+                perplexity_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 /// Task 6: spawn the in-process server-side NEAR AI PII-backstop driver loop.
@@ -9247,7 +9358,6 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         batch_size = config.batch_size,
@@ -9255,29 +9365,27 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         backoff_base_seconds = config.backoff_base_seconds,
         "Trace Commons PII backstop driver enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_pii_backstop_driver_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        done = summary.done,
-                        failed = summary.failed,
-                        transient = summary.transient,
-                        exhausted = summary.exhausted,
-                        breaker_tripped = summary.breaker_tripped,
-                        "Trace Commons PII backstop driver tick completed"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error_hash = %safe_display_error_hash(&error),
-                        "Trace Commons PII backstop driver tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PII_BACKSTOP_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_pii_backstop_driver_tick(state, &config).await?;
+                tracing::info!(
+                    done = summary.done,
+                    failed = summary.failed,
+                    transient = summary.transient,
+                    exhausted = summary.exhausted,
+                    breaker_tripped = summary.breaker_tripped,
+                    "Trace Commons PII backstop driver tick completed"
+                );
+                pii_backstop_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_benchmark_registry_scheduler_task(
@@ -9287,7 +9395,6 @@ fn spawn_trace_benchmark_registry_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         submit_limit = config.submit_limit,
@@ -9295,34 +9402,35 @@ fn spawn_trace_benchmark_registry_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons benchmark registry scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_benchmark_registry_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        submit_checked = summary.submit.checked,
-                        submitted = summary.submit.submitted,
-                        submit_failed = summary.submit.failed,
-                        confirm_checked = summary.confirm.checked,
-                        confirmed = summary.confirm.confirmed,
-                        confirm_failed = summary.confirm.failed,
-                        submit_pending = summary.submit.pending,
-                        confirm_pending = summary.confirm.pending,
-                        dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                        "Trace Commons benchmark registry scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons benchmark registry scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_benchmark_registry_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    submit_checked = summary.submit.checked,
+                    submitted = summary.submit.submitted,
+                    submit_failed = summary.submit.failed,
+                    confirm_checked = summary.confirm.checked,
+                    confirmed = summary.confirm.confirmed,
+                    confirm_failed = summary.confirm.failed,
+                    submit_pending = summary.submit.pending,
+                    confirm_pending = summary.confirm.pending,
+                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                    "Trace Commons benchmark registry scheduler tick completed"
+                );
+                benchmark_registry_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_benchmark_pipeline_scheduler_task(
@@ -9332,7 +9440,6 @@ fn spawn_trace_benchmark_pipeline_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         evaluation_limit = config.evaluation_limit,
@@ -9344,34 +9451,40 @@ fn spawn_trace_benchmark_pipeline_scheduler_task(
         registry_ref_prefix_configured = !config.registry_ref_prefix.is_empty(),
         "Trace Commons benchmark pipeline scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_benchmark_pipeline_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        evaluation_checked = summary.evaluation.checked_count,
-                        evaluated = summary.evaluation.evaluated_count,
-                        passed = summary.evaluation.passed_count,
-                        failed = summary.evaluation.failed_count,
-                        evaluation_pending = summary.evaluation.pending_after_count,
-                        publication_checked = summary.publication.checked_count,
-                        published = summary.publication.published_count,
-                        publication_pending = summary.publication.pending_after_count,
-                        dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
-                        "Trace Commons benchmark pipeline scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons benchmark pipeline scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_benchmark_pipeline_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    evaluation_checked = summary.evaluation.checked_count,
+                    evaluated = summary.evaluation.evaluated_count,
+                    passed = summary.evaluation.passed_count,
+                    failed = summary.evaluation.failed_count,
+                    evaluation_pending = summary.evaluation.pending_after_count,
+                    publication_checked = summary.publication.checked_count,
+                    published = summary.publication.published_count,
+                    publication_pending = summary.publication.pending_after_count,
+                    dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
+                    "Trace Commons benchmark pipeline scheduler tick completed"
+                );
+                // No give-up signal: `failed_count` here is a benchmark
+                // verdict -- a candidate scored below `min_score` -- not an
+                // error, and publication has no failure counter. Reading it
+                // as a driver failure would report a working evaluator as
+                // dead every time a batch of candidates was simply bad.
+                Ok(())
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_credit_cycle_scheduler_task(
@@ -9381,7 +9494,6 @@ fn spawn_trace_credit_cycle_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         target_use = ?config.target_use,
@@ -9395,35 +9507,36 @@ fn spawn_trace_credit_cycle_scheduler_task(
         near_contract_configured = config.near_contract_id.is_some(),
         "Trace Commons credit cycle scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_credit_cycle_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tenant_storage_ref = %summary.tenant_storage_ref,
-                        target_use = ?summary.target_use,
-                        checked_count = summary.checked_count,
-                        eligible_count = summary.eligible_count,
-                        started_count = summary.started_count,
-                        skipped_count = summary.skipped_count,
-                        skipped_active_count = summary.skipped_active_count,
-                        pending_after_count = summary.pending_after_count,
-                        dry_run = summary.dry_run,
-                        preflight_only = summary.preflight_only,
-                        "Trace Commons credit cycle scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons credit cycle scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_credit_cycle_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(CREDIT_CYCLE_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    tenant_storage_ref = %summary.tenant_storage_ref,
+                    target_use = ?summary.target_use,
+                    checked_count = summary.checked_count,
+                    eligible_count = summary.eligible_count,
+                    started_count = summary.started_count,
+                    skipped_count = summary.skipped_count,
+                    skipped_active_count = summary.skipped_active_count,
+                    pending_after_count = summary.pending_after_count,
+                    dry_run = summary.dry_run,
+                    preflight_only = summary.preflight_only,
+                    "Trace Commons credit cycle scheduler tick completed"
+                );
+                credit_cycle_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_credit_settlement_scheduler_task(
@@ -9433,7 +9546,6 @@ fn spawn_trace_credit_settlement_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         policy_version_configured = !config.policy_version.is_empty(),
@@ -9445,33 +9557,34 @@ fn spawn_trace_credit_settlement_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons credit settlement scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_credit_settlement_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tenant_storage_ref = %summary.tenant_storage_ref,
-                        dry_run = summary.dry_run,
-                        policy_version_allowed = summary.policy_version_allowed,
-                        settled_source_event_count = summary.settled_source_event_count,
-                        eligible_source_event_count = summary.eligible_source_event_count,
-                        pending_after_count = summary.pending_after_count,
-                        settled_account_count = summary.settled_account_count,
-                        near_outbox_item_count = summary.near_outbox_item_count,
-                        "Trace Commons credit settlement scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons credit settlement scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    tenant_storage_ref = %summary.tenant_storage_ref,
+                    dry_run = summary.dry_run,
+                    policy_version_allowed = summary.policy_version_allowed,
+                    settled_source_event_count = summary.settled_source_event_count,
+                    eligible_source_event_count = summary.eligible_source_event_count,
+                    pending_after_count = summary.pending_after_count,
+                    settled_account_count = summary.settled_account_count,
+                    near_outbox_item_count = summary.near_outbox_item_count,
+                    "Trace Commons credit settlement scheduler tick completed"
+                );
+                credit_settlement_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_process_evaluation_scheduler_task(
@@ -9481,7 +9594,6 @@ fn spawn_trace_process_evaluation_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         limit = config.limit,
@@ -9493,33 +9605,37 @@ fn spawn_trace_process_evaluation_scheduler_task(
         external_ref_prefix_configured = config.external_ref_prefix.is_some(),
         "Trace Commons process evaluation scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_process_evaluation_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        checked = summary.run.checked_count,
-                        evaluated = summary.run.evaluated_count,
-                        labels_appended = summary.run.ranking_label_appended_count,
-                        labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
-                        skipped_existing = summary.run.skipped_existing_count,
-                        skipped_ineligible = summary.run.skipped_ineligible_count,
-                        pending_after = summary.run.pending_after_count,
-                        dry_run = summary.run.dry_run,
-                        "Trace Commons process evaluation scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons process evaluation scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_process_evaluation_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    checked = summary.run.checked_count,
+                    evaluated = summary.run.evaluated_count,
+                    labels_appended = summary.run.ranking_label_appended_count,
+                    labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
+                    skipped_existing = summary.run.skipped_existing_count,
+                    skipped_ineligible = summary.run.skipped_ineligible_count,
+                    pending_after = summary.run.pending_after_count,
+                    dry_run = summary.run.dry_run,
+                    "Trace Commons process evaluation scheduler tick completed"
+                );
+                // No give-up signal: the tick has no failure counter. Each
+                // candidate is evaluated or skipped as ineligible or already
+                // done; an evaluator error aborts the tick through `?` above.
+                Ok(())
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_trace_revocation_propagation_scheduler_task(
@@ -9529,39 +9645,39 @@ fn spawn_trace_revocation_propagation_scheduler_task(
     let Some(config) = config else {
         return;
     };
-    let state = state.clone();
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         limit = config.limit,
         dry_run = config.dry_run,
         "Trace Commons revocation propagation scheduler enabled"
     );
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(config.interval).await;
-            match run_trace_revocation_propagation_scheduler_tick(state.clone(), &config).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        checked = summary.run.checked,
-                        completed = summary.run.completed,
-                        failed = summary.run.failed,
-                        skipped = summary.run.skipped,
-                        pending = summary.run.pending,
-                        next_attempt_scheduled = summary.run.next_attempt_scheduled,
-                        dry_run = summary.run.dry_run,
-                        "Trace Commons revocation propagation scheduler tick completed"
-                    );
-                }
-                Err((status, Json(error))) => {
-                    tracing::warn!(
-                        status = %status,
-                        error_hash = %safe_display_error_hash(&error.error),
-                        "Trace Commons revocation propagation scheduler tick failed"
-                    );
-                }
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_trace_revocation_propagation_scheduler_tick(state, &config)
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                tracing::info!(
+                    checked = summary.run.checked,
+                    completed = summary.run.completed,
+                    failed = summary.run.failed,
+                    skipped = summary.run.skipped,
+                    pending = summary.run.pending,
+                    next_attempt_scheduled = summary.run.next_attempt_scheduled,
+                    dry_run = summary.run.dry_run,
+                    "Trace Commons revocation propagation scheduler tick completed"
+                );
+                revocation_propagation_scheduler_tick_outcome(&summary)
             }
-        }
-    });
+        },
+    );
 }
 
 fn validate_community_snapshot_invalidation_scheduler_config(
@@ -12509,7 +12625,7 @@ async fn submit_trace_handler(
         if principal_can_remediate_quarantined(tenant.auth(), &existing) {
             Some(existing)
         } else {
-            let receipt = receipt_from_record(&existing);
+            let receipt = receipt_from_record(&existing, state.near_settlement_mode);
             append_audit_event(
                 &state.root,
                 tenant.tenant_id(),
@@ -12703,7 +12819,10 @@ async fn submit_trace_handler(
         }
     }
 
-    Ok(Json(receipt_from_record(&record)))
+    Ok(Json(receipt_from_record(
+        &record,
+        state.near_settlement_mode,
+    )))
 }
 
 async fn revoke_trace_handler(
@@ -13996,7 +14115,11 @@ async fn submission_status_handler(
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(record, &status_credit_events));
+            statuses.push(submission_status_from_record(
+                record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            ));
         }
     }
 
@@ -14024,6 +14147,36 @@ struct ScoreAttestationResponse {
     attestation: String,
 }
 
+/// A scoped attestation, plus the two counts a client needs to decide
+/// whether to keep waiting.
+///
+/// The counts are a convenience for the CLI's bounded wait and its
+/// "N of M traces scored, K pending" line; they are NOT the attestation.
+/// Anything a collector relies on must be read from the signed payload,
+/// which carries the same information in `submissions` and `pending`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScopedScoreAttestationResponse {
+    attestation: String,
+    scored: usize,
+    pending: usize,
+    unknown: usize,
+}
+
+/// Body of a SCOPED score-attestation request.
+///
+/// `deny_unknown_fields` is load-bearing, not tidiness: the unscoped route's
+/// non-negotiable is that no principal can be named in a request, and this
+/// body is the first request parameter the endpoint has ever accepted. A
+/// caller that adds `auth_principal_ref` — by hand, or by pointing an old
+/// forged-identity script at the new route — gets a 4xx rather than a
+/// silently ignored field, so the property fails loudly if anyone ever
+/// tries to reintroduce it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedScoreAttestationRequest {
+    submission_ids: Vec<Uuid>,
+}
+
 /// `GET /v1/contributors/me/score-attestation` — signs a statement of the
 /// CALLER'S OWN scored submissions, resolved entirely from the authenticated
 /// upload claim (`tenant.tenant_id()` / `tenant.principal_ref()`).
@@ -14036,7 +14189,14 @@ struct ScoreAttestationResponse {
 /// could carry one. Reintroducing a caller-suppliable identity parameter on
 /// this route would rebuild the exact forgery hole this endpoint exists to
 /// close — a participant relaying someone else's identifier the same way a
-/// bare submission id could be relayed today. See
+/// bare submission id could be relayed today.
+///
+/// `scoped_score_attestation_handler` (POST, same path) does take a body,
+/// and the property is preserved there differently: the body is a
+/// `deny_unknown_fields` struct with one field, a submission-id list, which
+/// can only narrow rows the authenticated principal already owns. Any other
+/// field is a 4xx, so an identity parameter cannot be reintroduced quietly.
+/// See
 /// `score_attestation_handler_resolves_principal_from_auth_only_never_from_a_parameter`
 /// in the test module, which pins this property.
 async fn score_attestation_handler(
@@ -14110,6 +14270,133 @@ async fn score_attestation_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// `POST /v1/contributors/me/score-attestation` — the SCOPED form: attests
+/// to exactly the submission ids in the body, and says plainly which of them
+/// it could not score.
+///
+/// Same principal resolution as the GET form, and the same non-negotiable:
+/// `tenant_id` and `auth_principal_ref` come from
+/// `authenticate_ctx_with_tenant_access_grant` alone. The body carries a
+/// submission-id list and nothing else (`deny_unknown_fields`), and that
+/// list can only NARROW the set of rows the authenticated principal already
+/// owns — an id belonging to anyone else comes back in `unknown`, which
+/// deliberately reads the same as an id that exists nowhere.
+///
+/// Why a second method on the same path rather than a query parameter on
+/// the GET: the cap is 500 ids, which is ~18KB of percent-encoded UUIDs and
+/// past what proxies accept in a request line. `submission-status` already
+/// established POST-with-a-body as the shape for contributor-scoped id lists
+/// on `/v1/contributors/me/*`.
+async fn scoped_score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ScopedScoreAttestationRequest>,
+) -> ApiResult<Json<ScopedScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    if body.submission_ids.len() > usize::try_from(SCORE_ATTESTATION_MAX_SUBMISSIONS).unwrap_or(0) {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "score attestation requests are limited to 500 submission ids",
+        ));
+    }
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score attestation requires a configured DB mirror",
+        ));
+    };
+
+    // Dedupe while preserving the caller's order, so a repeated id cannot
+    // inflate the signed document and the three output lists read back in
+    // the order they were asked about.
+    let mut requested: Vec<Uuid> = Vec::with_capacity(body.submission_ids.len());
+    let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+    for submission_id in body.submission_ids {
+        if seen.insert(submission_id) {
+            requested.push(submission_id);
+        }
+    }
+
+    let owned = db
+        .list_own_gate_decision_scores_for_submissions(
+            tenant.tenant_id(),
+            tenant.principal_ref(),
+            &requested,
+        )
+        .await
+        .map_err(|error| match error {
+            // Mirrors the unscoped route: an unconfigured cross-tenant
+            // gate-driver pool is a missing control, not an internal fault.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score attestation requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
+    let owned_by_id = owned
+        .into_iter()
+        .map(|row| (row.submission_id, row.score))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut submissions = Vec::new();
+    let mut scope = ScoreAttestationScope::default();
+    for submission_id in requested {
+        match owned_by_id.get(&submission_id) {
+            Some(Some(row)) => submissions.push(ScoreAttestationSubmissionEntry {
+                submission_id: row.submission_id,
+                credit_quality_micros: row.credit_quality_micros,
+                perplexity_micros: row.perplexity_micros,
+                novelty_score_micros: row.novelty_score_micros,
+                gate_passed: row.gate_passed,
+                coverage: ScoreAttestationCoverage::from_decision_columns(
+                    row.chunk_count,
+                    row.total_chunk_count,
+                    row.chunks_capped,
+                ),
+            }),
+            // Owned, no gate decision yet. Scoring is asynchronous, so this
+            // is the common state moments after an upload, and saying so is
+            // the whole point of the scoped form.
+            Some(None) => scope.pending.push(submission_id),
+            // Not owned. Never says whether it exists.
+            None => scope.unknown.push(submission_id),
+        }
+    }
+
+    let scored = submissions.len();
+    let pending = scope.pending.len();
+    let unknown = scope.unknown.len();
+    let token = sign_scoped_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Some(scope),
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "score_attestation_scoped",
+        scored,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScopedScoreAttestationResponse {
+        attestation: token,
+        scored,
+        pending,
+        unknown,
+    }))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
@@ -37618,7 +37905,7 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
     }
 
-    Ok(receipt_from_record(&record))
+    Ok(receipt_from_record(&record, state.near_settlement_mode))
 }
 
 fn ensure_review_decision_eligible(
@@ -39215,9 +39502,12 @@ async fn run_perplexity_score_driver_tick(
     state: Arc<AppState>,
     config: &PerplexityScoreDriverConfig,
 ) -> anyhow::Result<PerplexityDriverTickSummary> {
-    let db = state.db_mirror.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("perplexity score driver requires a configured DB mirror")
-    })?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(DriverTickError::MissingDbMirror {
+            driver: PERPLEXITY_SCORE_DRIVER_NAME,
+        })?;
     let items = db
         .list_submissions_needing_gate_decision(
             Utc::now(),
@@ -39226,6 +39516,7 @@ async fn run_perplexity_score_driver_tick(
             config.batch_size,
         )
         .await?;
+    let tick_started = std::time::Instant::now();
     let mut summary = PerplexityDriverTickSummary::default();
     // Consecutive per-item failures, reset by any success. See
     // `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`.
@@ -39271,6 +39562,20 @@ async fn run_perplexity_score_driver_tick(
              remainder of the batch left untouched"
         );
     }
+    summary.tick_duration_ms = tick_started.elapsed().as_millis() as u64;
+    // After the work, so the number is what remains rather than what was
+    // waiting when the tick began. Failure is swallowed to a `None`: the
+    // driver's job is scoring, and losing a diagnostic must not turn a
+    // productive tick into a reported error and trip the caller's breaker.
+    summary.backlog = db
+        .count_submissions_needing_gate_decision(
+            Utc::now(),
+            config.knobs.max_attempts,
+            config.backoff_base_seconds,
+        )
+        .await
+        .ok();
+
     Ok(summary)
 }
 
@@ -39303,6 +39608,469 @@ fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<trace_commons_gate_enclave::ScorerFailure>()
         .is_some_and(|err| err.is_transient())
+}
+
+/// Typed failures a driver tick raises on its own behalf, rather than
+/// receiving from a dependency.
+///
+/// #438 fix round 1: these existed only as bare `anyhow!("...")` strings, so
+/// `classify_driver_failure` had nothing to downcast to and the two most
+/// common operator-facing failures -- an unconfigured DB mirror and a tick
+/// that gave up after repeated upstream errors -- both logged as
+/// `unclassified`. Every variant carries only the driver's stable label; no
+/// error text, endpoint, or credential is ever part of one.
+#[derive(Debug, thiserror::Error)]
+enum DriverTickError {
+    #[error("driver {driver} requires a configured DB mirror")]
+    MissingDbMirror { driver: &'static str },
+    #[error("driver {driver} tripped its consecutive-failure breaker")]
+    BreakerTripped { driver: &'static str },
+    /// Every item the tick attempted in `stage` failed. The call site names
+    /// the dependency class it gave up on, because the same shape means a
+    /// chain RPC for one scheduler and object storage for another; that is
+    /// typed data supplied by the driver, not a guess parsed from a message.
+    #[error("driver {driver} stage {stage} had all {failed} attempts fail")]
+    AllAttemptsFailed {
+        driver: &'static str,
+        stage: &'static str,
+        failed: usize,
+        class: DriverFailureClass,
+    },
+    /// The tick ran but refused to act because `control` is not configured to
+    /// permit it. Nothing moves until an operator changes that control, so it
+    /// is a stalled driver, not a healthy idle one.
+    #[error("driver {driver} refused to act: {control} does not permit it")]
+    RefusedByPolicy {
+        driver: &'static str,
+        control: &'static str,
+    },
+    /// A worker route the scheduler calls in-process rejected the tick. The
+    /// status is kept as a status, not folded into a string, so the class
+    /// still follows from the error's shape.
+    #[error("driver {driver} worker route returned {status}: {message}")]
+    WorkerRouteRejected {
+        driver: &'static str,
+        status: StatusCode,
+        message: String,
+    },
+}
+
+/// The give-up rule the batch-draining schedulers share.
+///
+/// #438 fix round 1, Finding B generalised: a tick that claimed work and had
+/// every single attempt fail has given up on that batch, and returning `Ok`
+/// there refreshes `last_success_at` forever. An idle tick (nothing to do)
+/// and a partly-failed tick (real work landed) are both successes -- only a
+/// clean sweep of failures is not.
+fn all_attempts_failed_outcome(
+    driver: &'static str,
+    stage: &'static str,
+    succeeded: usize,
+    failed: usize,
+    class: DriverFailureClass,
+) -> anyhow::Result<()> {
+    if failed > 0 && succeeded == 0 {
+        return Err(DriverTickError::AllAttemptsFailed {
+            driver,
+            stage,
+            failed,
+            class,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Carry a worker-route rejection to the wrapper with its status intact.
+///
+/// The message is never logged: `spawn_driver_loop` hashes the error, and
+/// only the hash and the class reach the log line.
+fn worker_route_error(driver: &'static str, error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
+    let (status, Json(ApiError { error })) = error;
+    DriverTickError::WorkerRouteRejected {
+        driver,
+        status,
+        message: error,
+    }
+    .into()
+}
+
+/// A tick that drained an export-job batch and completed none of what it
+/// claimed has given up on that batch. Export jobs write through the DB and
+/// object storage, so the class is the in-infrastructure one.
+fn export_job_scheduler_tick_outcome(
+    summary: &TraceExportJobSchedulerTickSummary,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        EXPORT_JOB_SCHEDULER_DRIVER_NAME,
+        "run_queued",
+        summary.run_queued.completed_count,
+        summary.run_queued.failed_count,
+        DriverFailureClass::DependencyUnavailable,
+    )
+}
+
+/// Both outbox stages drain to the NEAR RPC, so a stage where every item
+/// failed is an upstream outage.
+fn near_credit_outbox_scheduler_tick_outcome(
+    summary: &TraceNearCreditOutboxSchedulerTickSummary,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+        "submit",
+        summary.submit.submitted,
+        summary.submit.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
+        "confirm",
+        summary.confirm.confirmed,
+        summary.confirm.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )
+}
+
+/// Retention's only failure counter is the DB-mirror backfill. A tick where
+/// every backfill attempt failed is a tick against an unhealthy mirror; the
+/// marking and purging counts have no failure counterpart to read.
+fn retention_maintenance_scheduler_tick_outcome(
+    summary: &TraceRetentionMaintenanceSchedulerTickSummary,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME,
+        "db_mirror_backfill",
+        summary.run.db_mirror_backfilled,
+        summary.run.db_mirror_backfill_failed,
+        DriverFailureClass::DependencyUnavailable,
+    )
+}
+
+/// Both registry outbox stages drain to the on-chain registry.
+fn benchmark_registry_scheduler_tick_outcome(
+    summary: &TraceBenchmarkRegistrySchedulerTickSummary,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
+        "submit",
+        summary.submit.submitted,
+        summary.submit.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
+        "confirm",
+        summary.confirm.confirmed,
+        summary.confirm.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )
+}
+
+/// A settlement run whose policy version is not on the allow-list settles
+/// nothing, every tick, forever. That is a stalled driver waiting on an
+/// operator, not a healthy one.
+fn credit_settlement_scheduler_tick_outcome(
+    summary: &TraceCreditSettlementRunResponse,
+) -> anyhow::Result<()> {
+    if !summary.policy_version_allowed {
+        return Err(DriverTickError::RefusedByPolicy {
+            driver: CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
+            control: "credit_settlement_allowed_policy_versions",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Propagation pushes revocations to downstream consumers, so a tick that
+/// completed none of what it checked is an upstream outage.
+fn revocation_propagation_scheduler_tick_outcome(
+    summary: &TraceRevocationPropagationSchedulerTickSummary,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+        "propagate",
+        summary.run.completed,
+        summary.run.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )
+}
+
+/// Decide whether a completed PII-backstop tick counts as a success.
+///
+/// The tick sorts every item it could not release into exactly one of three
+/// disjoint counters, and each one means something different to an operator:
+///
+/// - `transient` — the NEAR AI classifier was unreachable or erroring. The
+///   submission is held and not charged an attempt. A whole batch of these
+///   with nothing released is the #438 incident itself, and it does not
+///   necessarily trip the breaker: a batch shorter than
+///   `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES` never reaches the threshold.
+///   `upstream_unavailable`.
+/// - `exhausted` — the submission spent its whole retry budget on permanent
+///   failures and was quarantined. The driver has stopped retrying it for
+///   good; that is a give-up in the most literal sense. `content_rejected`.
+/// - `failed` — a permanent, non-transient re-redaction failure: the upstream
+///   answered and refused this trace. `content_rejected`.
+///
+/// Checked in triage order, so a sweep that is both transient and terminal
+/// reports the outage rather than the symptom. A tick that released anything
+/// (`done > 0`) is a success in all three cases: partial progress is progress.
+fn pii_backstop_tick_outcome(summary: &PiiBackstopDriverTickSummary) -> anyhow::Result<()> {
+    if summary.breaker_tripped {
+        return Err(DriverTickError::BreakerTripped {
+            driver: PII_BACKSTOP_DRIVER_NAME,
+        }
+        .into());
+    }
+    all_attempts_failed_outcome(
+        PII_BACKSTOP_DRIVER_NAME,
+        "backstop_upstream",
+        summary.done,
+        summary.transient,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        PII_BACKSTOP_DRIVER_NAME,
+        "backstop_exhausted",
+        summary.done,
+        summary.exhausted,
+        DriverFailureClass::ContentRejected,
+    )?;
+    all_attempts_failed_outcome(
+        PII_BACKSTOP_DRIVER_NAME,
+        "backstop_rescrub",
+        summary.done,
+        summary.failed,
+        DriverFailureClass::ContentRejected,
+    )
+}
+
+/// A credit cycle drives its own NEAR outbox submit and confirm stages, and
+/// its own settlement, through `config.submit_near_outbox` /
+/// `config.confirm_near_outbox`. Those sub-runs carry the same counters the
+/// standalone outbox scheduler gives up on, and the top-level cycle counters
+/// say nothing about them: a cycle pointed at a dead NEAR RPC fails every
+/// submit on every tick while `started_count` looks healthy.
+fn credit_cycle_scheduler_tick_outcome(
+    summary: &TraceCreditCycleSchedulerRunResponse,
+) -> anyhow::Result<()> {
+    for cycle in &summary.cycles {
+        credit_cycle_sub_run_outcome(
+            &cycle.near_outbox_submit,
+            &cycle.near_outbox_confirm,
+            cycle.settlement.policy_version_allowed,
+        )?;
+    }
+    Ok(())
+}
+
+/// The give-up decision for one cycle's sub-runs, taking only the fields it
+/// reads so it is reachable from a test without standing up a whole cycle
+/// response.
+fn credit_cycle_sub_run_outcome(
+    submit: &TraceNearCreditOutboxSubmitWorkerResponse,
+    confirm: &TraceNearCreditOutboxConfirmWorkerResponse,
+    policy_version_allowed: bool,
+) -> anyhow::Result<()> {
+    all_attempts_failed_outcome(
+        CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+        "near_outbox_submit",
+        submit.submitted,
+        submit.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+        "near_outbox_confirm",
+        confirm.confirmed,
+        confirm.failed,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    // The cycle's settlement step is the same handler the settlement
+    // scheduler calls, so it stalls the same way and reports the same control.
+    if !policy_version_allowed {
+        return Err(DriverTickError::RefusedByPolicy {
+            driver: CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
+            control: "credit_settlement_allowed_policy_versions",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Decide whether a completed perplexity tick counts as a success.
+///
+/// #438 fix round 1, Finding B: the tick folds per-item failures into its
+/// summary and returns `Ok` even when every item failed and the breaker
+/// tripped, which through `spawn_driver_loop` refreshed `last_success_at` on
+/// every tick -- a scorer pointed at a vendor with no credit never went stale
+/// and never escalated. A tripped breaker means the upstream failed
+/// repeatedly, so it is a failed tick and `upstream_unavailable` is the
+/// honest label.
+///
+/// An empty queue is deliberately still a success: a driver with nothing to
+/// do is working.
+///
+/// #438 fix round 2: the breaker alone was not enough. It trips at
+/// `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`, so a tick that enumerated fewer
+/// items than that and had every one come back transient never reached the
+/// threshold and returned `Ok`. A transient scoring failure deliberately does
+/// not charge an attempt and sets no backoff, so that state persists: one or
+/// two traces awaiting a decision with the scorer down kept the driver
+/// reporting healthy forever. The counters are folded the same way the PII
+/// backstop's are, and for the same reason.
+///
+/// `succeeded` is every disposition that moved a trace forward -- scored,
+/// skipped as a duplicate, or served from cache -- so a tick that made real
+/// progress alongside some failures is still a success.
+fn perplexity_tick_outcome(summary: &PerplexityDriverTickSummary) -> anyhow::Result<()> {
+    if summary.breaker_tripped {
+        return Err(DriverTickError::BreakerTripped {
+            driver: PERPLEXITY_SCORE_DRIVER_NAME,
+        }
+        .into());
+    }
+    let succeeded = summary.scored + summary.skipped_duplicate + summary.cached;
+    // Transient first: an outage is the more actionable label when a sweep is
+    // both.
+    all_attempts_failed_outcome(
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        "score_upstream",
+        succeeded,
+        summary.transient,
+        DriverFailureClass::UpstreamUnavailable,
+    )?;
+    all_attempts_failed_outcome(
+        PERPLEXITY_SCORE_DRIVER_NAME,
+        "score",
+        succeeded,
+        summary.failed,
+        DriverFailureClass::ContentRejected,
+    )
+}
+
+/// Map a driver tick error to a short, non-sensitive label for the log.
+///
+/// #438: a hash alone is a fine forensic tool and a terrible triage signal --
+/// recovering what `sha256:37769fdd...` meant took reading the code that
+/// built the string and probing the live endpoint. A stable class alongside
+/// it costs nothing and leaks nothing.
+///
+/// Classification reads the error's TYPE. It never inspects the message: a
+/// message is not a contract, and matching on one would resurrect exactly the
+/// coupling the hash-only convention exists to avoid.
+fn classify_driver_failure(error: &anyhow::Error) -> DriverFailureClass {
+    if let Some(failure) = error.downcast_ref::<DriverTickError>() {
+        return match failure {
+            DriverTickError::MissingDbMirror { .. } => DriverFailureClass::ConfigMissing,
+            DriverTickError::BreakerTripped { .. } => DriverFailureClass::UpstreamUnavailable,
+            DriverTickError::AllAttemptsFailed { class, .. } => *class,
+            DriverTickError::RefusedByPolicy { .. } => DriverFailureClass::ConfigMissing,
+            // A worker route the scheduler calls in-process: a 5xx is this
+            // deployment's own database or storage, an auth rejection is a
+            // misconfigured worker token, and any other 4xx is the route
+            // refusing the request it was handed.
+            DriverTickError::WorkerRouteRejected { status, .. } => {
+                if status.is_server_error() {
+                    DriverFailureClass::DependencyUnavailable
+                } else if *status == StatusCode::UNAUTHORIZED || *status == StatusCode::FORBIDDEN {
+                    DriverFailureClass::ConfigMissing
+                } else {
+                    DriverFailureClass::ContentRejected
+                }
+            }
+        };
+    }
+    if error
+        .downcast_ref::<trace_commons_protocol::trace_contribution::PrivacyFilterConfigError>()
+        .is_some()
+    {
+        return DriverFailureClass::ConfigMissing;
+    }
+    if error
+        .downcast_ref::<trace_commons_server::error::DatabaseError>()
+        .is_some()
+    {
+        return DriverFailureClass::DependencyUnavailable;
+    }
+    if let Some(failure) = error.downcast_ref::<trace_commons_gate_enclave::ScorerFailure>() {
+        return if failure.is_transient() {
+            DriverFailureClass::UpstreamUnavailable
+        } else {
+            DriverFailureClass::ContentRejected
+        };
+    }
+    if let Some(failure) =
+        error.downcast_ref::<trace_commons_protocol::trace_contribution::TraceContributionError>()
+    {
+        return if failure.is_transient() {
+            DriverFailureClass::UpstreamUnavailable
+        } else {
+            DriverFailureClass::ContentRejected
+        };
+    }
+    DriverFailureClass::Unclassified
+}
+
+/// Execute the decision `observe_driver_tick` returned.
+///
+/// Every field here is hash-only or label-only.
+fn emit_driver_log_action(driver: &'static str, action: LogAction) {
+    match action {
+        LogAction::None => {}
+        LogAction::Warn { class, error_hash } => {
+            tracing::warn!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                "Trace Commons driver tick failed"
+            );
+        }
+        LogAction::Escalate {
+            class,
+            error_hash,
+            consecutive_failures,
+            dead_seconds,
+        } => {
+            tracing::error!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                consecutive_failures,
+                dead_seconds,
+                "Trace Commons driver is not working and has not been for some time"
+            );
+        }
+        LogAction::EscalateRepeat {
+            class,
+            error_hash,
+            consecutive_failures,
+            dead_seconds,
+            suppressed,
+        } => {
+            tracing::error!(
+                driver,
+                failure_class = class.as_label(),
+                error_hash = %error_hash,
+                consecutive_failures,
+                dead_seconds,
+                suppressed,
+                "Trace Commons driver is still not working"
+            );
+        }
+        LogAction::Recovered {
+            failures,
+            dead_seconds,
+        } => {
+            tracing::info!(
+                driver,
+                recovered_after_failures = failures,
+                dead_seconds,
+                "Trace Commons driver recovered"
+            );
+        }
+    }
 }
 
 /// Audit actor label recorded for status transitions the PII-backstop driver
@@ -39358,20 +40126,32 @@ async fn run_pii_backstop_driver_tick(
     let db = state
         .db_mirror
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("PII backstop driver requires a configured DB mirror"))?;
+        .ok_or(DriverTickError::MissingDbMirror {
+            driver: PII_BACKSTOP_DRIVER_NAME,
+        })?;
 
     // Build the adapter ONCE per tick. A missing key fails the whole tick
     // before any submission is loaded — nothing is processed, traces stay held.
+    //
+    // #438 fix round 1: `.context()` rather than `anyhow!("...: {err}")` --
+    // stringifying the error destroyed the `PrivacyFilterConfigError` the
+    // classifier reads to report `config_missing`. The string is only ever
+    // hashed, so changing it changes the hash and leaks nothing.
     let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
-        .map_err(|err| anyhow::anyhow!("PII backstop adapter unavailable: {err}"))?;
+        .context("PII backstop adapter unavailable")?;
 
     // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
     // touching any real submission; abort without mutating anything when the
     // filter is unhealthy or errors — never process real traces through a
     // broken filter.
+    //
+    // #438 fix round 1: same reason as the adapter build above. This is the
+    // NEAR-AI-unavailable path -- the actual incident path -- and it carries a
+    // `TraceContributionError` whose transient marker is exactly what makes it
+    // report as `upstream_unavailable` instead of `unclassified`.
     let canary = run_privacy_filter_canary(adapter.as_ref())
         .await
-        .map_err(|err| anyhow::anyhow!("PII backstop canary errored: {err}"))?;
+        .context("PII backstop canary errored")?;
     if !canary.healthy {
         anyhow::bail!("PII backstop canary reported unhealthy filter; tick aborted");
     }
@@ -40537,6 +41317,25 @@ async fn rollout_smoke_evidence_handler(
     Ok(Json(evidence))
 }
 
+/// #438: "last successful tick at T" is a single value that makes a five-day
+/// outage obvious at a glance; 6,999 warnings do not.
+///
+/// Admin-gated rather than on `/health`, which is unauthenticated: which
+/// subsystem is currently dead, and for how long, is operational intelligence
+/// -- it tells an anonymous caller when the PII backstop is not running.
+///
+/// Deliberately does no DB read, no tenant scoping, and no audit write.
+/// Driver health is process-global and tenant-independent, and this should
+/// stay cheap enough to poll.
+async fn driver_liveness_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<trace_commons_server::driver_liveness::DriverLivenessSnapshot>>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    Ok(Json(state.driver_liveness.snapshot(Utc::now())))
+}
+
 async fn rollout_smoke_preflight_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -41435,7 +42234,11 @@ async fn run_canary_read_drill(
                 &credit_view.records,
             )
             .await?;
-            let status = submission_status_from_record(status_record, &status_credit_events);
+            let status = submission_status_from_record(
+                status_record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            );
             submit_status_visible = status.submission_id == request.submission_id
                 && status.status == record.status.as_str();
         }
@@ -54777,10 +55580,41 @@ fn corpus_status_with_pii_backstop_hold(
     }
 }
 
-fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmissionReceipt {
+/// The contributor-facing sentence describing what will happen to the credit
+/// this receipt reports, given the deployment's settlement posture.
+///
+/// #445: a pilot ran for three months with 307 credit events stuck `pending`,
+/// because `NearSettlementMode::Disabled` makes the settlement worker a no-op
+/// and nothing said so. The contributor saw an accepted trace, a pending
+/// figure, and a blank `FINAL` column, and could not tell "switched off" from
+/// "still working on it". Whichever posture is configured, the receipt says
+/// it, so the two can never drift apart again.
+fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
+    match mode {
+        // Deliberate and fail-safe, not a fault. Say both halves: the credit
+        // is real and recorded, and nothing is going to settle it here.
+        NearSettlementMode::Disabled => {
+            "Credit is recorded but not settled: on-chain settlement is not \
+             enabled on this deployment, so this figure stays pending."
+        }
+        // The outbox advances with synthetic transaction hashes and no funds.
+        // A settled-looking row here is not an on-chain credit.
+        NearSettlementMode::DryRun => {
+            "Settlement is running in dry-run: the credit ledger advances with \
+             synthetic transaction hashes and no on-chain credit is issued."
+        }
+        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
+    }
+}
+
+fn receipt_from_record(
+    record: &TraceCommonsSubmissionRecord,
+    settlement_mode: NearSettlementMode,
+) -> TraceSubmissionReceipt {
     let explanation = match record.status {
         TraceCorpusStatus::Accepted => vec![
             "Accepted into the private redacted corpus.".to_string(),
+            settlement_posture_explanation(settlement_mode).to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Quarantined => vec![
@@ -54809,8 +55643,9 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
 fn submission_status_from_record(
     record: &TraceCommonsSubmissionRecord,
     credit_events: &[TraceCommonsCreditLedgerRecord],
+    settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionStatusUpdate {
-    let receipt = receipt_from_record(record);
+    let receipt = receipt_from_record(record, settlement_mode);
     let delayed_events = credit_events
         .iter()
         .filter(|event| event.submission_id == record.submission_id)

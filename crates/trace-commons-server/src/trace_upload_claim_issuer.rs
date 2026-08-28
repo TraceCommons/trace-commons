@@ -86,7 +86,7 @@ trace-commons-contributor login --invite '<full invite link>'
 That registers a device key, redeems the code, and writes the config in one
 step. It is the supported path and everything below is what it does for you.
 
-The CLI ships as source in TraceCommons/trace-commons-server; build it with
+The CLI ships as source in TraceCommons/trace-commons; build it with
   cargo build --release -p trace-commons-contributor
 There is no published binary on npm, Homebrew, or PyPI.
 

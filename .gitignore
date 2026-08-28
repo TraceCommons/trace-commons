@@ -48,3 +48,6 @@ __pycache__/
 .linux-settings-*.png
 .linux-queue-screenshot.png
 .linux-queue-screenshot-toast.png
+
+# Node tooling under tools/ (trajectory-export)
+node_modules/

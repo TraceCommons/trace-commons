@@ -13,6 +13,7 @@ pub mod credit_quality;
 pub mod db;
 pub mod dedup_assign;
 pub mod dedup_simhash;
+pub mod driver_liveness;
 pub mod error;
 pub mod instance_enroll_guard;
 pub mod near_credit;

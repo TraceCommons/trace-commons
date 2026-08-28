@@ -55,6 +55,10 @@ pub struct Hosting {
 /// across the product means the three onboarding flows can route on the same
 /// fact rather than each inventing a spelling.
 pub const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
+/// A declaration named a source this build does not know. Fixed and
+/// content-free like every other label here: the input that would identify
+/// it is an adapter name, and the failure is refused rather than written.
+pub const ERR_UNKNOWN_SOURCE: &str = "unknown-source";
 
 /// Record the two session roots the contributor named, so the next
 /// `Backend::open` can start.
@@ -70,21 +74,24 @@ pub const ERR_ROOTS_NOT_DECLARED: &str = "roots-not-declared";
 /// Refuses an incomplete declaration here rather than writing one and
 /// letting the next start refuse: a half-written settings file is a worse
 /// thing to leave behind than an unanswered question.
-pub fn declare_sources(
-    dir: &std::path::Path,
-    claude: &SourceDeclaration,
-    codex: &SourceDeclaration,
-) -> Result<()> {
+pub fn declare_sources(dir: &std::path::Path, answers: &[(&str, SourceDeclaration)]) -> Result<()> {
     let store = ConfigStore::open(dir.to_path_buf())?;
     let mut settings = daemon::settings::DaemonSettings::load(&store)?;
+    // Every answer the screen collected, keyed by adapter name rather than
+    // by a list of fields kept here. A source the roots screen can now
+    // discover but this function had never heard of would otherwise be
+    // rendered, answered, and silently dropped.
+    //
     // The `_source` spellings, not the `_root` ones: a path can say where to
     // watch but cannot say "off", and off is the answer this exists to make
     // expressible.
-    let object = serde_json::json!({
-        "claude_source": serde_json::to_value(claude)?,
-        "codex_source": serde_json::to_value(codex)?,
-    });
-    daemon::settings::apply_settings_object(&mut settings, &object)
+    let mut object = serde_json::Map::new();
+    for (source, declaration) in answers {
+        let key = daemon::settings::source_settings_key(source)
+            .ok_or_else(|| anyhow!(ERR_UNKNOWN_SOURCE))?;
+        object.insert(key.to_string(), serde_json::to_value(declaration)?);
+    }
+    daemon::settings::apply_settings_object(&mut settings, &serde_json::Value::Object(object))
         .map_err(|label| anyhow!(label))?;
     if !daemon::settings::roots_declared(&settings) {
         bail!(ERR_ROOTS_NOT_DECLARED);
@@ -105,12 +112,20 @@ pub fn declare_roots(
 ) -> Result<()> {
     declare_sources(
         dir,
-        &SourceDeclaration::Watch {
-            path: claude_root.to_path_buf(),
-        },
-        &SourceDeclaration::Watch {
-            path: codex_root.to_path_buf(),
-        },
+        &[
+            (
+                trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                SourceDeclaration::Watch {
+                    path: claude_root.to_path_buf(),
+                },
+            ),
+            (
+                trace_commons_contributor::source::SOURCE_CODEX,
+                SourceDeclaration::Watch {
+                    path: codex_root.to_path_buf(),
+                },
+            ),
+        ],
     )
 }
 
@@ -483,10 +498,18 @@ mod roots_tests {
 
         declare_sources(
             dir.path(),
-            &SourceDeclaration::Watch {
-                path: claude.clone(),
-            },
-            &SourceDeclaration::Off,
+            &[
+                (
+                    trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                    SourceDeclaration::Watch {
+                        path: claude.clone(),
+                    },
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_CODEX,
+                    SourceDeclaration::Off,
+                ),
+            ],
         )
         .unwrap();
 
@@ -508,8 +531,16 @@ mod roots_tests {
 
         declare_sources(
             dir.path(),
-            &SourceDeclaration::Watch { path: claude },
-            &SourceDeclaration::Off,
+            &[
+                (
+                    trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                    SourceDeclaration::Watch { path: claude },
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_CODEX,
+                    SourceDeclaration::Off,
+                ),
+            ],
         )
         .unwrap();
 
@@ -523,13 +554,76 @@ mod roots_tests {
         );
     }
 
+    /// The roots screen renders one row per discovered source, and every
+    /// row it renders must be written. A source the screen can show but
+    /// this function drops would ask the contributor a question and then
+    /// ignore the answer.
+    #[test]
+    fn every_answered_source_is_written_not_just_the_two_that_gate_the_start() {
+        let dir = Scratch::new("every-answer");
+        let gemini = dir.path().join("gemini");
+        std::fs::create_dir_all(&gemini).unwrap();
+
+        declare_sources(
+            dir.path(),
+            &[
+                (
+                    trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                    SourceDeclaration::Off,
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_CODEX,
+                    SourceDeclaration::Off,
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_GEMINI_CLI,
+                    SourceDeclaration::Watch {
+                        path: gemini.clone(),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let settings = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            settings.gemini_source,
+            Some(SourceDeclaration::Watch { path: gemini }),
+            "the contributor said to watch it; the answer must survive"
+        );
+    }
+
+    /// A source this build has no settings key for is refused, not written
+    /// under a guessed field name.
+    #[test]
+    fn an_unknown_source_name_is_refused() {
+        let dir = Scratch::new("unknown-source");
+        let err = declare_sources(dir.path(), &[("not-an-adapter", SourceDeclaration::Off)])
+            .expect_err("an unknown source must refuse");
+        assert_eq!(err.to_string(), ERR_UNKNOWN_SOURCE);
+    }
+
     #[test]
     fn both_agents_off_is_a_complete_declaration() {
         // Somebody who uses neither agent still has to be able to leave the
         // screen. Refusing here would be the dead end this whole slice
         // exists to remove.
         let dir = Scratch::new("both-off");
-        declare_sources(dir.path(), &SourceDeclaration::Off, &SourceDeclaration::Off).unwrap();
+        declare_sources(
+            dir.path(),
+            &[
+                (
+                    trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                    SourceDeclaration::Off,
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_CODEX,
+                    SourceDeclaration::Off,
+                ),
+            ],
+        )
+        .unwrap();
 
         let backend = match Backend::open(dir.path().to_path_buf()) {
             Ok(b) => b,
@@ -545,7 +639,20 @@ mod roots_tests {
         // which is "never asked" -- and never-asked is the state that falls
         // back to the real location.
         let dir = Scratch::new("off-round-trip");
-        declare_sources(dir.path(), &SourceDeclaration::Off, &SourceDeclaration::Off).unwrap();
+        declare_sources(
+            dir.path(),
+            &[
+                (
+                    trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                    SourceDeclaration::Off,
+                ),
+                (
+                    trace_commons_contributor::source::SOURCE_CODEX,
+                    SourceDeclaration::Off,
+                ),
+            ],
+        )
+        .unwrap();
 
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let reloaded = DaemonSettings::load(&store).unwrap();
