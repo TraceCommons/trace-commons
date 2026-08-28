@@ -351,11 +351,20 @@ privacy filter that does not reproduce its own output: with
 `pii_filter = "near-ai"` an LLM-backed filter returns different spans for
 identical text, and any design that rebuilt-and-compared refused every
 previewed entry forever. The stored bytes are held to the same bounds as
-the rest of the exemption, plus two of their own:
+the rest of the exemption, plus three of their own:
 
-- **Bounded.** One file per previewed-and-approved entry, each at most the
-  1.5 MB envelope ceiling, and live entries are capped by
-  `max_queue_entries`. Only an approved-but-unsent backlog accumulates.
+- **Bounded in bytes.** One file per pinned entry, each at most the 16 MB
+  envelope ceiling, and live entries are capped by `max_queue_entries` --
+  but that pair alone would allow 7.8 GB of redacted trace content on a
+  contributor's disk, which is not a bound anyone would choose. The store
+  is held under a ceiling of its own (256 MB) by releasing the oldest
+  pending previews.
+- **Kept only while somebody is waiting on it.** The exemption is for an
+  entry the contributor asked about, so a `pending` entry's stored envelope
+  is released once it is three days old and the contributor has not acted
+  on it; opening the entry again rebuilds and re-pins it. An `approved` or
+  `uploading` entry is never released this way: its bytes are the bytes the
+  upload will send.
 - **Deleted when the entry resolves.** Uploading, refusing, failing,
   expiring, superseding, or revoking an approval all drop the file, and
   `logout` removes any that remain. If the bytes are missing or unreadable

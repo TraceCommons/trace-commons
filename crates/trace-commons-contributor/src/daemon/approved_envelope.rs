@@ -40,23 +40,54 @@
 //!   state directory, are written 0600 through the same atomic temp-then
 //!   -rename path as every other daemon file, and are removed by
 //!   `ConfigStore::wipe` on logout.
-//! * **Bounded.** One file per previewed-and-approved entry, each at most
-//!   `MAX_ENVELOPE_BYTES`, and live entries are capped by
-//!   `max_queue_entries`. An approved-but-unsent backlog is the only thing
-//!   that can accumulate.
+//! * **Bounded in bytes, not just in count.** One file per pinned entry,
+//!   each at most `MAX_ENVELOPE_BYTES`, and live entries are capped by
+//!   `max_queue_entries` -- but that pair only bounds the directory at
+//!   500 x 16 MB, which is 7.8 GB of redacted trace content and is not a
+//!   bound anyone would choose on purpose. `MAX_STORE_BYTES` is the real
+//!   ceiling, and `release_stale_pins` holds the store under it by
+//!   releasing the oldest pending previews.
+//! * **Kept only while somebody is waiting on it.** The at-rest exemption
+//!   is for "an entry the contributor asked about", and a preview nobody
+//!   acted on stops being that. `release_stale_pins` drops the pin on a
+//!   `Pending` entry whose stored envelope is older than `PIN_MAX_AGE`;
+//!   opening the entry again rebuilds and re-pins it. An `Approved` or
+//!   `Uploading` entry is never released this way -- its bytes are the
+//!   bytes the upload will send.
 //! * **Deleted as soon as it is not needed.** `sweep` removes every stored
 //!   envelope whose entry has reached a terminal state or has lost its pin
-//!   -- to a revoked approval or an undone one -- and runs after every
-//!   upload pass and every watcher tick.
+//!   -- to a revoked approval, an undone one, or a released one -- and runs
+//!   after every upload pass and every watcher tick.
 
 use std::collections::HashSet;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_APPROVED_ENVELOPE_PREFIX};
+use crate::daemon::queue::{Queue, QueueEntry, QueueState};
 use crate::envelope::MAX_ENVELOPE_BYTES;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
+
+/// How long a `Pending` entry's stored envelope is kept before its pin is
+/// released.
+///
+/// Shorter than `queue_ttl_days` (14) on purpose. The entry itself is a
+/// standing offer and can sit for a fortnight harmlessly; the file behind
+/// it is redacted trace content at rest, and three days after a preview the
+/// contributor did not act on it is no longer "an entry the contributor
+/// asked about". The cost of being wrong is one rebuilt preview when they
+/// do open it.
+pub const PIN_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+
+/// The ceiling on the whole store, over every entry at once.
+///
+/// `MAX_ENVELOPE_BYTES` bounds one file and `max_queue_entries` bounds how
+/// many can be live, but their product is 7.8 GB. This is the number that
+/// actually decides how much redacted trace content a contributor's disk
+/// can be holding, so it is stated rather than inferred.
+pub const MAX_STORE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Stored envelopes are named `daemon-approved-envelope-{entry_id}.json`.
 /// The variable part is a `Uuid` rendered by `Display`, so it can never
@@ -115,6 +146,98 @@ pub fn load(store: &ConfigStore, entry_id: Uuid) -> Result<Option<TraceContribut
 
 pub fn remove(store: &ConfigStore, entry_id: Uuid) -> Result<()> {
     store.remove_daemon_file(&file_name(entry_id))
+}
+
+/// Release the pins on stored envelopes nobody is waiting on, so the next
+/// `sweep` deletes them. Returns the entries released.
+///
+/// Two reasons to release, both of them only ever applied to a `Pending`
+/// entry (see `Queue::release_preview_pin`):
+///
+/// * **Age.** The stored envelope is older than `PIN_MAX_AGE`. This is what
+///   drains a store left behind by previews the contributor never asked
+///   for -- an unbounded preview-on-launch storm, say -- which would
+///   otherwise sit at the queue cap forever, because a pending entry has no
+///   other reason to resolve.
+/// * **Pressure.** The whole store is over `MAX_STORE_BYTES`, in which case
+///   the oldest pending previews are released until it is not.
+///
+/// Age is decided from the file's own modification time rather than from
+/// anything in the queue: it is the time the preview was written, it needs
+/// no new queue field and no migration for entries that predate this, and
+/// a filesystem that reports it as newer than it is only keeps a file
+/// longer, which is the safe direction for a correctness-neutral cleanup.
+///
+/// The caller must save the queue and then `sweep`. That order matters: the
+/// pin is the daemon's record that the bytes are on disk, so clearing it
+/// first means a crash in the middle leaves an orphan file the next sweep
+/// removes, while deleting first would leave a `Pending` entry pinned to
+/// bytes that are gone, which refuses its own preview instead of rebuilding.
+pub fn release_stale_pins(store: &ConfigStore, queue: &mut Queue) -> Vec<Uuid> {
+    release_stale_pins_with(
+        store,
+        queue,
+        SystemTime::now(),
+        PIN_MAX_AGE,
+        MAX_STORE_BYTES,
+    )
+}
+
+/// `release_stale_pins` with its clock and its bounds injected, so a test
+/// can age a file and fill a store without doing either for real.
+fn release_stale_pins_with(
+    store: &ConfigStore,
+    queue: &mut Queue,
+    now: SystemTime,
+    max_age: Duration,
+    ceiling: u64,
+) -> Vec<Uuid> {
+    // Every file this module owns, oldest first, with its size.
+    let mut files: Vec<(Uuid, SystemTime, u64)> = match std::fs::read_dir(store.dir()) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|e| {
+                let id = entry_id_of(&e.file_name().to_string_lossy())?;
+                let meta = e.metadata().ok()?;
+                Some((id, meta.modified().ok()?, meta.len()))
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort_by_key(|(_, modified, _)| *modified);
+
+    // The ceiling is on the whole store, including the files that are not
+    // eligible for release: an approved backlog occupies the budget even
+    // though nothing here can evict it.
+    let mut total: u64 = files.iter().map(|(_, _, len)| len).sum();
+
+    let releasable: HashSet<Uuid> = queue
+        .all()
+        .iter()
+        .filter(|e: &&QueueEntry| {
+            e.state == QueueState::Pending && e.previewed_envelope_digest.is_some()
+        })
+        .map(|e| e.entry_id)
+        .collect();
+
+    let mut released = Vec::new();
+    for (id, modified, len) in files {
+        if !releasable.contains(&id) {
+            continue;
+        }
+        let aged = now
+            .duration_since(modified)
+            .map(|age| age >= max_age)
+            .unwrap_or(false);
+        if !(aged || total > ceiling) {
+            continue;
+        }
+        if queue.release_preview_pin(id) {
+            released.push(id);
+            total = total.saturating_sub(len);
+        }
+    }
+    released
 }
 
 /// Delete every stored envelope not in `keep`.
@@ -246,6 +369,159 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// A pending queue entry pinned to a stored envelope.
+    fn pinned_entry(hash: &str, state: crate::daemon::queue::QueueState) -> QueueEntry {
+        QueueEntry {
+            entry_id: crate::daemon::queue::entry_id_for(hash),
+            session_hash: hash.into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: std::path::PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),
+            size_bytes: 100,
+            discovered_at: chrono::Utc::now(),
+            state,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_verdict: None,
+            approved_correction: None,
+            approved_inputs: None,
+            previewed_envelope_digest: Some("sha256:previewed".into()),
+            approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            observed_modified_at: None,
+        }
+    }
+
+    fn queue_with(entries: Vec<QueueEntry>) -> Queue {
+        let mut q = Queue::new();
+        for e in entries {
+            q.upsert(e, 5000).unwrap();
+        }
+        q
+    }
+
+    /// `save` an envelope for every entry in `q` that claims a pin.
+    async fn store_envelopes_for(store: &ConfigStore, q: &Queue) {
+        let e = envelope().await;
+        for entry in q.all() {
+            if entry.previewed_envelope_digest.is_some() {
+                save(store, entry.entry_id, &e).unwrap();
+            }
+        }
+    }
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    #[tokio::test]
+    async fn a_pending_preview_nobody_acted_on_loses_its_pin_once_it_is_old() {
+        // The residue this exists for: previews written for entries the
+        // contributor never opened, kept indefinitely because the entry
+        // stays pending. Dropping the pin lets `sweep` take the bytes; the
+        // next preview rebuilds.
+        let (_d, store) = temp_store();
+        let mut q = queue_with(vec![pinned_entry("sha256:aa", QueueState::Pending)]);
+        store_envelopes_for(&store, &q).await;
+        let id = q.all()[0].entry_id;
+
+        let released = release_stale_pins_with(
+            &store,
+            &mut q,
+            SystemTime::now() + 4 * DAY,
+            PIN_MAX_AGE,
+            MAX_STORE_BYTES,
+        );
+
+        assert_eq!(released, vec![id]);
+        assert_eq!(q.get(id).unwrap().previewed_envelope_digest, None);
+        sweep(&store, &q.pinned_entry_ids()).unwrap();
+        assert!(load(&store, id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_pending_preview_is_kept() {
+        // Releasing a preview the contributor is still looking at would
+        // make the entry rebuild under them for no benefit.
+        let (_d, store) = temp_store();
+        let mut q = queue_with(vec![pinned_entry("sha256:aa", QueueState::Pending)]);
+        store_envelopes_for(&store, &q).await;
+        let id = q.all()[0].entry_id;
+
+        let released = release_stale_pins_with(
+            &store,
+            &mut q,
+            SystemTime::now(),
+            PIN_MAX_AGE,
+            MAX_STORE_BYTES,
+        );
+
+        assert!(released.is_empty());
+        assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());
+        sweep(&store, &q.pinned_entry_ids()).unwrap();
+        assert!(load(&store, id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_approved_entrys_envelope_is_never_released_however_old() {
+        // These are the bytes the upload sends. Age is not a reason to
+        // drop them; only the entry resolving is.
+        let (_d, store) = temp_store();
+        let mut q = queue_with(vec![pinned_entry("sha256:aa", QueueState::Approved)]);
+        store_envelopes_for(&store, &q).await;
+        let id = q.all()[0].entry_id;
+
+        let released = release_stale_pins_with(
+            &store,
+            &mut q,
+            SystemTime::now() + 400 * DAY,
+            PIN_MAX_AGE,
+            // A ceiling of zero: even under maximum pressure an approved
+            // entry keeps its bytes.
+            0,
+        );
+
+        assert!(released.is_empty());
+        assert!(q.get(id).unwrap().previewed_envelope_digest.is_some());
+        sweep(&store, &q.pinned_entry_ids()).unwrap();
+        assert!(load(&store, id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_store_evicts_pending_previews_until_it_is_under_its_ceiling() {
+        // The bound the module claims has to be a byte bound, not just a
+        // count of entries times the per-envelope cap.
+        let (_d, store) = temp_store();
+        let mut q = queue_with(vec![
+            pinned_entry("sha256:aa", QueueState::Pending),
+            pinned_entry("sha256:bb", QueueState::Pending),
+            pinned_entry("sha256:cc", QueueState::Pending),
+        ]);
+        store_envelopes_for(&store, &q).await;
+        let one = store
+            .read_daemon_file(&file_name(q.all()[0].entry_id))
+            .unwrap()
+            .unwrap()
+            .len() as u64;
+
+        // Room for two of the three.
+        let released = release_stale_pins_with(
+            &store,
+            &mut q,
+            SystemTime::now(),
+            PIN_MAX_AGE,
+            one * 2 + one / 2,
+        );
+
+        assert_eq!(released.len(), 1, "evict only as much as the ceiling needs");
+        assert_eq!(q.pinned_entry_ids().len(), 2);
+        sweep(&store, &q.pinned_entry_ids()).unwrap();
+        assert!(load(&store, released[0]).unwrap().is_none());
     }
 
     #[tokio::test]
