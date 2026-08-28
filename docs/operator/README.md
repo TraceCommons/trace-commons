@@ -128,6 +128,12 @@ Every runbook in this directory, with a one-line description.
   workflows for `trace-commons-{review,admin,worker,tenant}`: install,
   env-var matrix, common sequences, defense-in-depth notes, and an
   error-variant troubleshooting table.
+- [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
+  (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
+  restricting the NEAR AI privacy filter to prose events, the accepted
+  tool-output coverage gap, the recorded `classify_policy` /
+  `events_examined` / `events_skipped_by_policy` fields, and confirming the
+  active policy from the startup log line.
 - [`./pilot-bootstrap.md`](./pilot-bootstrap.md) — operator runbook for the
   HF-trace replay harness used to seed pilot calibration data.
 - [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) —

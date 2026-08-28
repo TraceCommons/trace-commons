@@ -428,6 +428,14 @@ pub struct SafePrivacyFilterSummary {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub by_label: BTreeMap<String, u32>,
     pub decoded_mismatch: bool,
+    /// Which classify policy produced this result, so decisions made under
+    /// different policies stay distinguishable after the fact. Label only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classify_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub events_examined: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub events_skipped_by_policy: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2221,6 +2229,9 @@ pub fn safe_privacy_filter_redaction_from_output(
             span_count: detected_spans.len() as u32,
             by_label,
             decoded_mismatch,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
         },
         report,
     })
@@ -2351,12 +2362,25 @@ fn merge_privacy_filter_summary(
         span_count: 0,
         by_label: BTreeMap::new(),
         decoded_mismatch: false,
+        classify_policy: None,
+        events_examined: 0,
+        events_skipped_by_policy: 0,
     });
     target.schema_version = target.schema_version.max(next.schema_version);
     target.span_count = target.span_count.saturating_add(next.span_count);
     target.decoded_mismatch |= next.decoded_mismatch;
     for (label, count) in &next.by_label {
         *target.by_label.entry(label.clone()).or_insert(0) += count;
+    }
+    // classify_policy, events_examined, and events_skipped_by_policy move
+    // together: they describe one classifier pass, and a policy label paired
+    // with another pass's counts would be a false record. When `next` did not
+    // run a classify pass (classify_policy is None), leave all three fields
+    // in `target` untouched rather than merging the counts in isolation.
+    if next.classify_policy.is_some() {
+        target.classify_policy = next.classify_policy.clone();
+        target.events_examined = next.events_examined;
+        target.events_skipped_by_policy = next.events_skipped_by_policy;
     }
 }
 
@@ -2636,6 +2660,83 @@ pub fn privacy_filter_adapter_from_env() -> Result<
         other => Err(PrivacyFilterConfigError::UnknownBackend {
             value: other.to_string(),
         }),
+    }
+}
+
+/// Which events the NEAR AI privacy classifier is asked to examine.
+///
+/// Throughput is `windows x round-trip` and the round trip is ~4.5 s, so the
+/// only lever that moves it is issuing fewer windows. Contributor and model
+/// prose are ~10% of trace volume; tool traffic is the other ~90%.
+///
+/// Defaults to `AllEvents`: an operator who has not made this decision keeps
+/// today's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PiiClassifyPolicy {
+    /// Examine every event. Today's behaviour.
+    #[default]
+    AllEvents,
+    /// Examine only prose-bearing events; tool traffic relies on the
+    /// deterministic detectors, which still run over everything.
+    ProseOnly,
+}
+
+impl PiiClassifyPolicy {
+    /// The stable label used for both configuration and the recorded value,
+    /// so the configured and recorded policy cannot drift apart.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::AllEvents => "all-events",
+            Self::ProseOnly => "prose-only",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim() {
+            "all-events" => Some(Self::AllEvents),
+            "prose-only" => Some(Self::ProseOnly),
+            _ => None,
+        }
+    }
+
+    /// Reads `TRACE_COMMONS_PII_CLASSIFY_POLICY`. An unset or unparseable
+    /// value yields `AllEvents`: a typo must not silently narrow what the
+    /// classifier examines.
+    pub fn from_env() -> Self {
+        std::env::var("TRACE_COMMONS_PII_CLASSIFY_POLICY")
+            .ok()
+            .and_then(|raw| Self::from_label(&raw))
+            .unwrap_or_default()
+    }
+}
+
+/// Whether `policy` submits this event's text to the classifier.
+///
+/// The match is exhaustive on purpose: a newly added event type must not
+/// default into either bucket. Adding a variant will fail this to compile,
+/// which is the intended prompt to decide whether it carries authored prose.
+pub fn policy_examines_event(
+    policy: PiiClassifyPolicy,
+    event_type: TraceContributionEventType,
+) -> bool {
+    match policy {
+        PiiClassifyPolicy::AllEvents => true,
+        PiiClassifyPolicy::ProseOnly => match event_type {
+            // Authored by a human or the model: where unpatterned PII such as
+            // names and addresses actually originates.
+            TraceContributionEventType::UserMessage
+            | TraceContributionEventType::AssistantMessage
+            | TraceContributionEventType::Reasoning
+            | TraceContributionEventType::Feedback => true,
+            // Tool traffic: ~90% of volume. Patterned secrets here are still
+            // caught by the deterministic detectors, which are unaffected by
+            // this policy. Unpatterned PII arriving through tool output is the
+            // accepted, documented gap.
+            TraceContributionEventType::ToolCall
+            | TraceContributionEventType::ToolResult
+            | TraceContributionEventType::RoutingDecision
+            | TraceContributionEventType::HttpExchange => false,
+        },
     }
 }
 
@@ -4238,6 +4339,7 @@ fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
 pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
+    policy: PiiClassifyPolicy,
 ) -> Result<Vec<ResidualRiskCondition>, TraceContributionError> {
     // Same concordance floor as the sync server re-scrub: under-reported
     // consent must not survive into residual_risk / status decisions.
@@ -4248,11 +4350,18 @@ pub async fn rescrub_envelope_prose_pii_with(
     let mut report = RedactionReport::default();
     let mut summary: Option<SafePrivacyFilterSummary> = None;
     let mut structured_complete = true;
+    let mut examined_events: u32 = 0;
+    let mut skipped_events: u32 = 0;
 
     for (index, event) in envelope.events.iter().enumerate() {
+        if !policy_examines_event(policy, event.event_type) {
+            skipped_events += 1;
+            continue;
+        }
         let Some(content) = event.redacted_content.as_deref() else {
             continue;
         };
+        examined_events += 1;
         if let Some(redaction) = adapter.redact_text(content).await? {
             merge_privacy_filter_summary(&mut summary, &redaction.summary);
             report.merge(redaction.report);
@@ -4272,6 +4381,9 @@ pub async fn rescrub_envelope_prose_pii_with(
     {
         let mut budget = StructuredPayloadBudget::default();
         for (index, event) in envelope.events.iter().enumerate() {
+            if !policy_examines_event(policy, event.event_type) {
+                continue;
+            }
             if event.structured_payload.is_null() {
                 continue;
             }
@@ -4308,9 +4420,24 @@ pub async fn rescrub_envelope_prose_pii_with(
             envelope.privacy.pii_labels_present.push(label.clone());
         }
     }
-    if let Some(summary) = &summary {
-        merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, summary);
-    }
+    // Policy and coverage counts are recorded unconditionally, even when the
+    // adapter found nothing to redact: a summary is the only place these
+    // survive, and "which policy examined this trace" must stay answerable
+    // regardless of whether that policy found anything.
+    let mut summary = summary.unwrap_or_else(|| SafePrivacyFilterSummary {
+        schema_version: 1,
+        output_mode: "redacted_text_only".to_string(),
+        span_count: 0,
+        by_label: BTreeMap::new(),
+        decoded_mismatch: false,
+        classify_policy: None,
+        events_examined: 0,
+        events_skipped_by_policy: 0,
+    });
+    summary.classify_policy = Some(policy.as_label().to_string());
+    summary.events_examined = examined_events;
+    summary.events_skipped_by_policy = skipped_events;
+    merge_privacy_filter_summary(&mut envelope.privacy.privacy_filter_summary, &summary);
 
     // Zero-finding responses are not automatically trustworthy (Task 2): a
     // 200 with an empty span list is indistinguishable, on its own, from an
@@ -8000,6 +8127,9 @@ mod tests {
                                 1,
                             )]),
                             decoded_mismatch: false,
+                            classify_policy: None,
+                            events_examined: 0,
+                            events_skipped_by_policy: 0,
                         },
                         report,
                     }))
@@ -8009,7 +8139,7 @@ mod tests {
             }
         }
         let mut env = sample_envelope_with_event_content("email jane@example.com now");
-        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert!(
@@ -8045,7 +8175,7 @@ mod tests {
         let summary = env.privacy.privacy_filter_summary.as_ref().unwrap();
         assert_eq!(summary.by_label.get("private_email").copied(), Some(1));
         // Idempotent suffix: running again does not double-append.
-        rescrub_envelope_prose_pii_with(&Stub, &mut env)
+        rescrub_envelope_prose_pii_with(&Stub, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -8137,9 +8267,13 @@ mod tests {
             .expected_assertions
             .push(deeply_nested_json(RESIDUAL_SCAN_MAX_DEPTH + 8));
 
-        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &NeverFindsAnything,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8175,6 +8309,9 @@ mod tests {
                         span_count: 0,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report: RedactionReport::default(),
                 }))
@@ -8185,7 +8322,7 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env)
+        rescrub_envelope_prose_pii_with(&AlwaysEmptySpans, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
 
@@ -8219,9 +8356,13 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&NeverFindsAnything, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &NeverFindsAnything,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8266,6 +8407,9 @@ mod tests {
                         span_count: canary_values.len() as u32,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8280,9 +8424,13 @@ mod tests {
         env.consent.message_text_included = false;
         env.consent.tool_payloads_included = false;
 
-        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &CanaryHealthyButFindsNoRealPii,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8333,6 +8481,9 @@ mod tests {
                         span_count: canary_values.len() as u32,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8351,9 +8502,13 @@ mod tests {
         }
         env.events[0].structured_payload = nested;
 
-        rescrub_envelope_prose_pii_with(&CanaryHealthyButFindsNoRealPii, &mut env)
-            .await
-            .unwrap();
+        rescrub_envelope_prose_pii_with(
+            &CanaryHealthyButFindsNoRealPii,
+            &mut env,
+            PiiClassifyPolicy::AllEvents,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             env.privacy.residual_pii_risk,
@@ -8398,6 +8553,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::new(),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -8417,7 +8575,7 @@ mod tests {
         // the only difference between the two cases is the note.
         let mut clean = build();
         clean.replay.replay_notes.clear();
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean)
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut clean, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_ne!(
@@ -8429,7 +8587,7 @@ mod tests {
         let mut gapped = build();
         gapped.replay.replay_notes =
             vec!["they asked about their mother Mary in Baltimore".to_string()];
-        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped)
+        rescrub_envelope_prose_pii_with(&FindsRealEmail, &mut gapped, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
         assert_eq!(
@@ -8470,6 +8628,9 @@ mod tests {
                                 1,
                             )]),
                             decoded_mismatch: false,
+                            classify_policy: None,
+                            events_examined: 0,
+                            events_skipped_by_policy: 0,
                         },
                         report,
                     }))
@@ -8484,7 +8645,7 @@ mod tests {
             "reviewer_alice@example.com": "argument value with alice@example.com inside",
         });
 
-        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env)
+        rescrub_envelope_prose_pii_with(&DetectsEmail, &mut env, PiiClassifyPolicy::AllEvents)
             .await
             .unwrap();
 
@@ -9002,6 +9163,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::from([("person_name".into(), 1)]),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -9114,6 +9278,9 @@ mod tests {
                         span_count: 1,
                         by_label: std::collections::BTreeMap::from([("private_email".into(), 1)]),
                         decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
                     },
                     report,
                 }))
@@ -9124,7 +9291,7 @@ mod tests {
         let mut envelope = sample_envelope_with_event_content("email jane@example.com now");
         envelope.outcome.human_correction = Some(correction.to_string());
 
-        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope)
+        rescrub_envelope_prose_pii_with(&RedactsJane, &mut envelope, PiiClassifyPolicy::AllEvents)
             .await
             .expect("the backstop pass succeeds");
 
@@ -9141,6 +9308,229 @@ mod tests {
             Some(correction),
             "the backstop must not rewrite a correction"
         );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    use super::*;
+
+    /// Records every string handed to the classifier so a test can assert
+    /// what was and was not submitted.
+    #[cfg(feature = "near-ai-privacy-filter")]
+    struct RecordingAdapter {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[async_trait::async_trait]
+    impl PrivacyFilterAdapter for RecordingAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            self.seen.lock().unwrap().push(text.to_string());
+            Ok(None)
+        }
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    fn envelope_with_events(
+        events: Vec<(TraceContributionEventType, &str)>,
+    ) -> super::TraceContributionEnvelope {
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        // The fixture ships exactly one UserMessage event; reuse it as a
+        // template so every required field stays populated.
+        let template = envelope.events[0].clone();
+        envelope.events = events
+            .into_iter()
+            .map(|(event_type, text)| {
+                let mut event = template.clone();
+                event.event_id = Uuid::new_v4();
+                event.event_type = event_type;
+                event.redacted_content = Some(text.to_string());
+                event.structured_payload = Value::Null;
+                event
+            })
+            .collect();
+        envelope
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn prose_only_policy_does_not_submit_tool_result_text() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![
+            (
+                TraceContributionEventType::UserMessage,
+                "my name is Dana Ruiz",
+            ),
+            (
+                TraceContributionEventType::ToolResult,
+                "file says Dana Ruiz, 12 Oak Street",
+            ),
+        ]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::ProseOnly)
+            .await
+            .expect("rescrub succeeds");
+
+        let seen = adapter.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|t| t.contains("my name is")),
+            "prose event must be submitted"
+        );
+        // The accepted gap, asserted deliberately: unpatterned PII reaching
+        // the trace through tool output is NOT model-examined under this
+        // policy.
+        assert!(
+            !seen.iter().any(|t| t.contains("12 Oak Street")),
+            "tool result must not be submitted under prose-only"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn all_events_policy_still_submits_tool_result_text() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![(
+            TraceContributionEventType::ToolResult,
+            "file says Dana Ruiz, 12 Oak Street",
+        )]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::AllEvents)
+            .await
+            .expect("rescrub succeeds");
+
+        assert!(
+            adapter
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.contains("12 Oak Street")),
+            "all-events must preserve today's behaviour exactly"
+        );
+    }
+
+    #[test]
+    fn summary_without_policy_serializes_unchanged() {
+        use super::*;
+        // The envelope digest is pinned in the contributor crate. A summary
+        // that does not set the new fields must serialize byte-identically
+        // to before.
+        let summary = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "spans".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
+        };
+        let json = serde_json::to_string(&summary).expect("serializes");
+        assert!(
+            !json.contains("classify_policy"),
+            "absent policy must not serialize"
+        );
+        assert!(
+            !json.contains("events_examined"),
+            "zero counts must not serialize"
+        );
+    }
+
+    #[test]
+    fn merge_privacy_filter_summary_keeps_policy_and_counts_from_the_same_pass() {
+        use super::*;
+
+        let mut target: Option<SafePrivacyFilterSummary> = None;
+        let first_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: Some("all-events".to_string()),
+            events_examined: 3,
+            events_skipped_by_policy: 0,
+        };
+        merge_privacy_filter_summary(&mut target, &first_pass);
+
+        let second_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: Some("prose-only".to_string()),
+            events_examined: 1,
+            events_skipped_by_policy: 2,
+        };
+        merge_privacy_filter_summary(&mut target, &second_pass);
+
+        // A backstop retry over an already-summarized envelope must not sum
+        // counts across passes run under different policies: the stored
+        // state must be exactly the last pass, not first-pass-counts labeled
+        // with the second pass's policy.
+        let merged = target.as_ref().expect("summary recorded");
+        assert_eq!(merged.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(merged.events_examined, 1);
+        assert_eq!(merged.events_skipped_by_policy, 2);
+
+        // A merge from a summary that ran no classify pass (classify_policy
+        // is None, counts zero, as adapter-level summaries construct them)
+        // must not clobber the previously recorded policy pass.
+        let no_policy_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
+        };
+        merge_privacy_filter_summary(&mut target, &no_policy_pass);
+        let merged = target.expect("summary recorded");
+        assert_eq!(merged.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(merged.events_examined, 1);
+        assert_eq!(merged.events_skipped_by_policy, 2);
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    #[tokio::test]
+    async fn prose_only_records_policy_and_counts() {
+        let adapter = RecordingAdapter {
+            seen: Default::default(),
+        };
+        let mut envelope = envelope_with_events(vec![
+            (
+                TraceContributionEventType::UserMessage,
+                "my name is Dana Ruiz",
+            ),
+            (
+                TraceContributionEventType::ToolResult,
+                "file says Dana Ruiz, 12 Oak Street",
+            ),
+            (TraceContributionEventType::ToolCall, "grep -rn Dana"),
+        ]);
+
+        rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::ProseOnly)
+            .await
+            .expect("rescrub succeeds");
+
+        let summary = envelope
+            .privacy
+            .privacy_filter_summary
+            .as_ref()
+            .expect("summary recorded");
+        assert_eq!(summary.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(summary.events_examined, 1);
+        assert_eq!(summary.events_skipped_by_policy, 2);
     }
 
     // The envelope-level re-scrub is the second site, and it gets the same
@@ -11683,5 +12073,89 @@ mod tests {
         }
         assert_eq!(ResidualRiskCondition::from_label("other"), None);
         assert_eq!(ResidualRiskCondition::from_label(""), None);
+    }
+
+    #[test]
+    fn pii_classify_policy_parses_known_labels() {
+        use super::*;
+        assert_eq!(
+            PiiClassifyPolicy::from_label("prose-only"),
+            Some(PiiClassifyPolicy::ProseOnly)
+        );
+        assert_eq!(
+            PiiClassifyPolicy::from_label("all-events"),
+            Some(PiiClassifyPolicy::AllEvents)
+        );
+        // Unknown values do not silently become the fast policy.
+        assert_eq!(PiiClassifyPolicy::from_label("nonsense"), None);
+    }
+
+    #[test]
+    fn pii_classify_policy_label_round_trips() {
+        use super::*;
+        for policy in [PiiClassifyPolicy::AllEvents, PiiClassifyPolicy::ProseOnly] {
+            assert_eq!(
+                PiiClassifyPolicy::from_label(policy.as_label()),
+                Some(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn pii_classify_policy_defaults_to_all_events() {
+        use super::*;
+        assert_eq!(PiiClassifyPolicy::default(), PiiClassifyPolicy::AllEvents);
+    }
+
+    #[test]
+    fn all_events_policy_examines_every_event_type() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::UserMessage,
+            TraceContributionEventType::AssistantMessage,
+            TraceContributionEventType::Reasoning,
+            TraceContributionEventType::Feedback,
+            TraceContributionEventType::ToolCall,
+            TraceContributionEventType::ToolResult,
+            TraceContributionEventType::RoutingDecision,
+            TraceContributionEventType::HttpExchange,
+        ] {
+            assert!(
+                policy_examines_event(PiiClassifyPolicy::AllEvents, event_type),
+                "AllEvents must examine {event_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_only_policy_examines_authored_prose() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::UserMessage,
+            TraceContributionEventType::AssistantMessage,
+            TraceContributionEventType::Reasoning,
+            TraceContributionEventType::Feedback,
+        ] {
+            assert!(
+                policy_examines_event(PiiClassifyPolicy::ProseOnly, event_type),
+                "ProseOnly must examine {event_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_only_policy_skips_tool_traffic() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::ToolCall,
+            TraceContributionEventType::ToolResult,
+            TraceContributionEventType::RoutingDecision,
+            TraceContributionEventType::HttpExchange,
+        ] {
+            assert!(
+                !policy_examines_event(PiiClassifyPolicy::ProseOnly, event_type),
+                "ProseOnly must skip {event_type:?}"
+            );
+        }
     }
 }

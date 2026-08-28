@@ -81158,6 +81158,9 @@ impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for Backst
                 span_count: 1,
                 by_label: BTreeMap::from([("private_email".to_string(), 1)]),
                 decoded_mismatch: false,
+                classify_policy: None,
+                events_examined: 0,
+                events_skipped_by_policy: 0,
             },
             report,
         }))
@@ -87281,4 +87284,30 @@ async fn a_record_written_before_v51_reads_as_not_recorded_not_as_empty() {
         serde_json::json!([]),
         "a recorded, empty basis is a different claim and must survive as one"
     );
+}
+
+#[test]
+fn classify_policy_env_defaults_closed() {
+    const VAR: &str = "TRACE_COMMONS_PII_CLASSIFY_POLICY";
+    let prior = std::env::var(VAR).ok();
+    // SAFETY: this test runs single-threaded with respect to env mutation; no
+    // other thread reads these vars while we overwrite them. Rust 2024 marks
+    // set_var/remove_var unsafe to flag the global-state hazard. This mirrors
+    // the existing env-var tests in this file (see ~70361).
+    unsafe { std::env::remove_var(VAR) };
+    assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::AllEvents);
+
+    unsafe { std::env::set_var(VAR, "prose-only") };
+    assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::ProseOnly);
+
+    // A typo must not silently narrow what the classifier examines.
+    unsafe { std::env::set_var(VAR, "typo") };
+    assert_eq!(PiiClassifyPolicy::from_env(), PiiClassifyPolicy::AllEvents);
+
+    unsafe {
+        match prior {
+            Some(value) => std::env::set_var(VAR, value),
+            None => std::env::remove_var(VAR),
+        }
+    }
 }

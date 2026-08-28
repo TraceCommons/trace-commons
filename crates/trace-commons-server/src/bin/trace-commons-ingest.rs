@@ -30,11 +30,11 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PrivacyFilterBackendTag,
-    ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
-    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
-    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
+    PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
+    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
+    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
+    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
     privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
     retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
@@ -1135,6 +1135,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _ = tracing_subscriber::fmt::try_init();
+    tracing::info!(
+        policy = PiiClassifyPolicy::from_env().as_label(),
+        "Trace Commons PII classify policy"
+    );
     let state = Arc::new(AppState::from_env().await?);
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
@@ -40422,7 +40426,9 @@ async fn process_one_pii_backstop(
     // async NEAR AI prose path rather than `rescrub_trace_envelope`. It is
     // the population #474 is about: the coverage hypothesis concerns
     // classifier errors, which is precisely what this path hits.
-    let residual_risk_basis = rescrub_envelope_prose_pii_with(adapter, &mut envelope).await?;
+    let classify_policy = PiiClassifyPolicy::from_env();
+    let residual_risk_basis =
+        rescrub_envelope_prose_pii_with(adapter, &mut envelope, classify_policy).await?;
     record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
 
     // Status is chosen from the POST-backstop residual risk: a filter that
