@@ -168,6 +168,29 @@ build commit.
   code does not move from an AGPL crate into a permissive one.
 - `docs/operator/`: note the section 13 endpoint so operators do not firewall it.
 
+## What the implementation found
+
+Two things the design did not anticipate.
+
+**A dev-dependency already crossed the boundary.** `trace-commons-contributor`
+takes `trace-commons-server` as a `cfg(not(windows))` dev-dependency, for three
+cross-check tests in `account_auth.rs` and the `e2e_enroll_and_submit`
+integration test. Its shipped code never links the server crate.
+
+This is not a licence violation: dev-dependencies are absent from the published
+artifact, and AGPL obligations attach to conveying or network-serving a combined
+work, not to building a test in this tree. So the guard test checks normal and
+build dependencies as a hard failure, and pins the set of crossing dev edges
+separately -- allowed, but no new one appears without someone deciding.
+
+**The dependency licence audit was clean but not trivially so.** Three licences
+in the tree needed a considered allow rather than a reflex: `CDLA-Permissive-2.0`
+(webpki-roots, a data licence over the Mozilla CA root store), `NCSA`
+(libfuzzer-sys via rav1e, under `near-ai-scorer` and `local-gpu-models`), and
+`0BSD` (recvmsg via interprocess, under `local-gpu-models`). All three are
+permissive and combinable into an AGPL-3.0 work. No GPL-2.0-only, SSPL, or
+proprietary dependency appears in any of the three feature configurations.
+
 ## Out of scope
 
 - No CLA, DCO, or CONTRIBUTING file.
