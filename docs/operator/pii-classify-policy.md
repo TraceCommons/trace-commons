@@ -2,10 +2,15 @@
 
 The NEAR AI privacy filter is a remote prose-PII classifier: it catches
 names, addresses, and other unpatterned PII in free text that the
-deterministic regex detectors cannot match. It runs both at submit time and
-as part of the [server-side PII backstop](pii-backstop.md). This runbook
-covers `TRACE_COMMONS_PII_CLASSIFY_POLICY`, the knob that controls which
-events in a trace the classifier examines.
+deterministic regex detectors cannot match. It runs in exactly one
+production path: the [server-side PII backstop](pii-backstop.md). Submit-time
+redaction (`rescrub_trace_envelope`) is deterministic-regex-only and never
+contacts the remote classifier — this policy has no effect on it. This
+runbook covers `TRACE_COMMONS_PII_CLASSIFY_POLICY`, the knob that controls
+which events the backstop's classifier examines. Because the backstop is the
+only place the remote classifier runs, this policy governs all of the remote
+classifier's traffic, and the ~10x round-trip reduction below applies to all
+of it.
 
 ## Why this knob exists
 
