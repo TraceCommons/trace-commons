@@ -138,6 +138,104 @@ def test_collect_novel_texts_samples_deterministically(tmp_path=None):
         assert all(t for t in a)
 
 
+def _paragraphs(text: str) -> int:
+    return len([b for b in text.split("\n\n") if b.strip()])
+
+
+def test_shuffle_paragraphs_preserves_every_trivial_measure():
+    # The whole point of the model-free transform: the duplicate differs from
+    # the original in paragraph ORDER alone, so no structural measure can see
+    # the class label (#204).
+    text = "\n\n".join(f"paragraph {i} body text here" for i in range(12))
+    dup = M.shuffle_paragraphs(text, seed=7)
+    assert dup != text, "a 12-paragraph trace should permute"
+    assert len(dup.encode("utf-8")) == len(text.encode("utf-8"))
+    assert len(dup.splitlines()) == len(text.splitlines())
+    assert _paragraphs(dup) == _paragraphs(text)
+    assert len(dup.split()) == len(text.split())
+    assert sorted(dup.split()) == sorted(text.split())
+
+
+def test_shuffle_paragraphs_is_deterministic_and_identity_on_single_block():
+    text = "\n\n".join(f"block {i}" for i in range(9))
+    assert M.shuffle_paragraphs(text, 3) == M.shuffle_paragraphs(text, 3)
+    assert M.shuffle_paragraphs(text, 3) != M.shuffle_paragraphs(text, 4)
+    assert M.shuffle_paragraphs("only one block", 1) == "only one block"
+
+
+def test_length_matched_enforces_the_band():
+    orig = " ".join(["word"] * 100)
+    assert M.length_matched(orig, " ".join(["word"] * 105), 0.10)
+    assert not M.length_matched(orig, " ".join(["word"] * 120), 0.10)
+    # #204: the A2.6 paraphrases had a median length ratio of 0.282. That is
+    # what the band exists to reject.
+    assert not M.length_matched(orig, " ".join(["word"] * 28), 0.10)
+    assert not M.length_matched("", "anything", 0.10)
+
+
+def test_build_pairs_drops_length_mismatched_duplicates_and_backfills():
+    pool = ["\n\n".join(f"trace{i} para{j} filler" for j in range(6)) for i in range(6)]
+
+    def fake_transform(cmd, originals):
+        out = {}
+        for idx, o in enumerate(originals):
+            # Every other row comes back truncated, the way a back-translator
+            # with a token cap does.
+            out[o] = o if idx % 2 == 0 else o.split("\n\n")[0]
+        return out
+
+    real = M.run_external_transform
+    M.run_external_transform = fake_transform
+    try:
+        pairs = M.build_pairs(
+            pool=pool,
+            count=3,
+            transform="external",
+            transform_cmd="unused",
+            seed=1,
+            band=0.10,
+        )
+    finally:
+        M.run_external_transform = real
+    assert len(pairs) == 3
+    for original, dup in pairs:
+        assert M.length_matched(original, dup, 0.10)
+
+
+def test_build_pairs_fails_rather_than_emitting_a_length_confounded_corpus():
+    pool = ["\n\n".join(f"trace{i} para{j} filler" for j in range(6)) for i in range(4)]
+
+    def truncating(cmd, originals):
+        return {o: o.split("\n\n")[0] for o in originals}
+
+    real = M.run_external_transform
+    M.run_external_transform = truncating
+    try:
+        M.build_pairs(
+            pool=pool,
+            count=3,
+            transform="external",
+            transform_cmd="unused",
+            seed=1,
+            band=0.10,
+        )
+    except SystemExit as exc:
+        assert "insufficient_length_matched_pairs" in str(exc), exc
+    else:
+        raise AssertionError("a truncating transform must not yield a corpus")
+    finally:
+        M.run_external_transform = real
+
+
+def test_validity_gate_fails_closed_when_the_binary_is_missing():
+    try:
+        M.run_validity_gate("definitely-not-on-path-xyzzy", Path("/dev/null"), 0.15)
+    except SystemExit as exc:
+        assert "validity_gate_binary_missing" in str(exc), exc
+    else:
+        raise AssertionError("a missing validity binary must refuse to build")
+
+
 def main() -> int:
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failures = []
