@@ -1871,6 +1871,48 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&49_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V49__trace_submission_last_status_reason.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&49_i32, &"trace_submission_last_status_reason"],
+                )
+                .await?;
+        }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&50_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V50__onboarding_invite_grant_consumption.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&50_i32, &"onboarding_invite_grant_consumption"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2763,6 +2805,54 @@ impl Database for PgBackend {
             }
             return Err(crate::db::OnboardDeviceKeyError::InviteNotValid);
         };
+
+        // Consume the invite's OWN allowance before the per-tenant one.
+        //
+        // V29's counter is keyed (tenant_id, invite_subject_hash), and under
+        // InviteTenantMode::Derived the tenant is computed from the redeemer's
+        // device key -- so each redeemer gets a fresh row at zero and the limit
+        // never binds. This counter is on the tenant-less grant row, so it
+        // binds whatever tenant the redeemer lands in.
+        //
+        // The GUC is set transaction-locally so the grant row for the code
+        // actually presented is visible and updatable, and no other; the
+        // policies in V42 and V50 are both predicated on it.
+        tx.execute(
+            "SELECT set_config('trace_commons.invite_subject', $1, true)",
+            &[&device_key.invite_subject_hash],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        let has_grant = tx
+            .query_opt(
+                "SELECT 1 FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+                &[&device_key.invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .is_some();
+        if has_grant {
+            // Absent when the invite came from the file allowlist rather than
+            // the DB registry. That path has no grant row and no second
+            // counter, so "no row" must mean "not governed here" rather than
+            // "exhausted" -- conflating them would refuse every legacy invite.
+            let globally_consumed = tx
+                .query_opt(
+                    "UPDATE onboarding_invite_grants
+                        SET consumed_uses = consumed_uses + 1,
+                            updated_at = NOW()
+                      WHERE invite_subject_hash = $1
+                        AND revoked_at IS NULL
+                        AND consumed_uses < max_uses
+                      RETURNING consumed_uses",
+                    &[&device_key.invite_subject_hash],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            if globally_consumed.is_none() {
+                return Err(crate::db::OnboardDeviceKeyError::InviteAlreadyConsumed);
+            }
+        }
 
         let consumed = tx
             .query_opt(
@@ -4519,6 +4609,50 @@ impl Database for PgBackend {
         }))
     }
 
+    async fn count_submissions_needing_gate_decision(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_attempts: i32,
+        backoff_base_seconds: i64,
+    ) -> Result<i64, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // Character-for-character the predicate in
+        // `list_submissions_needing_gate_decision`, minus its ORDER BY and
+        // LIMIT. If the two ever drift, the logged backlog stops describing
+        // the queue the driver is actually draining, which is worse than not
+        // logging one -- an operator would tune against a number that means
+        // something else. The pg test asserts they agree on real rows.
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM (
+                   SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                     FROM trace_submissions s
+                     JOIN trace_object_refs o
+                       ON o.tenant_id = s.tenant_id
+                      AND o.submission_id = s.submission_id
+                      AND o.artifact_kind = 'submitted_envelope'
+                      AND o.invalidated_at IS NULL
+                      AND o.deleted_at IS NULL
+                     LEFT JOIN trace_gate_decisions d
+                       ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                     LEFT JOIN trace_gate_evaluation_attempts a
+                       ON a.tenant_id = s.tenant_id AND a.submission_id = s.submission_id
+                    WHERE d.decision_id IS NULL
+                      AND COALESCE(a.attempts, 0) < $1
+                      AND (a.last_attempt_at IS NULL
+                           OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                 ) pending",
+                &[&max_attempts, &backoff_base_seconds, &now],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(row.get::<_, i64>(0))
+    }
+
     async fn list_submissions_needing_gate_decision(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -4600,11 +4734,12 @@ impl Database for PgBackend {
                 // to multiple rows per submission. Deduplicate to one work item
                 // per (tenant, submission) — otherwise a multi-ref submission
                 // wastes LIMIT slots and gets attempted concurrently more than
-                // once. `received_at` is included in the projection only so it
-                // is a legal DISTINCT + ORDER BY target; it is a per-submission
-                // constant, so it does not change dedup cardinality, and it is
-                // dropped when mapping to GateWorkItem.
-                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at
+                // once. `received_at` and `a.last_attempt_at` are included in
+                // the projection only so they are legal DISTINCT + ORDER BY
+                // targets; both are per-submission constants, so they do not
+                // change dedup cardinality, and both are dropped when mapping
+                // to GateWorkItem.
+                "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at, a.last_attempt_at
                  FROM trace_submissions s
                  JOIN trace_object_refs o
                    ON o.tenant_id = s.tenant_id
@@ -4618,7 +4753,15 @@ impl Database for PgBackend {
                    AND COALESCE(a.attempts, 0) < $1
                    AND (a.last_attempt_at IS NULL
                         OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
-                 ORDER BY s.received_at ASC
+                 -- Least-recently-attempted first, never-attempted before
+                 -- everything else. Ordering by received_at alone let a
+                 -- submission that keeps failing transiently sit at the head
+                 -- of every batch forever: a transient failure charges no
+                 -- attempt, so it stayed permanently eligible, and the
+                 -- consecutive-failure breaker aborted each tick before
+                 -- reaching anything behind it. On 2026-08-27 that starved
+                 -- 233 never-attempted traces behind the same three.
+                 ORDER BY a.last_attempt_at ASC NULLS FIRST, s.received_at ASC
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
             )
@@ -4898,25 +5041,39 @@ impl Database for PgBackend {
         // `score_attestation_handler`).
         let rows = client
             .query(
-                "SELECT DISTINCT ON (d.submission_id)
-                    d.submission_id,
-                    d.credit_quality_micros,
-                    d.perplexity_micros,
-                    d.novelty_score_micros,
-                    d.perplexity_passed,
-                    d.novelty_passed,
-                    d.chunk_count,
-                    d.total_chunk_count,
-                    d.chunks_capped
-                 FROM trace_gate_decisions d
-                 JOIN trace_submissions s
-                   ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
-                 WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
-                 -- decision_id is the final, unique tiebreaker (mirrors
-                 -- list_scores_by_submission_ids) so decisions that share a
-                 -- decided_at sort deterministically instead of Postgres
-                 -- picking an arbitrary row among ties on repeated reads.
-                 ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                // The inner SELECT picks the LATEST decision per submission;
+                // the outer one orders those by recency and truncates. The
+                // two cannot be one statement: DISTINCT ON requires its
+                // leading ORDER BY term to be the distinct key, so a single
+                // query can only truncate in submission_id order — which is
+                // a random v4 per trace, making truncation an arbitrary slice
+                // of the UUID space rather than a comprehensible "your oldest
+                // scores fell off".
+                "SELECT * FROM (
+                    SELECT DISTINCT ON (d.submission_id)
+                        d.submission_id,
+                        d.credit_quality_micros,
+                        d.perplexity_micros,
+                        d.novelty_score_micros,
+                        d.perplexity_passed,
+                        d.novelty_passed,
+                        d.chunk_count,
+                        d.total_chunk_count,
+                        d.chunks_capped,
+                        d.decided_at
+                     FROM trace_gate_decisions d
+                     JOIN trace_submissions s
+                       ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                     WHERE s.tenant_id = $1 AND s.auth_principal_ref = $2
+                     -- decision_id is the final, unique tiebreaker (mirrors
+                     -- list_scores_by_submission_ids) so decisions that share a
+                     -- decided_at sort deterministically instead of Postgres
+                     -- picking an arbitrary row among ties on repeated reads.
+                     ORDER BY d.submission_id, d.decided_at DESC, d.decision_id DESC
+                 ) latest
+                 -- submission_id breaks decided_at ties so the truncated set
+                 -- is stable across repeated reads.
+                 ORDER BY latest.decided_at DESC, latest.submission_id DESC
                  LIMIT $3",
                 &[&tenant_id, &auth_principal_ref, &limit],
             )
@@ -4936,6 +5093,83 @@ impl Database for PgBackend {
                     chunk_count: row.get("chunk_count"),
                     total_chunk_count: row.get("total_chunk_count"),
                     chunks_capped: row.get("chunks_capped"),
+                }
+            })
+            .collect())
+    }
+
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // Same authorization story as `list_own_gate_decision_scores`: no
+        // tenant GUC, the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize the read, and the `s.tenant_id = $1 AND
+        // s.auth_principal_ref = $2` predicates are what scope it to the
+        // caller's own rows. $3 only NARROWS that set.
+        //
+        // The join is LEFT, and driven from trace_submissions rather than
+        // from trace_gate_decisions, precisely so an owned-but-unscored
+        // submission comes back with NULL score columns instead of
+        // vanishing. That absence is the defect this method exists to fix.
+        let rows = client
+            .query(
+                "SELECT DISTINCT ON (s.submission_id)
+                    s.submission_id,
+                    d.decision_id,
+                    d.credit_quality_micros,
+                    d.perplexity_micros,
+                    d.novelty_score_micros,
+                    d.perplexity_passed,
+                    d.novelty_passed,
+                    d.chunk_count,
+                    d.total_chunk_count,
+                    d.chunks_capped
+                 FROM trace_submissions s
+                 LEFT JOIN trace_gate_decisions d
+                   ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 WHERE s.tenant_id = $1
+                   AND s.auth_principal_ref = $2
+                   AND s.submission_id = ANY($3)
+                 ORDER BY s.submission_id, d.decided_at DESC NULLS LAST, d.decision_id DESC",
+                &[&tenant_id, &auth_principal_ref, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let decision_id: Option<Uuid> = row.get("decision_id");
+                let submission_id: Uuid = row.get("submission_id");
+                // Every score column is NULLable only because of the LEFT
+                // join; a present decision_id means the whole row is present.
+                let score = decision_id.map(|_| {
+                    let perplexity_passed: bool = row.get("perplexity_passed");
+                    let novelty_passed: bool = row.get("novelty_passed");
+                    crate::trace_corpus_storage::TraceScoreBySubmissionRow {
+                        submission_id,
+                        credit_quality_micros: row.get("credit_quality_micros"),
+                        perplexity_micros: row.get("perplexity_micros"),
+                        novelty_score_micros: row.get("novelty_score_micros"),
+                        gate_passed: perplexity_passed && novelty_passed,
+                        chunk_count: row.get("chunk_count"),
+                        total_chunk_count: row.get("total_chunk_count"),
+                        chunks_capped: row.get("chunks_capped"),
+                    }
+                });
+                crate::trace_corpus_storage::OwnSubmissionScoreRow {
+                    submission_id,
+                    score,
                 }
             })
             .collect())
@@ -5270,6 +5504,53 @@ mod tests {
         assert!(
             !V48.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
             "V48 must not weaken forced RLS"
+        );
+    }
+
+    /// V49 adds the label-only status-reason column. It must stay
+    /// label-only: the point of the column is that a reviewer can tell a
+    /// privacy finding from a processing failure, and the point of the
+    /// allowlist behind it is that caller-supplied revocation text never
+    /// lands in a plainly-readable column. No new reader-role grant either --
+    /// widening a column-scoped reader for a column it never reads is exactly
+    /// the drift V45 exists to prevent.
+    #[test]
+    fn v49_adds_a_nullable_label_only_status_reason_column() {
+        const V49: &str =
+            include_str!("../../../../migrations/V49__trace_submission_last_status_reason.sql");
+        assert!(
+            V49.contains("ADD COLUMN IF NOT EXISTS last_status_reason TEXT"),
+            "V49 must add the status-reason column"
+        );
+        assert!(
+            !V49.to_uppercase().contains("NOT NULL"),
+            "V49 must leave pre-existing rows NULL rather than assert a reason for them"
+        );
+        assert!(
+            !V49.to_uppercase().contains("UPDATE TRACE_SUBMISSIONS"),
+            "V49 must not backfill a guessed reason onto historical rows"
+        );
+        assert!(
+            !V49.contains("GRANT SELECT (last_status_reason)"),
+            "V49 must not widen a column-scoped reader role for a column it does not read"
+        );
+        assert!(
+            !V49.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V49 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v49_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V49__trace_submission_last_status_reason.sql"),
+            "V49 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&49_i32"),
+            "V49 must record itself in _trace_commons_migrations"
         );
     }
 

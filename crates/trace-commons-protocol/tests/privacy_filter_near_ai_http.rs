@@ -3,9 +3,17 @@
 use std::time::Duration;
 
 use serde_json::json;
-use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
+use trace_commons_protocol::privacy_filter_near_ai::{
+    MAX_CLASSIFY_INPUT_TOKENS, MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY,
+    NearAiPrivacyFilterAdapter,
+};
+
+/// Roughly the byte span of one full window for this filler, at the sparse
+/// (prose-like) end of token density. Windows are budgeted in TOKENS now, so
+/// tests size their filler from the token budget rather than a byte constant.
+const APPROX_BYTES_PER_WINDOW: usize = MAX_CLASSIFY_INPUT_TOKENS * 4;
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
@@ -17,6 +25,36 @@ fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
         1_000_000,
     )
     .expect("adapter builds")
+}
+
+/// Responder that finds the test email inside whichever window carries it and
+/// spans it at that window's own codepoint offsets.
+///
+/// Windows are budgeted in tokens, so which window holds the email -- and
+/// where inside it -- depends on the content's density. Computing the offset
+/// instead of hardcoding it keeps these tests about span merging rather than
+/// about where a boundary happens to fall.
+fn email_span_at_actual_offset(req: &wiremock::Request) -> ResponseTemplate {
+    const NEEDLE: &str = "bob@example.com";
+    let body: serde_json::Value = serde_json::from_slice(&req.body).expect("request body is JSON");
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_str())
+        .expect("input must be a string");
+    let spans = match input.find(NEEDLE) {
+        Some(byte_start) => {
+            let start = input[..byte_start].chars().count();
+            vec![json!({
+                "category": "private_email",
+                "start": start,
+                "end": start + NEEDLE.chars().count(),
+                "score": 0.99,
+                "text": NEEDLE,
+            })]
+        }
+        None => Vec::new(),
+    };
+    ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
 }
 
 #[tokio::test]
@@ -50,11 +88,22 @@ async fn classifies_and_redacts_single_span() {
 
 #[tokio::test]
 async fn large_field_is_chunked_and_span_offsets_are_merged() {
-    // Field text larger than CLASSIFY_CHUNK_BYTES (20_000) is split into
-    // windows and classified per window. The email lands in the second
-    // window; its window-local offsets must be shifted into full-text
-    // coordinates so the right region is redacted.
-    let filler = "clean line\n".repeat(1818); // 19_998 bytes, ends on a newline
+    // Field text larger than one window is split and
+    // classified per window. The email lands in a later window; its
+    // window-local offsets must be shifted into full-text coordinates so the
+    // right region is redacted. Sized off the constant rather than a literal
+    // so the test keeps its meaning when the vendor's ceiling moves.
+    // Windows break at the last newline inside the limit, so a whole number
+    // of lines fills a window exactly. Two full windows of filler leave
+    // "contact ..." alone in the third, putting the email at window-local
+    // codepoint offset 8 regardless of how the window budget is set.
+    const LINE: &str = "clean line\n"; // 11 bytes, ends on a newline
+    let lines_per_window = APPROX_BYTES_PER_WINDOW / LINE.len();
+    let filler = LINE.repeat(lines_per_window * 2);
+    assert!(
+        filler.len() > APPROX_BYTES_PER_WINDOW,
+        "filler must overflow at least one window"
+    );
     let text = format!("{filler}contact bob@example.com now");
 
     let server = MockServer::start().await;
@@ -62,22 +111,7 @@ async fn large_field_is_chunked_and_span_offsets_are_merged() {
     // codepoint offsets ("contact " = 8, "bob@example.com" = 15 -> 8..23).
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
-        .and(body_string_contains("bob@example.com"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [
-                {"category": "private_email", "start": 8, "end": 23, "score": 0.99, "text": "bob@example.com"}
-            ]}]
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    // Every other window (the filler): no PII.
-    Mock::given(method("POST"))
-        .and(path("/privacy/classify"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "spans": [] }]
-        })))
-        .with_priority(5)
+        .respond_with(email_span_at_actual_offset)
         .mount(&server)
         .await;
 
@@ -425,4 +459,58 @@ async fn oversized_input_is_typed_permanent() {
         !err.is_transient(),
         "an oversized input is about the trace and must stay permanent: {err}"
     );
+}
+
+/// Windows are classified ONE AT A TIME, on purpose.
+///
+/// #456 raised `MAX_CONCURRENT_CLASSIFY_WINDOWS` to 8 to cut the per-field
+/// cost. Throughput collapsed instead: on the pilot every PII-backstop tick
+/// then returned `done=0 transient=3 breaker_tripped=true` and the queue
+/// drained nothing, so the host was rolled back to the sequential build.
+///
+/// Why concurrency hurt is still not established -- the obvious rate-limit
+/// explanation did not survive testing, since 20 rapid 8 KB requests all
+/// returned 200. Until the classify diagnostics explain the real failures,
+/// this stays at 1, and raising it should be a deliberate change made with
+/// evidence rather than an optimisation someone reaches for again.
+#[test]
+fn classify_windows_are_not_overlapped() {
+    assert_eq!(
+        CLASSIFY_CONCURRENCY, 1,
+        "raising classify concurrency regressed the pilot to zero throughput \
+         once already; see this test's comment before changing it"
+    );
+}
+
+/// The window's full-text offset is accumulated across windows rather than
+/// recomputed from the start of the field each time (which was O(n^2)). That
+/// accumulation counts CODEPOINTS, not bytes -- multibyte filler in every
+/// window would shift every later span if it counted bytes.
+#[tokio::test]
+async fn window_offsets_stay_correct_across_multibyte_windows() {
+    // Multibyte in the filler, and a whole number of lines per window so the
+    // email lands alone in the final window at window-local offset 8.
+    const LINE: &str = "clèan lïne wîth ünicode\n";
+    let lines_per_window = APPROX_BYTES_PER_WINDOW / LINE.len();
+    let filler = LINE.repeat(lines_per_window * 2);
+    let text = format!("{filler}contact bob@example.com now");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(email_span_at_actual_offset)
+        .mount(&server)
+        .await;
+
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-empty redaction");
+    assert_eq!(
+        result.redacted_text,
+        format!("{filler}contact [REDACTED:private_email] now"),
+        "a byte-counted accumulator would misplace this span"
+    );
+    assert_eq!(result.summary.span_count, 1);
 }

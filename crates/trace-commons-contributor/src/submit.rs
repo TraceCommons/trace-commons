@@ -2,6 +2,7 @@
 //! status. Every outcome reason is a fixed label -- never a response body,
 //! trace content, or raw path.
 
+use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
@@ -948,6 +949,208 @@ pub async fn fetch_score_attestation(
         .await
         .context("fetching score attestation")?;
     Ok(body.attestation)
+}
+
+/// Ids per scoped attestation request, matching the server's per-request cap
+/// on `POST /v1/contributors/me/score-attestation`. A run that submitted
+/// more traces than this is split across several requests -- and so across
+/// several signed documents -- rather than truncated, because a document
+/// that silently omits ids the contributor asked about is exactly the defect
+/// the scoped form exists to remove.
+pub const SCORE_ATTESTATION_REQUEST_CHUNK: usize = 500;
+
+#[derive(Debug, Clone, Serialize)]
+struct ScopedScoreAttestationRequest {
+    submission_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScopedAttestationBody {
+    attestation: String,
+    scored: usize,
+    pending: usize,
+}
+
+/// A scoped attestation over one submit run's ids.
+///
+/// `scored + pending` need not equal `requested`: an id the server does not
+/// recognise as this principal's lands in the signed document's `unknown`
+/// list and in neither count.
+#[derive(Debug, Clone)]
+pub struct ScopedAttestation {
+    /// One compact JWS per request chunk, in request order. Usually one.
+    pub attestations: Vec<String>,
+    pub requested: usize,
+    pub scored: usize,
+    pub pending: usize,
+}
+
+impl ScopedAttestation {
+    /// The line `submit` prints when the bounded wait ran out with traces
+    /// still unscored. Counts only -- no ids, no paths.
+    pub fn progress_line(&self) -> String {
+        format!(
+            "{} of {} traces scored, {} pending",
+            self.scored, self.requested, self.pending
+        )
+    }
+
+    /// The file body: one JWS per line. A single-chunk run -- every ordinary
+    /// one -- is therefore just the JWS and a newline.
+    pub fn document(&self) -> String {
+        let mut body = self.attestations.join("\n");
+        body.push('\n');
+        body
+    }
+}
+
+/// One round of scoped attestation requests over `submission_ids`, chunked
+/// to the server's per-request cap.
+async fn scoped_attestation_round(
+    client: &Client,
+    submission_ids: &[Uuid],
+) -> Result<ScopedAttestation> {
+    let mut collected = ScopedAttestation {
+        attestations: Vec::new(),
+        requested: submission_ids.len(),
+        scored: 0,
+        pending: 0,
+    };
+    for chunk in submission_ids.chunks(SCORE_ATTESTATION_REQUEST_CHUNK) {
+        let request = ScopedScoreAttestationRequest {
+            submission_ids: chunk.to_vec(),
+        };
+        let body: ScopedAttestationBody = client
+            .call_json(
+                Method::POST,
+                "/v1/contributors/me/score-attestation",
+                &[],
+                Some(&request),
+            )
+            .await
+            .context("fetching scoped score attestation")?;
+        collected.attestations.push(body.attestation);
+        collected.scored += body.scored;
+        collected.pending += body.pending;
+    }
+    Ok(collected)
+}
+
+/// Ask for an attestation scoped to `submission_ids` and keep asking until
+/// nothing is pending or `timeout` elapses, whichever comes first.
+///
+/// The wait has to be bounded and the bound has to be honest. Scoring is
+/// asynchronous -- a 45-second tick over a small batch, and off entirely
+/// unless the operator enabled the driver -- so "wait until scored" is not a
+/// promise this side can keep. What it returns on timeout is a real signed
+/// document that says which traces are still waiting, which a collector can
+/// resolve later through the admin score read-back.
+///
+/// One upload claim is minted for the whole wait and reused across polls,
+/// rather than re-minting per poll.
+pub async fn await_scoped_score_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    submission_ids: &[Uuid],
+    timeout: StdDuration,
+    poll_interval: StdDuration,
+) -> Result<ScopedAttestation> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    let issuer = IssuerClient::new(allowlist_for(cfg.allowed_hosts.as_deref()))
+        .context("building issuer client")?;
+    // Same empty-scope mint as `status` and the unscoped attestation: a read
+    // of scores the server already holds must not depend on whatever scopes
+    // were narrowed for submission since the last login.
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for score attestation")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let attestation = scoped_attestation_round(&client, submission_ids).await?;
+        if attestation.pending == 0 {
+            return Ok(attestation);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(attestation);
+        }
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
+    }
+}
+
+/// Fetch a scoped attestation for `submission_ids` and write it to `path`.
+///
+/// Returns `None` -- after a label-only warning -- when there was nothing to
+/// attest to or the fetch failed. A submit run whose traces were accepted
+/// and whose receipts were written has succeeded; failing it because a
+/// follow-up read did not come back would throw away work the contributor
+/// already did. The attestation is written on timeout too, because with the
+/// scoped schema it is truthful about the part it does not cover.
+/// The submission ids this run actually delivered, for a scoped attestation.
+///
+/// `Submitted` and `AlreadySubmitted` both count: a re-run that finds a trace
+/// already on the server has still contributed it, and omitting it would make
+/// the attestation shrink every time a contributor re-ran the command. Every
+/// other outcome -- refused, quarantined, parse failure -- is something the
+/// server cannot attest to and must not be asked about, or it comes back in
+/// `unknown` and reads as a disclaimer.
+pub fn submitted_ids(outcomes: &[SubmitOutcome]) -> Vec<Uuid> {
+    outcomes
+        .iter()
+        .filter_map(|o| match o {
+            SubmitOutcome::Submitted { submission_id, .. }
+            | SubmitOutcome::AlreadySubmitted { submission_id, .. } => Some(*submission_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Add the attestation to a `--json` submit document.
+///
+/// `scored` and `pending` ride alongside it because a collector reading this
+/// programmatically needs to know the document is partial without parsing the
+/// JWS to find out.
+pub fn attach_attestation_to_json(document: &mut serde_json::Value, attested: &ScopedAttestation) {
+    if let Some(map) = document.as_object_mut() {
+        map.insert(
+            "attestation".to_string(),
+            serde_json::json!(attested.attestations),
+        );
+        map.insert("scored".to_string(), serde_json::json!(attested.scored));
+        map.insert("pending".to_string(), serde_json::json!(attested.pending));
+    }
+}
+
+pub async fn emit_scoped_attestation(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    submission_ids: &[Uuid],
+    path: &Path,
+    timeout: StdDuration,
+    poll_interval: StdDuration,
+) -> Option<ScopedAttestation> {
+    if submission_ids.is_empty() {
+        return None;
+    }
+    let attestation =
+        match await_scoped_score_attestation(store, cfg, submission_ids, timeout, poll_interval)
+            .await
+        {
+            Ok(attestation) => attestation,
+            Err(_) => {
+                // Label-only: the error can carry a URL or a token-bearing
+                // request context, and this line reaches a terminal and any
+                // log scraping it.
+                tracing::warn!("score attestation unavailable: attestation-fetch-failed");
+                return None;
+            }
+        };
+    if std::fs::write(path, attestation.document()).is_err() {
+        tracing::warn!("score attestation not written: attestation-write-failed");
+    }
+    Some(attestation)
 }
 
 /// Re-scan a finished envelope for a residual secret shape. Returns
@@ -2914,6 +3117,201 @@ mod tests {
         );
         assert_eq!(parsed[0]["status"], "accepted");
     }
+    /// A scoped-attestation ingest stub whose `pending` count drains by one
+    /// on every call, so a test can watch the bounded wait poll.
+    fn stub_scoped_attestation_ingest(
+        calls: Arc<Mutex<Vec<serde_json::Value>>>,
+        pending_for_call: Vec<usize>,
+    ) -> Router {
+        Router::new().route(
+            "/v1/contributors/me/score-attestation",
+            post(move |Json(req): Json<serde_json::Value>| {
+                let calls = calls.clone();
+                let pending_for_call = pending_for_call.clone();
+                async move {
+                    let requested = req["submission_ids"].as_array().unwrap().len();
+                    let call_index = {
+                        let mut calls = calls.lock().unwrap();
+                        calls.push(req.clone());
+                        calls.len() - 1
+                    };
+                    let pending = *pending_for_call
+                        .get(call_index)
+                        .unwrap_or(pending_for_call.last().unwrap_or(&0));
+                    let pending = pending.min(requested);
+                    Json(serde_json::json!({
+                        "attestation": format!("header.payload-{call_index}.signature"),
+                        "scored": requested - pending,
+                        "pending": pending,
+                        "unknown": 0,
+                    }))
+                }
+            }),
+        )
+    }
+
+    /// The bounded wait polls until nothing is pending, then writes the
+    /// attestation it was given last.
+    #[tokio::test]
+    async fn attest_out_waits_for_pending_to_empty_then_writes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![2, 1, 0])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("attestation emitted");
+
+        assert_eq!(outcome.requested, 2);
+        assert_eq!(outcome.scored, 2);
+        assert_eq!(outcome.pending, 0);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            3,
+            "polled until nothing pending"
+        );
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(written.trim(), "header.payload-2.signature");
+    }
+
+    /// On timeout the attestation is still written and the outcome reports
+    /// what it does not cover. `submit` must not fail here: the traces are
+    /// uploaded and the receipts written, and the artifact is truthful about
+    /// the part that is still waiting.
+    #[tokio::test]
+    async fn attest_out_on_timeout_still_writes_and_reports_pending() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![1])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("a timed-out attestation is still emitted");
+
+        assert_eq!(outcome.scored, 1);
+        assert_eq!(outcome.pending, 1);
+        assert!(out.exists(), "the attestation is written on timeout too");
+        assert_eq!(
+            outcome.progress_line(),
+            "1 of 2 traces scored, 1 pending",
+            "the timeout line names the shortfall without failing the submit"
+        );
+    }
+
+    /// A failed attestation fetch is a warning, not a submit failure: the
+    /// caller gets `None` and nothing is written.
+    #[tokio::test]
+    async fn attest_out_reports_a_failed_fetch_as_none_rather_than_an_error() {
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(Router::new().route(
+            "/v1/contributors/me/score-attestation",
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        ))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &[Uuid::new_v4()],
+            &out,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(1),
+        )
+        .await;
+        assert!(outcome.is_none(), "a failed fetch does not fail the submit");
+        assert!(
+            !out.exists(),
+            "nothing is written when there is nothing to write"
+        );
+    }
+
+    /// More ids than the server's per-request cap are split across requests
+    /// rather than silently truncated: every submitted trace is attested to
+    /// by one of the documents in the file.
+    #[tokio::test]
+    async fn attest_out_splits_id_lists_past_the_server_cap() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer_recording_requests(Arc::new(Mutex::new(
+            Vec::new(),
+        ))))
+        .await;
+        let ingest = spawn(stub_scoped_attestation_ingest(calls.clone(), vec![0])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        let ids: Vec<Uuid> = (0..SCORE_ATTESTATION_REQUEST_CHUNK + 1)
+            .map(|_| Uuid::new_v4())
+            .collect();
+        let out = dir.path().join("attestation.jws");
+        let outcome = emit_scoped_attestation(
+            &store,
+            &cfg,
+            &ids,
+            &out,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .expect("attestation emitted");
+
+        assert_eq!(outcome.requested, SCORE_ATTESTATION_REQUEST_CHUNK + 1);
+        assert_eq!(outcome.scored, SCORE_ATTESTATION_REQUEST_CHUNK + 1);
+        let sizes: Vec<usize> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|req| req["submission_ids"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(sizes, vec![SCORE_ATTESTATION_REQUEST_CHUNK, 1]);
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            2,
+            "one signed document per chunk, newline-delimited"
+        );
+    }
 }
 
 /// Machine-readable form of a submit run, for callers driving this CLI
@@ -3056,5 +3454,152 @@ mod json_output_tests {
             out["results"][0]["limit_bytes"],
             crate::envelope::MAX_ENVELOPE_BYTES
         );
+    }
+}
+
+/// Validate a `--attest-post` target before anything is sent to it.
+///
+/// Fail-closed in a way the ingest path deliberately is not. `allowlist_for`
+/// returns a permissive allowlist when nobody configured one, which is fine
+/// for ingest -- that URL came from enrollment and is already trusted. This
+/// URL comes from the command line, and the payload is a signed statement
+/// about the contributor that whoever holds it can present. So an
+/// unconfigured allowlist means no egress, not any host.
+///
+/// The scheme check is separate from the host check and both must pass:
+/// allowlisting a collector says who may receive the attestation, not that it
+/// may cross the network in the clear.
+pub fn validate_attest_post_target(
+    raw: &str,
+    allowlist: &trace_commons_operator_client::host_allowlist::HostAllowlist,
+) -> anyhow::Result<reqwest::Url> {
+    let url =
+        reqwest::Url::parse(raw).with_context(|| format!("--attest-post is not a URL: {raw}"))?;
+    if url.scheme() != "https" {
+        anyhow::bail!(
+            "--attest-post must be https: an attestation is presentable by \
+             whoever holds it, so it does not cross the network in the clear"
+        );
+    }
+    if !allowlist.is_enforcing() {
+        anyhow::bail!(
+            "--attest-post needs an explicit host allowlist. Set --allowed-hosts \
+             at login, or TRACE_COMMONS_ALLOWED_HOSTS, naming the collector you \
+             mean to send the attestation to"
+        );
+    }
+    allowlist
+        .check(&url)
+        .context("--attest-post host is not on the allowlist")?;
+    Ok(url)
+}
+
+/// Deliver the attestation to a collector endpoint the contributor named.
+///
+/// Returns whether it was delivered. A failure here is reported and swallowed:
+/// the traces are already uploaded and the receipts already written, so
+/// exiting non-zero would tell a contributor their submission failed when it
+/// did not. The attestation is on disk if `--attest-out` was also given, and
+/// `attest` can always mint another.
+///
+/// Label-only on failure. The URL is the contributor's, but the response body
+/// is the collector's and may carry anything.
+pub async fn post_attestation(
+    target: &reqwest::Url,
+    attested: &ScopedAttestation,
+    allowed_hosts: Option<&str>,
+) -> bool {
+    let client = match reqwest::Client::builder()
+        .user_agent(concat!(
+            "trace-commons-contributor/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            tracing::warn!("attestation not delivered: http-client-unavailable");
+            return false;
+        }
+    };
+    // Re-check immediately before sending. The validator ran when the flag was
+    // parsed; this is the call that actually opens the connection, and a
+    // redirect could otherwise carry the document to a host nobody authorized.
+    let allowlist = crate::config::allowlist_for(allowed_hosts);
+    if validate_attest_post_target(target.as_str(), &allowlist).is_err() {
+        tracing::warn!("attestation not delivered: target-not-allowlisted");
+        return false;
+    }
+    let body = serde_json::json!({
+        "schema_version": "trace_commons.attestation_delivery.v1",
+        "attestations": attested.attestations,
+        "scored": attested.scored,
+        "pending": attested.pending,
+    });
+    match client.post(target.clone()).json(&body).send().await {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            // Status only. A collector's error body is not ours to print.
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "attestation not delivered: collector-rejected"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!("attestation not delivered: transport-failed");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod attest_post_tests {
+    use super::validate_attest_post_target;
+    use trace_commons_operator_client::host_allowlist::HostAllowlist;
+
+    #[test]
+    fn a_permissive_allowlist_refuses_rather_than_posting_anywhere() {
+        // The allowlist is permissive whenever nobody configured one, which is
+        // the common case. For ingest that is tolerable -- the URL came from
+        // enrollment. Here the URL comes from the command line, and the payload
+        // is a signed statement about the contributor, so "no allowlist" must
+        // mean "no egress" rather than "any host".
+        let err = validate_attest_post_target(
+            "https://collector.example/hook",
+            &HostAllowlist::permissive(),
+        )
+        .expect_err("permissive allowlist must refuse");
+        assert!(
+            err.to_string().contains("allowed-hosts"),
+            "the refusal must say how to authorize the host: {err}"
+        );
+    }
+
+    #[test]
+    fn a_host_outside_the_allowlist_is_refused() {
+        let allow = HostAllowlist::from_csv("collector.example");
+        let err = validate_attest_post_target("https://elsewhere.example/hook", &allow)
+            .expect_err("off-list host must refuse");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn plaintext_http_is_refused_even_when_allowlisted() {
+        // An attestation is a bearer-shaped artifact: whoever holds it can
+        // present it. Allowlisting a host says who may receive it, not that it
+        // may cross the network in the clear.
+        let allow = HostAllowlist::from_csv("collector.example");
+        let err = validate_attest_post_target("http://collector.example/hook", &allow)
+            .expect_err("http must refuse");
+        assert!(err.to_string().contains("https"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn an_allowlisted_https_target_is_accepted() {
+        let allow = HostAllowlist::from_csv("collector.example");
+        let url = validate_attest_post_target("https://collector.example/hook", &allow)
+            .expect("allowlisted https target");
+        assert_eq!(url.host_str(), Some("collector.example"));
     }
 }

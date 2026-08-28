@@ -1,0 +1,4 @@
+{"role":"meta","source":"claude-code","model":"claude-fable-5","cwd":"/w"}
+{"role":"system","content":"You are a helpful coding assistant.","timestamp":"2026-07-30T10:00:00Z"}
+{"role":"user","content":"hello","timestamp":"2026-07-30T10:00:01Z"}
+{"role":"assistant","content":"done","timestamp":"2026-07-30T10:00:02Z"}

@@ -15591,6 +15591,7 @@ fn db_reconciliation_projects_submitted_audit_metadata_privacy_risk_drift() {
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     };
     let db_by_submission = BTreeMap::from([(submission_id, &submission_record)]);
 
@@ -65850,6 +65851,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
     }
@@ -65909,6 +65911,7 @@ impl PerplexityDriverTestDb {
                 revoked_at: None,
                 expires_at: None,
                 purged_at: None,
+                last_status_reason: None,
             },
         );
         self.object_refs
@@ -67006,28 +67009,99 @@ impl Database for PerplexityDriverTestDb {
                 }
             }
         }
-        let mut rows: Vec<trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow> =
-            latest
-                .into_values()
-                .map(|row| {
-                    let credit_quality_micros = credit
-                        .get(&(tenant_id.to_string(), row.decision_id))
-                        .map(|(q, _, _)| *q);
-                    trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
-                        submission_id: row.submission_id,
-                        credit_quality_micros,
-                        perplexity_micros: row.perplexity_micros,
-                        novelty_score_micros: row.novelty_score_micros,
-                        gate_passed: row.perplexity_passed && row.novelty_passed,
-                        chunk_count: row.chunk_count,
-                        total_chunk_count: row.total_chunk_count,
-                        chunks_capped: row.chunks_capped,
-                    }
-                })
-                .collect();
-        rows.sort_by_key(|row| row.submission_id);
-        rows.truncate(limit);
-        Ok(rows)
+        // Recency first, submission_id as the tiebreaker -- mirroring the
+        // Postgres impl's outer `ORDER BY decided_at DESC, submission_id
+        // DESC` -- so truncation drops the OLDEST scores rather than an
+        // arbitrary slice of the random-v4 submission-id space.
+        let mut ordered: Vec<&StorageTraceGateDecisionRow> = latest.into_values().collect();
+        ordered.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then_with(|| b.submission_id.cmp(&a.submission_id))
+        });
+        ordered.truncate(limit);
+        Ok(ordered
+            .into_iter()
+            .map(|row| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id.to_string(), row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
+                }
+            })
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres
+    /// `list_own_gate_decision_scores_for_submissions` read: drives from the
+    /// seeded submissions (not the decisions), keeps only ids the requested
+    /// `(tenant_id, auth_principal_ref)` owns, and attaches the LATEST
+    /// decision for each -- or `None` when there is none, which is the
+    /// "submitted, not scored yet" state the unscoped read cannot express.
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        tenant_id: &str,
+        auth_principal_ref: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError>
+    {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let credit = self.credit_quality_scores.read().unwrap();
+        let decisions = self.gate_decisions.read().unwrap();
+        let submissions = self.submissions.read().unwrap();
+        let mut out = Vec::new();
+        for submission_id in submission_ids {
+            let owned = submissions
+                .get(&(tenant_id.to_string(), *submission_id))
+                .is_some_and(|s| s.auth_principal_ref == auth_principal_ref);
+            if !owned {
+                continue;
+            }
+            let mut latest: Option<&StorageTraceGateDecisionRow> = None;
+            for (row_tenant_id, row) in decisions.iter() {
+                if row_tenant_id != tenant_id || row.submission_id != *submission_id {
+                    continue;
+                }
+                let candidate_key = (row.decided_at, row.decision_id);
+                match latest {
+                    Some(existing)
+                        if (existing.decided_at, existing.decision_id) >= candidate_key => {}
+                    _ => latest = Some(row),
+                }
+            }
+            let score = latest.map(|row| {
+                let credit_quality_micros = credit
+                    .get(&(tenant_id.to_string(), row.decision_id))
+                    .map(|(q, _, _)| *q);
+                trace_commons_server::trace_corpus_storage::TraceScoreBySubmissionRow {
+                    submission_id: row.submission_id,
+                    credit_quality_micros,
+                    perplexity_micros: row.perplexity_micros,
+                    novelty_score_micros: row.novelty_score_micros,
+                    gate_passed: row.perplexity_passed && row.novelty_passed,
+                    chunk_count: row.chunk_count,
+                    total_chunk_count: row.total_chunk_count,
+                    chunks_capped: row.chunks_capped,
+                }
+            });
+            out.push(
+                trace_commons_server::trace_corpus_storage::OwnSubmissionScoreRow {
+                    submission_id: *submission_id,
+                    score,
+                },
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -81056,10 +81130,17 @@ struct PiiBackstopDriverTestDb {
     seeded_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
     /// The `awaiting_pii_backstop` backlog enumerated by the driver tick.
     awaiting_pii_backstop: std::sync::RwLock<Vec<GateWorkItem>>,
+    /// Quarantined submissions whose quarantine reason was retry exhaustion,
+    /// standing in for the audit-trail join the Postgres impl performs.
+    exhausted_quarantines: std::sync::RwLock<Vec<GateWorkItem>>,
     /// Per-submission PII-backstop attempt bookkeeping bumped on redaction
     /// failure.
-    pii_backstop_attempts:
-        std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i32, String)>>,
+    /// Per-submission PII-backstop bookkeeping: `(attempts, last_error_label,
+    /// last_attempt_at)`. `last_attempt_at` is stamped by BOTH a charged bump
+    /// and an uncharged transient touch, mirroring `trace_pii_backstop`.
+    pii_backstop_attempts: std::sync::RwLock<
+        std::collections::HashMap<(String, Uuid), (i32, String, Option<DateTime<Utc>>)>,
+    >,
     /// When set, `release_pii_backstop_hold` simulates the invalidation half
     /// of the atomic release failing (e.g. a transient DB error after the
     /// status UPDATE would have applied). Neither the status flip nor the
@@ -81096,6 +81177,7 @@ impl PiiBackstopDriverTestDb {
             invalidated_kinds: std::sync::RwLock::new(Vec::new()),
             seeded_refs: std::sync::RwLock::new(Vec::new()),
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
+            exhausted_quarantines: std::sync::RwLock::new(Vec::new()),
             pii_backstop_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
             status_transitions: std::sync::RwLock::new(Vec::new()),
@@ -81107,7 +81189,7 @@ impl PiiBackstopDriverTestDb {
     fn seed_pii_attempts(&self, tenant_id: &str, submission_id: Uuid, attempts: i32) {
         self.pii_backstop_attempts.write().unwrap().insert(
             (tenant_id.to_string(), submission_id),
-            (attempts, String::new()),
+            (attempts, String::new(), None),
         );
     }
 
@@ -81165,6 +81247,28 @@ impl PiiBackstopDriverTestDb {
             });
     }
 
+    /// Register a submission that the driver quarantined for retry
+    /// exhaustion: status Quarantined, a spent attempt budget, and an entry in
+    /// the set the re-queue pass enumerates.
+    fn seed_exhausted_quarantine(&self, tenant_id: &str, submission_id: Uuid, attempts: i32) {
+        let key = (tenant_id.to_string(), submission_id);
+        self.statuses
+            .write()
+            .unwrap()
+            .insert(key.clone(), StorageTraceCorpusStatus::Quarantined);
+        self.pii_backstop_attempts
+            .write()
+            .unwrap()
+            .insert(key, (attempts, "exhausted".to_string(), None));
+        self.exhausted_quarantines
+            .write()
+            .unwrap()
+            .push(GateWorkItem {
+                tenant_id: tenant_id.to_string(),
+                submission_id,
+            });
+    }
+
     fn status_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<StorageTraceCorpusStatus> {
         self.statuses
             .read()
@@ -81178,7 +81282,17 @@ impl PiiBackstopDriverTestDb {
             .read()
             .unwrap()
             .get(&(tenant_id.to_string(), submission_id))
-            .map(|(count, _)| *count)
+            .map(|(count, _, _)| *count)
+    }
+
+    /// The `last_attempt_at` stamp, if any. A transient failure must set this
+    /// (so the driver's ordering advances) without touching `attempts`.
+    fn pii_last_attempt_of(&self, tenant_id: &str, submission_id: Uuid) -> Option<DateTime<Utc>> {
+        self.pii_backstop_attempts
+            .read()
+            .unwrap()
+            .get(&(tenant_id.to_string(), submission_id))
+            .and_then(|(_, _, at)| *at)
     }
 
     fn appended_kinds(
@@ -81250,6 +81364,7 @@ fn seeded_storage_submission_record(
         revoked_at: None,
         expires_at: None,
         purged_at: None,
+        last_status_reason: None,
     }
 }
 
@@ -81359,6 +81474,10 @@ enum ClassifierMode {
     /// when it contains `POISON_MARKER_NEEDLE`, so a batch can mix failing and
     /// succeeding submissions in a controlled order.
     FailPoisonedPermanent,
+    /// As `FailPoisonedPermanent` but the poisoned window returns 500 -- a
+    /// TRANSIENT failure, which charges no attempt. This is the shape that
+    /// starved the backlog on 2026-08-27.
+    FailPoisonedTransient,
     /// Return no spans for anything, so the canary's raw values survive and the
     /// filter reports unhealthy -> the tick aborts before touching submissions.
     UnhealthyCanary,
@@ -81413,6 +81532,12 @@ fn near_ai_classify_response(
         {
             wiremock::ResponseTemplate::new(400)
                 .set_body_json(serde_json::json!({"error": "synthetic bad request"}))
+        }
+        ClassifierMode::FailPoisonedTransient
+            if !is_canary && input.contains(POISON_MARKER_NEEDLE) =>
+        {
+            wiremock::ResponseTemplate::new(500)
+                .set_body_json(serde_json::json!({"error": "synthetic upstream failure"}))
         }
         _ => {
             let mut needles = canary_values;
@@ -81987,9 +82112,14 @@ async fn pii_backstop_driver_tick_transient_failure_does_not_bump() {
         "an upstream 5xx must tally as transient, never as a charged failure: {summary:?}"
     );
     assert_eq!(
-        db.pii_attempts_of("tenant-a", submission_id),
-        None,
+        db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0),
+        0,
         "a transient upstream failure must not spend the trace's attempt budget"
+    );
+    assert!(
+        db.pii_last_attempt_of("tenant-a", submission_id).is_some(),
+        "a transient failure must still stamp last_attempt_at, or the trace \
+         stays first in every batch and starves the backlog behind it"
     );
     assert_eq!(
         db.status_of("tenant-a", submission_id),
@@ -82037,8 +82167,8 @@ async fn pii_backstop_transient_failures_never_exhaust_a_trace() {
             "round {round} must still find and attempt the held trace: {summary:?}"
         );
         assert_eq!(
-            db.pii_attempts_of("tenant-a", submission_id),
-            None,
+            db.pii_attempts_of("tenant-a", submission_id).unwrap_or(0),
+            0,
             "round {round} must leave the attempt budget untouched"
         );
     }
@@ -82161,6 +82291,196 @@ async fn pii_backstop_driver_tick_below_breaker_processes_rest_of_batch() {
         db.status_of("tenant-a", clean_id),
         Some(StorageTraceCorpusStatus::Accepted),
         "the last item in the batch must have been released"
+    );
+}
+
+/// 2026-08-27 starvation regression. Enough transiently-failing submissions to
+/// trip the breaker sit at the head of the backlog. Because a transient failure
+/// charges no attempt, ordering by `received_at` alone left them permanently
+/// first: every tick re-picked the same three, the breaker aborted the batch,
+/// and the traces behind them were never attempted at all -- 233 of 248 on the
+/// pilot. Stamping `last_attempt_at` on a transient failure and enumerating
+/// least-recently-attempted-first is what lets the queue drain past them.
+#[tokio::test]
+async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    // Seeded FIRST, so they are the head of the backlog under any
+    // received_at-style ordering.
+    let poison_marker = format!("{POISON_MARKER_NEEDLE}@example.com");
+    let mut poisoned = Vec::new();
+    for _ in 0..MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES {
+        let id = seed_held_backstop_submission(&state, "tenant-a", &poison_marker).await;
+        db.seed_awaiting("tenant-a", id);
+        poisoned.push(id);
+    }
+    let marker = "jane.doe@example.com";
+    let mut clean = Vec::new();
+    for _ in 0..2 {
+        let id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+        db.seed_awaiting("tenant-a", id);
+        clean.push(id);
+    }
+
+    let server = wiremock::MockServer::start().await;
+    mount_near_ai_classifier(&server, marker, ClassifierMode::FailPoisonedTransient).await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let mut config = backstop_driver_config();
+    config.batch_size = MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES as i64;
+
+    // Tick 1: the poisoned head fills the batch and trips the breaker, so
+    // nothing else is reached. This much was true before the fix too.
+    let first = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert!(
+        first.breaker_tripped,
+        "the poisoned head must trip the breaker: {first:?}"
+    );
+    assert_eq!(first.done, 0, "nothing should have been released yet");
+    for id in &clean {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+            "clean traces are still queued behind the poisoned head"
+        );
+    }
+
+    // Tick 2: the poisoned three now carry a `last_attempt_at`, so the
+    // never-attempted clean traces sort ahead of them and get processed.
+    // Without the fix this tick is byte-for-byte identical to tick 1, forever.
+    let second = run_pii_backstop_driver_tick(state.clone(), &config)
+        .await
+        .expect("tick itself succeeds");
+    assert_eq!(
+        second.done,
+        clean.len(),
+        "the previously-starved traces must be reached on the next tick: {second:?}"
+    );
+    for id in &clean {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::Accepted),
+            "a clean trace behind the poisoned head must be released"
+        );
+    }
+    // The poisoned traces are still held, and still owe no attempt budget.
+    for id in &poisoned {
+        assert_eq!(
+            db.status_of("tenant-a", *id),
+            Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+            "a transiently-failing trace stays held, never excluded"
+        );
+        assert_eq!(
+            db.pii_attempts_of("tenant-a", *id).unwrap_or(0),
+            0,
+            "a transient failure must never spend the trace's attempt budget"
+        );
+    }
+}
+
+// --- re-queue of traces quarantined for retry exhaustion ----------------
+//
+// 2026-08-27: 112 of the pilot's 177 quarantined traces carried reason code
+// `pii_backstop_attempts_exhausted`. None had been scrubbed or assessed --
+// they burned their retry budget against a classifier that was failing every
+// request. Quarantine there records a processing failure, not a privacy
+// finding, and the re-queue pass is what undoes it.
+
+/// The pass moves an exhausted quarantine back to `AwaitingPiiBackstop` and
+/// clears its attempt budget, so the driver enumerates and reassesses it
+/// instead of leaving it condemned unexamined.
+#[tokio::test]
+async fn requeue_pass_returns_exhausted_quarantines_to_the_backlog() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    db.seed_exhausted_quarantine("tenant-a", submission_id, 5);
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Quarantined),
+        "precondition: the trace starts quarantined"
+    );
+
+    let summary = run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
+        .await
+        .expect("re-queue pass succeeds");
+
+    assert_eq!(
+        (summary.requeued, summary.failed),
+        (1, 0),
+        "the exhausted quarantine must be re-queued: {summary:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::AwaitingPiiBackstop),
+        "a re-queued trace must be held for reassessment, not left quarantined"
+    );
+    assert_eq!(
+        db.pii_attempts_of("tenant-a", submission_id),
+        None,
+        "the attempt budget must be cleared, or the trace re-exhausts immediately"
+    );
+    // The transition is audited, and attributed to the re-queue rather than to
+    // the driver that gave up on it.
+    let transitions = db.status_transitions_of("tenant-a", submission_id);
+    assert!(
+        transitions.iter().any(|(status, actor, reason)| {
+            *status == StorageTraceCorpusStatus::AwaitingPiiBackstop
+                && actor == PII_BACKSTOP_REQUEUE_ACTOR_REF
+                && reason.as_deref() == Some(PII_BACKSTOP_REQUEUED_REASON)
+        }),
+        "the re-queue must write its own audited transition; got {transitions:?}"
+    );
+}
+
+/// The pass is narrow on purpose. A trace quarantined by a real privacy
+/// determination is NOT an exhaustion victim and must not be swept back into
+/// the corpus pipeline by an operator reaching for this route.
+#[tokio::test]
+async fn requeue_pass_leaves_genuinely_quarantined_traces_alone() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let submission_id =
+        seed_held_backstop_submission(&state, "tenant-a", "jane.doe@example.com").await;
+    // Quarantined, but never registered as an exhaustion -- i.e. quarantined
+    // because the filter actually found something.
+    db.statuses.write().unwrap().insert(
+        ("tenant-a".to_string(), submission_id),
+        StorageTraceCorpusStatus::Quarantined,
+    );
+
+    let summary = run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
+        .await
+        .expect("re-queue pass succeeds");
+
+    assert_eq!(
+        (summary.requeued, summary.failed),
+        (0, 0),
+        "a privacy-determined quarantine must not be re-queued: {summary:?}"
+    );
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Quarantined),
+        "the trace must stay quarantined"
     );
 }
 
@@ -82997,16 +83317,72 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         &self,
         tenant_id: &str,
         submission_id: Uuid,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
         error_label: &str,
     ) -> Result<i32, DatabaseError> {
         let mut attempts = self.pii_backstop_attempts.write().unwrap();
         let entry = attempts
             .entry((tenant_id.to_string(), submission_id))
-            .or_insert((0, String::new()));
+            .or_insert((0, String::new(), None));
         entry.0 += 1;
         entry.1 = error_label.to_string();
+        entry.2 = Some(now);
         Ok(entry.0)
+    }
+
+    async fn list_quarantined_pii_backstop_exhausted(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let statuses = self.statuses.read().unwrap();
+        Ok(self
+            .exhausted_quarantines
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|item| item.tenant_id == tenant_id)
+            // Mirror the production WHERE: only still-quarantined rows.
+            .filter(|item| {
+                statuses
+                    .get(&(item.tenant_id.clone(), item.submission_id))
+                    .copied()
+                    == Some(StorageTraceCorpusStatus::Quarantined)
+            })
+            .take(limit)
+            .map(|item| item.submission_id)
+            .collect())
+    }
+
+    async fn clear_pii_backstop_attempts(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        self.pii_backstop_attempts
+            .write()
+            .unwrap()
+            .remove(&(tenant_id.to_string(), submission_id));
+        Ok(())
+    }
+
+    async fn touch_pii_backstop_attempt(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        now: DateTime<Utc>,
+        error_label: &str,
+    ) -> Result<(), DatabaseError> {
+        // Mirrors the Postgres upsert: stamp the timestamp and error label,
+        // seed `attempts` at 0 on insert, and never increment it.
+        let mut attempts = self.pii_backstop_attempts.write().unwrap();
+        let entry = attempts
+            .entry((tenant_id.to_string(), submission_id))
+            .or_insert((0, String::new(), None));
+        entry.1 = error_label.to_string();
+        entry.2 = Some(now);
+        Ok(())
     }
     async fn stream_trace_gate_decisions_for_replay(
         &self,
@@ -83081,7 +83457,7 @@ impl Database for PiiBackstopDriverTestDb {
         let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
         let statuses = self.statuses.read().unwrap();
         let attempts = self.pii_backstop_attempts.read().unwrap();
-        Ok(self
+        let mut eligible = self
             .awaiting_pii_backstop
             .read()
             .unwrap()
@@ -83095,12 +83471,22 @@ impl Database for PiiBackstopDriverTestDb {
             .filter(|item| {
                 attempts
                     .get(&(item.tenant_id.clone(), item.submission_id))
-                    .map(|(count, _)| *count < max_attempts)
+                    .map(|(count, _, _)| *count < max_attempts)
                     .unwrap_or(true)
             })
-            .take(limit)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        // Mirror the production ORDER BY: least-recently-attempted first,
+        // never-attempted (NULL) before everything else. `sort_by_key` is
+        // stable, so ties keep seeding order, which stands in for the
+        // `received_at ASC` tiebreak.
+        eligible.sort_by_key(|item| {
+            attempts
+                .get(&(item.tenant_id.clone(), item.submission_id))
+                .and_then(|(_, _, at)| *at)
+        });
+        eligible.truncate(limit);
+        Ok(eligible)
     }
 }
 
@@ -83539,6 +83925,240 @@ async fn score_attestation_handler_signs_only_the_callers_own_scores_and_fails_c
         .await
         .expect_err("no DB mirror fails closed");
     assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+/// Regression test for the one property Devfolio's in-flight v2 verifier
+/// depends on: an UNSCOPED attestation is the document it always was. Slice
+/// E's `pending`/`unknown` fields must be ABSENT -- not null, not empty
+/// arrays -- so a verifier that pinned `trace_commons.score_attestation.v2`
+/// and rejects on shape sees no change until it opts in by asking a scoped
+/// question.
+#[tokio::test]
+async fn unscoped_score_attestation_omits_pending_and_unknown_entirely() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal_a = static_token_principal_ref("token-a");
+
+    let id1 = Uuid::new_v4();
+    let row1 = rescore_test_decision_row(id1);
+    db.seed_gate_decision("tenant-a", row1.clone());
+    db.seed_submission_with_principal("tenant-a", id1, &principal_a);
+    // An owned submission with no gate decision at all: invisible to the
+    // unscoped document, exactly as before.
+    db.seed_submission_with_principal("tenant-a", Uuid::new_v4(), &principal_a);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = score_attestation_handler(State(state), auth_headers("token-a"))
+        .await
+        .expect("unscoped attestation signs");
+
+    let claims = decode_attestation_payload(&response.attestation);
+    let object = claims.as_object().expect("claims are a JSON object");
+    assert!(
+        !object.contains_key("pending"),
+        "unscoped attestation must not carry a pending key: {object:?}"
+    );
+    assert!(
+        !object.contains_key("unknown"),
+        "unscoped attestation must not carry an unknown key: {object:?}"
+    );
+    assert_eq!(
+        object["schema_version"],
+        serde_json::json!("trace_commons.score_attestation.v2"),
+        "the schema version does not bump for scoped fields"
+    );
+    assert_eq!(
+        object["submissions"]
+            .as_array()
+            .expect("submissions is an array")
+            .len(),
+        1
+    );
+}
+
+/// A SCOPED request attests to exactly the asked-for ids, splitting them
+/// three ways: scored (a gate decision exists), `pending` (owned, no
+/// decision yet -- the signal that did not exist before, so a hacker
+/// submitting at 23:58 hands the collector a signed "these are waiting"
+/// rather than nothing), and `unknown`.
+///
+/// `unknown` deliberately collapses "belongs to another principal" and
+/// "no such submission anywhere" into one bucket, so the route cannot be
+/// used to probe for the existence of someone else's submission id.
+#[tokio::test]
+async fn scoped_score_attestation_reports_scored_pending_and_unknown() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let principal_a = static_token_principal_ref("token-a");
+    let principal_a2 = static_token_principal_ref("token-a-2");
+
+    let scored_id = Uuid::new_v4();
+    let mut scored_row = rescore_test_decision_row(scored_id);
+    scored_row.perplexity_passed = true;
+    scored_row.novelty_passed = true;
+    db.seed_gate_decision("tenant-a", scored_row.clone());
+    db.seed_submission_with_principal("tenant-a", scored_id, &principal_a);
+
+    let pending_id = Uuid::new_v4();
+    db.seed_submission_with_principal("tenant-a", pending_id, &principal_a);
+
+    // Owned by a DIFFERENT contributor in the same tenant, and scored.
+    let other_id = Uuid::new_v4();
+    db.seed_gate_decision("tenant-a", rescore_test_decision_row(other_id));
+    db.seed_submission_with_principal("tenant-a", other_id, &principal_a2);
+
+    // Never submitted anywhere.
+    let absent_id = Uuid::new_v4();
+
+    // Owned and scored, but NOT asked about: a scoped request attests to the
+    // asked-for set and nothing else.
+    let unasked_id = Uuid::new_v4();
+    db.seed_gate_decision("tenant-a", rescore_test_decision_row(unasked_id));
+    db.seed_submission_with_principal("tenant-a", unasked_id, &principal_a);
+
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let state = test_state_with_attestation_signing(state);
+
+    let Json(response) = scoped_score_attestation_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(ScopedScoreAttestationRequest {
+            submission_ids: vec![scored_id, pending_id, other_id, absent_id],
+        }),
+    )
+    .await
+    .expect("scoped attestation signs");
+
+    assert_eq!(response.scored, 1);
+    assert_eq!(response.pending, 1);
+
+    let claims = decode_attestation_payload(&response.attestation);
+    let object = claims.as_object().expect("claims are a JSON object");
+    assert_eq!(
+        object["schema_version"],
+        serde_json::json!("trace_commons.score_attestation.v2"),
+        "scoped responses stay on v2"
+    );
+    let submissions = object["submissions"]
+        .as_array()
+        .expect("submissions is an array");
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0]["submission_id"],
+        serde_json::json!(scored_id.to_string())
+    );
+    assert_eq!(
+        object["pending"],
+        serde_json::json!([pending_id.to_string()])
+    );
+    assert_eq!(
+        object["unknown"],
+        serde_json::json!([other_id.to_string(), absent_id.to_string()]),
+        "another principal's id and an id that exists nowhere are indistinguishable"
+    );
+}
+
+/// The scoped request is capped by REQUEST SIZE rather than by the unscoped
+/// path's global `LIMIT`, so a collector asking about more than the cap gets
+/// a refusal it can chunk around -- never a silently truncated signed
+/// document that omits ids it explicitly asked about.
+#[tokio::test]
+async fn scoped_score_attestation_refuses_more_ids_than_the_cap() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_attestation_signing(test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    ));
+
+    let too_many = (0..usize::try_from(SCORE_ATTESTATION_MAX_SUBMISSIONS).unwrap() + 1)
+        .map(|_| Uuid::new_v4())
+        .collect::<Vec<_>>();
+    let refused = scoped_score_attestation_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(ScopedScoreAttestationRequest {
+            submission_ids: too_many,
+        }),
+    )
+    .await
+    .expect_err("an oversized scoped request is refused");
+    assert_eq!(refused.0, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// The unscoped enumeration truncates by RECENCY, so a contributor past the
+/// cap loses their oldest scores rather than an arbitrary slice of the
+/// submission-UUID space. Ordering by `submission_id` -- a random v4 for
+/// every trace -- made truncation unpredictable and unexplainable.
+#[tokio::test]
+async fn unscoped_gate_decision_enumeration_truncates_the_oldest_not_a_uuid_range() {
+    let db = PerplexityDriverTestDb::new();
+    let principal = "principal-truncation";
+
+    let mut ids = Vec::new();
+    for age_minutes in [30_i64, 20, 10] {
+        let id = Uuid::new_v4();
+        let mut row = rescore_test_decision_row(id);
+        row.decided_at = Utc::now() - chrono::Duration::minutes(age_minutes);
+        db.seed_gate_decision("tenant-a", row);
+        db.seed_submission_with_principal("tenant-a", id, principal);
+        ids.push(id);
+    }
+    let (oldest, newest) = (ids[0], ids[2]);
+    let middle = ids[1];
+
+    let kept = db
+        .list_own_gate_decision_scores("tenant-a", principal, 2)
+        .await
+        .expect("enumeration succeeds");
+    let kept_ids = kept.iter().map(|row| row.submission_id).collect::<Vec<_>>();
+    assert_eq!(
+        kept_ids,
+        vec![newest, middle],
+        "truncation drops the oldest decision, newest first"
+    );
+    assert!(!kept_ids.contains(&oldest));
+}
+
+/// Decode an attestation's claims as raw JSON, so a test can assert on the
+/// PRESENCE of keys rather than on a typed struct that would silently
+/// default an absent field.
+fn decode_attestation_payload(attestation: &str) -> serde_json::Value {
+    let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+        .expect("test public key parses");
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    jsonwebtoken::decode::<serde_json::Value>(attestation, &decoding_key, &validation)
+        .expect("attestation verifies against the published key")
+        .claims
 }
 
 /// The attestation keyset endpoint fails closed (503, same missing-control
@@ -85327,4 +85947,99 @@ async fn score_attestation_reports_an_unknown_denominator_for_pre_v47_capped_dec
         },
         "unknown-denominator coverage must not be confusable with a fully scored trace"
     );
+}
+
+/// #445: 307 credit events sat `pending` for three months because settlement is
+/// deliberately disabled on the pilot, and nothing on the contributor-facing
+/// receipt said so. A contributor saw an accepted trace, a pending credit
+/// figure, and an empty `FINAL` column, with no way to learn that the settling
+/// path was switched off rather than merely slow.
+///
+/// The receipt must state the deployment's settlement posture in its own
+/// words. This is wording only -- no outbox row moves because of it.
+#[test]
+fn an_accepted_receipt_says_settlement_is_disabled_when_it_is() {
+    let record = submission_record_with_principal("principal_a");
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::Disabled);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("not settled") && line.contains("not enabled")),
+        "a disabled-settlement deployment must say so on the receipt; got {:?}",
+        receipt.explanation
+    );
+}
+
+/// The converse, so the line cannot become a permanent falsehood the moment a
+/// deployment turns settlement on. An undocumented deliberate state drifting
+/// from what the contributor is told is the whole defect in #445; hardcoding
+/// the disabled wording would reintroduce it pointing the other way.
+#[test]
+fn an_accepted_receipt_does_not_claim_settlement_is_disabled_when_it_is_not() {
+    let record = submission_record_with_principal("principal_a");
+
+    for mode in [NearSettlementMode::Http, NearSettlementMode::DryRun] {
+        let receipt = receipt_from_record(&record, mode);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("not enabled")),
+            "mode {:?} must not claim settlement is disabled; got {:?}",
+            mode,
+            receipt.explanation
+        );
+    }
+}
+
+/// Dry-run advances the outbox with synthetic transaction hashes and no funds.
+/// A contributor must not read that as an on-chain credit.
+#[test]
+fn a_dry_run_receipt_does_not_imply_an_on_chain_credit() {
+    let record = submission_record_with_principal("principal_a");
+
+    let receipt = receipt_from_record(&record, NearSettlementMode::DryRun);
+
+    assert!(
+        receipt
+            .explanation
+            .iter()
+            .any(|line| line.contains("dry-run")),
+        "dry-run settlement must be named on the receipt; got {:?}",
+        receipt.explanation
+    );
+}
+
+/// The driver's tick summary carries the two numbers a throughput decision
+/// needs, and defaults that cannot be mistaken for a measurement.
+///
+/// `tick_duration_ms` exists because the loop sleeps THEN ticks, so cycle time
+/// is interval plus tick, and per-trace latency was previously only derivable
+/// from gaps between log lines minus an interval that may since have been
+/// retuned. That is how it came to be unmeasured.
+///
+/// `backlog` is an `Option` on purpose. A failed count must be distinguishable
+/// from an empty queue: reporting `0` when the probe itself failed would read
+/// as "caught up" at exactly the moment nobody can see the queue.
+#[test]
+fn perplexity_tick_summary_carries_duration_and_backlog() {
+    let summary = super::PerplexityDriverTickSummary::default();
+    assert_eq!(summary.tick_duration_ms, 0);
+    assert_eq!(
+        summary.backlog, None,
+        "an unmeasured backlog must be None, never 0 -- 0 means an empty queue"
+    );
+
+    let measured = super::PerplexityDriverTickSummary {
+        scored: 3,
+        tick_duration_ms: 1234,
+        backlog: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(measured.tick_duration_ms, 1234);
+    assert_eq!(measured.backlog, Some(42));
 }

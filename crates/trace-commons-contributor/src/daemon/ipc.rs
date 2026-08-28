@@ -1886,15 +1886,11 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
-    let (near_ai, claude_source, codex_source) = {
+    let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.near_ai.clone(),
-            s.claude_source.clone(),
-            s.codex_source.clone(),
-        )
+        (s.near_ai.clone(), s.source_roots())
     };
-    let sources = crate::source::all_sources(claude_source, codex_source, None);
+    let sources = crate::source::all_sources(&source_roots);
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
     };
@@ -2095,15 +2091,11 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let (near_ai, claude_source, codex_source) = {
+    let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (
-            s.near_ai.clone(),
-            s.claude_source.clone(),
-            s.codex_source.clone(),
-        )
+        (s.near_ai.clone(), s.source_roots())
     };
-    let sources = crate::source::all_sources(claude_source, codex_source, None);
+    let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
@@ -2572,10 +2564,12 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         };
         let claude_mode = mode_of(&s.claude_source);
         let codex_mode = mode_of(&s.codex_source);
+        let gemini_mode = mode_of(&s.gemini_source);
         obj.remove("claude_root");
         obj.remove("codex_root");
         obj.remove("claude_source");
         obj.remove("codex_source");
+        obj.remove("gemini_source");
         obj.insert(
             "claude_root_configured".to_string(),
             serde_json::Value::Bool(claude_mode == "watch"),
@@ -2591,6 +2585,14 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         obj.insert(
             "codex_source_mode".to_string(),
             serde_json::Value::String(codex_mode.to_string()),
+        );
+        // No `gemini_root_configured`: the `*_root_configured` pair exists
+        // for shells written before `*_source_mode` did, and none of them
+        // knows about this source. A new key would only be a second
+        // spelling of the mode.
+        obj.insert(
+            "gemini_source_mode".to_string(),
+            serde_json::Value::String(gemini_mode.to_string()),
         );
     }
     v
@@ -2834,6 +2836,32 @@ mod tests {
         // borrows its path.
         std::mem::forget(_d);
         DaemonShared::load(store).unwrap()
+    }
+
+    /// Every source declaration carries a local filesystem path, and this
+    /// blob is serialized wholesale. A source added to `DaemonSettings`
+    /// without a matching removal here would put that path on the wire.
+    #[test]
+    fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
+        let settings = DaemonSettings {
+            claude_source: Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from("/declared/claude"),
+            }),
+            codex_source: Some(crate::daemon::settings::SourceDeclaration::Off),
+            gemini_source: Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from("/declared/gemini"),
+            }),
+            ..Default::default()
+        };
+        let v = redacted_settings(&settings);
+        let rendered = v.to_string();
+        for path in ["/declared/claude", "/declared/gemini"] {
+            assert!(!rendered.contains(path), "a source path reached the wire");
+        }
+        assert_eq!(v["claude_source_mode"], "watch");
+        assert_eq!(v["codex_source_mode"], "off");
+        assert_eq!(v["gemini_source_mode"], "watch");
+        assert!(v.get("gemini_source").is_none());
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {

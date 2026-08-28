@@ -823,6 +823,49 @@ pub struct TraceSubmissionKeysetCursor {
     pub submission_id: Uuid,
 }
 
+/// Fallback label for a status reason that is not on the allowlist below.
+pub const STATUS_REASON_OTHER: &str = "other";
+
+/// Reason labels that may be stored verbatim in
+/// `trace_submissions.last_status_reason`.
+///
+/// Every entry is a fixed compile-time constant produced by the server
+/// itself, never anything a caller supplies.
+const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
+    // The driver gave up on a trace after exhausting its retry budget. The
+    // whole reason this column exists: it means NOTHING was learned about the
+    // trace, as opposed to a filter having found something.
+    "pii_backstop_attempts_exhausted",
+    // An operator returned an exhausted trace to the backlog for reassessment.
+    "pii_backstop_requeued",
+    // The backstop completed and released the hold on a real determination.
+    "near-ai-pii-backstop-v1",
+    // A human review decision.
+    "review_decision",
+    // Retention lifecycle.
+    "retention_purged",
+    "retention_expired",
+];
+
+/// Reduce a status-transition reason to a label safe to store in a
+/// plainly-readable column.
+///
+/// Fail-closed: anything not on `ALLOWLISTED_STATUS_REASONS` becomes
+/// [`STATUS_REASON_OTHER`]. This is not defensive tidiness -- trace revocation
+/// takes a free-text reason straight from the API caller
+/// (`trace_revocation_reason_for_request`), and the audit trail stores only
+/// `sha256(reason)` for exactly that input. Storing it verbatim here would put
+/// arbitrary caller text, potentially PII or operator-secret material, into a
+/// column that the review surface reads back. An allowlist is the only form of
+/// this that cannot be defeated by a new call site forgetting the rule.
+pub fn safe_status_reason_label(reason: &str) -> &'static str {
+    ALLOWLISTED_STATUS_REASONS
+        .iter()
+        .find(|allowed| **allowed == reason)
+        .copied()
+        .unwrap_or(STATUS_REASON_OTHER)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionRecord {
     pub tenant_id: String,
@@ -855,6 +898,10 @@ pub struct TraceSubmissionRecord {
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub purged_at: Option<DateTime<Utc>>,
+    /// Allowlisted label for why the submission is in its current status, or
+    /// `None` for rows written before V49. See [`safe_status_reason_label`].
+    #[serde(default)]
+    pub last_status_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1937,6 +1984,22 @@ pub struct TraceScoreBySubmissionRow {
     pub chunks_capped: Option<bool>,
 }
 
+/// One asked-about submission that the requesting principal actually owns,
+/// with its latest gate-decision score when there is one.
+///
+/// The scoped score-attestation read returns one of these per owned id.
+/// `score: None` is the "submitted, not scored yet" state that had no
+/// representation anywhere before: the unscoped enumeration inner-joins the
+/// decision table, so a submission awaiting the gate driver is simply absent
+/// and indistinguishable from one that was never uploaded. Ids the principal
+/// does not own are not returned at all, and the caller reports them as
+/// `unknown` without saying whether they exist elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnSubmissionScoreRow {
+    pub submission_id: Uuid,
+    pub score: Option<TraceScoreBySubmissionRow>,
+}
+
 /// Safe, label-only missing-control name returned when a storage backend has
 /// no real withdrawal implementation. Withdrawal deletes content and reports a
 /// distribution tier; a backend that cannot do either must refuse rather than
@@ -2829,6 +2892,79 @@ pub trait TraceCorpusStore: Send + Sync {
         ))
     }
 
+    /// List quarantined submissions in `tenant_id` whose quarantine was a
+    /// PII-backstop retry exhaustion rather than a privacy finding, most
+    /// recently received first, bounded by `limit`.
+    ///
+    /// Identified by an audit row with `action = 'review'` and
+    /// `metadata_json->>'reason_code' = 'pii_backstop_attempts_exhausted'`,
+    /// which is the only thing that records WHY a submission was quarantined
+    /// -- `trace_submissions` carries no reason column today.
+    ///
+    /// Only submissions that still have an active `submitted_envelope` object
+    /// ref are returned. Exhaustion never invalidates that ref (nothing was
+    /// re-scrubbed, so there is no replacement), but a retention or revocation
+    /// pass since then may have, and re-queueing a submission whose envelope
+    /// is gone would strand it on `AwaitingPiiBackstop` forever.
+    ///
+    /// The default returns an empty list — a backend without a real
+    /// implementation simply has nothing to re-queue.
+    async fn list_quarantined_pii_backstop_exhausted(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Clear the PII-backstop attempt budget for one submission, so a
+    /// re-queued trace is enumerated again rather than immediately
+    /// re-exhausting. Deletes the bookkeeping row outright; the driver treats
+    /// an absent row as `COALESCE(attempts, 0) = 0`.
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today.
+    async fn clear_pii_backstop_attempts(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "clear_pii_backstop_attempts not implemented for this backend".to_string(),
+        ))
+    }
+
+    /// Stamp `last_attempt_at`/`last_error_label` on the per-`(tenant_id,
+    /// submission_id)` PII-backstop bookkeeping row WITHOUT incrementing
+    /// `attempts`, creating the row with `attempts = 0` if absent.
+    ///
+    /// This is the transient-failure counterpart to
+    /// `bump_pii_backstop_attempt`. A transient upstream failure must not
+    /// spend the trace's attempt budget — that is the 2026-08-26 incident
+    /// fix — but it must still move the trace to the back of the driver's
+    /// least-recently-attempted ordering. Without the timestamp a
+    /// transiently-failing submission stays permanently first in every batch
+    /// and starves the whole backlog behind it (2026-08-27).
+    ///
+    /// Implementations MUST scope the upsert by `tenant_id` (migration V38
+    /// forces RLS on `trace_pii_backstop` bound to
+    /// `trace_current_tenant_id()`).
+    ///
+    /// The default returns a "not implemented" error — only the production
+    /// Postgres backend has a real implementation today. The caller treats a
+    /// failure here as non-fatal: the trace stays held either way.
+    async fn touch_pii_backstop_attempt(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _now: DateTime<Utc>,
+        _error_label: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "touch_pii_backstop_attempt not implemented for this backend".to_string(),
+        ))
+    }
+
     /// Look up an existing `trace_gate_decisions` row belonging to a
     /// DIFFERENT submission in the same tenant that shares the given
     /// `canonical_summary_hash`, used by the perplexity-scoring driver's
@@ -2876,4 +3012,62 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
         vector_entry_id: Uuid,
     ) -> Result<bool, DatabaseError>;
+}
+
+#[cfg(test)]
+mod status_reason_tests {
+    use super::{STATUS_REASON_OTHER, safe_status_reason_label};
+
+    /// The labels the review surface actually reasons about must survive
+    /// verbatim, or the queue cannot tell a processing failure from a privacy
+    /// finding -- the entire point of the column.
+    #[test]
+    fn allowlisted_labels_pass_through_unchanged() {
+        for label in [
+            "pii_backstop_attempts_exhausted",
+            "pii_backstop_requeued",
+            "near-ai-pii-backstop-v1",
+            "review_decision",
+            "retention_purged",
+            "retention_expired",
+        ] {
+            assert_eq!(
+                safe_status_reason_label(label),
+                label,
+                "{label} must be storable verbatim"
+            );
+        }
+    }
+
+    /// The reason this is an allowlist and not a sanitiser. Trace revocation
+    /// takes a free-text reason straight from the API caller, and the audit
+    /// trail stores only sha256 of it. Anything of that shape must collapse to
+    /// a fixed label rather than reach a plainly-readable column.
+    #[test]
+    fn caller_supplied_text_never_reaches_the_column() {
+        for hostile in [
+            "contact alice@example.com about this",
+            "sk-live-0000000000000000000000000000000000000000",
+            "https://internal.example.com/admin?token=abcd1234",
+            "arn:aws:iam::123456789012:role/trace-commons",
+            "",
+            "PII_BACKSTOP_ATTEMPTS_EXHAUSTED",
+            "pii_backstop_attempts_exhausted ",
+            "review_decision; DROP TABLE trace_submissions",
+        ] {
+            assert_eq!(
+                safe_status_reason_label(hostile),
+                STATUS_REASON_OTHER,
+                "{hostile:?} must not be stored verbatim"
+            );
+        }
+    }
+
+    /// The label is `&'static str`, so a stored value can only ever be one of
+    /// a fixed set. Pin that the fallback is not itself caller-influenced.
+    #[test]
+    fn the_fallback_is_a_fixed_label() {
+        assert_eq!(STATUS_REASON_OTHER, "other");
+        assert_eq!(safe_status_reason_label("anything at all"), "other");
+    }
 }
