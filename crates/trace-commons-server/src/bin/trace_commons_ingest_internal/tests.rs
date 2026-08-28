@@ -63,6 +63,15 @@ async fn source_offer_is_served_without_credentials() {
     let value: serde_json::Value = serde_json::from_slice(&body).expect("source offer serialises");
 
     assert_eq!(value["license"], "AGPL-3.0-or-later");
+    // Pinned to the literal rather than compared against the constant, which
+    // would be tautological. The offer is worthless if it points somewhere the
+    // source is not, and the pre-rename `zmanian/trace-commons-server` survives
+    // only as a GitHub redirect that anyone can break by creating a repository
+    // at that name.
+    assert_eq!(
+        value["source_url"],
+        "https://github.com/TraceCommons/trace-commons"
+    );
     assert_eq!(value["source_url"], TRACE_COMMONS_SOURCE_URL);
     assert_eq!(value["build_commit"], trace_commons_build_info::COMMIT);
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));

@@ -11029,12 +11029,17 @@ fn insert_token_with_expiry(
     Ok(())
 }
 
-/// Where the Corresponding Source lives. A constant rather than configuration:
+/// Where the Corresponding Source lives. This is the canonical URL, not the
+/// pre-rename one: GitHub still redirects `zmanian/trace-commons-server`, but a
+/// redirect is broken the moment anyone creates a repository at the old name,
+/// and a section 13 offer is a bad place to depend on one.
+///
+/// A constant rather than configuration:
 /// AGPL section 13 obliges the operator of a *modified* version to point at
 /// their own source, and an operator who modifies this binary is already
 /// editing it. A knob here would only let an unmodified deploy point somewhere
 /// wrong.
-const TRACE_COMMONS_SOURCE_URL: &str = "https://github.com/zmanian/trace-commons-server";
+const TRACE_COMMONS_SOURCE_URL: &str = "https://github.com/TraceCommons/trace-commons";
 
 /// The AGPL section 13 source offer.
 ///
