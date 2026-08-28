@@ -2372,13 +2372,16 @@ fn merge_privacy_filter_summary(
     for (label, count) in &next.by_label {
         *target.by_label.entry(label.clone()).or_insert(0) += count;
     }
+    // classify_policy, events_examined, and events_skipped_by_policy move
+    // together: they describe one classifier pass, and a policy label paired
+    // with another pass's counts would be a false record. When `next` did not
+    // run a classify pass (classify_policy is None), leave all three fields
+    // in `target` untouched rather than merging the counts in isolation.
     if next.classify_policy.is_some() {
         target.classify_policy = next.classify_policy.clone();
+        target.events_examined = next.events_examined;
+        target.events_skipped_by_policy = next.events_skipped_by_policy;
     }
-    target.events_examined = target.events_examined.saturating_add(next.events_examined);
-    target.events_skipped_by_policy = target
-        .events_skipped_by_policy
-        .saturating_add(next.events_skipped_by_policy);
 }
 
 fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
@@ -9437,6 +9440,64 @@ mod tests {
             !json.contains("events_examined"),
             "zero counts must not serialize"
         );
+    }
+
+    #[test]
+    fn merge_privacy_filter_summary_keeps_policy_and_counts_from_the_same_pass() {
+        use super::*;
+
+        let mut target: Option<SafePrivacyFilterSummary> = None;
+        let first_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: Some("all-events".to_string()),
+            events_examined: 3,
+            events_skipped_by_policy: 0,
+        };
+        merge_privacy_filter_summary(&mut target, &first_pass);
+
+        let second_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: Some("prose-only".to_string()),
+            events_examined: 1,
+            events_skipped_by_policy: 2,
+        };
+        merge_privacy_filter_summary(&mut target, &second_pass);
+
+        // A backstop retry over an already-summarized envelope must not sum
+        // counts across passes run under different policies: the stored
+        // state must be exactly the last pass, not first-pass-counts labeled
+        // with the second pass's policy.
+        let merged = target.as_ref().expect("summary recorded");
+        assert_eq!(merged.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(merged.events_examined, 1);
+        assert_eq!(merged.events_skipped_by_policy, 2);
+
+        // A merge from a summary that ran no classify pass (classify_policy
+        // is None, counts zero, as adapter-level summaries construct them)
+        // must not clobber the previously recorded policy pass.
+        let no_policy_pass = SafePrivacyFilterSummary {
+            schema_version: 1,
+            output_mode: "redacted_text_only".to_string(),
+            span_count: 0,
+            by_label: Default::default(),
+            decoded_mismatch: false,
+            classify_policy: None,
+            events_examined: 0,
+            events_skipped_by_policy: 0,
+        };
+        merge_privacy_filter_summary(&mut target, &no_policy_pass);
+        let merged = target.expect("summary recorded");
+        assert_eq!(merged.classify_policy.as_deref(), Some("prose-only"));
+        assert_eq!(merged.events_examined, 1);
+        assert_eq!(merged.events_skipped_by_policy, 2);
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]
