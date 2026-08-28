@@ -120,11 +120,16 @@ struct QueueContent: View {
             // never a slice the UI made up. `waitingByProject`'s order is
             // first-seen, which is also `awaitingDecision`'s order, so this
             // reshuffles nothing a contributor has already scanned.
+            //
+            // The group carries its own entries. It used to carry only
+            // totals, and this loop filtered the whole waiting list once
+            // per group to find the rows -- entries times projects on every
+            // redraw, at a 500-entry cap. `QueueGrouping` does it in one
+            // pass, off the model, only when the queue moves. See #388.
             VStack(spacing: TC.Space.lg) {
-                ForEach(model.waitingByProject, id: \.id) { group in
+                ForEach(model.waitingByProject) { group in
                     ProjectQueueGroup(
                         group: group,
-                        entries: model.awaitingDecision.filter { $0.projectID == group.id },
                         summaries: model.summaries,
                         summaryErrors: model.summaryErrors,
                         tooLarge: model.tooLarge,
@@ -169,8 +174,7 @@ struct QueueContent: View {
 /// project level". A single-entry group offers no second way to do what its
 /// one row's own `Submit` already does.
 private struct ProjectQueueGroup: View {
-    let group: (id: String, label: String, count: Int, bytes: Int)
-    let entries: [QueueEntry]
+    let group: QueueGroup<QueueEntry>
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
@@ -247,7 +251,7 @@ private struct ProjectQueueGroup: View {
             } message: {
                 Text(ProjectIgnoreCopy.confirmationBody(
                     project: group.label,
-                    pendingCount: entries.count
+                    pendingCount: group.count
                 ))
             }
             rowList
@@ -289,7 +293,7 @@ private struct ProjectQueueGroup: View {
     }
 
     private var rows: some View {
-        ForEach(entries) { entry in
+        ForEach(group.entries) { entry in
             QueueRow(
                 entry: entry,
                 summary: summaries[entry.entryID],
