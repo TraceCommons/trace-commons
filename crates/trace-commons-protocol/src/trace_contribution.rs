@@ -9310,10 +9310,11 @@ mod tests {
         );
     }
 
-    /// Records every string handed to the classifier so a test can assert
-    /// what was and was not submitted.
     #[cfg(feature = "near-ai-privacy-filter")]
     use super::*;
+
+    /// Records every string handed to the classifier so a test can assert
+    /// what was and was not submitted.
     #[cfg(feature = "near-ai-privacy-filter")]
     struct RecordingAdapter {
         seen: std::sync::Mutex<Vec<String>>,
