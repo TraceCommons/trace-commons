@@ -1,0 +1,217 @@
+#!/bin/sh
+# One-time Trace Commons contribution: fetch the verified CLI, submit the
+# sessions under the directory you are standing in, and exit.
+#
+#   # from a project directory: that project
+#   # from a parent of several repos: all of them
+#   TRACE_COMMONS_INVITE='<your invite link>' \
+#     curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh | sh
+#
+# Reading it before running it is encouraged, and the two-step form is
+# documented first in the README for exactly that reason. The security
+# boundary is not this file: verification lives in scripts/install.sh, which
+# refuses any binary whose published SHA-256 does not match and, on macOS, any
+# whose signature does not name our Developer ID. A tampered copy of this
+# script cannot talk that one into accepting an unsigned binary.
+#
+# WHAT THIS LEAVES BEHIND
+#
+# The binary goes in a cache directory, not on your PATH, and no daemon,
+# autostart, or login item is created. Pass --no-cache to put it in a temporary
+# directory that is removed when the run ends, leaving nothing of the program
+# behind at all; the default keeps it so a second run costs no download.
+#
+# --with-export first normalizes sessions from harnesses the CLI does not read
+# natively, via our npm exporter. Opt-in: it fetches an npm package, which the
+# registry signs but which carries no provenance attestation, unlike the binary
+# this script verifies by checksum and Developer ID.
+#
+# But one thing does persist either way, deliberately -- the keep: a device key
+# and the coordinates needed to use it. --no-cache does not touch it, and
+# nothing else should be read as promising to.
+#
+# The device key IS your identity here, not merely a credential for it. Your
+# account is minted from it. Delete it and there is no way to sign in, and
+# therefore no way to withdraw the traces this run uploads. A one-time script
+# that left a contributor unable to retract what they sent would be a consent
+# failure, so there is no flag that suppresses the keep. Deleting it afterwards
+# is the same act with better timing: by then you have seen what it is for.
+#
+# The invite is never passed in argv, where it would land in your shell
+# history and in `ps` for every user on the machine. Set TRACE_COMMONS_INVITE,
+# or let the script prompt for it on a terminal.
+#
+# The keep is deliberately its OWN directory, not the state directory an
+# installed CLI uses. Two reasons. A script fetched over the network should not
+# silently adopt an existing enrollment and submit under an identity you did
+# not pick for it; and the delete instruction below has to be safe to follow,
+# which `rm -rf` on an installed CLI's state would not be.
+#
+# The cost is worth stating plainly: if you later install the CLI properly, it
+# enrolls separately. That is a second device key, so a second identity, a
+# second invite use, and per-contributor credit that does not add up across the
+# two. Point TRACE_COMMONS_KEEP_DIR at your installed state directory if you
+# would rather they were one -- and then do not run the delete command.
+
+set -eu
+
+# Everything is inside this function, invoked on the very last line. A
+# truncated download therefore executes nothing at all -- table stakes once a
+# script is advertised in its piped form.
+tc_contribute_main() {
+  REPO_RAW="https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main"
+
+  # XDG-ish, with plain fallbacks. Both are ordinary user-owned directories;
+  # nothing here needs sudo and nothing is written outside them.
+  cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/tracecommons"
+  bin_dir="$cache_root/bin"
+  keep_dir="${TRACE_COMMONS_KEEP_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tracecommons/keep}"
+  no_cache=""
+  with_export=""
+  # Pinned exactly. npx resolves a range at runtime, and this script is
+  # advertised in its piped form: "whatever is latest right now" is not a thing
+  # to run unattended over session transcripts.
+  EXPORTER="@tracecommons/trajectory-export@0.1.0"
+
+  say() { printf '%s\n' "$*"; }
+  die() { printf 'contribute failed: %s\n' "$*" >&2; exit 1; }
+  need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"; }
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-cache) no_cache=1; shift ;;
+      --with-export) with_export=1; shift ;;
+      -h|--help) sed -n '2,45p' "$0" 2>/dev/null || say "see scripts/contribute.sh"; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  need curl
+  need mkdir
+
+  # --no-cache: keep the binary for exactly this run and take it with us.
+  #
+  # By default the verified binary is cached, so a second run costs no
+  # download. That is a convenience, not a requirement, and someone who asked
+  # for a one-time script may well mean it literally. This leaves nothing of
+  # the program behind.
+  #
+  # It does NOT touch the keep. The keep is the device key your account is
+  # minted from, and discarding it is what makes the traces you just uploaded
+  # unwithdrawable -- a different thing entirely from where the binary lives.
+  if [ -n "$no_cache" ]; then
+    need mktemp
+    bin_dir="$(mktemp -d)" || die "could not create a temporary directory"
+    trap 'rm -rf "$bin_dir"' EXIT INT TERM
+  fi
+
+  # ---- refuse the unbounded run early ---------------------------------
+  # The CLI refuses this too (see `resolve_submit_scope`), but refusing here
+  # means we do not download anything on the way to an error.
+  cwd="$(pwd -P)"
+  home="$(cd "$HOME" 2>/dev/null && pwd -P)" || home=""
+  case "$cwd" in
+    /) die "run this from a project directory. From a filesystem root the
+scope would be every session on this machine." ;;
+  esac
+  if [ -n "$home" ] && [ "$cwd" = "$home" ]; then
+    die "run this from a project directory, or a parent of the repos you want
+to contribute. From \$HOME the scope would be every session on this machine."
+  fi
+
+  # ---- the invite, never from argv ------------------------------------
+  invite="${TRACE_COMMONS_INVITE:-}"
+  if [ -z "$invite" ]; then
+    # `< /dev/tty` matters: stdin is the piped script itself.
+    if [ -r /dev/tty ]; then
+      printf 'invite link: ' > /dev/tty
+      IFS= read -r invite < /dev/tty || invite=""
+    fi
+  fi
+  if [ -z "$invite" ] && [ ! -d "$keep_dir" ]; then
+    die "no invite. Set TRACE_COMMONS_INVITE to the link you were handed, or
+run this from a terminal so it can ask."
+  fi
+
+  # ---- fetch the verified binary --------------------------------------
+  mkdir -p "$bin_dir" || die "could not create $bin_dir"
+  cli="$bin_dir/trace-commons-contributor"
+
+  installer="$(mktemp)" || die "could not create a temporary file"
+  # shellcheck disable=SC2064
+  trap "rm -f '$installer'" EXIT INT TERM
+  curl -fsSL --proto '=https' --tlsv1.2 "$REPO_RAW/scripts/install.sh" -o "$installer" \
+    || die "could not download the installer"
+  # install.sh owns checksum and signature verification, and has no --force
+  # and no --skip-verify. Reimplementing either here would be a second chance
+  # to get verification wrong.
+  sh "$installer" --dir "$bin_dir" || die "the CLI could not be verified and installed"
+  [ -x "$cli" ] || die "the installer did not produce $cli"
+
+  # ---- the keep --------------------------------------------------------
+  mkdir -p "$keep_dir" || die "could not create $keep_dir"
+  chmod 700 "$keep_dir" 2>/dev/null || true
+  TRACE_COMMONS_CONTRIBUTOR_DIR="$keep_dir"
+  export TRACE_COMMONS_CONTRIBUTOR_DIR
+
+  say ""
+  say "keep: $keep_dir"
+  say "  This holds the device key your account is minted from. It is the only"
+  say "  way to sign in and withdraw the traces this run uploads."
+  say "  To delete it later, and give up the ability to withdraw them:"
+  say "    rm -rf \"$keep_dir\""
+  say ""
+
+  # ---- optional: normalize other harnesses first ------------------------
+  #
+  # Opt-in, and it stays opt-in for a reason worth reading. Everything else
+  # this script fetches is one binary whose checksum must match and whose macOS
+  # signature must name our Developer ID, with no flag to skip either. The
+  # exporter is an npm package: the registry signs it, but there is no
+  # provenance attestation tying that tarball to our source, so this widens the
+  # trust surface of a script that reads coding transcripts. Defaulting it on
+  # would spend that trust for people who never asked.
+  #
+  # It writes <source>-<id>.trajectory.json into this directory, which is the
+  # name `submit` discovers, so nothing needs to be passed between them.
+  if [ -n "$with_export" ]; then
+    if command -v npx >/dev/null 2>&1; then
+      say "normalizing sessions from other harnesses..."
+      # A non-zero exit here is ordinary: the exporter reports 1 when it finds
+      # nothing to export, which is the common case on a machine that only runs
+      # natively-read harnesses. Never fatal -- the native sources are the point
+      # of the run and must still be submitted.
+      npx --yes "$EXPORTER" --all || say "  nothing exported; continuing"
+    else
+      say "--with-export needs npx (Node 20+); skipping, native sources still submit"
+    fi
+  fi
+
+  # ---- one submission --------------------------------------------------
+  # `submit` scopes itself to this directory's subtree and enrolls with the
+  # invite only if the keep holds no config yet -- so a second run finds the
+  # keep and spends no further invite use.
+  #
+  # The invite goes through the environment, never on the command line: argv
+  # is visible to every user on the machine via `ps`.
+  #
+  # Stdin is the piped script, so the confirmation and the consent questions
+  # must read the terminal instead -- otherwise they would consume script text
+  # as their answers. With no terminal there is nobody to answer them, and a
+  # run that uploaded traces unconfirmed would be the failure this prompt
+  # exists to prevent, so it stops.
+  if [ ! -r /dev/tty ]; then
+    die "no terminal to confirm the upload on. Install the CLI with
+scripts/install.sh and run \`trace-commons-contributor submit\` yourself."
+  fi
+  status=0
+  TRACE_COMMONS_INVITE="$invite" "$cli" submit < /dev/tty || status=$?
+
+  say ""
+  say "keep: $keep_dir  (the only way to withdraw these traces)"
+  say "  withdraw : TRACE_COMMONS_CONTRIBUTOR_DIR=\"$keep_dir\" \"$cli\" account login"
+  say "  delete   : rm -rf \"$keep_dir\""
+  return $status
+}
+
+tc_contribute_main "$@"

@@ -127,6 +127,7 @@ impl QueueEntry {
         match self.source.as_str() {
             "claude-code" => "Claude Code",
             "codex" => "Codex",
+            "gemini-cli" => "Gemini CLI",
             "trajectory" => "Trajectory",
             other => other,
         }

@@ -466,7 +466,15 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
     // Rendered verbatim. "Held because a passage looked like a personal
     // address" is enormously better than a status word, and it is the
     // server's sentence to write, not this window's to paraphrase.
-    for explanation in &record.explanations {
+    //
+    // Verbatim, but not indiscriminate: a line whose payload is an opaque
+    // digest says nothing to the person reading it. See
+    // `explanation_is_contributor_facing`.
+    for explanation in record
+        .explanations
+        .iter()
+        .filter(|e| explanation_is_contributor_facing(e))
+    {
         let line = gtk::Label::builder()
             .label(explanation)
             .xalign(0.0)
@@ -479,7 +487,15 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
     // and only when the server sent none: it is the one state a person can
     // misread as a refusal. The other three are said by the chip and
     // repeating them under it is noise.
-    if record.status == "quarantined" && record.explanations.is_empty() {
+    // Against the FILTERED view, not the raw list: a record whose only lines
+    // were digests renders nothing above, and would otherwise lose the one
+    // sentence that keeps held from reading as refused.
+    if record.status == "quarantined"
+        && !record
+            .explanations
+            .iter()
+            .any(|e| explanation_is_contributor_facing(e))
+    {
         let body = gtk::Label::builder()
             .label(copy::HELD_ROW_BODY)
             .xalign(0.0)
@@ -711,6 +727,22 @@ fn credit_line(record: &HistoryRecord) -> Option<String> {
 /// The four states a record can be in, in the same words the stat cards and
 /// the chips use, so a badge on a record and a card at the top of the
 /// screen cannot say different things about one state.
+/// Whether a server explanation line is worth showing a contributor.
+///
+/// The receipt carries `Attributed to tenant tenant_sha256:<64 hex>` on every
+/// held and accepted record. It is true, and it is meaningless to the person
+/// reading it: an opaque digest they cannot act on, repeated once per trace,
+/// crowding out the one line that says what actually happened. The rule is
+/// the digest, not the sentence -- any future line carrying a raw hash is
+/// equally unreadable, and this catches those too without a list to maintain.
+///
+/// Deliberately a display filter rather than a server change: the receipt is
+/// an API surface other consumers read, and the tenant attribution is real
+/// information there. It is only this window that has no use for it.
+fn explanation_is_contributor_facing(explanation: &str) -> bool {
+    !explanation.contains("sha256:")
+}
+
 fn status_word(status: &str) -> &'static str {
     match status {
         "accepted" => copy::HISTORY_IN_THE_COMMONS,
@@ -1074,6 +1106,47 @@ mod tests {
         // scored", which would read as though it were still in flight.
         assert_eq!(status_word("withdrawn"), copy::WITHDRAWN_BY_YOU);
         assert!(matches!(status_tone("withdrawn"), Tone::Refused));
+    }
+
+    /// Every held and accepted receipt carries an `Attributed to tenant
+    /// tenant_sha256:<hex>` line. Showing it puts an opaque digest on every
+    /// card, once per trace, above the sentence that says what happened.
+    /// A held record whose only server lines were digests must still get the
+    /// sentence that says it was not refused -- the filter must not be able
+    /// to empty a card of its meaning.
+    #[test]
+    fn a_held_record_left_empty_by_the_filter_still_gets_its_sentence() {
+        let only_digests =
+            vec!["Attributed to tenant tenant_sha256:8719ab8d740b9882d27c80f473bfe5b1".to_string()];
+        let shown: Vec<&String> = only_digests
+            .iter()
+            .filter(|e| explanation_is_contributor_facing(e))
+            .collect();
+        assert!(shown.is_empty(), "the digest is filtered out");
+        // Which is exactly the condition that must trigger the fallback.
+        assert!(
+            !only_digests
+                .iter()
+                .any(|e| explanation_is_contributor_facing(e)),
+            "the fallback condition must be evaluated against the filtered view"
+        );
+    }
+
+    #[test]
+    fn an_opaque_digest_line_is_not_shown_to_a_contributor() {
+        assert!(!explanation_is_contributor_facing(
+            "Attributed to tenant tenant_sha256:8719ab8d740b9882d27c80f473bfe5b1"
+        ));
+        // The sentence that carries the meaning stays.
+        assert!(explanation_is_contributor_facing(
+            "Quarantined for privacy review; credit is pending review."
+        ));
+        assert!(explanation_is_contributor_facing(
+            "Accepted into the private redacted corpus."
+        ));
+        assert!(explanation_is_contributor_facing(
+            "Held pending an automated privacy backstop verdict; not yet in the corpus."
+        ));
     }
 
     #[test]

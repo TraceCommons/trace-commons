@@ -596,7 +596,7 @@ function renderInstall() {
         <p class="install-label">Desktop app, portable</p>
         <p class="install-note">Unzip <code>trace-commons-app-windows-x86_64-*.zip</code> from the release and run <code>TraceCommons.exe</code>. It is self-contained, so there is no runtime to install first.</p>
         <p class="install-label">Command-line contributor</p>
-        <pre class="install-code"><code>irm https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.ps1 -OutFile install.ps1
+        <pre class="install-code"><code>irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
 .\\install.ps1</code></pre>
         <p class="install-note">Downloading it first so you can read it is the documented form. Only an x64 build is published; Windows on Arm runs it under emulation.</p>
       </div>
@@ -618,7 +618,7 @@ brew install --cask trace-commons</code></pre>
         <p class="install-label">Desktop app</p>
         <pre class="install-code"><code>flatpak install --from https://storage.googleapis.com/tracecommons-flatpak/ai.tracecommons.Contributor.flatpakref</code></pre>
         <p class="install-label">Command-line contributor</p>
-        <pre class="install-code"><code>curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/install.sh -o install.sh
+        <pre class="install-code"><code>curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
 sh install.sh</code></pre>
       </div>
     </section>

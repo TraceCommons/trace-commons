@@ -1,0 +1,4 @@
+{"role":"meta","source":"openhands","model":"claude-fable-5","cwd":"/w"}
+{"role":"user","content":"run the tests","timestamp":"2026-07-30T10:00:00Z"}
+{"role":"observation","content":"3 passed, 0 failed","timestamp":"2026-07-30T10:00:01Z"}
+{"role":"assistant","content":"tests pass","timestamp":"2026-07-30T10:00:02Z"}

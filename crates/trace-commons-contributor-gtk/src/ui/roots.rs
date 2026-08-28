@@ -221,22 +221,18 @@ fn present_with<F>(
         let failure = failure.clone();
         let on_declared = Rc::new(on_declared);
         move |_| {
-            // Both are Some: the button is insensitive until they are, and
-            // this re-reads rather than trusting that.
-            let find = |source: &str| {
-                choices
-                    .iter()
-                    .find(|c| c.source == source)
-                    .and_then(|c| c.declaration())
-            };
-            let (Some(claude), Some(codex)) = (
-                find(trace_commons_contributor::source::SOURCE_CLAUDE_CODE),
-                find(trace_commons_contributor::source::SOURCE_CODEX),
-            ) else {
-                failure.set_visible(true);
-                return;
-            };
-            match crate::backend::declare_sources(&dir, &claude, &codex) {
+            // Every answered choice, not a hand-listed pair: this screen
+            // renders one row per discovered source, so a source it can
+            // show is a source whose answer must be written. The button is
+            // insensitive until all of them are answered, and this
+            // re-reads rather than trusting that -- an unanswered row is
+            // simply absent, and `declare_sources` refuses an incomplete
+            // declaration.
+            let answers: Vec<(&str, SourceDeclaration)> = choices
+                .iter()
+                .filter_map(|c| c.declaration().map(|d| (c.source.as_str(), d)))
+                .collect();
+            match crate::backend::declare_sources(&dir, &answers) {
                 Ok(()) => {
                     failure.set_visible(false);
                     window.close();
@@ -361,10 +357,27 @@ fn build_choice(
     }
 }
 
+/// The title on a roots row: the only thing naming the store a contributor is
+/// agreeing to.
+///
+/// Every known source is matched explicitly. The arm this replaced sent
+/// anything unrecognised to the Claude Code title, so when a third source
+/// appeared the screen offered two rows both called "Claude Code sessions",
+/// one of them pointing at `~/.gemini/tmp`. Agreeing to a store under another
+/// store's name is not agreeing, and a fallback that reads as a safe default
+/// is how that shipped.
+///
+/// The unknown arm now says so rather than borrowing a name. A source with no
+/// title here is a bug -- `no_two_sources_share_a_title` catches the shape of
+/// it -- but showing the raw slug beside its real path is honest, where
+/// showing the wrong product name is not.
 fn source_title(source: &str) -> &'static str {
+    use trace_commons_contributor::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
     match source {
-        trace_commons_contributor::source::SOURCE_CODEX => copy::ROOTS_CODEX,
-        _ => copy::ROOTS_CLAUDE,
+        SOURCE_CLAUDE_CODE => copy::ROOTS_CLAUDE,
+        SOURCE_CODEX => copy::ROOTS_CODEX,
+        SOURCE_GEMINI_CLI => copy::ROOTS_GEMINI,
+        _ => copy::ROOTS_UNKNOWN_SOURCE,
     }
 }
 
@@ -445,5 +458,25 @@ mod tests {
     fn each_source_gets_its_own_title() {
         assert_eq!(source_title("codex"), copy::ROOTS_CODEX);
         assert_eq!(source_title("claude-code"), copy::ROOTS_CLAUDE);
+        assert_eq!(source_title("gemini-cli"), copy::ROOTS_GEMINI);
+    }
+
+    /// Titles must be distinct, because this label is the only thing naming
+    /// the store a contributor is agreeing to. A catch-all arm previously sent
+    /// Gemini to the Claude Code title, so the screen offered two rows both
+    /// called "Claude Code sessions", one of them pointing at ~/.gemini/tmp.
+    /// Agreeing to a store under another store's name is not agreeing.
+    #[test]
+    fn no_two_sources_share_a_title() {
+        let titles = [
+            source_title("claude-code"),
+            source_title("codex"),
+            source_title("gemini-cli"),
+        ];
+        for (i, a) in titles.iter().enumerate() {
+            for b in titles.iter().skip(i + 1) {
+                assert_ne!(a, b, "two sources share the title {a:?}");
+            }
+        }
     }
 }

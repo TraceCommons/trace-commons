@@ -81,6 +81,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         switch source {
         case "claude-code", "claude_code": return "Claude Code"
         case "codex": return "Codex"
+        case "gemini-cli", "gemini_cli": return "Gemini CLI"
         case "trajectory", "letta_trajectory": return "Letta trajectory"
         default:
             return source

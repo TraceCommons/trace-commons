@@ -185,8 +185,8 @@ use trace_commons_server::trace_gate_service::{
     TenantCtx as GateTenantCtx, TraceGateService,
 };
 use trace_commons_server::trace_score_attestation::{
-    AttestationConfig, AttestationSigningState, ScoreAttestationCoverage,
-    ScoreAttestationSubmissionEntry, sign_score_attestation,
+    AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
+    ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
 };
 use uuid::Uuid;
 
@@ -1744,6 +1744,21 @@ struct PerplexityDriverTickSummary {
     failed: usize,
     transient: usize,
     breaker_tripped: bool,
+    /// Wall time for the tick body, excluding the interval slept before it.
+    ///
+    /// The loop sleeps THEN ticks, so cycle time is interval + this. Without
+    /// it, per-trace latency can only be inferred from the gap between
+    /// consecutive log lines minus an interval that may have been retuned,
+    /// which is how this number came to be unknown in the first place.
+    tick_duration_ms: u64,
+    /// Submissions the enumeration would return with no `LIMIT`, measured
+    /// after the tick's work. See
+    /// `Database::count_submissions_needing_gate_decision` for the two things
+    /// it deliberately excludes -- a zero here is not "nothing outstanding".
+    ///
+    /// `None` when the count itself failed: a backlog probe must never turn a
+    /// tick that scored traces into a tick that reports an error.
+    backlog: Option<i64>,
 }
 
 /// In-process PII-backstop driver loop config (server-side NEAR AI PII
@@ -7237,7 +7252,7 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/contributors/me/score-attestation",
-            get(score_attestation_handler),
+            get(score_attestation_handler).post(scoped_score_attestation_handler),
         )
         .route(
             "/.well-known/trace-commons-attestation-keyset.json",
@@ -9322,6 +9337,8 @@ fn spawn_perplexity_score_driver_task(
                     failed = summary.failed,
                     transient = summary.transient,
                     breaker_tripped = summary.breaker_tripped,
+                    tick_duration_ms = summary.tick_duration_ms,
+                    backlog = summary.backlog,
                     "Trace Commons perplexity score driver tick completed"
                 );
                 perplexity_tick_outcome(&summary)
@@ -12608,7 +12625,7 @@ async fn submit_trace_handler(
         if principal_can_remediate_quarantined(tenant.auth(), &existing) {
             Some(existing)
         } else {
-            let receipt = receipt_from_record(&existing);
+            let receipt = receipt_from_record(&existing, state.near_settlement_mode);
             append_audit_event(
                 &state.root,
                 tenant.tenant_id(),
@@ -12802,7 +12819,10 @@ async fn submit_trace_handler(
         }
     }
 
-    Ok(Json(receipt_from_record(&record)))
+    Ok(Json(receipt_from_record(
+        &record,
+        state.near_settlement_mode,
+    )))
 }
 
 async fn revoke_trace_handler(
@@ -14095,7 +14115,11 @@ async fn submission_status_handler(
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(record, &status_credit_events));
+            statuses.push(submission_status_from_record(
+                record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            ));
         }
     }
 
@@ -14123,6 +14147,36 @@ struct ScoreAttestationResponse {
     attestation: String,
 }
 
+/// A scoped attestation, plus the two counts a client needs to decide
+/// whether to keep waiting.
+///
+/// The counts are a convenience for the CLI's bounded wait and its
+/// "N of M traces scored, K pending" line; they are NOT the attestation.
+/// Anything a collector relies on must be read from the signed payload,
+/// which carries the same information in `submissions` and `pending`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScopedScoreAttestationResponse {
+    attestation: String,
+    scored: usize,
+    pending: usize,
+    unknown: usize,
+}
+
+/// Body of a SCOPED score-attestation request.
+///
+/// `deny_unknown_fields` is load-bearing, not tidiness: the unscoped route's
+/// non-negotiable is that no principal can be named in a request, and this
+/// body is the first request parameter the endpoint has ever accepted. A
+/// caller that adds `auth_principal_ref` — by hand, or by pointing an old
+/// forged-identity script at the new route — gets a 4xx rather than a
+/// silently ignored field, so the property fails loudly if anyone ever
+/// tries to reintroduce it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedScoreAttestationRequest {
+    submission_ids: Vec<Uuid>,
+}
+
 /// `GET /v1/contributors/me/score-attestation` — signs a statement of the
 /// CALLER'S OWN scored submissions, resolved entirely from the authenticated
 /// upload claim (`tenant.tenant_id()` / `tenant.principal_ref()`).
@@ -14135,7 +14189,14 @@ struct ScoreAttestationResponse {
 /// could carry one. Reintroducing a caller-suppliable identity parameter on
 /// this route would rebuild the exact forgery hole this endpoint exists to
 /// close — a participant relaying someone else's identifier the same way a
-/// bare submission id could be relayed today. See
+/// bare submission id could be relayed today.
+///
+/// `scoped_score_attestation_handler` (POST, same path) does take a body,
+/// and the property is preserved there differently: the body is a
+/// `deny_unknown_fields` struct with one field, a submission-id list, which
+/// can only narrow rows the authenticated principal already owns. Any other
+/// field is a 4xx, so an identity parameter cannot be reintroduced quietly.
+/// See
 /// `score_attestation_handler_resolves_principal_from_auth_only_never_from_a_parameter`
 /// in the test module, which pins this property.
 async fn score_attestation_handler(
@@ -14209,6 +14270,133 @@ async fn score_attestation_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// `POST /v1/contributors/me/score-attestation` — the SCOPED form: attests
+/// to exactly the submission ids in the body, and says plainly which of them
+/// it could not score.
+///
+/// Same principal resolution as the GET form, and the same non-negotiable:
+/// `tenant_id` and `auth_principal_ref` come from
+/// `authenticate_ctx_with_tenant_access_grant` alone. The body carries a
+/// submission-id list and nothing else (`deny_unknown_fields`), and that
+/// list can only NARROW the set of rows the authenticated principal already
+/// owns — an id belonging to anyone else comes back in `unknown`, which
+/// deliberately reads the same as an id that exists nowhere.
+///
+/// Why a second method on the same path rather than a query parameter on
+/// the GET: the cap is 500 ids, which is ~18KB of percent-encoded UUIDs and
+/// past what proxies accept in a request line. `submission-status` already
+/// established POST-with-a-body as the shape for contributor-scoped id lists
+/// on `/v1/contributors/me/*`.
+async fn scoped_score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ScopedScoreAttestationRequest>,
+) -> ApiResult<Json<ScopedScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    if body.submission_ids.len() > usize::try_from(SCORE_ATTESTATION_MAX_SUBMISSIONS).unwrap_or(0) {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "score attestation requests are limited to 500 submission ids",
+        ));
+    }
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "score attestation requires a configured DB mirror",
+        ));
+    };
+
+    // Dedupe while preserving the caller's order, so a repeated id cannot
+    // inflate the signed document and the three output lists read back in
+    // the order they were asked about.
+    let mut requested: Vec<Uuid> = Vec::with_capacity(body.submission_ids.len());
+    let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+    for submission_id in body.submission_ids {
+        if seen.insert(submission_id) {
+            requested.push(submission_id);
+        }
+    }
+
+    let owned = db
+        .list_own_gate_decision_scores_for_submissions(
+            tenant.tenant_id(),
+            tenant.principal_ref(),
+            &requested,
+        )
+        .await
+        .map_err(|error| match error {
+            // Mirrors the unscoped route: an unconfigured cross-tenant
+            // gate-driver pool is a missing control, not an internal fault.
+            DatabaseError::Pool(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "score attestation requires a configured gate-driver pool",
+            ),
+            other => internal_error(other),
+        })?;
+    let owned_by_id = owned
+        .into_iter()
+        .map(|row| (row.submission_id, row.score))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut submissions = Vec::new();
+    let mut scope = ScoreAttestationScope::default();
+    for submission_id in requested {
+        match owned_by_id.get(&submission_id) {
+            Some(Some(row)) => submissions.push(ScoreAttestationSubmissionEntry {
+                submission_id: row.submission_id,
+                credit_quality_micros: row.credit_quality_micros,
+                perplexity_micros: row.perplexity_micros,
+                novelty_score_micros: row.novelty_score_micros,
+                gate_passed: row.gate_passed,
+                coverage: ScoreAttestationCoverage::from_decision_columns(
+                    row.chunk_count,
+                    row.total_chunk_count,
+                    row.chunks_capped,
+                ),
+            }),
+            // Owned, no gate decision yet. Scoring is asynchronous, so this
+            // is the common state moments after an upload, and saying so is
+            // the whole point of the scoped form.
+            Some(None) => scope.pending.push(submission_id),
+            // Not owned. Never says whether it exists.
+            None => scope.unknown.push(submission_id),
+        }
+    }
+
+    let scored = submissions.len();
+    let pending = scope.pending.len();
+    let unknown = scope.unknown.len();
+    let token = sign_scoped_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Some(scope),
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "score_attestation_scoped",
+        scored,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScopedScoreAttestationResponse {
+        attestation: token,
+        scored,
+        pending,
+        unknown,
+    }))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
@@ -37717,7 +37905,7 @@ async fn apply_review_decision(
             .map_err(internal_error)?;
     }
 
-    Ok(receipt_from_record(&record))
+    Ok(receipt_from_record(&record, state.near_settlement_mode))
 }
 
 fn ensure_review_decision_eligible(
@@ -39328,6 +39516,7 @@ async fn run_perplexity_score_driver_tick(
             config.batch_size,
         )
         .await?;
+    let tick_started = std::time::Instant::now();
     let mut summary = PerplexityDriverTickSummary::default();
     // Consecutive per-item failures, reset by any success. See
     // `MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES`.
@@ -39373,6 +39562,20 @@ async fn run_perplexity_score_driver_tick(
              remainder of the batch left untouched"
         );
     }
+    summary.tick_duration_ms = tick_started.elapsed().as_millis() as u64;
+    // After the work, so the number is what remains rather than what was
+    // waiting when the tick began. Failure is swallowed to a `None`: the
+    // driver's job is scoring, and losing a diagnostic must not turn a
+    // productive tick into a reported error and trip the caller's breaker.
+    summary.backlog = db
+        .count_submissions_needing_gate_decision(
+            Utc::now(),
+            config.knobs.max_attempts,
+            config.backoff_base_seconds,
+        )
+        .await
+        .ok();
+
     Ok(summary)
 }
 
@@ -42031,7 +42234,11 @@ async fn run_canary_read_drill(
                 &credit_view.records,
             )
             .await?;
-            let status = submission_status_from_record(status_record, &status_credit_events);
+            let status = submission_status_from_record(
+                status_record,
+                &status_credit_events,
+                state.near_settlement_mode,
+            );
             submit_status_visible = status.submission_id == request.submission_id
                 && status.status == record.status.as_str();
         }
@@ -55283,10 +55490,41 @@ fn corpus_status_with_pii_backstop_hold(
     }
 }
 
-fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmissionReceipt {
+/// The contributor-facing sentence describing what will happen to the credit
+/// this receipt reports, given the deployment's settlement posture.
+///
+/// #445: a pilot ran for three months with 307 credit events stuck `pending`,
+/// because `NearSettlementMode::Disabled` makes the settlement worker a no-op
+/// and nothing said so. The contributor saw an accepted trace, a pending
+/// figure, and a blank `FINAL` column, and could not tell "switched off" from
+/// "still working on it". Whichever posture is configured, the receipt says
+/// it, so the two can never drift apart again.
+fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
+    match mode {
+        // Deliberate and fail-safe, not a fault. Say both halves: the credit
+        // is real and recorded, and nothing is going to settle it here.
+        NearSettlementMode::Disabled => {
+            "Credit is recorded but not settled: on-chain settlement is not \
+             enabled on this deployment, so this figure stays pending."
+        }
+        // The outbox advances with synthetic transaction hashes and no funds.
+        // A settled-looking row here is not an on-chain credit.
+        NearSettlementMode::DryRun => {
+            "Settlement is running in dry-run: the credit ledger advances with \
+             synthetic transaction hashes and no on-chain credit is issued."
+        }
+        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
+    }
+}
+
+fn receipt_from_record(
+    record: &TraceCommonsSubmissionRecord,
+    settlement_mode: NearSettlementMode,
+) -> TraceSubmissionReceipt {
     let explanation = match record.status {
         TraceCorpusStatus::Accepted => vec![
             "Accepted into the private redacted corpus.".to_string(),
+            settlement_posture_explanation(settlement_mode).to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Quarantined => vec![
@@ -55315,8 +55553,9 @@ fn receipt_from_record(record: &TraceCommonsSubmissionRecord) -> TraceSubmission
 fn submission_status_from_record(
     record: &TraceCommonsSubmissionRecord,
     credit_events: &[TraceCommonsCreditLedgerRecord],
+    settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionStatusUpdate {
-    let receipt = receipt_from_record(record);
+    let receipt = receipt_from_record(record, settlement_mode);
     let delayed_events = credit_events
         .iter()
         .filter(|event| event.submission_id == record.submission_id)

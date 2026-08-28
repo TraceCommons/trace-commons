@@ -5,6 +5,67 @@ makes payout destination an explicit, contributor-designated choice. This
 runbook covers the `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` knob, the per-request
 `dry_run` preview flag, and payout designation / holds.
 
+## Current posture: settlement is OFF, deliberately (as of 2026-08-27)
+
+Read this before diagnosing "credit is stuck". Nothing is broken.
+
+The pilot runs `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled`
+(`deploy/pilot-gcp/ingest.env.template`), which makes the settlement worker a
+no-op that leaves every outbox row `pending`. On top of that, none of the three
+schedulers that would even drive the worker are set at all, so they take their
+`false` defaults:
+
+- `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED`
+- `TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED`
+- `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED`
+
+**Consequence, measured on the pilot DB 2026-08-27:** 307 credit events on
+`tenant-zaki-pilot`, every one of them `pending`, and no other settlement state
+present in the table at all. Three months of pilot traffic have produced zero
+settled credit. That is the configuration working as designed, not a fault to
+chase.
+
+### This is not a config flip to undo
+
+Turning settlement on for real needs three things that do not exist yet:
+
+1. **A deployed NEAR credit contract.**
+2. **A funded issuer key** to pay for the calls.
+3. **An external signing adapter** behind
+   `TRACE_COMMONS_NEAR_CREDIT_SUBMITTER_URL` / `..._CONFIRMATION_URL`. There is
+   no implementation of it in this repository; `http` mode is a seam, not a
+   service.
+
+Beyond those, `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE`
+gates a further ~19-item config profile — see
+`credit_settlement_central_issuer_profile_missing_config` in
+`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`, which enumerates
+exactly what is missing and is the authoritative list. Do not transcribe it
+here; it will drift.
+
+Until items 1-3 land, `disabled` is the only honest setting. `dry_run` proves
+the state machine end-to-end but writes synthetic transaction hashes, so it
+must not be used to make a contributor's credit *look* settled.
+
+### What the contributor is told meanwhile
+
+Because settlement being off is invisible from the outside — an accepted trace,
+a pending figure, and a blank `FINAL` column look identical to "still
+working on it" — the submission receipt states the deployment's posture in
+words. `settlement_posture_explanation` in `trace-commons-ingest.rs` maps the
+mode to one contributor-facing line, and an accepted receipt carries it:
+
+| Mode | Line on the receipt |
+|---|---|
+| `disabled` | Credit is recorded but not settled: on-chain settlement is not enabled on this deployment, so this figure stays pending. |
+| `dry_run` | Settlement is running in dry-run: the credit ledger advances with synthetic transaction hashes and no on-chain credit is issued. |
+| `http` | Credit is queued for on-chain settlement. |
+
+The line is derived from the live mode rather than hardcoded, so flipping the
+mode changes what contributors are told in the same deploy. If you add a mode,
+add its sentence there — a receipt that describes a posture the deployment is
+not in is the exact defect this section exists to prevent (#445).
+
 ## Settlement mode: `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`
 
 The NEAR credit outbox is the state machine that drives account credit toward

@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use super::{SOURCE_CLAUDE_CODE, SOURCE_CODEX};
+use super::gemini_cli::{GEMINI_CLI_HOME_ENV, conventional_root};
+use super::{SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
 
 /// The environment variable Claude Code uses to relocate its config
 /// directory, and therefore its `projects/` session store.
@@ -35,13 +36,17 @@ pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 /// machine, which documents `$CODEX_HOME/<name>.config.toml`.
 pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 
-/// The session-file extension both stores use.
-const SESSION_EXTENSION: &str = "jsonl";
+/// The session-file extension the Claude Code and Codex stores use.
+const JSONL_EXTENSION: &str = "jsonl";
+
+/// Gemini CLI writes one JSON document per session rather than JSONL, so
+/// counting `.jsonl` under its store would report every machine as empty.
+const JSON_EXTENSION: &str = "json";
 
 /// One candidate session store, described well enough to consent to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceCandidate {
-    /// `claude-code` or `codex`, matching the adapter names.
+    /// `claude-code`, `codex` or `gemini-cli`, matching the adapter names.
     pub source: String,
     /// Where this store would be watched.
     pub path: PathBuf,
@@ -74,6 +79,7 @@ where
     let codex_base = env(CODEX_HOME_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
+    let gemini_relocated = env(GEMINI_CLI_HOME_ENV).is_some_and(|v| !v.is_empty());
 
     vec![
         describe(
@@ -87,6 +93,7 @@ where
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("projects"),
             claude_base.is_some(),
+            JSONL_EXTENSION,
         ),
         describe(
             SOURCE_CODEX,
@@ -95,6 +102,17 @@ where
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("sessions"),
             codex_base.is_some(),
+            JSONL_EXTENSION,
+        ),
+        // Appended rather than inserted: a shell written before this source
+        // existed indexes the first two rows by position.
+        describe(
+            SOURCE_GEMINI_CLI,
+            // The store is `<gemini home>/tmp`, which holds one directory
+            // per project; the session documents are two levels below it.
+            conventional_root(home, &env),
+            gemini_relocated,
+            JSON_EXTENSION,
         ),
     ]
 }
@@ -105,9 +123,14 @@ pub fn probe_this_machine() -> Vec<SourceCandidate> {
     probe(&home, |key| std::env::var(key).ok())
 }
 
-fn describe(source: &str, path: PathBuf, relocated_by_env: bool) -> SourceCandidate {
+fn describe(
+    source: &str,
+    path: PathBuf,
+    relocated_by_env: bool,
+    extension: &str,
+) -> SourceCandidate {
     let (exists, session_count, most_recent) = if path.is_dir() {
-        let (count, recent) = count_sessions(&path);
+        let (count, recent) = count_sessions(&path, extension);
         (true, count, recent)
     } else {
         (false, 0, None)
@@ -128,7 +151,7 @@ fn describe(source: &str, path: PathBuf, relocated_by_env: bool) -> SourceCandid
 /// symlinks: a symlinked directory could point anywhere, and this is a
 /// counting pass whose whole justification is that it stays inside the store
 /// it is describing.
-fn count_sessions(root: &Path) -> (u64, Option<DateTime<Utc>>) {
+fn count_sessions(root: &Path, extension: &str) -> (u64, Option<DateTime<Utc>>) {
     let mut count = 0_u64;
     let mut most_recent: Option<DateTime<Utc>> = None;
     let mut stack = vec![root.to_path_buf()];
@@ -149,7 +172,7 @@ fn count_sessions(root: &Path) -> (u64, Option<DateTime<Utc>>) {
                 stack.push(path);
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some(SESSION_EXTENSION) {
+            if path.extension().and_then(|e| e.to_str()) != Some(extension) {
                 continue;
             }
             count += 1;
@@ -214,6 +237,58 @@ mod tests {
         // Watching ~/.claude rather than ~/.claude/projects would take in
         // settings, plugins, and history alongside the sessions.
         assert_ne!(found[0].path, home.path().join(".claude"));
+    }
+
+    #[test]
+    fn probes_the_gemini_store_and_counts_its_json_sessions() {
+        let home = Scratch::new("gemini");
+        let chats = home.path().join(".gemini/tmp/proj/chats");
+        write_session(&chats, "session-a.json");
+        write_session(&chats, "session-b.json");
+        // The other two stores count `.jsonl`; this one counts `.json`, so
+        // a `.jsonl` sitting beside a session must not be counted here.
+        write_session(&chats, "session-c.jsonl");
+
+        let found = probe(home.path(), no_env);
+        let gemini = found
+            .iter()
+            .find(|c| c.source == SOURCE_GEMINI_CLI)
+            .expect("the roots screen must be able to ask about gemini too");
+        assert_eq!(gemini.path, home.path().join(".gemini/tmp"));
+        assert!(gemini.exists);
+        assert_eq!(gemini.session_count, 2);
+        assert!(gemini.most_recent.is_some());
+        assert!(!gemini.relocated_by_env);
+    }
+
+    #[test]
+    fn the_gemini_home_variable_relocates_the_store_and_says_so() {
+        let home = Scratch::new("gemini-env-home");
+        let elsewhere = Scratch::new("gemini-env-target");
+        write_session(&elsewhere.path().join("tmp/proj/chats"), "session-a.json");
+
+        let target = elsewhere.path().to_str().unwrap().to_string();
+        let found = probe(home.path(), |key| {
+            (key == GEMINI_CLI_HOME_ENV).then(|| target.clone())
+        });
+        let gemini = found
+            .iter()
+            .find(|c| c.source == SOURCE_GEMINI_CLI)
+            .unwrap();
+        assert_eq!(gemini.path, elsewhere.path().join("tmp"));
+        assert!(gemini.relocated_by_env);
+        assert_eq!(gemini.session_count, 1);
+    }
+
+    /// The first two rows are what every shell written before this source
+    /// existed indexes by position.
+    #[test]
+    fn the_existing_rows_keep_their_positions() {
+        let home = Scratch::new("ordering");
+        let found = probe(home.path(), no_env);
+        assert_eq!(found[0].source, SOURCE_CLAUDE_CODE);
+        assert_eq!(found[1].source, SOURCE_CODEX);
+        assert_eq!(found[2].source, SOURCE_GEMINI_CLI);
     }
 
     #[test]

@@ -1113,6 +1113,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// gate-driver pool (e.g. test doubles). [`postgres::PgBackend`] overrides
     /// this with the real query and its own "pool not configured" check when
     /// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset.
+    /// How many submissions the enumeration above would eventually return,
+    /// ignoring its `LIMIT`. The driver's backlog depth.
+    ///
+    /// Deliberately the SAME predicate as `list_submissions_needing_gate_decision`,
+    /// so the number answers "work this driver can actually pick up" rather
+    /// than "rows with no decision". Two exclusions follow from that and are
+    /// worth knowing before reading a zero as "nothing outstanding":
+    ///
+    /// - Submissions in exponential backoff are excluded until their next
+    ///   attempt is due. They come back on their own.
+    /// - Submissions at or past `max_attempts` are excluded permanently. They
+    ///   do not come back without an operator resetting their attempt row, so
+    ///   a backlog of zero can coexist with traces that will never be scored.
+    async fn count_submissions_needing_gate_decision(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+        _max_attempts: i32,
+        _backoff_base_seconds: i64,
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "gate-driver pool not configured".to_string(),
+        ))
+    }
+
     async fn list_submissions_needing_gate_decision(
         &self,
         _now: chrono::DateTime<chrono::Utc>,
@@ -1260,6 +1284,28 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _auth_principal_ref: &str,
         _limit: i64,
     ) -> Result<Vec<crate::trace_corpus_storage::TraceScoreBySubmissionRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// The scoped counterpart of `list_own_gate_decision_scores`: for each of
+    /// `submission_ids` OWNED by `(tenant_id, auth_principal_ref)`, return
+    /// its latest gate-decision score, or `None` when it has not been scored
+    /// yet. Ids the principal does not own are simply absent from the
+    /// result, whether they belong to another principal or to nobody — the
+    /// caller must not be able to tell those apart, or this becomes a probe
+    /// for other contributors' submission ids.
+    ///
+    /// `submission_ids` is the ONLY caller-supplied input; the identity pair
+    /// still comes from the authenticated request context, never from the
+    /// request body. The id list narrows a set the principal already owns,
+    /// so it cannot widen the read. Default: empty (test doubles / backends
+    /// without a gate-driver pool).
+    async fn list_own_gate_decision_scores_for_submissions(
+        &self,
+        _tenant_id: &str,
+        _auth_principal_ref: &str,
+        _submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::OwnSubmissionScoreRow>, DatabaseError> {
         Ok(Vec::new())
     }
 }

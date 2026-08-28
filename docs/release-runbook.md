@@ -17,7 +17,7 @@ The macOS app and CLI are distributed via a Homebrew tap:
 
 - `Casks/trace-commons.rb` installs the notarized `TraceCommons.app` from the
   DMG published as `TraceCommons-<version>.dmg` on releases of
-  `TraceCommons/trace-commons-server` tagged `app-v<version>`.
+  `TraceCommons/trace-commons` tagged `app-v<version>`.
 - `Formula/trace-commons-contributor.rb` installs the signed CLI from the
   zips published as `trace-commons-contributor-<target>.zip` on releases
   tagged `contributor-v<version>`, for both `aarch64-apple-darwin` and

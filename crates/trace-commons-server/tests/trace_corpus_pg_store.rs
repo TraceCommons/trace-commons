@@ -4541,3 +4541,307 @@ async fn chunk_vector_entries_insert_atomically_and_list_by_submission() {
     cleanup_tenant(&backend, &tenant_alpha).await;
     cleanup_tenant(&backend, &tenant_beta).await;
 }
+
+/// The scoped attestation's read path, against a real database.
+///
+/// This exists because the defect it pins is invisible to an in-memory double:
+/// the old attestation query INNER JOINed gate decisions, so a submission the
+/// contributor owns but the server has not scored yet simply vanished from the
+/// result, indistinguishable from one that was never submitted. The fix drives
+/// a LEFT join from `trace_submissions`, and "an absent row means unscored, not
+/// unknown" is a claim about SQL, not about Rust.
+///
+/// Requires a gate-driver pool, so it skips when
+/// `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` is unset -- the same condition the
+/// RLS suite documents. That connection matters: the query relies on the
+/// `trace_gate_driver` role's permissive cross-tenant SELECT policies, and a
+/// superuser connection would authorize the read for the wrong reason and hide
+/// a policy regression.
+#[tokio::test]
+async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
+        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
+        return;
+    }
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant = format!("pg-scoped-attest-{}", Uuid::new_v4());
+    let mine = "principal:test-user";
+
+    // Three submissions under one tenant: one scored, one submitted but never
+    // scored, and one belonging to a different principal.
+    let scored_id = Uuid::new_v4();
+    let unscored_id = Uuid::new_v4();
+    let other_principal_id = Uuid::new_v4();
+    let never_existed_id = Uuid::new_v4();
+
+    for id in [scored_id, unscored_id] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant, id))
+            .await
+            .expect("insert own submission");
+    }
+    let mut other = sample_submission(&tenant, other_principal_id);
+    other.auth_principal_ref = "principal:somebody-else".to_string();
+    backend
+        .upsert_trace_submission(other)
+        .await
+        .expect("insert other principal's submission");
+
+    backend
+        .insert_trace_gate_decision(&tenant, sample_gate_decision(scored_id))
+        .await
+        .expect("score one of them");
+    backend
+        .insert_trace_gate_decision(&tenant, sample_gate_decision(other_principal_id))
+        .await
+        .expect("score the other principal's too");
+
+    let rows = backend
+        .list_own_gate_decision_scores_for_submissions(
+            &tenant,
+            mine,
+            &[scored_id, unscored_id, other_principal_id, never_existed_id],
+        )
+        .await
+        .expect("scoped score read");
+
+    let by_id: std::collections::BTreeMap<Uuid, bool> = rows
+        .iter()
+        .map(|r| (r.submission_id, r.score.is_some()))
+        .collect();
+
+    // The whole point: owned-and-scored and owned-but-unscored are BOTH
+    // returned, and are told apart by `score`, not by presence.
+    assert_eq!(
+        by_id.get(&scored_id),
+        Some(&true),
+        "a scored submission must come back with its score"
+    );
+    assert_eq!(
+        by_id.get(&unscored_id),
+        Some(&false),
+        "an owned but unscored submission must come back with score: None, \
+         not vanish -- that absence is the defect this method exists to fix"
+    );
+
+    // Not ours, and not real, are both simply absent. The handler turns that
+    // absence into `unknown`, which is why the two must be indistinguishable
+    // here: telling them apart would let the route probe for submission ids.
+    assert!(
+        !by_id.contains_key(&other_principal_id),
+        "another principal's submission must not be returned, even scored, \
+         even under the same tenant"
+    );
+    assert!(
+        !by_id.contains_key(&never_existed_id),
+        "an id that does not exist must be absent, exactly like one we do not own"
+    );
+}
+
+/// An invite's use limit must bind across derived tenants.
+///
+/// V29's counter is keyed `(tenant_id, invite_subject_hash)`. Under
+/// `InviteTenantMode::Derived` the tenant is computed from the redeemer's own
+/// device key, so before V50 each redeemer opened a fresh counter at zero and
+/// a `max_uses = 1` invite admitted as many devices as presented it. The limit
+/// lived on the tenant-less grant row and the counter lived per tenant, and in
+/// derived mode the two never met.
+///
+/// Two devices, two derived tenants, one single-use invite. The second must be
+/// refused.
+#[tokio::test]
+async fn pg_store_invite_max_uses_binds_across_derived_tenants() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let invite_hash = format!("sha256:{}", "b".repeat(64));
+
+    // The DB-authoritative grant row is what carries the limit. Written
+    // directly: this test is about consumption, not about the admin path that
+    // creates invites.
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get grant-provisioning connection");
+        client
+            .execute(
+                "INSERT INTO onboarding_invite_grants
+                     (invite_subject_hash, policy_label, tenant_mode,
+                      tenant_template_id, policy_version, max_uses,
+                      issuance_source)
+                 VALUES ($1, 'test-pool', 'derived', 'tpl', '2026-08-27', 1, 'test')
+                 ON CONFLICT (invite_subject_hash) DO NOTHING",
+                &[&invite_hash],
+            )
+            .await
+            .expect("insert invite grant");
+    }
+
+    let mut outcomes = Vec::new();
+    for n in 0..2 {
+        let tenant_id = format!("pg-derived-bind-{}-{}", n, Uuid::new_v4());
+        {
+            let client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("get tenant-provisioning connection");
+            client
+                .execute(
+                    "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    &[&tenant_id],
+                )
+                .await
+                .expect("provision derived tenant");
+        }
+        let device = trace_commons_server::db::DeviceKeyWrite {
+            device_key_id: format!(
+                "sha256:{}{}",
+                Uuid::new_v4().simple(),
+                Uuid::new_v4().simple()
+            ),
+            tenant_id,
+            public_key: format!("pk-bind-{n}"),
+            invite_subject_hash: invite_hash.clone(),
+            client_info: serde_json::json!({}),
+            allowed_consent_scopes: None,
+            allowed_uses: None,
+        };
+        outcomes.push(backend.onboard_device_key(device, 1).await);
+    }
+
+    assert!(
+        outcomes[0].is_ok(),
+        "the first redemption must succeed: {:?}",
+        outcomes[0].as_ref().err()
+    );
+    assert!(
+        matches!(
+            outcomes[1],
+            Err(trace_commons_server::db::OnboardDeviceKeyError::InviteAlreadyConsumed)
+        ),
+        "a single-use invite must refuse a second device even though that \
+         device derives a different tenant id, got {:?}",
+        outcomes[1]
+    );
+}
+
+/// The backlog count and the work enumeration must agree on real rows.
+///
+/// They are two copies of one predicate, and the whole value of logging a
+/// backlog is that it describes the queue the driver is actually draining. If
+/// they drift, an operator tunes concurrency against a number that means
+/// something else -- worse than logging nothing, because it looks like data.
+///
+/// Also pins the two exclusions the count inherits, because both make a zero
+/// mean less than it appears: a submission in backoff is absent until its
+/// next attempt is due, and one at `max_attempts` is absent for good.
+#[tokio::test]
+async fn pg_store_backlog_count_agrees_with_the_work_enumeration() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    if std::env::var("TRACE_COMMONS_GATE_DRIVER_DATABASE_URL").is_err() {
+        eprintln!("skipping: TRACE_COMMONS_GATE_DRIVER_DATABASE_URL not configured");
+        return;
+    }
+    backend.run_migrations().await.expect("run migrations");
+
+    let now = chrono::Utc::now();
+    let max_attempts = 5;
+    let backoff = 30_i64;
+
+    // Give the predicate something to find, or both sides return zero and the
+    // comparison passes without comparing anything. One submission carrying a
+    // submitted_envelope object ref and no gate decision is the exact shape
+    // the driver picks up.
+    let tenant_id = format!("pg-backlog-{}", Uuid::new_v4());
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get provisioning connection");
+        client
+            .execute(
+                "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                &[&tenant_id],
+            )
+            .await
+            .expect("provision tenant");
+    }
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+    // Written directly: no trait method writes a single object ref -- they are
+    // produced as part of larger operations -- and the predicate only cares
+    // that a live submitted_envelope row exists.
+    {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("get provisioning connection");
+        client
+            .execute(
+                "INSERT INTO trace_object_refs
+                   (tenant_id, submission_id, object_ref_id, artifact_kind,
+                    object_store, object_key, content_sha256, encryption_key_ref,
+                    size_bytes)
+                 VALUES ($1, $2, $3, 'submitted_envelope',
+                         'trace_commons_file_store', $4, 'sha256:envelope',
+                         $5, 64)",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &Uuid::new_v4(),
+                    &format!("{tenant_id}/{submission_id}/envelope.json"),
+                    &format!("tenant:{tenant_id}"),
+                ],
+            )
+            .await
+            .expect("record submitted envelope ref");
+    }
+
+    // A large limit, so the enumeration is not the thing truncating.
+    let listed = backend
+        .list_submissions_needing_gate_decision(now, max_attempts, backoff, 100_000)
+        .await
+        .expect("enumeration");
+    let counted = backend
+        .count_submissions_needing_gate_decision(now, max_attempts, backoff)
+        .await
+        .expect("count");
+
+    assert_eq!(
+        counted,
+        listed.len() as i64,
+        "count and enumeration disagree: the logged backlog would not describe \
+         the queue the driver drains"
+    );
+    assert!(
+        counted >= 1,
+        "the fixture submission must be counted, or this test compares two zeroes"
+    );
+
+    // max_attempts = 0 admits nothing, whatever else is true of the rows.
+    let none = backend
+        .count_submissions_needing_gate_decision(now, 0, backoff)
+        .await
+        .expect("count with no attempts allowed");
+    assert_eq!(
+        none, 0,
+        "a submission at or past max_attempts must be excluded -- this is why \
+         a backlog of zero can coexist with traces that will never be scored"
+    );
+}

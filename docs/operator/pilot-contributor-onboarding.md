@@ -220,7 +220,7 @@ human eye before that content joins the shared corpus — there is
 currently no automatic downgrade path even after server-side
 re-scrubbing. The policy decision behind this (and whether to wire
 an auto-accept path off a successful privacy-filter pass) is tracked
-in [#131](https://github.com/TraceCommons/trace-commons-server/issues/131).
+in [#131](https://github.com/TraceCommons/trace-commons/issues/131).
 
 Expected wait for the quarantine queue depends on operator capacity;
 ask the operator if your `credit_points_pending` has been at `0.0`

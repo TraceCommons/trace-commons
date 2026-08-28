@@ -131,6 +131,12 @@ pub struct DaemonSettings {
     pub claude_source: Option<SourceDeclaration>,
     #[serde(default)]
     pub codex_source: Option<SourceDeclaration>,
+    /// Added after every desktop client had shipped, which is why an absent
+    /// value here means "no gemini adapter" rather than "the conventional
+    /// `~/.gemini`" -- see [`crate::source::SourceRoots`] and
+    /// [`roots_declared`].
+    #[serde(default)]
+    pub gemini_source: Option<SourceDeclaration>,
 
     /// Legacy spellings, read on load and never written.
     ///
@@ -220,6 +226,7 @@ impl Default for DaemonSettings {
             near_ai: None,
             claude_source: None,
             codex_source: None,
+            gemini_source: None,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -267,6 +274,28 @@ impl DaemonSettings {
         self.legacy_codex_root = None;
     }
 
+    /// What the contributor declared, in the shape `crate::source::all_sources`
+    /// takes.
+    ///
+    /// The named fields stay the serialised shape -- a `daemon-settings.json`
+    /// written by any previous version parses unchanged -- and the map is
+    /// built from them here, in one place, so adding an adapter does not
+    /// touch the daemon, the watcher, the preview scheduler or the CLI.
+    ///
+    /// No trajectory selection: a daemon's working directory is whatever a
+    /// service manager handed it, so auto-discovery would mean nothing
+    /// there. Callers that want one add it with
+    /// [`crate::source::SourceRoots::with_trajectory`].
+    pub fn source_roots(&self) -> crate::source::SourceRoots {
+        crate::source::SourceRoots::new()
+            .declare(
+                crate::source::SOURCE_CLAUDE_CODE,
+                self.claude_source.clone(),
+            )
+            .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
+            .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
+    }
+
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
         let body = serde_json::to_vec_pretty(self).context("serializing daemon settings")?;
         store.write_daemon_file(DAEMON_SETTINGS_FILE, &body)
@@ -289,6 +318,24 @@ pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
 
+/// The `daemon-settings.json` key carrying one adapter's declaration.
+///
+/// The mapping exists because the adapter names are wire names
+/// (`gemini-cli`) and the settings keys are field names (`gemini_source`);
+/// a shell that renders one candidate per discovered source needs to turn
+/// the first into the second without transcribing a table of its own. An
+/// unrecognised source answers `None` rather than inventing a key, so a
+/// caller that has fallen behind this crate refuses rather than writing a
+/// field `apply_settings_object` will reject.
+pub fn source_settings_key(source: &str) -> Option<&'static str> {
+    match source {
+        crate::source::SOURCE_CLAUDE_CODE => Some("claude_source"),
+        crate::source::SOURCE_CODEX => Some("codex_source"),
+        crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
+        _ => None,
+    }
+}
+
 /// Whether the contributor has said which session folders to watch.
 ///
 /// BOTH, not either. `claude_root: None` does not mean "no Claude source" --
@@ -309,6 +356,22 @@ pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
 /// someone typing a command on purpose, and the CLI keeps its defaults.
 pub fn roots_declared(settings: &DaemonSettings) -> bool {
     settings.claude_source.is_some() && settings.codex_source.is_some()
+}
+
+/// Whether the contributor has been asked about their Gemini CLI sessions.
+///
+/// Deliberately NOT a third conjunct in `roots_declared`. That predicate
+/// decides whether the daemon may start, and every desktop client already
+/// installed declares claude and codex and has no gemini field: a third
+/// conjunct would stop the daemon starting on every one of them. An absent
+/// gemini declaration is not disqualifying because it is not dangerous --
+/// it constructs no adapter and scans nothing (`crate::source::Undeclared`)
+/// -- which is exactly the property the fail-closed-roots rule turns on.
+///
+/// So this is a question about what a shell should OFFER to ask, not a gate
+/// on starting.
+pub fn gemini_declared(settings: &DaemonSettings) -> bool {
+    settings.gemini_source.is_some()
 }
 
 /// Apply a partial settings object -- the shape `tc_call(handle,
@@ -405,6 +468,9 @@ pub fn apply_settings_object(
             "codex_source" => {
                 settings.codex_source = parse_source_declaration(value)?;
             }
+            "gemini_source" => {
+                settings.gemini_source = parse_source_declaration(value)?;
+            }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
         changed = true;
@@ -476,6 +542,123 @@ mod tests {
         };
         s.save(&store).unwrap();
         assert_eq!(DaemonSettings::load(&store).unwrap().quiescence_secs, 60);
+    }
+
+    /// The A2 rule, at the gate it must not join.
+    ///
+    /// Every desktop client already installed declares claude and codex and
+    /// has no gemini field. A third conjunct here would stop the daemon
+    /// starting on every one of them.
+    #[test]
+    fn roots_declared_does_not_require_a_gemini_declaration() {
+        let declared = |path: &str| {
+            Some(SourceDeclaration::Watch {
+                path: PathBuf::from(path),
+            })
+        };
+        let s = DaemonSettings {
+            claude_source: declared("/declared/claude"),
+            codex_source: declared("/declared/codex"),
+            ..Default::default()
+        };
+        assert!(
+            roots_declared(&s),
+            "an absent gemini declaration is not disqualifying"
+        );
+        assert!(
+            !gemini_declared(&s),
+            "but a shell can still ask whether to offer the question"
+        );
+
+        let asked = DaemonSettings {
+            gemini_source: Some(SourceDeclaration::Off),
+            ..s
+        };
+        assert!(roots_declared(&asked));
+        assert!(
+            gemini_declared(&asked),
+            "off is an answer; it is not the absence of one"
+        );
+    }
+
+    /// A settings file written before this source existed must load, and
+    /// must construct no gemini adapter.
+    #[test]
+    fn a_settings_file_written_before_gemini_existed_loads_with_it_absent() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("gemini_source");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.gemini_source, None);
+        assert!(
+            !crate::source::all_sources(&loaded.source_roots())
+                .iter()
+                .any(|s| s.name() == crate::source::SOURCE_GEMINI_CLI)
+        );
+    }
+
+    /// The declarations reach `all_sources` as a map, so an adapter added
+    /// later needs no call-site change anywhere in the daemon.
+    #[test]
+    fn source_roots_carries_every_declaration() {
+        let s = DaemonSettings {
+            claude_source: Some(SourceDeclaration::Off),
+            codex_source: Some(SourceDeclaration::Off),
+            gemini_source: Some(SourceDeclaration::Watch {
+                path: PathBuf::from("/declared/gemini"),
+            }),
+            ..Default::default()
+        };
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots())
+            .iter()
+            .map(|s| s.name())
+            .collect();
+        assert_eq!(names, vec![crate::source::SOURCE_GEMINI_CLI]);
+    }
+
+    #[test]
+    fn the_gemini_declaration_is_settable_and_type_checked() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"gemini_source": {"mode": "off"}})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.gemini_source, Some(SourceDeclaration::Off));
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"gemini_source": "/a/path"})),
+            Err(ERR_SETTINGS_INVALID_VALUE),
+            "a bare string is the legacy *_root spelling, which this key \
+             never had"
+        );
+    }
+
+    /// Every source a shell can discover must have a settings key, and
+    /// every one of those keys must be one `apply_settings_object` accepts.
+    /// A source added to the table without both is a roots screen that
+    /// silently discards the contributor's answer.
+    #[test]
+    fn every_discoverable_source_has_a_settings_key_that_round_trips() {
+        let home = std::env::temp_dir();
+        for candidate in crate::source::discovery::probe(&home, |_| None) {
+            let key = source_settings_key(&candidate.source)
+                .unwrap_or_else(|| panic!("no settings key for {}", candidate.source));
+            let mut s = DaemonSettings::default();
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ key: {"mode": "off"} })),
+                Ok(true),
+                "{key} is not a key apply_settings_object accepts"
+            );
+            assert!(
+                s.source_roots().is_declared(candidate.source.as_str()),
+                "{key} did not reach the declaration map"
+            );
+        }
     }
 
     #[test]
