@@ -66,7 +66,7 @@ use usearch::Index;
 use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 use uuid::Uuid;
 
-use crate::vector_index::{NearestNeighbor, VectorIndex};
+use crate::vector_index::{NearestNeighbor, VectorIndex, VectorIndexSnapshot};
 
 /// One tenant's open index handle. The mutex serializes inserts / searches /
 /// deletes within the tenant; `dirty_writes` counts unflushed writes for the
@@ -203,6 +203,29 @@ impl UsearchVectorIndex {
             flush_every,
             periodic_flusher,
         })
+    }
+
+    /// Stable identity of one tenant's shard, for the #199 instrumentation.
+    ///
+    /// Derived rather than generated so it survives a restart: this index is
+    /// reopened on every deploy and LRU-evicted whenever `max_open` tenants
+    /// are busy, and an id minted per open would shatter one continuous
+    /// corpus into fragments nobody could pool. Derived from the index root
+    /// and the tenant ref, so a corpus rebuilt under a different root reads
+    /// as the different corpus it is.
+    ///
+    /// Hashed, not carried: `root_dir` is a filesystem path and the ref is a
+    /// tenant identifier, and neither may appear in a stored row.
+    fn shard_snapshot_id(&self, tenant_storage_ref: &str) -> Uuid {
+        let mut h = Sha256::new();
+        h.update(b"trace_gate_enclave.vector_index_snapshot.v1\n");
+        h.update(self.root_dir.as_os_str().as_encoded_bytes());
+        h.update(b"\n");
+        h.update(tenant_storage_ref.as_bytes());
+        let digest = h.finalize();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        Uuid::from_bytes(bytes)
     }
 
     fn tenant_file_path(&self, tenant_storage_ref: &str) -> PathBuf {
@@ -633,6 +656,26 @@ impl VectorIndex for UsearchVectorIndex {
     fn flush(&self) -> anyhow::Result<()> {
         self.flush_all()
     }
+
+    fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+        // Opening the shard is the only way to count it, and `nearest` is
+        // about to open it anyway. Nothing here mutates its contents. A
+        // failure to open reports "cannot describe" rather than refusing the
+        // evaluation: the scoring call immediately after this one will fail
+        // closed on the same error, and instrumentation must not become a new
+        // way for a trace to be rejected.
+        let handle = self.handle_for(tenant_storage_ref).ok()?;
+        let cardinality = {
+            let guard = handle
+                .lock()
+                .expect("UsearchVectorIndex tenant mutex poisoned");
+            guard.index.size() as u64
+        };
+        Some(VectorIndexSnapshot {
+            snapshot_id: self.shard_snapshot_id(tenant_storage_ref),
+            cardinality,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -666,6 +709,48 @@ mod tests {
 
     fn build_index(root: &Path, dim: usize) -> UsearchVectorIndex {
         UsearchVectorIndex::try_new(root, test_config(dim)).expect("index ctor")
+    }
+
+    /// #199 instrumentation. The shard id must survive a restart: the pilot
+    /// restarts often, and an id that changed on every reopen would shatter a
+    /// single continuous corpus into fragments an analyst could not pool.
+    /// Cardinality is what moves as the shard fills.
+    #[test]
+    fn snapshot_identifies_the_shard_and_counts_it() {
+        let dir = tempdir().unwrap();
+        let idx = build_index(dir.path(), 4);
+
+        let empty = idx
+            .snapshot("tenant_a")
+            .expect("a real index describes itself");
+        assert_eq!(
+            empty.cardinality, 0,
+            "an untouched shard holds nothing; 0 is a real observation"
+        );
+
+        idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![0.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+        let filled = idx.snapshot("tenant_a").unwrap();
+        assert_eq!(filled.snapshot_id, empty.snapshot_id, "same shard");
+        assert_eq!(filled.cardinality, 2);
+
+        let other = idx.snapshot("tenant_b").unwrap();
+        assert_ne!(
+            other.snapshot_id, empty.snapshot_id,
+            "novelty is per-tenant, so each tenant is its own corpus"
+        );
+
+        idx.flush().unwrap();
+        drop(idx);
+        let reopened = build_index(dir.path(), 4);
+        let after_restart = reopened.snapshot("tenant_a").unwrap();
+        assert_eq!(
+            after_restart.snapshot_id, empty.snapshot_id,
+            "a restart does not make the corpus a different corpus"
+        );
+        assert_eq!(after_restart.cardinality, 2);
     }
 
     fn build_index_with_periodic_flush(

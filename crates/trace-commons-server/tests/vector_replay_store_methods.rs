@@ -113,6 +113,9 @@ fn sample_gate_decision(
         chunk_count: None,
         total_chunk_count: None,
         chunks_capped: None,
+        composite_score_micros: None,
+        vector_index_snapshot_id: None,
+        index_cardinality_at_scoring: None,
     }
 }
 

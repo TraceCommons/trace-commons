@@ -1,0 +1,61 @@
+-- Prospective instrumentation for the gate-utility question (#199).
+--
+-- The landing claim is that credits attest to utility. The only calibration
+-- number behind it is `discrimination_auc(novel, duplicate)`, which is a
+-- statement about redundancy, not about whether a trace was any good.
+-- `task_success` is collected, persisted to trace_derived_records and
+-- rendered in the admin analytics, and no part of the scoring or credit path
+-- reads it. Answering the question later needs three things recorded at the
+-- moment a decision is made:
+--
+--   * composite_score_micros -- the composite `q` the credit path keys on,
+--     * 1e6, as computed at scoring time under the calibration active then.
+--     The three stored components (perplexity, tail fraction, novelty) do not
+--     reconstruct it once the weights move. It is deliberately distinct from
+--     credit_quality_micros (V39), which the POST /v1/admin/score-credit-quality
+--     batch route OVERWRITES in place: that column holds the latest re-score,
+--     this one holds the number production actually used, and only the second
+--     can be joined to an outcome.
+--
+--   * vector_index_snapshot_id -- novelty is `1 - max cosine similarity`
+--     against whatever was in the tenant's index shard at scoring time. Two
+--     decisions carrying the same snapshot id were scored against the same
+--     shard generation; a different id marks a shard reopen or rebuild, which
+--     is the discontinuity an analyst must not average across.
+--
+--   * index_cardinality_at_scoring -- the index fills monotonically, so
+--     novelty drifts downward with time. This is the covariate that drift
+--     shows up in, and the one a chronological estimate has to condition on.
+--
+-- PROSPECTIVE BY CONSTRUCTION, which is the whole reason to add the columns
+-- before anyone wants the answer. Recomputing novelty later scores against a
+-- fuller index and produces a number production never used, so a backfilled
+-- value would be a fabrication wearing the same column name as a measurement.
+-- Nullable and backfill-free on purpose, exactly like V49's
+-- last_status_reason and V52's residual_risk_basis: every row predating this
+-- migration keeps NULL, which reads as "not instrumented". NULL is also
+-- distinct from 0 here, and that distinction is load-bearing -- a below-floor
+-- trace has a genuine composite score of 0, and an empty shard has a genuine
+-- cardinality of 0, so a non-null zero default would silently enrol every
+-- historical row into the sample as a real observation.
+--
+-- Hash-only/label-only discipline is unaffected: a score in micros, an opaque
+-- shard-generation UUID, and a count. No trace content, no contributor
+-- identity, no operator-secret material.
+--
+-- No RLS change (a column on an already-RLS-forced table inherits the tenant
+-- predicate). No column-level SELECT grant is added: trace_gate_driver holds
+-- column-scoped grants (V45/V47) and reads none of these three -- nothing in
+-- the credit, dedup, cap or attestation passes consumes them -- so adding one
+-- here would widen a reader role for no reason. The analysis reads them
+-- through an operator connection, not a driver role.
+--
+-- This column set changes nothing about which traces pass the gate, what any
+-- contributor is paid, or what any attestation says. It is instrumentation,
+-- and it answers nothing on its own: #199 pre-registers the analysis with a
+-- stopping rule of ~125 per class, and an early look yields a null that means
+-- only that the sample was small.
+ALTER TABLE trace_gate_decisions
+    ADD COLUMN IF NOT EXISTS composite_score_micros BIGINT,
+    ADD COLUMN IF NOT EXISTS vector_index_snapshot_id UUID,
+    ADD COLUMN IF NOT EXISTS index_cardinality_at_scoring BIGINT;

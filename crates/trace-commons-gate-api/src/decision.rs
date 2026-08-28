@@ -83,6 +83,14 @@ pub struct OrchestrationDecision {
     /// Every chunk entry inserted into the vector index (both gates passed,
     /// per-chunk novelty at or above the insert threshold). Empty on fail.
     pub inserted_chunk_entries: Vec<InsertedChunkEntry>,
+    /// Generation of the tenant's index shard the novelty scores above were
+    /// computed against, captured before this trace's own entries were
+    /// inserted (#199). `None` when the index cannot describe its own state.
+    pub vector_index_snapshot_id: Option<Uuid>,
+    /// How many entries that shard held at scoring time (#199). `None` has
+    /// the same meaning as above and is deliberately distinct from `Some(0)`,
+    /// which is the real observation for a tenant's first trace.
+    pub index_cardinality_at_scoring: Option<u64>,
 }
 
 /// Output of `EnclaveGateOrchestrator::evaluate_perplexity_only`. Carries

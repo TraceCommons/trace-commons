@@ -5647,6 +5647,9 @@ async fn list_submissions_needing_gate_decision_excludes_decided_and_capped_subm
                 chunk_count: None,
                 total_chunk_count: None,
                 chunks_capped: None,
+                composite_score_micros: None,
+                vector_index_snapshot_id: None,
+                index_cardinality_at_scoring: None,
             },
         )
         .await

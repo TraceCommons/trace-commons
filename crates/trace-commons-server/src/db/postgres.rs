@@ -1958,6 +1958,31 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        // V53 adds the prospective gate-utility instrumentation columns
+        // (#199). Additive and backfill-free: rows written before it keep NULL
+        // forever, because a novelty score recomputed against a fuller index
+        // is not the number production used.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&53_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V53__trace_gate_decision_composite_score.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&53_i32, &"trace_gate_decision_composite_score"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5658,6 +5683,70 @@ mod tests {
         assert!(
             !V52.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
             "V52 must not weaken forced RLS"
+        );
+    }
+
+    /// V53 records the composite score credit keys on, plus the vector-index
+    /// state novelty was scored against (#199). Prospective by construction:
+    /// recomputing novelty later scores against a fuller index and produces a
+    /// number production never used, so historical rows must keep NULL.
+    #[test]
+    fn v53_adds_nullable_prospective_gate_instrumentation_columns() {
+        const V53: &str =
+            include_str!("../../../../migrations/V53__trace_gate_decision_composite_score.sql");
+        assert!(
+            V53.contains("ADD COLUMN IF NOT EXISTS composite_score_micros BIGINT"),
+            "V53 must add the composite-score column"
+        );
+        assert!(
+            V53.contains("ADD COLUMN IF NOT EXISTS vector_index_snapshot_id UUID"),
+            "V53 must add the vector-index snapshot column"
+        );
+        assert!(
+            V53.contains("ADD COLUMN IF NOT EXISTS index_cardinality_at_scoring BIGINT"),
+            "V53 must add the index-cardinality covariate column"
+        );
+        assert!(
+            !V53.to_uppercase().contains("NOT NULL"),
+            "V53 must leave pre-existing rows NULL rather than assert a score for them"
+        );
+        assert!(
+            !V53.to_uppercase().contains("UPDATE TRACE_GATE_DECISIONS"),
+            "V53 must not backfill: a recomputed novelty is not the number production used"
+        );
+        assert!(
+            !V53.contains("GRANT SELECT (composite_score_micros)"),
+            "V53 must not widen a column-scoped reader role for a column it does not read"
+        );
+        assert!(
+            !V53.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V53 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    ///
+    /// The markers are built at runtime rather than written as literals.
+    /// `THIS_FILE` is this file, so a literal would appear in the assertion's
+    /// own source and the assertion would be satisfied by itself -- passing
+    /// with the migration wired into nothing.
+    #[test]
+    fn v53_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!(
+            "migrations/V{}__trace_gate_decision_composite_score.sql",
+            53
+        );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V53 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 53);
+        assert!(
+            THIS_FILE.contains(&version_marker),
+            "V53 must record itself in _trace_commons_migrations"
         );
     }
 
