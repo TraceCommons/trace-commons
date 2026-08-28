@@ -100,6 +100,7 @@ fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWri
         credit_points_pending: Some(1.0),
         credit_points_final: None,
         expires_at: None,
+        residual_risk_basis: None,
     }
 }
 
@@ -1471,6 +1472,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             credit_points_pending: Some(0.0),
             credit_points_final: None,
             expires_at: None,
+            residual_risk_basis: None,
         })
         .await
         .expect("insert second accepted ranking source");
@@ -1497,6 +1499,7 @@ async fn pg_store_round_trips_tenant_scoped_ranking_evidence() {
             credit_points_pending: Some(0.0),
             credit_points_final: None,
             expires_at: None,
+            residual_risk_basis: None,
         })
         .await
         .expect("insert beta second accepted ranking source with same ids");
@@ -4847,4 +4850,90 @@ async fn pg_store_backlog_count_agrees_with_the_work_enumeration() {
         "a submission at or past max_attempts must be excluded -- this is why \
          a backlog of zero can coexist with traces that will never be scored"
     );
+}
+
+/// V51 round trip (#474 proposal 4). The column exists so the quarantine
+/// queue can be split into privacy findings and outage artifacts; three
+/// distinct states have to survive storage for that to be possible.
+///
+/// CI never runs this suite. It is here to be run by hand against
+/// `trace_commons_test`.
+#[tokio::test]
+async fn residual_risk_basis_round_trips_and_distinguishes_unrecorded_from_empty() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+    let tenant_id = "tenant-residual-basis";
+    cleanup_tenant(&backend, tenant_id).await;
+
+    // 1. Not recorded. Every row written before V51 is this, and it must
+    //    never read back as a claim that no condition held.
+    let unrecorded_id = Uuid::new_v4();
+    let record = backend
+        .upsert_trace_submission(sample_submission(tenant_id, unrecorded_id))
+        .await
+        .expect("insert unrecorded");
+    assert!(
+        record.residual_risk_basis.is_none(),
+        "a write that recorded no basis must read back as NULL"
+    );
+
+    // 2. Recorded, and nothing held. A different claim, and it must survive
+    //    as one.
+    let empty_id = Uuid::new_v4();
+    let mut write = sample_submission(tenant_id, empty_id);
+    write.residual_risk_basis = Some(Vec::new());
+    let record = backend
+        .upsert_trace_submission(write)
+        .await
+        .expect("insert empty basis");
+    assert_eq!(record.residual_risk_basis, Some(Vec::new()));
+
+    // 3. Recorded conditions, including the pair that a first-wins label
+    //    could never carry together.
+    let recorded_id = Uuid::new_v4();
+    let mut write = sample_submission(tenant_id, recorded_id);
+    write.privacy_risk = "high".to_string();
+    write.residual_risk_basis = Some(vec![
+        "key_finding".to_string(),
+        "coverage_incomplete".to_string(),
+    ]);
+    let record = backend
+        .upsert_trace_submission(write)
+        .await
+        .expect("insert recorded basis");
+    assert_eq!(
+        record.residual_risk_basis,
+        Some(vec![
+            "key_finding".to_string(),
+            "coverage_incomplete".to_string()
+        ])
+    );
+    let reread = backend
+        .get_trace_submission(tenant_id, recorded_id)
+        .await
+        .expect("read back")
+        .expect("row exists");
+    assert_eq!(reread.residual_risk_basis, record.residual_risk_basis);
+    assert_eq!(reread.privacy_risk, "high");
+
+    // A re-scrub overwrites the risk, so it must overwrite the basis in the
+    // same statement. A stale basis beside a fresh risk is the failure this
+    // column exists to prevent.
+    let mut rescrubbed = sample_submission(tenant_id, recorded_id);
+    rescrubbed.privacy_risk = "medium".to_string();
+    rescrubbed.residual_risk_basis = Some(vec!["found_and_removed".to_string()]);
+    let record = backend
+        .upsert_trace_submission(rescrubbed)
+        .await
+        .expect("re-scrub upsert");
+    assert_eq!(record.privacy_risk, "medium");
+    assert_eq!(
+        record.residual_risk_basis,
+        Some(vec!["found_and_removed".to_string()]),
+        "the basis must be rewritten beside the risk, never left stale"
+    );
+
+    cleanup_tenant(&backend, tenant_id).await;
 }

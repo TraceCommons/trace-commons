@@ -51,6 +51,7 @@ fn submission_write_keeps_auth_tenant_separate_from_envelope_scope() {
         credit_points_pending: Some(1.25),
         credit_points_final: None,
         expires_at: None,
+        residual_risk_basis: None,
     };
 
     assert_eq!(submission.tenant_id, "tenant-a");

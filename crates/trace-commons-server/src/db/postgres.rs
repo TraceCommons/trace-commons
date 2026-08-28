@@ -1937,6 +1937,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&52_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V52__trace_submission_residual_risk_basis.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&52_i32, &"trace_submission_residual_risk_basis"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5602,6 +5623,55 @@ mod tests {
         assert!(
             schema.contains("spans") && schema.contains("window_hash"),
             "V51 must key on a hash and store spans"
+        );
+    }
+
+    /// V52 records WHICH residual-risk conditions held when a submission's
+    /// privacy risk was decided (#474 proposal 4). Same shape as V49 and for
+    /// the same reason: at review time a coverage gap forced High is
+    /// indistinguishable from a filter that looked and found a secret, and
+    /// those two demand opposite responses.
+    ///
+    /// Label-only by construction, nullable, backfill-free. Inferring a basis
+    /// from `status` would fabricate exactly the data this column exists to
+    /// obtain.
+    #[test]
+    fn v52_adds_a_nullable_label_only_residual_risk_basis_column() {
+        const V52: &str =
+            include_str!("../../../../migrations/V52__trace_submission_residual_risk_basis.sql");
+        assert!(
+            V52.contains("ADD COLUMN IF NOT EXISTS residual_risk_basis JSONB"),
+            "V52 must add the residual-risk basis column"
+        );
+        assert!(
+            !V52.to_uppercase().contains("NOT NULL"),
+            "V52 must leave pre-existing rows NULL rather than assert a basis for them"
+        );
+        assert!(
+            !V52.to_uppercase().contains("UPDATE TRACE_SUBMISSIONS"),
+            "V52 must not backfill a guessed basis onto historical rows"
+        );
+        assert!(
+            !V52.contains("GRANT SELECT (residual_risk_basis)"),
+            "V52 must not widen a column-scoped reader role for a column it does not read"
+        );
+        assert!(
+            !V52.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V52 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
+    #[test]
+    fn v52_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        assert!(
+            THIS_FILE.contains("migrations/V52__trace_submission_residual_risk_basis.sql"),
+            "V52 must be wired into run_migrations with an include_str!"
+        );
+        assert!(
+            THIS_FILE.contains("&52_i32"),
+            "V52 must record itself in _trace_commons_migrations"
         );
     }
 
