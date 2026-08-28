@@ -264,6 +264,14 @@ jobs:
       # with a `SmokePilotBootstrapFailure:<label>` diagnostic.
       - name: Run pilot-bootstrap smoke
         run: bash scripts/operator/pilot-bootstrap-smoke.sh
+      # The corpus builder is the surface #204 was filed against: it built the
+      # novel and duplicate slices from different source populations, so a
+      # no-model measure classified the corpus the bake-off then selected a
+      # model on. These stdlib-only self-tests cover the same-source pair
+      # construction and the length band that keeps a truncating paraphraser
+      # from reintroducing the confound. They gated nothing before.
+      - name: Run corpus-builder self-tests
+        run: python3 scripts/operator/test_build_agent_traces_corpus.py
 
   operator-binaries-smoke:
     name: operator-binaries smoke

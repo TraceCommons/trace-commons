@@ -29,6 +29,7 @@ the link.
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
+| Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
 | Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
@@ -87,6 +88,11 @@ Every runbook in this directory, with a one-line description.
   and verify the audit chain when investigating a dispute or anomaly.
 - [`./backup-restore.md`](./backup-restore.md) — what is backed up where,
   restore procedures, and honest RPO/RTO targets.
+- [`./corpus-validity-battery.md`](./corpus-validity-battery.md) — the
+  trivial-measure battery that a bake-off corpus must fail to be separated by,
+  why the A2.6 corpus was separable by paragraph count alone (#204), the
+  corrected same-source construction, and what passing the battery does and
+  does not establish.
 - [`./calibration.md`](./calibration.md) — empirical procedure for tuning
   perplexity, tail-fraction, and novelty floors (dry-run → cutover).
 - [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) —
