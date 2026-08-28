@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Append-only JSONL sidecar writer. One line per attempted submission;
 //! calibration tooling joins these by `submission_id` against
 //! `trace_gate_decisions`.

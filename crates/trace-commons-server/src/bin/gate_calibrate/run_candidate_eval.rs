@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Per-candidate evaluation for the A2.1 perplexity-scorer bake-off.
 //!
 //! Takes a loaded corpus and a single candidate, runs it through a

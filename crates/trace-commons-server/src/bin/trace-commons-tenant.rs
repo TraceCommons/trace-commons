@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `trace-commons-tenant` — tenant-audience operator CLI.
 //!
 //! Twelve subcommands covering tenant-policy management, tenant access-grant

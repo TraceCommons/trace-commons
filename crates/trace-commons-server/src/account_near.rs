@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Login-with-NEAR (Slice 3a) account ceremony support.
 //!
 //! This module hosts the server-side NEAR sign-in flow: issuing a NEP-413

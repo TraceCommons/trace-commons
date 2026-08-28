@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration test for the `tail-floor` subcommand of
 //! `trace-commons-gate-calibrate`. Drives the pure-data pipeline
 //! (`read_sidecar` → `compute_report` → `emit`) against a 100-submission

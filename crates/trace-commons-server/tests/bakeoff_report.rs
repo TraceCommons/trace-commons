@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // These source modules expose helpers for their own integration targets; this
 // target intentionally uses only corpus loading and discrimination AUC.
 #[allow(dead_code)]

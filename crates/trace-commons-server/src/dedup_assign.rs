@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pure cluster-assignment logic for cross-trace dedup. Signal-agnostic: the
 //! caller gathers candidate clusters from the cross-tenant simhash scan and/or
 //! the dedup vector index and hands them here. OR-match on either signal; tie

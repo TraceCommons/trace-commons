@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Unit tests for `CloudKmsKeyWrapper` against the hermetic
 //! `InMemoryCloudKmsClient`. The in-memory client uses real AES-256-GCM with
 //! the canonical KEK-context hash bound as AAD, so the round-trip exercises

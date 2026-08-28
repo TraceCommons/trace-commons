@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pure, deterministic per-decision contributor-cap factor. A saturating
 //! concave function of a contributor's in-epoch cumulative raw credit
 //! `R = sum(q * dup_pen)` bounds how much any one identity can earn per epoch:

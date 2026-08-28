@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Loopback (native-app) account sign-in: PKCE binding, exact loopback
 //! redirect matching, and the bearer-token encoding for a native session.
 //!

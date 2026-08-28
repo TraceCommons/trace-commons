@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! HuggingFace JSONL session reader. The three pilot-bootstrap target
 //! datasets (`jedisct1/agent-traces-swival`, `badlogicgames/pi-mono`,
 //! `TeichAI/DeepSeek-v4-Pro-Agent`) all ship one `.jsonl` file per session,

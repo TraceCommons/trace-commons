@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! PG-backed tests for the new `TraceCorpusStore` methods added for the
 //! `trace-commons-vector-replay` recovery binary:
 //!

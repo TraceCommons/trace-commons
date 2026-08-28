@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Self-serve invite claims for NEAR Legion token holders.
 //!
 //! A holder proves control of a NEAR account with a NEP-413 wallet signature

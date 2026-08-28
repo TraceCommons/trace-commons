@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration tests for the v2 KEK envelope path in
 //! `ServiceOwnedTraceArtifactStore`.
 //!

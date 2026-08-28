@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `trace-commons-pilot-bootstrap` — replay HuggingFace agent-traces datasets into a
 //! running `trace-commons-ingest` for Phase A.6 pilot-bootstrap calibration.
 //!

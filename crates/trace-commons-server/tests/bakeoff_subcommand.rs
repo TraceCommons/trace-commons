@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration test for the `bake-off` subcommand of
 //! `trace-commons-gate-calibrate`. Builds a synthetic corpus tarball + a
 //! 2-candidate manifest, invokes the binary, and validates the produced

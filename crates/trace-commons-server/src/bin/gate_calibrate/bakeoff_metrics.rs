@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Pure-function scoring primitives for the A2.1 perplexity-scorer bake-off.
 // The decision rule (in a later slice) takes a weighted combination of these
 // numbers across candidates to pick a winner. Keep them allocation-light and

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! DB-backed (real PostgreSQL) tests for the Slice 3b device-principal merge
 //! core: `stage_merge_proposal` (consume device B's login-link as proof and
 //! stage a proposal) and `execute_merge` (atomically fold absorbed account B

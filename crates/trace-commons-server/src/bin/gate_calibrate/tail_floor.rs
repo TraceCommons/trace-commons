@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `tail-floor` subcommand: propose a value for
 //! `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS` from a pilot-bootstrap
 //! sidecar JSONL joined with `trace_gate_decisions` table data.

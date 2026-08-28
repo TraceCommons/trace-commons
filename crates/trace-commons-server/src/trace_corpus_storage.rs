@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Backend-agnostic storage contracts for Trace Commons corpus metadata.
 //!
 //! These types describe the DB-backed production storage surface without

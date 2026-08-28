@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Integration test for the pilot-bootstrap submitter + sidecar pair. Spins
 //! up a `wiremock` server that mimics the `trace-commons-ingest` `/v1/traces`
 //! endpoint, points the submitter at it, runs a small batch of drafts, and

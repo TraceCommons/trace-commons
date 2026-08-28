@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `canonical-text` subcommand: measure what the embedder is actually asked
 //! to tell apart.
 //!

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Per-dataset translators that map one HuggingFace session (a single
 //! `.jsonl` file = a sequence of agent events) to a [`SubmissionDraft`].
 //!

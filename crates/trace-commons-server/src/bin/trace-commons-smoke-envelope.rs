@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `trace-commons-smoke-envelope` — deploy-probe helper that builds a minimal
 //! `TraceContributionEnvelope` via the same redactor pipeline real clients use
 //! and POSTs it to a running `trace-commons-ingest`'s `/v1/traces` endpoint.

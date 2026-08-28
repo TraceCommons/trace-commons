@@ -1,3 +1,6 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pilot allowlist for the upload-claim issuer.
 //!
 //! The issuer mints upload claims for callers who can prove they hold an
