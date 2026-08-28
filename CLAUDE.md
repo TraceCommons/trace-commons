@@ -113,7 +113,8 @@ those versions unless intentionally upgrading.
 
 ## Licensing
 
-This repo is **split-licensed**, and the split is load-bearing.
+This repo is **split-licensed**, and the split is load-bearing. `AGENTS.md`
+carries the full statement of it; the essentials are repeated here.
 
 - **AGPL-3.0-or-later**: `trace-commons-server`, `trace-commons-gate-api`,
   `trace-commons-gate-enclave`. Copyright K&Z Partners LLC. Every `.rs` file in
@@ -141,7 +142,11 @@ tenant context, outside every fail-closed gate. Do not put it behind auth.
 
 `cargo deny check licenses` audits dependency licenses against `deny.toml`; run
 it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
-those pull in different trees.
+those pull in different trees. A new dependency must be combinable into an
+AGPL-3.0 work: GPL-2.0-only, SSPL, or proprietary is a hard conflict.
+
+If the boundary test fails, remove the dependency. Do not edit the expected sets
+in `license_boundary.rs` to match your diff -- those sets are the specification.
 
 ## Conventions specific to this repo
 

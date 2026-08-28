@@ -31,8 +31,10 @@ allow = [
     # 0BSD (recvmsg, via interprocess under local-gpu-models). Public-domain
     # equivalent.
     "0BSD",
-    # Our own crates, once the split lands.
-    "AGPL-3.0",
+    # Our own server and gate crates. Spelled `-or-later` because that is what
+    # they declare, and cargo-deny does not treat it as a synonym for
+    # "AGPL-3.0".
+    "AGPL-3.0-or-later",
     # webpki-roots. A data licence over the Mozilla CA root store, not code:
     # permissive, no copyleft or attribution obligation that conflicts with
     # AGPL-3.0. Combinable into an AGPL work.
