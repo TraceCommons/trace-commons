@@ -40224,16 +40224,7 @@ async fn run_pii_backstop_driver_tick(
     // `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES`.
     let mut consecutive_failures = 0usize;
     for item in &items {
-        // Scope the adapter to this submission's tenant so the durable
-        // classify cache (V51) is tenant-isolated. The per-tick adapter keeps
-        // owning config validation and the canary, so a misconfiguration
-        // still fails the whole tick before any trace is touched; this only
-        // adds a cache binding, and falls back to the unscoped adapter when
-        // no DB mirror or no caching backend is available.
-        let scoped =
-            pii_backstop_adapter_for_tenant(state.as_ref(), adapter.as_ref(), &item.tenant_id);
-        let effective = scoped.as_deref().unwrap_or(adapter.as_ref());
-        match process_one_pii_backstop(state.as_ref(), db, item, effective).await {
+        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
             Ok(()) => {
                 summary.done += 1;
                 consecutive_failures = 0;
@@ -40369,20 +40360,6 @@ async fn run_pii_backstop_driver_tick(
         );
     }
     Ok(summary)
-}
-
-/// Bind the classify-window cache to one tenant, if the deployment has one.
-///
-/// Returns `None` when there is no Postgres backend to cache in, which is the
-/// correct degradation: every window is classified, exactly as before the
-/// cache existed.
-fn pii_backstop_adapter_for_tenant(
-    state: &AppState,
-    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
-    tenant_id: &str,
-) -> Option<std::sync::Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter>> {
-    let store = state.db_mirror.as_ref()?.classify_window_store(tenant_id)?;
-    adapter.scoped_to_window_store(store, PII_BACKSTOP_REDACTION_LABEL)
 }
 
 /// Terminal disposition for a submission that has exhausted its PII-backstop
