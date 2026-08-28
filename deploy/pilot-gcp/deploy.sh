@@ -11,6 +11,7 @@
 #   6. Smoke the issuer through the public URL.
 #   7. Start ingest (it fetches the issuer's JWKS over HTTPS at startup).
 #   8. Smoke /health on both ingest and issuer.
+#   9. Smoke the AGPL section 13 source offer through the public ingress.
 #
 # Required features when building the ingest binary on the host:
 #   cargo build --release --bin trace-commons-ingest \
@@ -84,4 +85,10 @@ curl -sfS http://127.0.0.1:3907/health | head -c 400; echo
 
 # 8. Smoke through Caddy.
 curl -sf "https://ingest.${TC_PUBLIC_HOST}/health" | head -c 300; echo
+
+# 9. AGPL section 13: the source offer has to be reachable by a network user
+#    holding no credentials, which means through the public ingress and not
+#    merely on localhost. --fail so a proxy rule that swallows it breaks the
+#    deploy rather than going unnoticed.
+curl -sfS "https://ingest.${TC_PUBLIC_HOST}/v1/source" | head -c 300; echo
 echo "PILOT DEPLOY OK"

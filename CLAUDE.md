@@ -111,6 +111,38 @@ GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
 those versions unless intentionally upgrading.
 
+## Licensing
+
+This repo is **split-licensed**, and the split is load-bearing.
+
+- **AGPL-3.0-or-later**: `trace-commons-server`, `trace-commons-gate-api`,
+  `trace-commons-gate-enclave`. Copyright K&Z Partners LLC. Every `.rs` file in
+  these crates carries a two-line copyright + SPDX header; new files need one.
+- **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
+  `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
+  `-build-info`). These ship inside proprietary agent harnesses and must stay
+  permissive.
+
+**Permissive code may flow into the AGPL crates. Never the reverse.** Do not add
+`trace-commons-gate-api`, `-gate-enclave`, or `-server` to a permissive crate's
+dependencies -- not even to reuse a single trait. That silently makes a shipped
+client copyleft. `crates/trace-commons-server/tests/license_boundary.rs` fails
+if you do; do not "fix" it by editing the expected sets. Test-only
+dev-dependencies across the boundary are permitted but pinned in that same file.
+
+Note that `trace-commons-gate-api`'s traits being AGPL is deliberate: the
+proprietary-backend seam described below is available to the copyright holder
+and closed to third parties. There is no CLA, so an outside contribution to
+either gate crate would end the ability to grant an exception on it.
+
+AGPL section 13 obliges a network operator to offer the Corresponding Source.
+`trace-commons-ingest` does this at `GET /v1/source` -- unauthenticated, no
+tenant context, outside every fail-closed gate. Do not put it behind auth.
+
+`cargo deny check licenses` audits dependency licenses against `deny.toml`; run
+it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
+those pull in different trees.
+
 ## Conventions specific to this repo
 
 - **Hash-only audit and logging.** Audit rows, error logs, and operational
