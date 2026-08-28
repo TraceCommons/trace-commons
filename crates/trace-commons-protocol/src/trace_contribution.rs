@@ -2686,6 +2686,36 @@ impl PiiClassifyPolicy {
     }
 }
 
+/// Whether `policy` submits this event's text to the classifier.
+///
+/// The match is exhaustive on purpose: a newly added event type must not
+/// default into either bucket. Adding a variant will fail this to compile,
+/// which is the intended prompt to decide whether it carries authored prose.
+pub fn policy_examines_event(
+    policy: PiiClassifyPolicy,
+    event_type: TraceContributionEventType,
+) -> bool {
+    match policy {
+        PiiClassifyPolicy::AllEvents => true,
+        PiiClassifyPolicy::ProseOnly => match event_type {
+            // Authored by a human or the model: where unpatterned PII such as
+            // names and addresses actually originates.
+            TraceContributionEventType::UserMessage
+            | TraceContributionEventType::AssistantMessage
+            | TraceContributionEventType::Reasoning
+            | TraceContributionEventType::Feedback => true,
+            // Tool traffic: ~90% of volume. Patterned secrets here are still
+            // caught by the deterministic detectors, which are unaffected by
+            // this policy. Unpatterned PII arriving through tool output is the
+            // accepted, documented gap.
+            TraceContributionEventType::ToolCall
+            | TraceContributionEventType::ToolResult
+            | TraceContributionEventType::RoutingDecision
+            | TraceContributionEventType::HttpExchange => false,
+        },
+    }
+}
+
 /// Resolve which privacy-filter backend the environment configures, without
 /// keeping the adapter.
 ///
@@ -11762,5 +11792,57 @@ mod tests {
     fn pii_classify_policy_defaults_to_all_events() {
         use super::*;
         assert_eq!(PiiClassifyPolicy::default(), PiiClassifyPolicy::AllEvents);
+    }
+
+    #[test]
+    fn all_events_policy_examines_every_event_type() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::UserMessage,
+            TraceContributionEventType::AssistantMessage,
+            TraceContributionEventType::Reasoning,
+            TraceContributionEventType::Feedback,
+            TraceContributionEventType::ToolCall,
+            TraceContributionEventType::ToolResult,
+            TraceContributionEventType::RoutingDecision,
+            TraceContributionEventType::HttpExchange,
+        ] {
+            assert!(
+                policy_examines_event(PiiClassifyPolicy::AllEvents, event_type),
+                "AllEvents must examine {event_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_only_policy_examines_authored_prose() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::UserMessage,
+            TraceContributionEventType::AssistantMessage,
+            TraceContributionEventType::Reasoning,
+            TraceContributionEventType::Feedback,
+        ] {
+            assert!(
+                policy_examines_event(PiiClassifyPolicy::ProseOnly, event_type),
+                "ProseOnly must examine {event_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_only_policy_skips_tool_traffic() {
+        use super::*;
+        for event_type in [
+            TraceContributionEventType::ToolCall,
+            TraceContributionEventType::ToolResult,
+            TraceContributionEventType::RoutingDecision,
+            TraceContributionEventType::HttpExchange,
+        ] {
+            assert!(
+                !policy_examines_event(PiiClassifyPolicy::ProseOnly, event_type),
+                "ProseOnly must skip {event_type:?}"
+            );
+        }
     }
 }
