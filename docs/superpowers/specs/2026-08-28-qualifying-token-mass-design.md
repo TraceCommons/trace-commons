@@ -157,9 +157,14 @@ decision to use the statistic.
 ## Calibration gate
 
 The statistic may not become a floor until a `qualifying-mass` run over a real
-corpus shows non-degenerate spread. Concretely: the statistic must not pin at 0
-or 1 for more than an agreed share of traces, with the share fixed before the
-run rather than after seeing it.
+corpus shows non-degenerate spread. The criterion is fixed here, before the
+run, rather than chosen after seeing the distribution:
+
+- **fewer than 25% of traces at exactly 0**, and
+- **fewer than 25% at exactly 1**,
+
+so at least half the corpus lands strictly interior. `tail_fraction` fails this
+badly at 81% pinned to 0, which is the calibration this bar exists to catch.
 
 If it pins, A has failed exactly as `tail_fraction` failed, and the fallback is
 the length-aware floor (B below) rather than shipping a second dead statistic.
