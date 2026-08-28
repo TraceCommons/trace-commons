@@ -50100,6 +50100,18 @@ async fn evaluate_and_record_gate(
     .context("TraceGateEvaluationJoinFailed")??;
 
     let decision_id = Uuid::new_v4();
+    // The composite the credit path keys on, computed HERE rather than after
+    // the insert so it lands in the decision row in one write and is never
+    // updated afterwards (#199). `credit_quality_micros` below carries the
+    // same number today, but the batch re-score route overwrites that column
+    // in place; the composite recorded here is the value production used, and
+    // only a value production used can be joined to an outcome.
+    let composite = trace_commons_server::credit_quality::credit_quality(
+        i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
+        i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
+    );
     let row = StorageTraceGateDecisionRow {
         decision_id,
         submission_id,
@@ -50126,6 +50138,15 @@ async fn evaluate_and_record_gate(
         // instead of leaving a reader to assume the whole trace was scored.
         total_chunk_count: Some(i32::try_from(decision.total_chunk_count).unwrap_or(i32::MAX)),
         chunks_capped: Some(decision.chunks_capped),
+        // Prospective gate-utility instrumentation (#199).
+        composite_score_micros: Some(composite.q_micros),
+        // Reported by the index, not derived here: `None` when the configured
+        // index cannot describe its own state, which is recorded as
+        // not-instrumented rather than as an empty shard.
+        vector_index_snapshot_id: decision.vector_index_snapshot_id,
+        index_cardinality_at_scoring: decision
+            .index_cardinality_at_scoring
+            .map(|c| i64::try_from(c).unwrap_or(i64::MAX)),
     };
     let chunk_entries: Vec<StorageTraceGateChunkVectorEntryRow> = decision
         .chunk_vector_entries
@@ -50144,12 +50165,10 @@ async fn evaluate_and_record_gate(
     // arithmetic on the signals just recorded; failure is non-fatal and
     // hash-only logged so a scoring hiccup never blocks the gate decision
     // itself.
-    let cq = trace_commons_server::credit_quality::credit_quality(
-        i64::try_from(decision.perplexity_micros).unwrap_or(i64::MAX),
-        i64::try_from(decision.peak_perplexity_micros).unwrap_or(i64::MAX),
-        i64::try_from(decision.novelty_score_micros).unwrap_or(i64::MAX),
-        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
-    );
+    // The same score already written into `composite_score_micros` above.
+    // Reused rather than recomputed so the two columns cannot disagree about
+    // what production scored this trace at.
+    let cq = composite;
     if let Err(error) = db
         .update_trace_gate_decision_credit_quality(
             tenant_id,
@@ -51362,6 +51381,14 @@ async fn score_one_submission(
                             chunk_count: None,
                             total_chunk_count: None,
                             chunks_capped: None,
+                            // Not instrumented, and it never can be: this
+                            // branch short-circuits before the gate service
+                            // runs, so no composite was computed and no index
+                            // was consulted. A skipped duplicate must not
+                            // enter the #199 sample.
+                            composite_score_micros: None,
+                            vector_index_snapshot_id: None,
+                            index_cardinality_at_scoring: None,
                         },
                     );
                     let decision_id = row.decision_id;
@@ -51631,6 +51658,11 @@ async fn gate_evaluate_worker_handler(
             // Same reason: this throwaway copy carries no plaintext, and the
             // correction value already ran inline against the real decision.
             correction_simhash: None,
+            // Same reason again: the real decision row already carries the
+            // #199 instrumentation. This copy exists only to call the credit
+            // emitter and is never persisted, so it claims no index state.
+            vector_index_snapshot_id: None,
+            index_cardinality_at_scoring: None,
         };
         let emit_result = attempt_emit_novelty_utility_credit(
             state.as_ref(),

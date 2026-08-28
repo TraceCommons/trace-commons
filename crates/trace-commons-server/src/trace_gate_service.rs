@@ -127,6 +127,16 @@ pub struct GateDecision {
     /// Feeds the SHADOW-ONLY correction value (`crate::correction_value`).
     /// Nothing downstream of it gates, settles, or pays.
     pub correction_simhash: Option<i64>,
+    /// Which vector-index shard the novelty score above was computed against
+    /// (#199), sampled before this trace's own entries were inserted. `None`
+    /// for services that never touch a real index — the deterministic ones —
+    /// and for an index that cannot describe its own state. Stored as
+    /// not-instrumented, never as an empty index.
+    pub vector_index_snapshot_id: Option<Uuid>,
+    /// How many entries that shard held at scoring time (#199). `None` has
+    /// the same meaning as above; `Some(0)` is the real observation for a
+    /// tenant's first trace.
+    pub index_cardinality_at_scoring: Option<u64>,
 }
 
 /// Token simhash of `outcome.human_correction` in a decrypted envelope
@@ -368,6 +378,12 @@ fn build_deterministic_decision(
         // would fabricate a correction signal for every trace and seed the
         // shadow corpus with phantom corrections.
         correction_simhash: None,
+        // Deterministic services derive novelty from a hash, not from a
+        // corpus, so there is no index state to describe (#199). Reporting a
+        // snapshot here would put rows in the sample whose novelty was never
+        // measured against anything.
+        vector_index_snapshot_id: None,
+        index_cardinality_at_scoring: None,
     }
 }
 
@@ -725,6 +741,10 @@ where
             // correction's simhash is computed here so the correction text
             // itself never crosses back to the caller.
             correction_simhash: correction_simhash_from_plaintext(&plaintext),
+            // Carried straight through from the orchestrator, which sampled
+            // the index before scoring this trace's chunks (#199).
+            vector_index_snapshot_id: decision.vector_index_snapshot_id,
+            index_cardinality_at_scoring: decision.index_cardinality_at_scoring,
         })
     }
 

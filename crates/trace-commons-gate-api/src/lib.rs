@@ -23,4 +23,4 @@ pub use perplexity::{
     TokenRarityScorer, scorer_status_is_transient,
 };
 pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
-pub use vector_index::{NearestNeighbor, VectorIndex};
+pub use vector_index::{NearestNeighbor, VectorIndex, VectorIndexSnapshot};

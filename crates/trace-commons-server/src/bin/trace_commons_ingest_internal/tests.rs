@@ -3807,6 +3807,9 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
                 chunk_count: None,
                 total_chunk_count: None,
                 chunks_capped: None,
+                composite_score_micros: None,
+                vector_index_snapshot_id: None,
+                index_cardinality_at_scoring: None,
             },
         )
         .await
@@ -67734,6 +67737,113 @@ async fn evaluate_and_record_gate_writes_credit_quality_inline() {
     );
 }
 
+/// #199, sub-project A: the decision row must carry the composite score the
+/// credit path keyed on, written in the same insert as the decision itself.
+///
+/// `credit_quality_micros` carries the same number today and is not a
+/// substitute: the batch re-score route overwrites it in place, so it holds
+/// the newest re-score rather than the value production used, and a join to
+/// an outcome needs the second. The two-part assertion below is the whole
+/// point -- both columns agree at write time, and only one of them still
+/// agrees after a re-score.
+#[tokio::test]
+async fn evaluate_and_record_gate_records_the_composite_score_production_used() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _object_store_name) =
+        fixture_gate_worker_artifact_store(artifact_temp.path());
+    let tenant_id = "tenant-a";
+
+    let db = seed_perplexity_driver_test_db(&artifact_store, tenant_id, 1);
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    fn m(x: f64) -> i64 {
+        (x * 1_000_000.0).round() as i64
+    }
+    let perplexity_micros = m(15.0);
+    let peak_perplexity_micros = m(18.0);
+    let novelty_micros = m(0.85);
+    Arc::make_mut(&mut state).gate_service = Arc::new(FixedSignalGateService {
+        perplexity_micros: perplexity_micros as u64,
+        peak_perplexity_micros: peak_perplexity_micros as u64,
+        novelty_score_micros: novelty_micros as u64,
+    });
+
+    let items = db
+        .list_submissions_needing_gate_decision(Utc::now(), 5, 0, 10)
+        .await
+        .expect("list seeded backlog");
+    let submission_id = items
+        .into_iter()
+        .next()
+        .expect("exactly one seeded submission")
+        .submission_id;
+
+    let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds with fixed-signal gate service");
+    let GateOutcome::Scored { decision_id, .. } = outcome else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+
+    let expected = trace_commons_server::credit_quality::credit_quality(
+        perplexity_micros,
+        peak_perplexity_micros,
+        novelty_micros,
+        &trace_commons_server::credit_quality::CREDIT_QUALITY_ACTIVE,
+    );
+
+    let after = db
+        .gate_decision_with_credit_quality_by_id(tenant_id, decision_id)
+        .expect("decision row present");
+    assert_eq!(
+        after.row.composite_score_micros,
+        Some(expected.q_micros),
+        "the composite the credit path keyed on must be on the decision row"
+    );
+    assert_eq!(
+        after.credit_quality_micros,
+        Some(expected.q_micros),
+        "at write time the two columns agree"
+    );
+
+    // A later re-score under different calibration moves the mutable column
+    // and must leave the recorded one alone. Without this, #199's join would
+    // read whatever the most recent maintenance pass produced and call it the
+    // number production scored with.
+    db.update_trace_gate_decision_credit_quality(tenant_id, decision_id, 1, 2, 99)
+        .await
+        .expect("re-score succeeds");
+    let rescored = db
+        .gate_decision_with_credit_quality_by_id(tenant_id, decision_id)
+        .expect("decision row still present");
+    assert_eq!(rescored.credit_quality_micros, Some(1));
+    assert_eq!(
+        rescored.row.composite_score_micros,
+        Some(expected.q_micros),
+        "composite_score_micros is write-once: a re-score must not touch it"
+    );
+
+    // The in-memory gate service double derives novelty from a hash rather
+    // than from a corpus, so it reports no index state -- and that must be
+    // recorded as not-instrumented, not as an empty index.
+    assert_eq!(after.row.vector_index_snapshot_id, None);
+    assert_eq!(after.row.index_cardinality_at_scoring, None);
+}
+
 /// Build a fully-populated gate-decision row with distinctive novelty/status
 /// fields so a re-score that touches any non-perplexity column is detectable.
 fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow {
@@ -67758,6 +67868,9 @@ fn rescore_test_decision_row(submission_id: Uuid) -> StorageTraceGateDecisionRow
         chunk_count: Some(7),
         total_chunk_count: Some(19),
         chunks_capped: Some(true),
+        composite_score_micros: Some(321_000),
+        vector_index_snapshot_id: Some(Uuid::from_u128(0x199)),
+        index_cardinality_at_scoring: Some(4_096),
     }
 }
 
@@ -67811,6 +67924,18 @@ async fn update_trace_gate_decision_perplexity_touches_only_perplexity_columns()
     assert_eq!(after.peak_novelty_micros, before.peak_novelty_micros);
     assert_eq!(after.chunk_count, before.chunk_count);
     assert_eq!(after.chunks_capped, before.chunks_capped);
+    // The #199 instrumentation is a record of what production scored with.
+    // A perplexity re-score changes the perplexity columns and must leave it
+    // untouched, or the recorded value stops describing any real decision.
+    assert_eq!(after.composite_score_micros, before.composite_score_micros);
+    assert_eq!(
+        after.vector_index_snapshot_id,
+        before.vector_index_snapshot_id
+    );
+    assert_eq!(
+        after.index_cardinality_at_scoring,
+        before.index_cardinality_at_scoring
+    );
 }
 
 /// Unit test for the isolation invariant: `update_trace_gate_decision_credit_quality`

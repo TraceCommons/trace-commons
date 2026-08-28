@@ -1903,6 +1903,34 @@ pub struct TraceGateDecisionRow {
     /// True when the per-trace chunk cap dropped trailing chunks
     /// (migration V37). `None` reads as false.
     pub chunks_capped: Option<bool>,
+    /// The composite credit-quality score `q` * 1e6 as computed at scoring
+    /// time under the calibration active then (migration V53, #199).
+    ///
+    /// Deliberately distinct from `credit_quality_micros`, which the batch
+    /// re-score route overwrites in place: that column holds the newest
+    /// re-score, this one holds the number production actually used, and only
+    /// the second can be joined to an outcome. WRITE-ONCE — no code path may
+    /// update it, because a later value would silently answer a different
+    /// question than the one asked.
+    ///
+    /// `None` means NOT INSTRUMENTED: every decision written before V53, and
+    /// any path that records a decision without scoring it. It is not `Some(0)`
+    /// — a below-floor trace earns a genuine composite of 0, and conflating
+    /// the two would enrol unmeasured rows into the sample as real
+    /// observations. Readers MUST NOT default it.
+    pub composite_score_micros: Option<i64>,
+    /// Which vector-index shard the novelty score was computed against
+    /// (migration V53, #199), captured before this trace's own entries were
+    /// inserted. Same shard id means the same corpus lineage;
+    /// `index_cardinality_at_scoring` distinguishes states within it.
+    /// `None` means not instrumented, or an index that cannot describe itself.
+    pub vector_index_snapshot_id: Option<Uuid>,
+    /// How many entries that shard held at scoring time (migration V53,
+    /// #199). Novelty drifts downward as the index fills, so this is the
+    /// covariate a chronological estimate has to condition on. `None` is not
+    /// instrumented; `Some(0)` is the real observation for a tenant's first
+    /// trace, scored against an empty shard.
+    pub index_cardinality_at_scoring: Option<i64>,
 }
 
 /// One per-chunk vector-index entry row (`trace_gate_chunk_vector_entries`,

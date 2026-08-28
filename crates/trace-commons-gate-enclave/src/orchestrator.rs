@@ -168,6 +168,12 @@ where
         // the whole chunk (no 512-token truncation), then per-chunk novelty
         // against the tenant's existing per-chunk entries. Fail-closed: any
         // chunk's embedder/index error refuses the evaluation.
+        // Instrumentation (#199), captured HERE: before the first `nearest`
+        // query and therefore before any of this trace's own entries reach
+        // the shard. A decision has to describe the corpus its novelty was
+        // measured against, not the one it went on to enlarge.
+        let index_snapshot = self.index.snapshot(tenant_storage_ref);
+
         let mut chunk_embeddings: Vec<Vec<f32>> = Vec::with_capacity(plan.chunks.len());
         let mut chunk_novelty_micros: Vec<u64> = Vec::with_capacity(plan.chunks.len());
         let mut all_neighbors: Vec<crate::vector_index::NearestNeighbor> = Vec::new();
@@ -254,6 +260,8 @@ where
             total_chunk_count: (plan.chunks.len() as u32).saturating_add(plan.dropped_chunk_count),
             chunks_capped: plan.chunks_capped,
             inserted_chunk_entries,
+            vector_index_snapshot_id: index_snapshot.map(|s| s.snapshot_id),
+            index_cardinality_at_scoring: index_snapshot.map(|s| s.cardinality),
         })
     }
 }
@@ -337,6 +345,55 @@ mod tests {
         assert_eq!(a.attestation_chain_hash, b.attestation_chain_hash);
         assert_eq!(a.perplexity_passed, b.perplexity_passed);
         assert_eq!(a.novelty_passed, b.novelty_passed);
+    }
+
+    /// #199: novelty is `1 - max cosine similarity` against whatever was in
+    /// the tenant's shard at scoring time, so a stored novelty score is not
+    /// reproducible without knowing which shard and how full it was. Both are
+    /// captured BEFORE this trace's own chunks are inserted -- a decision must
+    /// describe the index it was scored against, not the one it created.
+    #[test]
+    fn decision_records_the_index_state_novelty_was_scored_against() {
+        let orch = orch_with_floors(0, 0, 0);
+        let first = orch.evaluate(b"hello world", "tenant_a").unwrap();
+        assert_eq!(
+            first.index_cardinality_at_scoring,
+            Some(0),
+            "the first trace of a tenant scores against an empty shard; 0 is a \
+             real observation and must not be reported as a missing one"
+        );
+        let snapshot = first
+            .vector_index_snapshot_id
+            .expect("a real index must identify the shard it scored against");
+        assert!(first.inserted_entry_id.is_some());
+
+        let second = orch
+            .evaluate(
+                b"an entirely different trace about other things",
+                "tenant_a",
+            )
+            .unwrap();
+        assert_eq!(
+            second.vector_index_snapshot_id,
+            Some(snapshot),
+            "same shard generation: the id changes on reopen or rebuild, not per write"
+        );
+        assert!(
+            second.index_cardinality_at_scoring.unwrap() > 0,
+            "the second trace scored against a shard the first one filled"
+        );
+    }
+
+    /// The shard, not the process. Novelty is per-tenant, so two tenants
+    /// scored in the same process are two different corpora and must not be
+    /// averaged across.
+    #[test]
+    fn snapshot_ids_are_per_tenant_shard() {
+        let orch = orch_with_floors(0, 0, 0);
+        let a = orch.evaluate(b"hello world", "tenant_a").unwrap();
+        let b = orch.evaluate(b"hello world", "tenant_b").unwrap();
+        assert_ne!(a.vector_index_snapshot_id, b.vector_index_snapshot_id);
+        assert_eq!(b.index_cardinality_at_scoring, Some(0));
     }
 
     #[test]

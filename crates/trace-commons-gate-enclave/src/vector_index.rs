@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use uuid::Uuid;
 
-pub use trace_commons_gate_api::{NearestNeighbor, VectorIndex};
+pub use trace_commons_gate_api::{NearestNeighbor, VectorIndex, VectorIndexSnapshot};
 
 /// In-memory `MockVectorIndex` for tests and local development.
 ///
@@ -24,6 +24,11 @@ pub use trace_commons_gate_api::{NearestNeighbor, VectorIndex};
 pub struct MockVectorIndex {
     // Outer map: tenant_storage_ref → (entry_id → embedding)
     entries: Mutex<BTreeMap<String, BTreeMap<Uuid, Vec<f32>>>>,
+    // Shard generation per tenant (#199). Assigned on first observation and
+    // stable for the life of this in-memory index, which is exactly the life
+    // of its contents: a new `MockVectorIndex` is a new, empty corpus and
+    // gets new ids.
+    shard_generations: Mutex<BTreeMap<String, Uuid>>,
 }
 
 impl MockVectorIndex {
@@ -83,6 +88,24 @@ impl VectorIndex for MockVectorIndex {
             Some(inner) => Ok(inner.remove(&entry_id).is_some()),
             None => Ok(false),
         }
+    }
+
+    fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+        let cardinality = {
+            let g = self.entries.lock().expect("MockVectorIndex mutex poisoned");
+            g.get(tenant_storage_ref).map_or(0, BTreeMap::len) as u64
+        };
+        let mut g = self
+            .shard_generations
+            .lock()
+            .expect("MockVectorIndex mutex poisoned");
+        let snapshot_id = *g
+            .entry(tenant_storage_ref.to_string())
+            .or_insert_with(Uuid::new_v4);
+        Some(VectorIndexSnapshot {
+            snapshot_id,
+            cardinality,
+        })
     }
 }
 

@@ -3345,7 +3345,83 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         chunk_count: None,
         total_chunk_count: None,
         chunks_capped: None,
+        composite_score_micros: None,
+        vector_index_snapshot_id: None,
+        index_cardinality_at_scoring: None,
     }
+}
+
+/// The three #199 instrumentation columns (migration V53) must survive a
+/// write and a read, and a decision that carries none of them must read back
+/// as NOT INSTRUMENTED rather than as a zero-scored trace against an empty
+/// index. Both halves matter: a composite score of 0 is what a below-floor
+/// trace genuinely earns, and a cardinality of 0 is what a tenant's first
+/// trace genuinely scores against, so neither zero can double as "absent".
+#[tokio::test]
+async fn pg_store_round_trips_prospective_gate_instrumentation() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-gate-instr-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let snapshot_id = Uuid::new_v4();
+    let mut instrumented = sample_gate_decision(submission_id);
+    // A genuinely below-floor trace: q == 0, scored against an empty shard.
+    // The values most likely to be confused with "no value".
+    instrumented.composite_score_micros = Some(0);
+    instrumented.vector_index_snapshot_id = Some(snapshot_id);
+    instrumented.index_cardinality_at_scoring = Some(0);
+    let instrumented_id = instrumented.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, instrumented)
+        .await
+        .expect("insert instrumented gate decision");
+
+    let mut uninstrumented = sample_gate_decision(submission_id);
+    let uninstrumented_id = uninstrumented.decision_id;
+    uninstrumented.decided_at = Utc::now() + chrono::Duration::seconds(1);
+    backend
+        .insert_trace_gate_decision(&tenant_id, uninstrumented)
+        .await
+        .expect("insert uninstrumented gate decision");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let read_instrumented = rows
+        .iter()
+        .find(|r| r.decision_id == instrumented_id)
+        .expect("instrumented decision must be readable");
+    assert_eq!(read_instrumented.composite_score_micros, Some(0));
+    assert_eq!(
+        read_instrumented.vector_index_snapshot_id,
+        Some(snapshot_id)
+    );
+    assert_eq!(read_instrumented.index_cardinality_at_scoring, Some(0));
+
+    let read_uninstrumented = rows
+        .iter()
+        .find(|r| r.decision_id == uninstrumented_id)
+        .expect("uninstrumented decision must be readable");
+    assert_eq!(
+        read_uninstrumented.composite_score_micros, None,
+        "an unrecorded composite must not read as a score of zero"
+    );
+    assert_eq!(read_uninstrumented.vector_index_snapshot_id, None);
+    assert_eq!(
+        read_uninstrumented.index_cardinality_at_scoring, None,
+        "an unrecorded cardinality must not read as an empty index"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
 }
 
 #[tokio::test]
