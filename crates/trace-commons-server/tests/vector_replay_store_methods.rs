@@ -76,6 +76,7 @@ fn sample_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWri
         credit_points_pending: None,
         credit_points_final: None,
         expires_at: None,
+        residual_risk_basis: None,
     }
 }
 

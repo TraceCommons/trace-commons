@@ -2,7 +2,8 @@ use super::*;
 use axum::http::HeaderValue;
 use trace_commons_protocol::llm::recording::{TraceFile, TraceResponse, TraceStep};
 use trace_commons_protocol::trace_contribution::{
-    DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
+    DeterministicTraceRedactor, RecordedTraceContributionOptions, ResidualRiskCondition,
+    TraceRedactor,
 };
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
@@ -2865,6 +2866,7 @@ async fn insert_account_test_submission_with_status(
             credit_points_pending: Some(1.0),
             credit_points_final: None,
             expires_at: None,
+            residual_risk_basis: None,
         })
         .await
         .expect("insert submission");
@@ -10425,6 +10427,7 @@ async fn postgres_rls_hides_same_submission_id_across_tenant_contexts() {
                 credit_points_pending: Some(1.0),
                 credit_points_final: None,
                 expires_at: None,
+                residual_risk_basis: None,
             })
             .await
             .expect("tenant-scoped submission writes");
@@ -15595,6 +15598,7 @@ fn db_reconciliation_projects_submitted_audit_metadata_privacy_risk_drift() {
         expires_at: None,
         purged_at: None,
         last_status_reason: None,
+        residual_risk_basis: None,
     };
     let db_by_submission = BTreeMap::from([(submission_id, &submission_record)]);
 
@@ -64763,6 +64767,7 @@ async fn seed_gate_worker_fixture_with_allowed_uses(
             credit_points_pending: None,
             credit_points_final: None,
             expires_at: None,
+            residual_risk_basis: None,
         })
         .await
         .expect("seed submission writes");
@@ -65858,6 +65863,7 @@ impl PerplexityDriverTestDb {
                 expires_at: None,
                 purged_at: None,
                 last_status_reason: None,
+                residual_risk_basis: None,
             },
         );
     }
@@ -65918,6 +65924,7 @@ impl PerplexityDriverTestDb {
                 expires_at: None,
                 purged_at: None,
                 last_status_reason: None,
+                residual_risk_basis: None,
             },
         );
         self.object_refs
@@ -81371,6 +81378,7 @@ fn seeded_storage_submission_record(
         expires_at: None,
         purged_at: None,
         last_status_reason: None,
+        residual_risk_basis: None,
     }
 }
 
@@ -86885,4 +86893,272 @@ fn perplexity_tick_summary_carries_duration_and_backlog() {
     };
     assert_eq!(measured.tick_duration_ms, 1234);
     assert_eq!(measured.backlog, Some(42));
+}
+
+// ---------------------------------------------------------------------
+// Residual-risk basis (#474 proposal 4).
+//
+// Instrumentation. The quarantine queue cannot today tell a privacy finding
+// from an outage: `coverage_incomplete` forcing High and a filter that looked
+// and found a secret both store the single word "high". These tests pin that
+// every server pass that decides a risk also records WHICH conditions held.
+// ---------------------------------------------------------------------
+
+/// A stored basis must never disagree with the risk stored beside it. A basis
+/// that contradicts its own row is worse than an absent one, because it will
+/// be believed.
+fn assert_basis_matches_risk(basis: &Option<Vec<String>>, risk: ResidualPiiRisk, case: &str) {
+    let labels = basis
+        .as_ref()
+        .unwrap_or_else(|| panic!("{case}: the pass must record a basis, not leave it NULL"));
+    let conditions: Vec<ResidualRiskCondition> = labels
+        .iter()
+        .map(|label| {
+            ResidualRiskCondition::from_label(label)
+                .unwrap_or_else(|| panic!("{case}: {label} is not an allowlisted condition"))
+        })
+        .collect();
+    let forces_high = conditions.iter().any(|c| c.forces_high());
+    assert_eq!(
+        forces_high,
+        risk == ResidualPiiRisk::High,
+        "{case}: basis {labels:?} disagrees with {risk:?}"
+    );
+    assert_eq!(
+        conditions.is_empty(),
+        risk == ResidualPiiRisk::Low,
+        "{case}: an empty basis must mean Low, and only Low"
+    );
+}
+
+/// Write site 1: `submit_trace_handler`. The basis is a return value of
+/// `rescrub_trace_envelope`, so it is the server's own finding and cannot be
+/// asserted by a contributor.
+#[tokio::test]
+async fn submit_records_the_basis_for_the_risk_it_stored() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    // A contributor asserting a clean basis has no field to assert it in:
+    // the envelope carries no basis at all, by construction.
+    let serialised = serde_json::to_value(&envelope).expect("envelope serialises");
+    assert!(
+        serialised["privacy"].get("residual_risk_basis").is_none(),
+        "the envelope must carry no basis field for a client to populate"
+    );
+
+    let Json(_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission is stored");
+
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_basis_matches_risk(&record.residual_risk_basis, record.privacy_risk, "submit");
+    assert!(
+        record
+            .residual_risk_basis
+            .as_ref()
+            .is_some_and(|basis| !basis.is_empty()),
+        "a non-Low submission must record what drove it: {:?}",
+        record.residual_risk_basis
+    );
+}
+
+/// Write site 2: `operator_rescrub_quarantined_submission`. It overwrites
+/// `privacy_risk`, so it must overwrite the basis in the same breath. A stale
+/// basis beside a fresh risk is the failure this instrumentation exists to
+/// prevent.
+#[tokio::test]
+async fn operator_rescrub_rewrites_the_basis_beside_the_risk() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let mut envelope = sample_envelope().await;
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("medium-risk submission quarantines");
+
+    let mut state = state;
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+
+    let Json(_result) = review_quarantine_rescrub_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(envelope.submission_id),
+        Json(TraceQuarantineRescrubRequest {
+            reason: Some("pilot backlog reclassify".into()),
+        }),
+    )
+    .await
+    .expect("operator rescrub succeeds");
+
+    let updated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_basis_matches_risk(
+        &updated.residual_risk_basis,
+        updated.privacy_risk,
+        "operator rescrub",
+    );
+}
+
+/// Write site 3: `process_one_pii_backstop`, the DRIVER that releases held
+/// traces. It goes through `rescrub_envelope_prose_pii_with`, not
+/// `rescrub_trace_envelope`, and it is the population #474 is actually about
+/// -- the coverage hypothesis concerns classifier errors, which is what this
+/// path hits. Instrumenting only the synchronous re-scrub would miss exactly
+/// these traces while appearing to work.
+#[tokio::test]
+async fn pii_backstop_release_records_the_basis_for_the_pass_that_decided_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+
+    let before = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert!(
+        before.residual_risk_basis.is_none(),
+        "the held record predates the backstop pass and must read as not recorded"
+    );
+
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("process_one releases the hold");
+
+    let after = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    assert_basis_matches_risk(
+        &after.residual_risk_basis,
+        after.privacy_risk,
+        "pii backstop release",
+    );
+}
+
+/// The DB mirror carries the basis, so the column is populated by the same
+/// write that populates `privacy_risk`. Pure-function proof: every path that
+/// mirrors a submission goes through this mapping.
+#[tokio::test]
+async fn the_storage_mirror_carries_the_basis_from_the_record() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let mut envelope = sample_envelope().await;
+    envelope.events[0].redacted_content =
+        Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+    let Json(_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission is stored");
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+
+    let write =
+        storage_submission_write_from_record(&record, &envelope, None).expect("storage write maps");
+    assert!(
+        record.residual_risk_basis.is_some(),
+        "the submit pass must have recorded a basis for this to prove anything"
+    );
+    assert_eq!(
+        write.residual_risk_basis, record.residual_risk_basis,
+        "the DB mirror must carry the basis the record holds"
+    );
+
+    // And a record that has none must mirror as NULL, never as an empty basis.
+    let mut unrecorded = record.clone();
+    unrecorded.residual_risk_basis = None;
+    let write = storage_submission_write_from_record(&unrecorded, &envelope, None)
+        .expect("storage write maps");
+    assert!(write.residual_risk_basis.is_none());
+}
+
+/// A record written before V51 has no basis, and "not recorded" must stay
+/// distinguishable from "recorded, and nothing held". Conflating them would
+/// let a pre-instrumentation trace be counted as a clean pass, which is the
+/// same fabrication a backfill would have committed.
+#[tokio::test]
+async fn a_record_written_before_v51_reads_as_not_recorded_not_as_empty() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let Json(_receipt) = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        Json(envelope.clone()),
+    )
+    .await
+    .expect("submission is stored");
+    let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+        .expect("record reads")
+        .expect("record exists");
+
+    // A record serialised before V51 simply has no such key. It must
+    // deserialise as "not recorded", never as a recorded empty basis.
+    let mut raw = serde_json::to_value(&record).expect("record serialises");
+    raw.as_object_mut()
+        .expect("record is an object")
+        .remove("residual_risk_basis");
+    let legacy: TraceCommonsSubmissionRecord =
+        serde_json::from_value(raw).expect("a pre-V51 record still deserialises");
+    assert!(
+        legacy.residual_risk_basis.is_none(),
+        "a pre-V51 record must read as not recorded"
+    );
+
+    let now = Utc::now();
+    let derived = BTreeMap::new();
+    let not_recorded =
+        serde_json::to_value(TraceReviewQueueItem::from_record(legacy, &derived, now))
+            .expect("queue item serialises");
+    assert!(
+        not_recorded["residual_risk_basis"].is_null(),
+        "an unrecorded basis must surface to a reviewer as null, not as an empty list: \
+         {not_recorded}"
+    );
+
+    let mut recorded_empty = record.clone();
+    recorded_empty.residual_risk_basis = Some(Vec::new());
+    let recorded_empty = serde_json::to_value(TraceReviewQueueItem::from_record(
+        recorded_empty,
+        &derived,
+        now,
+    ))
+    .expect("queue item serialises");
+    assert_eq!(
+        recorded_empty["residual_risk_basis"],
+        serde_json::json!([]),
+        "a recorded, empty basis is a different claim and must survive as one"
+    );
 }

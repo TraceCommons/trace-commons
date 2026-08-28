@@ -178,7 +178,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
-    TraceWorkerKind as StorageTraceWorkerKind,
+    TraceWorkerKind as StorageTraceWorkerKind, safe_residual_risk_basis_labels,
 };
 use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
@@ -12647,7 +12647,10 @@ async fn submit_trace_handler(
         state.require_tenant_submission_policy,
     )?;
 
-    rescrub_trace_envelope(&mut envelope)
+    // The basis is a return value of the pass, never a field on the
+    // envelope: the envelope is deserialised from contributor input, so a
+    // basis carried there would be client-asserted by construction.
+    let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
         .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
     bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
     let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
@@ -12754,6 +12757,7 @@ async fn submit_trace_handler(
         expires_at,
         purged_at: None,
         last_status_reason: None,
+        residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
         artifact_object_store: stored_envelope.artifact_object_store,
@@ -19196,7 +19200,7 @@ async fn operator_rescrub_quarantined_submission(
     let prior_status = record.status;
     let prior_privacy_risk = record.privacy_risk;
     let mut envelope = read_envelope_by_record(state, &record).map_err(internal_error)?;
-    rescrub_trace_envelope(&mut envelope)
+    let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
         .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
     let target_status = status_for_risk(
         envelope.privacy.residual_pii_risk,
@@ -19250,6 +19254,10 @@ async fn operator_rescrub_quarantined_submission(
     .map_err(internal_error)?;
     record.status = target_status;
     record.privacy_risk = envelope.privacy.residual_pii_risk;
+    // Written in the same breath as the risk it describes. This route
+    // overwrites `privacy_risk`, so leaving the prior basis in place would
+    // leave the two describing different passes.
+    record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
     record.redaction_counts = envelope.privacy.redaction_counts.clone();
     record.credit_points_pending = envelope.value.credit_points_pending;
     record.credit_points_final = envelope.value.credit_points_final;
@@ -40363,7 +40371,13 @@ async fn process_one_pii_backstop(
 
     // Two-pass and atomic inside the protocol helper: any adapter error is
     // returned before any field of `envelope` is mutated.
-    rescrub_envelope_prose_pii_with(adapter, &mut envelope).await?;
+    //
+    // This is the driver that releases held traces, and it goes through the
+    // async NEAR AI prose path rather than `rescrub_trace_envelope`. It is
+    // the population #474 is about: the coverage hypothesis concerns
+    // classifier errors, which is precisely what this path hits.
+    let residual_risk_basis = rescrub_envelope_prose_pii_with(adapter, &mut envelope).await?;
+    record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
 
     // Status is chosen from the POST-backstop residual risk: a filter that
     // still leaves Medium/High risk re-quarantines rather than accepts.
@@ -54656,6 +54670,7 @@ fn trace_commons_record_from_storage_submission(
             expires_at: record.expires_at,
             purged_at: record.purged_at,
             last_status_reason: record.last_status_reason,
+            residual_risk_basis: record.residual_risk_basis,
             object_key,
             artifact_receipt: None,
             artifact_object_store: None,
@@ -58785,6 +58800,7 @@ fn storage_submission_write_from_record(
         credit_points_pending: Some(record.credit_points_pending),
         credit_points_final: record.credit_points_final,
         expires_at: record.expires_at,
+        residual_risk_basis: record.residual_risk_basis.clone(),
     })
 }
 
@@ -67093,6 +67109,13 @@ struct TraceCommonsSubmissionRecord {
     /// `None` for records written before V49; see `safe_status_reason_label`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_status_reason: Option<String>,
+    /// Which conditions held when `privacy_risk` was decided, as allowlisted
+    /// labels (#474). Written by the server's own scrub pass -- never read
+    /// from the envelope, which is deserialised from contributor input.
+    /// `None` means not recorded (every record written before V51), never
+    /// "no condition held".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    residual_risk_basis: Option<Vec<String>>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -67287,6 +67310,18 @@ struct TraceReviewQueueItem {
     /// V49.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_status_reason: Option<String>,
+    /// Which conditions held when this trace's residual risk was decided
+    /// (#474). `coverage_incomplete` forcing High is correct fail-closed
+    /// behaviour; being unable to TELL at review time is the defect. A
+    /// reviewer should read the condition rather than infer it, because when
+    /// the overwhelming majority of a queue is benign, bulk approval becomes
+    /// the rational response, which is how a real finding gets waved through.
+    ///
+    /// Serialised even when absent, deliberately: `null` means not recorded
+    /// (any trace last written before V51) and is not the same claim as `[]`,
+    /// which means the pass recorded a basis and no condition held.
+    #[serde(default)]
+    residual_risk_basis: Option<Vec<String>>,
 }
 
 impl TraceReviewQueueItem {
@@ -67320,6 +67355,7 @@ impl TraceReviewQueueItem {
                 .map(|record| record.tool_sequence.clone())
                 .unwrap_or_default(),
             last_status_reason: record.last_status_reason,
+            residual_risk_basis: record.residual_risk_basis,
         }
     }
 }

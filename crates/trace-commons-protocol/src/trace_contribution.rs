@@ -3891,18 +3891,25 @@ impl TraceRedactor for DeterministicTraceRedactor {
     }
 }
 
+/// Re-scrub an envelope server-side, returning the [`ResidualRiskCondition`]s
+/// that held when this pass decided `privacy.residual_pii_risk`.
+///
+/// The basis is a RETURN VALUE, deliberately, and must never become a field
+/// on `PrivacyMetadata`: the envelope is deserialised from contributor input,
+/// so a field there would be client-supplied by construction. Returning it
+/// makes an asserted basis structurally impossible -- there is no field for a
+/// client to populate.
 pub fn rescrub_trace_envelope(
     envelope: &mut TraceContributionEnvelope,
-) -> Result<(), PrivacyFilterConfigError> {
+) -> Result<Vec<ResidualRiskCondition>, PrivacyFilterConfigError> {
     let redactor = DeterministicTraceRedactor::try_default()?;
-    rescrub_trace_envelope_with(&redactor, envelope);
-    Ok(())
+    Ok(rescrub_trace_envelope_with(&redactor, envelope))
 }
 
 pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
-) {
+) -> Vec<ResidualRiskCondition> {
     // Consent flags are a factual declaration of what the envelope carries.
     // Correct under-reported flags before risk derivation so residual_risk
     // and the PII-backstop hold cannot be skipped by a false declaration.
@@ -3977,15 +3984,26 @@ pub fn rescrub_trace_envelope_with(
         findings: report.clone(),
         residual_findings: residual.clone().unwrap_or_default(),
     };
-    envelope.privacy.residual_pii_risk = match residual {
-        Ok(_) => resolve_post_scrub_risk(prior_risk, server_pass_risk, &assessment),
-        Err(_) => {
+    let (resolved_risk, basis) = match residual {
+        Ok(_) => (
+            resolve_post_scrub_risk(prior_risk, server_pass_risk, &assessment),
+            residual_risk_basis(
+                &envelope.consent,
+                &report,
+                Some(&assessment.residual_findings),
+            ),
+        ),
+        Err(_) => (
             // Fail closed: the residual scan could not run, so this pass
             // cannot prove the envelope is clean. Never trust an empty
             // report produced by a failed scan; force the worst case.
-            ResidualPiiRisk::High
-        }
+            ResidualPiiRisk::High,
+            // ...and say so. This arm builds no `PostScrubAssessment`, so
+            // nothing on the report records that the scan never ran.
+            residual_risk_basis_for_failed_scan(&envelope.consent, &report),
+        ),
     };
+    envelope.privacy.residual_pii_risk = resolved_risk;
 
     for (label, count) in report.counts {
         *envelope.privacy.redaction_counts.entry(label).or_insert(0) += count;
@@ -4019,6 +4037,8 @@ pub fn rescrub_trace_envelope_with(
     );
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
+
+    basis
 }
 
 /// Byte/node/depth budgets for classifying `event.structured_payload` trees
@@ -4211,10 +4231,14 @@ fn uncovered_prose_present(envelope: &TraceContributionEnvelope) -> bool {
 }
 
 #[cfg(feature = "near-ai-privacy-filter")]
+/// Returns the [`ResidualRiskCondition`]s that held when this pass decided
+/// `privacy.residual_pii_risk`, for the same reason and with the same
+/// client-trust constraint as [`rescrub_trace_envelope`]: the basis is a
+/// return value, never a field on the envelope.
 pub async fn rescrub_envelope_prose_pii_with(
     adapter: &dyn PrivacyFilterAdapter,
     envelope: &mut TraceContributionEnvelope,
-) -> Result<(), TraceContributionError> {
+) -> Result<Vec<ResidualRiskCondition>, TraceContributionError> {
     // Same concordance floor as the sync server re-scrub: under-reported
     // consent must not survive into residual_risk / status decisions.
     reconcile_consent_declarations(envelope);
@@ -4323,7 +4347,7 @@ pub async fn rescrub_envelope_prose_pii_with(
     });
 
     let prior_risk = envelope.privacy.residual_pii_risk;
-    envelope.privacy.residual_pii_risk = match residual {
+    let (resolved_risk, basis) = match residual {
         Ok(residual_findings) => {
             let backstop_pass_risk = residual_risk(&envelope.consent, &report);
             let assessment = PostScrubAssessment {
@@ -4332,15 +4356,32 @@ pub async fn rescrub_envelope_prose_pii_with(
                 findings: report.clone(),
                 residual_findings,
             };
-            resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment)
+            let basis = residual_risk_basis(
+                &envelope.consent,
+                &report,
+                Some(&assessment.residual_findings),
+            );
+            (
+                resolve_post_scrub_risk(prior_risk, backstop_pass_risk, &assessment),
+                basis,
+            )
         }
         Err(_) => {
             // Fail closed: could not verify the envelope is clean after
             // this pass, so never trust it enough to downgrade or even
             // hold steady on an empty report. Force the worst case.
-            ResidualPiiRisk::High
+            //
+            // This arm builds no `PostScrubAssessment`, so nothing on the
+            // report records that the residual scan never ran. The basis is
+            // where that fact is written down -- it is the outage signature
+            // #474 needs told apart from a real finding.
+            (
+                ResidualPiiRisk::High,
+                residual_risk_basis_for_failed_scan(&envelope.consent, &report),
+            )
         }
     };
+    envelope.privacy.residual_pii_risk = resolved_risk;
     if !envelope
         .privacy
         .redaction_pipeline_version
@@ -4361,7 +4402,7 @@ pub async fn rescrub_envelope_prose_pii_with(
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
-    Ok(())
+    Ok(basis)
 }
 
 /// Redact one owned string in place, folding its report into `report`.
@@ -4774,6 +4815,168 @@ fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> Residua
     }
 
     ResidualPiiRisk::Low
+}
+
+/// One condition that held when a pass decided an envelope's residual PII
+/// risk.
+///
+/// Observational. It records why a risk came out the way it did; it never
+/// decides the risk, which remains [`residual_risk`]'s job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidualRiskCondition {
+    /// An object key was flagged as PII-bearing. Keys are never rewritten,
+    /// so redaction cannot resolve it.
+    KeyFinding,
+    /// A configured filter was unavailable, errored, or skipped content, so
+    /// the pass cannot speak for what it never examined.
+    CoverageIncomplete,
+    /// The detection-only residual scan saw a secret still in the envelope
+    /// after the pass finished. Reaches the decision through
+    /// [`resolve_post_scrub_risk`]'s `residual_findings`, which
+    /// [`residual_risk`] never sees.
+    ResidualSurvivor,
+    /// The residual scan could not be run at all. Distinct from
+    /// `CoverageIncomplete`: no `RedactionReport` flag records it, because
+    /// the `Err(_)` arms that force High never construct a
+    /// `PostScrubAssessment`. It is an outage signature.
+    ResidualScanUnavailable,
+    /// The pass found and removed PII. The Medium floor, not a survivor.
+    FoundAndRemoved,
+    /// A consent content flag was set. The other Medium floor.
+    ConsentContentFlag,
+}
+
+impl ResidualRiskCondition {
+    pub const ALL: &'static [ResidualRiskCondition] = &[
+        ResidualRiskCondition::KeyFinding,
+        ResidualRiskCondition::CoverageIncomplete,
+        ResidualRiskCondition::ResidualSurvivor,
+        ResidualRiskCondition::ResidualScanUnavailable,
+        ResidualRiskCondition::FoundAndRemoved,
+        ResidualRiskCondition::ConsentContentFlag,
+    ];
+
+    /// The stored label. A fixed compile-time constant, never caller text.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::KeyFinding => "key_finding",
+            Self::CoverageIncomplete => "coverage_incomplete",
+            Self::ResidualSurvivor => "residual_survivor",
+            Self::ResidualScanUnavailable => "residual_scan_unavailable",
+            Self::FoundAndRemoved => "found_and_removed",
+            Self::ConsentContentFlag => "consent_content_flag",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|condition| condition.as_label() == label)
+    }
+
+    /// Whether this condition is one of those that force High.
+    pub fn forces_high(self) -> bool {
+        matches!(
+            self,
+            Self::KeyFinding
+                | Self::CoverageIncomplete
+                | Self::ResidualSurvivor
+                | Self::ResidualScanUnavailable
+        )
+    }
+}
+
+/// Which conditions held when a pass decided an envelope's residual risk.
+///
+/// Deliberately does NOT short-circuit. [`residual_risk`] returns on the
+/// first condition that matches, which is correct for classification -- the
+/// value is the same either way -- and exactly wrong for measurement: a
+/// count derived from a first-wins label undercounts every condition by the
+/// population where an earlier one co-occurs. #474 asks how much of the
+/// quarantine queue is an outage rather than a privacy finding, and a
+/// systematic undercount of the outage side is the one error that cannot be
+/// tolerated.
+///
+/// `residual_findings` is `None` on a pass that ran no residual scan, which
+/// is not the same as a residual scan that came back clean, and is not the
+/// same as one that could not be run at all -- see
+/// [`residual_risk_basis_for_failed_scan`] for the third case.
+///
+/// This function never influences the risk. It is pinned to
+/// [`residual_risk`] by a consistency test rather than by a comment: a basis
+/// that disagrees with the risk on its own row is worse than an absent one,
+/// because it will be believed.
+pub fn residual_risk_basis(
+    consent: &ConsentMetadata,
+    report: &RedactionReport,
+    residual_findings: Option<&RedactionReport>,
+) -> Vec<ResidualRiskCondition> {
+    let mut basis = Vec::new();
+
+    // Forced High, mirroring `residual_risk` cases 3 and 4 and the
+    // `residual_findings` half of `resolve_post_scrub_risk`. A key finding or
+    // a coverage gap forces High whichever pass reported it.
+    if report.key_finding_detected
+        || residual_findings.is_some_and(|residual| residual.key_finding_detected)
+    {
+        basis.push(ResidualRiskCondition::KeyFinding);
+    }
+    if report.coverage_incomplete
+        || residual_findings.is_some_and(|residual| residual.coverage_incomplete)
+    {
+        basis.push(ResidualRiskCondition::CoverageIncomplete);
+    }
+    // A secret the detection-only scan still sees after the pass finished.
+    // Scoped to the flag that actually forces High in
+    // `resolve_post_scrub_risk`: residual counts alone only block a
+    // downgrade, so recording them here would claim a driver that is not one.
+    if residual_findings.is_some_and(|residual| residual.blocked_secret_detected) {
+        basis.push(ResidualRiskCondition::ResidualSurvivor);
+    }
+
+    // The Medium floor, recorded because a calibration pass needs the
+    // denominator as much as the numerator. `local_path` is excluded here for
+    // the same reason it is excluded from the tier (#219a): it is present in
+    // 93% of real sessions and cannot discriminate.
+    if report.blocked_secret_detected
+        || report
+            .counts
+            .keys()
+            .any(|label| label_bears_severity(label))
+        || report
+            .pii_labels_present
+            .iter()
+            .any(|label| label_bears_severity(label))
+    {
+        basis.push(ResidualRiskCondition::FoundAndRemoved);
+    }
+    if consent.message_text_included
+        || consent.tool_payloads_included
+        || consent.correction_included
+    {
+        basis.push(ResidualRiskCondition::ConsentContentFlag);
+    }
+
+    basis
+}
+
+/// The basis for a pass whose residual scan could not be run at all.
+///
+/// Both `rescrub_trace_envelope_with` and `rescrub_envelope_prose_pii_with`
+/// force High in an `Err(_)` arm when `residual_envelope_scan` failed, and
+/// that arm never constructs a `PostScrubAssessment`, so no flag on any
+/// `RedactionReport` records it. It is invisible to a basis derived from the
+/// report alone -- and it is an outage signature, exactly the thing #474 is
+/// trying to tell apart from a real finding.
+pub fn residual_risk_basis_for_failed_scan(
+    consent: &ConsentMetadata,
+    report: &RedactionReport,
+) -> Vec<ResidualRiskCondition> {
+    let mut basis = residual_risk_basis(consent, report, None);
+    basis.push(ResidualRiskCondition::ResidualScanUnavailable);
+    basis
 }
 
 /// What content-bearing surfaces an envelope actually carries.
@@ -11295,5 +11498,190 @@ mod tests {
             rendered.contains("cargo run"),
             "the shape of the command must survive: {rendered}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Residual-risk basis (#474 proposal 4).
+    //
+    // Instrumentation only: it records WHICH conditions held when the risk
+    // was decided, so the quarantine queue can be split into privacy
+    // findings and outage artifacts. It must never influence the risk.
+    // ------------------------------------------------------------------
+
+    /// The whole point of a separate basis function. `residual_risk` returns
+    /// on the first condition that matches, so a trace carrying both a key
+    /// finding and a coverage gap reports only the key finding, and any
+    /// count derived from that label undercounts coverage gaps by exactly
+    /// the population where a real finding co-occurs.
+    ///
+    /// Since the question #474 asks is "how much of this queue is an outage
+    /// rather than a finding", a systematic undercount of the outage side is
+    /// the one error that cannot be tolerated. This test fails against a
+    /// first-wins implementation.
+    #[test]
+    fn the_basis_records_every_condition_that_held_not_just_the_first() {
+        use super::*;
+
+        let report = RedactionReport {
+            key_finding_detected: true,
+            coverage_incomplete: true,
+            ..Default::default()
+        };
+
+        // The risk itself is unchanged and still short-circuits.
+        assert_eq!(
+            residual_risk(&clean_consent(), &report),
+            ResidualPiiRisk::High
+        );
+
+        let basis = residual_risk_basis(&clean_consent(), &report, None);
+        assert!(
+            basis.contains(&ResidualRiskCondition::KeyFinding),
+            "the key finding must be recorded: {basis:?}"
+        );
+        assert!(
+            basis.contains(&ResidualRiskCondition::CoverageIncomplete),
+            "the coverage gap must be recorded even though the key finding \
+             already forced High: {basis:?}"
+        );
+    }
+
+    /// A basis that disagrees with the stored risk is worse than no basis,
+    /// because it will be believed. `residual_risk` stays the sole authority
+    /// on the value; this test pins the observational function to it so a
+    /// future edit to one that does not touch the other fails the suite.
+    #[test]
+    fn the_basis_agrees_with_the_risk_it_describes() {
+        use super::*;
+
+        let severity_label = "secret:pem_private_key";
+        for key_finding in [false, true] {
+            for coverage_incomplete in [false, true] {
+                for found_and_removed in [false, true] {
+                    for consent_flag in [false, true] {
+                        let mut report = RedactionReport {
+                            key_finding_detected: key_finding,
+                            coverage_incomplete,
+                            ..Default::default()
+                        };
+                        if found_and_removed {
+                            report.counts.insert(severity_label.to_string(), 1);
+                        }
+                        // A non-severity label must not appear in the basis
+                        // either: `local_path` is excluded from the tier, so
+                        // recording it as a driver would misattribute.
+                        report.counts.insert("local_path".to_string(), 9);
+
+                        let mut consent = clean_consent();
+                        consent.message_text_included = consent_flag;
+
+                        let risk = residual_risk(&consent, &report);
+                        let basis = residual_risk_basis(&consent, &report, None);
+                        let case = format!(
+                            "key={key_finding} coverage={coverage_incomplete} \
+                             found={found_and_removed} consent={consent_flag}"
+                        );
+
+                        let forces_high = basis.iter().any(|condition| condition.forces_high());
+                        assert_eq!(
+                            forces_high,
+                            risk == ResidualPiiRisk::High,
+                            "{case}: basis {basis:?} disagrees with {risk:?}"
+                        );
+                        assert_eq!(
+                            basis.is_empty(),
+                            risk == ResidualPiiRisk::Low,
+                            "{case}: an empty basis must mean Low, and only Low"
+                        );
+                        if risk == ResidualPiiRisk::Medium {
+                            assert!(
+                                !forces_high && !basis.is_empty(),
+                                "{case}: Medium must carry only Medium-floor conditions"
+                            );
+                        }
+                        assert!(
+                            !basis.contains(&ResidualRiskCondition::ResidualSurvivor),
+                            "{case}: no residual scan ran, so nothing may claim one did"
+                        );
+                        assert!(
+                            !basis.contains(&ResidualRiskCondition::ResidualScanUnavailable),
+                            "{case}: the scan was not attempted, which is not the same \
+                             as having failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A secret that survived the pass reaches the decision through
+    /// `resolve_post_scrub_risk`'s `residual_findings`, which `residual_risk`
+    /// never sees. It is a distinct condition from anything the pass's own
+    /// report carries, and it forces High.
+    #[test]
+    fn a_survivor_from_the_residual_scan_is_its_own_condition() {
+        use super::*;
+
+        let residual = RedactionReport {
+            blocked_secret_detected: true,
+            ..Default::default()
+        };
+        let basis = residual_risk_basis(
+            &clean_consent(),
+            &RedactionReport::default(),
+            Some(&residual),
+        );
+        assert_eq!(basis, vec![ResidualRiskCondition::ResidualSurvivor]);
+        assert!(basis[0].forces_high());
+
+        // A residual scan that ran and found nothing records nothing, and in
+        // particular does not report a survivor by omission.
+        assert!(
+            residual_risk_basis(
+                &clean_consent(),
+                &RedactionReport::default(),
+                Some(&RedactionReport::default()),
+            )
+            .is_empty()
+        );
+    }
+
+    /// `ResidualScanUnavailable` is an outage signature, and it is invisible
+    /// to any basis derived from the report alone: both rescrub functions
+    /// force High in an `Err(_)` arm that never constructs a
+    /// `PostScrubAssessment`, so no `RedactionReport` flag records it.
+    /// Separating outages from findings is what #474 is for, so it cannot be
+    /// folded into `CoverageIncomplete`.
+    #[test]
+    fn a_residual_scan_that_could_not_run_is_recorded_separately() {
+        use super::*;
+
+        let basis =
+            residual_risk_basis_for_failed_scan(&clean_consent(), &RedactionReport::default());
+        assert_eq!(basis, vec![ResidualRiskCondition::ResidualScanUnavailable]);
+        assert!(basis[0].forces_high());
+        assert!(
+            !basis.contains(&ResidualRiskCondition::CoverageIncomplete),
+            "a scan that could not run is not the same as a filter that skipped content"
+        );
+    }
+
+    /// The stored form is a fixed label set. Storage relies on this: the
+    /// column holds an allowlist of `&'static str`, never caller text.
+    #[test]
+    fn every_condition_round_trips_through_its_label() {
+        use super::*;
+
+        let mut seen = std::collections::BTreeSet::new();
+        for condition in ResidualRiskCondition::ALL {
+            let label = condition.as_label();
+            assert!(
+                seen.insert(label),
+                "duplicate residual-risk basis label: {label}"
+            );
+            assert_eq!(ResidualRiskCondition::from_label(label), Some(*condition));
+        }
+        assert_eq!(ResidualRiskCondition::from_label("other"), None);
+        assert_eq!(ResidualRiskCondition::from_label(""), None);
     }
 }

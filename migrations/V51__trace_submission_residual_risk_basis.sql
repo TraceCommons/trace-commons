@@ -1,0 +1,50 @@
+-- Which conditions held when a submission's residual PII risk was decided.
+--
+-- `residual_risk` short-circuits: it returns High on the first condition that
+-- matches, so a trace carrying both a key finding and a coverage gap records
+-- only that it is High, and the coverage gap is never evaluated, let alone
+-- written down. That is correct for classification -- the risk value is the
+-- same either way -- and exactly wrong for measurement.
+--
+-- On 2026-08-27 the pilot held 221 quarantined traces. 112 were
+-- `pii_backstop_attempts_exhausted` (V49's column tells those apart). Of the
+-- 108 that remained, only 18 carried a key finding, and THE DRIVER FOR THE
+-- REMAINING ~90 IS NOT ESTABLISHED -- it cannot be, from stored data, because
+-- the input to the risk decision was never recorded. The leading hypothesis
+-- is `coverage_incomplete` from classifier errors, which would mean an
+-- upstream outage was inflating quarantine through a second path. A coverage
+-- gap forced High and a filter that looked and found a secret are
+-- indistinguishable at review time today, and they demand opposite responses:
+-- one is a privacy finding, the other is an outage.
+--
+-- LABEL-ONLY BY CONSTRUCTION. This column stores an array of allowlisted
+-- condition labels, every one a fixed compile-time constant produced by the
+-- server's own redaction pass -- never caller-supplied text, and never the
+-- envelope's own claim about itself. `safe_residual_risk_basis_labels` in
+-- trace_corpus_storage.rs is the choke point that enforces it: anything
+-- unrecognised is dropped rather than stored. The basis is a return value of
+-- each scrub pass and is never read from the envelope, which is deserialised
+-- from contributor input and therefore cannot be trusted to describe the
+-- conditions under which it was itself judged.
+--
+-- Nullable and backfill-free on purpose: every row predating this migration
+-- keeps NULL, which reads as "not recorded" rather than as a claim about why
+-- the trace is where it is. Backfilling by inferring from `status` would
+-- fabricate exactly the data this column exists to obtain. NULL is also
+-- distinct from `[]`, which means "recorded, and no condition held".
+--
+-- JSONB rather than TEXT[] to match the table's existing convention:
+-- consent_scopes, allowed_uses and redaction_counts are all JSONB, and the
+-- `json_array_strings` reader already exists.
+--
+-- No RLS change (a column on an already-RLS-forced table inherits the tenant
+-- predicate). No column-level SELECT grant is added: neither
+-- trace_gate_driver nor trace_pii_backstop_driver reads this column, and both
+-- hold column-scoped grants (V45), so adding one here would widen a reader
+-- role for no reason.
+--
+-- This column changes nothing about which traces are quarantined. It is
+-- instrumentation, and it answers nothing on its own; the measurement has to
+-- be re-run after the classifier failure rate has been normal for a day.
+ALTER TABLE trace_submissions
+    ADD COLUMN IF NOT EXISTS residual_risk_basis JSONB;

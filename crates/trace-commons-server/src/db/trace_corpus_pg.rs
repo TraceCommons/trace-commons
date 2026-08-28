@@ -344,6 +344,12 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
         expires_at: row.get("expires_at"),
         purged_at: row.get("purged_at"),
         last_status_reason: row.get("last_status_reason"),
+        // NULL reads as "not recorded" (every row before V51), never as an
+        // empty basis. `Some(vec![])` is the distinct recorded-and-empty case.
+        residual_risk_basis: row
+            .get::<_, Option<serde_json::Value>>("residual_risk_basis")
+            .map(|value| json_array_strings(value, "residual_risk_basis"))
+            .transpose()?,
     })
 }
 
@@ -1435,6 +1441,26 @@ impl TraceCorpusStore for PgBackend {
         let redaction_counts = serde_json::to_value(&submission.redaction_counts).map_err(|e| {
             DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
         })?;
+        // NULL when the caller recorded no basis, which reads as "not
+        // recorded" -- never as a claim that no condition held.
+        //
+        // The DO UPDATE below is deliberately COALESCE-free. It overwrites
+        // `privacy_risk` unconditionally, so preserving an older basis
+        // underneath a fresh risk would leave the two describing different
+        // passes, and a basis that disagrees with the risk on its own row is
+        // worse than an absent one, because it will be believed. The pair is
+        // written together or cleared together.
+        let residual_risk_basis = submission
+            .residual_risk_basis
+            .as_ref()
+            .map(|labels| {
+                serde_json::to_value(labels).map_err(|e| {
+                    DatabaseError::Serialization(format!(
+                        "trace residual risk basis encode failed: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
 
         let row = tx
             .query_one(
@@ -1443,10 +1469,11 @@ impl TraceCorpusStore for PgBackend {
                     submitted_tenant_scope_ref, schema_version, consent_policy_version,
                     consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
                     redaction_pipeline_version, redaction_hash, redaction_counts, canonical_summary_hash,
-                    submission_score, credit_points_pending, credit_points_final, expires_at
+                    submission_score, credit_points_pending, credit_points_final, expires_at,
+                    residual_risk_basis
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
                  )
                  ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
                     trace_id = excluded.trace_id,
@@ -1468,6 +1495,7 @@ impl TraceCorpusStore for PgBackend {
                     credit_points_pending = excluded.credit_points_pending,
                     credit_points_final = excluded.credit_points_final,
                     expires_at = excluded.expires_at,
+                    residual_risk_basis = excluded.residual_risk_basis,
                     updated_at = NOW()
                  RETURNING
                     tenant_id, submission_id, trace_id, status, auth_principal_ref,
@@ -1477,7 +1505,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,
@@ -1500,6 +1528,7 @@ impl TraceCorpusStore for PgBackend {
                     &submission.credit_points_pending,
                     &submission.credit_points_final,
                     &submission.expires_at,
+                    &residual_risk_basis,
                 ],
             )
             .await
@@ -1526,7 +1555,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
                  FROM trace_submissions
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
@@ -1554,7 +1583,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
                  FROM trace_submissions
                  WHERE tenant_id = $1
                  ORDER BY received_at ASC",
@@ -1594,7 +1623,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason";
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis";
         let rows = match cursor {
             Some(cursor) => {
                 let sql = format!(
@@ -2107,7 +2136,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
                 &[
                     &tenant_id,
                     &submission_id,
@@ -2152,7 +2181,7 @@ impl TraceCorpusStore for PgBackend {
                     redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
                     credit_points_final, received_at, updated_at, reviewed_at,
                     review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason",
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
                 &[&tenant_id, &submission_id, &actor_principal_ref],
             )
             .await

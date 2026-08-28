@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
@@ -810,6 +811,11 @@ pub struct TraceSubmissionWrite {
     pub credit_points_pending: Option<f32>,
     pub credit_points_final: Option<f32>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Which conditions held when `privacy_risk` was decided, as allowlisted
+    /// labels. `None` leaves the column untouched -- the two fields are
+    /// written together or not at all, because a stale basis beside a fresh
+    /// risk is worse than an absent one.
+    pub residual_risk_basis: Option<Vec<String>>,
 }
 
 /// Opaque keyset cursor for the account trace read-back list. It carries the
@@ -866,6 +872,29 @@ pub fn safe_status_reason_label(reason: &str) -> &'static str {
         .unwrap_or(STATUS_REASON_OTHER)
 }
 
+/// Reduce a residual-risk basis to the labels safe to store in
+/// `trace_submissions.residual_risk_basis`.
+///
+/// The choke point for the label-only rule on that column, and the analogue
+/// of [`safe_status_reason_label`]. It takes typed
+/// [`ResidualRiskCondition`]s rather than strings on purpose: there is no
+/// caller-supplied text to sanitise, because there is no way to express one.
+/// Every stored value is a fixed `&'static str` produced by the server's own
+/// redaction pass.
+///
+/// Duplicates collapse, order is preserved. A basis is a set of conditions;
+/// a repeated label would distort any count derived from the column.
+pub fn safe_residual_risk_basis_labels(basis: &[ResidualRiskCondition]) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    for condition in basis {
+        let label = condition.as_label();
+        if !labels.iter().any(|seen| seen == label) {
+            labels.push(label.to_string());
+        }
+    }
+    labels
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSubmissionRecord {
     pub tenant_id: String,
@@ -902,6 +931,13 @@ pub struct TraceSubmissionRecord {
     /// `None` for rows written before V49. See [`safe_status_reason_label`].
     #[serde(default)]
     pub last_status_reason: Option<String>,
+    /// Which conditions held when this submission's `privacy_risk` was
+    /// decided, as allowlisted labels (#474). `None` means NOT RECORDED --
+    /// every row written before V51, and never a claim that no condition
+    /// held. `Some(vec![])` is the distinct "recorded, nothing held" case.
+    /// See [`safe_residual_risk_basis_labels`].
+    #[serde(default)]
+    pub residual_risk_basis: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3069,5 +3105,60 @@ mod status_reason_tests {
     fn the_fallback_is_a_fixed_label() {
         assert_eq!(STATUS_REASON_OTHER, "other");
         assert_eq!(safe_status_reason_label("anything at all"), "other");
+    }
+}
+
+#[cfg(test)]
+mod residual_risk_basis_tests {
+    use super::safe_residual_risk_basis_labels;
+    use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
+
+    /// Every condition the protocol can produce must survive verbatim, or the
+    /// column cannot answer the question it exists for (#474): whether a
+    /// quarantined trace carries a privacy finding or an outage signature.
+    #[test]
+    fn every_protocol_condition_is_storable() {
+        let conditions: Vec<ResidualRiskCondition> = ResidualRiskCondition::ALL.to_vec();
+        let stored = safe_residual_risk_basis_labels(&conditions);
+        assert_eq!(stored.len(), conditions.len());
+        for condition in &conditions {
+            assert!(
+                stored.iter().any(|label| *label == condition.as_label()),
+                "{condition:?} must be storable"
+            );
+        }
+    }
+
+    /// The choke point exists so that nothing but a fixed compile-time label
+    /// can reach a plainly-readable column. The signature already forbids
+    /// caller text; this pins that the stored strings are exactly the
+    /// allowlist and carry no caller-influenced content.
+    #[test]
+    fn no_unallowlisted_label_can_be_stored() {
+        let stored = safe_residual_risk_basis_labels(ResidualRiskCondition::ALL);
+        for label in &stored {
+            assert!(
+                ResidualRiskCondition::from_label(label).is_some(),
+                "{label} is not on the allowlist"
+            );
+            assert!(
+                label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{label} is not a fixed lowercase label"
+            );
+        }
+        // Recorded-and-empty is representable, and is not the same as NULL.
+        assert!(safe_residual_risk_basis_labels(&[]).is_empty());
+    }
+
+    /// A basis is a set of conditions, not a multiset. Duplicates would
+    /// distort any count derived from the column.
+    #[test]
+    fn duplicate_conditions_collapse() {
+        let stored = safe_residual_risk_basis_labels(&[
+            ResidualRiskCondition::CoverageIncomplete,
+            ResidualRiskCondition::CoverageIncomplete,
+            ResidualRiskCondition::KeyFinding,
+        ]);
+        assert_eq!(stored, vec!["coverage_incomplete", "key_finding"]);
     }
 }
