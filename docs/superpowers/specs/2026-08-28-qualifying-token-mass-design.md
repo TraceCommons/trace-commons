@@ -28,10 +28,27 @@ separates short traces and passes essentially every long one. Measured in #478
 on 2026-08-28: perplexity passes 98% of uncapped and 93% of capped decisions.
 The floor is not discriminating; it is merely precise.
 
-**It cannot see composition.** A trace that is 90% boilerplate with 10%
-substantive work produces the same mean as one that is uniformly mediocre.
-"How much of this is worth having" is the admission question, and a mean cannot
-express it.
+**Its resolution is exponentially compressed where the decisions are made.**
+The mean is monotone in composition, so it is not blind to it. But
+`representative` is `exp` of a token-weighted mean log-perplexity, so a trace
+that is a fraction `s` substantive against boilerplate scores
+`exp(hi*s + lo*(1-s))` -- linear in `s` inside the exponent, and therefore
+exponentially compressed at the low end. With a substantive chunk at mean_nll
+3.0 and boilerplate at 0.5:
+
+| substantive share | qualifying mass | representative | % of the mean's range |
+|---|---|---|---|
+| 0.00 | 0.00 | 1.649 | 0.00% |
+| 0.10 | 0.10 | 2.117 | 2.54% |
+| 0.25 | 0.25 | 3.080 | 7.76% |
+| 0.50 | 0.50 | 5.755 | 22.27% |
+| 1.00 | 1.00 | 20.086 | 100.00% |
+
+A trace that is one quarter substantive work sits 7.8% of the way up the
+statistic's range. Boilerplate-heavy traces -- the ones an admission decision
+is actually about -- are all crushed into the bottom few percent, where a
+fixed floor cannot separate them. Qualifying mass is linear in composition
+across the whole range.
 
 Note what is NOT the problem. Strided chunk selection
 (`CHUNK_SELECTION_ALGORITHM = "stride_endpoint_inclusive.v1"`) is an unbiased
@@ -197,11 +214,13 @@ Tests first, in `chunk_aggregate.rs`:
 
 And the test the design rests on:
 
-- **Composition sensitivity.** Hold a substantive trace fixed and pad it with
-  increasing boilerplate. Qualifying mass must fall roughly in proportion to
-  the padding while the representative mean moves sub-proportionally. If this
-  cannot be made to pass, the premise that the mean cannot see composition is
-  wrong and the design should stop here.
+- **Composition resolution.** Hold a substantive trace fixed and pad it with
+  boilerplate. Qualifying mass must equal the substantive token share exactly,
+  while the representative traverses a disproportionately small share of its
+  own range over the same interval: at a quarter substantive, mass reads 0.25
+  and the mean sits under 10% of its range. The test asserts both halves, so it
+  fails if either the new statistic is not linear in composition or the mean
+  turns out to resolve the low end better than claimed.
 
 ## Out of scope
 
