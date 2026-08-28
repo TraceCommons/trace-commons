@@ -45,9 +45,15 @@ Notes
 The server components depend on several of the permissively licensed crates.
 Combining MIT or Apache-2.0 code into an AGPL-3.0 work is permitted; the
 resulting combined work is AGPL-3.0-or-later, while those crates remain
-available on their own terms. The dependency never runs the other way: no
-client or protocol crate depends on an AGPL-licensed crate, and none may be
-made to.
+available on their own terms.
+
+The dependency never runs the other way. No client or protocol crate links an
+AGPL-licensed crate in a shipped build, and none may be made to; this is
+enforced by a test, crates/trace-commons-server/tests/license_boundary.rs.
+`trace-commons-contributor` does take a test-only dev-dependency on
+`trace-commons-server` on non-Windows targets. Dev-dependencies are not part of
+any published artifact, so that edge conveys no combined work and imposes no
+AGPL obligation on the contributor crate.
 
 Contributions made before this split remain available under the MIT and
 Apache-2.0 terms that applied when they were published.
