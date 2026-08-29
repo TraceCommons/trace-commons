@@ -34,12 +34,17 @@ pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
 pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+/// Distinct from the near-ai suffix even though both serve the same weights:
+/// the hosted endpoint wraps a 512-context model in an internal splitter, so
+/// a stored summary must record which one actually produced the redaction.
+pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyFilterBackendTag {
     None,
     Sidecar,
     NearAi,
+    SelfHosted,
 }
 
 impl PrivacyFilterBackendTag {
@@ -50,6 +55,7 @@ impl PrivacyFilterBackendTag {
             PrivacyFilterBackendTag::None => "none",
             PrivacyFilterBackendTag::Sidecar => "sidecar",
             PrivacyFilterBackendTag::NearAi => "near_ai",
+            PrivacyFilterBackendTag::SelfHosted => "self_hosted",
         }
     }
 }
@@ -2393,6 +2399,9 @@ fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
         PrivacyFilterBackendTag::NearAi => format!(
             "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX}"
         ),
+        PrivacyFilterBackendTag::SelfHosted => format!(
+            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX}"
+        ),
     }
 }
 
@@ -2657,6 +2666,8 @@ pub fn privacy_filter_adapter_from_env() -> Result<
         "near-ai" => {
             build_near_ai_adapter().map(|adapter| Some((adapter, PrivacyFilterBackendTag::NearAi)))
         }
+        "self-hosted" => build_self_hosted_adapter()
+            .map(|adapter| Some((adapter, PrivacyFilterBackendTag::SelfHosted))),
         other => Err(PrivacyFilterConfigError::UnknownBackend {
             value: other.to_string(),
         }),
@@ -2850,6 +2861,19 @@ fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilte
 #[cfg(feature = "near-ai-privacy-filter")]
 fn build_near_ai_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     crate::privacy_filter_near_ai::build_from_env()
+}
+
+#[cfg(not(feature = "self-hosted-privacy-filter"))]
+fn build_self_hosted_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    Err(PrivacyFilterConfigError::FeatureDisabled {
+        backend: "self-hosted",
+        feature: "self-hosted-privacy-filter",
+    })
+}
+
+#[cfg(feature = "self-hosted-privacy-filter")]
+fn build_self_hosted_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
+    crate::privacy_filter_self_hosted::build_from_env()
 }
 
 pub(crate) fn read_privacy_env(canonical: &str, legacy: &str) -> Option<String> {
@@ -3588,8 +3612,17 @@ impl DeterministicTraceRedactor {
             Ok(None) => return Ok(text),
             Err(error) => {
                 match self.privacy_filter_backend {
-                    PrivacyFilterBackendTag::NearAi => {
+                    PrivacyFilterBackendTag::NearAi | PrivacyFilterBackendTag::SelfHosted => {
                         // Spec fail-closed: surface as RedactionFailed.
+                        //
+                        // The self-hosted backend joins near-ai rather than
+                        // the sidecar arm deliberately. Being on loopback
+                        // makes it more reliable, not less required: it is a
+                        // configured prose-PII control, and degrading to
+                        // deterministic-only redaction on failure is exactly
+                        // the silent downgrade the fail-closed convention
+                        // exists to prevent. A local process that is down
+                        // should stop the path, not quietly narrow it.
                         return Err(error);
                     }
                     PrivacyFilterBackendTag::Sidecar => {
@@ -7170,6 +7203,10 @@ mod tests {
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
             format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
         );
+        assert_eq!(
+            redaction_pipeline_version(PrivacyFilterBackendTag::SelfHosted),
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-self-hosted-v1")
+        );
     }
 
     #[test]
@@ -7200,6 +7237,66 @@ mod tests {
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    #[test]
+    fn self_hosted_backend_resolves_without_an_api_key() {
+        use super::privacy_filter_adapter_from_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests
+        // in this module.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted");
+            std::env::set_var(
+                "TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL",
+                "http://127.0.0.1:8471/v1",
+            );
+            // The loopback backend must not inherit the hosted backend's
+            // credential requirement.
+            std::env::remove_var("TRACE_NEAR_AI_PRIVACY_API_KEY");
+        }
+        let resolved = privacy_filter_adapter_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
+        }
+        match resolved {
+            Ok(Some((_adapter, tag))) => assert_eq!(tag.label(), "self_hosted"),
+            Ok(None) => panic!("expected a configured backend, got none"),
+            // Acceptable when the crate is built without the feature.
+            Err(super::PrivacyFilterConfigError::FeatureDisabled { backend, feature }) => {
+                assert_eq!(backend, "self-hosted");
+                assert_eq!(feature, "self-hosted-privacy-filter");
+            }
+            Err(other) => panic!("expected a resolved self-hosted backend, got err {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_hosted_backend_without_a_base_url_is_refused() {
+        use super::privacy_filter_adapter_from_env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: holding ENV_LOCK serializes env mutation across all tests
+        // in this module.
+        unsafe {
+            std::env::set_var("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted");
+            std::env::remove_var("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL");
+        }
+        let resolved = privacy_filter_adapter_from_env();
+        unsafe {
+            std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
+        }
+        // A configured backend with no endpoint must refuse, never silently
+        // fall back to a default or to deterministic-only redaction.
+        let message = match resolved {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a backend with no endpoint must refuse, not resolve"),
+        };
+        assert!(
+            message.contains("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL")
+                || message.contains("self-hosted-privacy-filter"),
+            "error should name the missing var or the disabled feature, got: {message}"
+        );
     }
 
     #[test]
