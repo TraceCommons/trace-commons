@@ -5,7 +5,20 @@
 # opf has no PyPI release. It installs from the upstream repository, so the
 # commit is pinned rather than a version range -- `main` is not a version.
 opf @ git+https://github.com/openai/privacy-filter.git@main
-torch==2.13.0
+
+# CPU-only torch, and the index that serves it.
+#
+# This matters on the pilot host and is easy to get wrong: on linux-x86_64 the
+# default PyPI `torch` wheel drags in the whole CUDA runtime -- nvidia-cufft
+# alone is 214 MB, and the set runs to several GB -- on a host with no GPU and
+# 13 GB of free disk. Installing it took the pilot from 13 GB free to 8.2 GB
+# before it was killed, and none of it would ever have been executed.
+#
+# macOS arm64 has no `+cpu` variant because its default wheel is already CPU,
+# so the marker splits them rather than one pin serving both.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu ; sys_platform == "linux"
+torch==2.13.0 ; sys_platform == "darwin"
 numpy==2.5.2
 safetensors==0.8.0
 
