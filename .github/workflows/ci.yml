@@ -296,6 +296,28 @@ jobs:
       - name: Run operator-binaries smoke
         run: bash scripts/operator/operator-smoke.sh
 
+  privacy-filter-shim-tests:
+    name: privacy-filter shim tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # Only the web layer, deliberately. The shim's contract tests stub the
+      # model, so this job needs neither torch nor 3 GB of weights, and stays
+      # a fast gate rather than an occasionally-skipped one.
+      - name: Install shim test dependencies
+        run: pip install fastapi==0.115.6 pydantic==2.10.4 httpx==0.28.1 pytest==8.3.4
+      # These pin the span offset convention. If the shim ever emits byte
+      # offsets where the Rust decoder expects codepoints, redaction lands on
+      # the wrong characters, the PII survives, and the call reports success.
+      # This job is the only thing standing behind that.
+      - name: Run shim contract tests
+        working-directory: deploy/pilot-gcp/privacy-filter
+        run: python -m pytest test_app.py -v
+
   macos-app-tests:
     name: macOS app tests
     # macos-26, not macos-14: macos/Package.swift declares

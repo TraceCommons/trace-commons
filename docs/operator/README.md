@@ -72,6 +72,11 @@ Every runbook in this directory, with a one-line description.
   (`disabled` / `dry_run` / `http`), the per-request `dry_run` preview flag,
   payout designation, fail-closed holds (NoneEnrolled / AmbiguousNoDesignation),
   and idempotent hold recovery.
+- [`./self-hosted-privacy-filter.md`](./self-hosted-privacy-filter.md) — bringing
+  up `openai/privacy-filter` on the pilot host and cutting the privacy-filter
+  backend over from `near-ai` to `self-hosted`: host resize (stops the
+  instance), weight staging, the offset-convention check against real weights,
+  and rollback.
 - [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) — post-run
   handler for the A2.6 bake-off: pull the report, fill the skeleton, route to
   the A2.7 / A2.7-partial / Phase A.5 outcome branch, tear down.
