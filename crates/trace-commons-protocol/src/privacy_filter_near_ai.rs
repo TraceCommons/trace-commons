@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_spans};
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -361,7 +361,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             .try_collect()
             .await?;
 
-        apply_windowed_spans(text, &windows)
+        apply_windowed_spans("near-ai", text, &windows)
     }
 }
 
@@ -588,178 +588,14 @@ async fn backoff(failed_attempt: usize) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
-/// The tokenizer the hosted classifier actually uses.
-///
-/// Identified by measurement rather than assumption: `o200k_base` reproduced
-/// the endpoint's own `usage.input_tokens` exactly on 17 of 17 samples --
-/// prose, source code, identifier-dense text, hex digests, long words and
-/// repeated characters, from 5 bytes to 8 KB. `cl100k_base` matched only 6 of
-/// 9 on the same short set, so the choice is not arbitrary and should not be
-/// changed without re-running that comparison.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn classifier_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
-    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
-}
-
-/// Count the tokens the classifier will charge for `text`.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn classifier_token_count(text: &str) -> Option<usize> {
-    classifier_bpe().map(|bpe| bpe.encode_ordinary(text).len())
-}
-
-/// Split `text` into contiguous byte ranges, each within `max_tokens` of the
-/// classifier's budget, covering the whole input on char boundaries.
-///
-/// Segments are cut at newlines where possible -- PII rarely spans lines, and
-/// a window that ends mid-entity risks splitting one across two requests. A
-/// single line that alone exceeds the budget (a long log line, a base64 blob)
-/// is bisected until its pieces fit.
-///
-/// Falls back to a conservative byte split if the tokenizer is unavailable:
-/// under-filling requests costs throughput, over-filling costs 502s, so the
-/// safe direction is down.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops::Range<usize>> {
-    if classifier_bpe().is_none() {
-        // No tokenizer: fall back to the dense-content byte equivalent, which
-        // is the smallest realistic window for this budget.
-        return chunk_byte_ranges(text, max_tokens.saturating_mul(3).max(1));
-    }
-    let max_tokens = max_tokens.max(1);
-
-    // Line-ish segments, each carrying its own token cost.
-    let mut segments: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut seg_start = 0usize;
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            segments.push(seg_start..index + 1);
-            seg_start = index + 1;
-        }
-    }
-    if seg_start < text.len() {
-        segments.push(seg_start..text.len());
-    }
-
-    // Any segment too big on its own is bisected until each piece fits.
-    let mut sized: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
-    let mut pending: Vec<std::ops::Range<usize>> = segments;
-    pending.reverse();
-    while let Some(range) = pending.pop() {
-        let tokens = classifier_token_count(&text[range.clone()]).unwrap_or(usize::MAX);
-        if tokens <= max_tokens || range.len() <= 1 {
-            sized.push((range, tokens));
-            continue;
-        }
-        // Bisect on a char boundary and re-measure both halves.
-        let mut mid = range.start + range.len() / 2;
-        while mid > range.start && !text.is_char_boundary(mid) {
-            mid -= 1;
-        }
-        if mid == range.start {
-            sized.push((range, tokens));
-            continue;
-        }
-        pending.push(mid..range.end);
-        pending.push(range.start..mid);
-    }
-
-    // Greedily pack segments up to the budget. Per-segment counts can differ
-    // slightly from the count of the joined text, because BPE merges across a
-    // boundary; the budget's margin under the measured limit absorbs that.
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut current: Option<std::ops::Range<usize>> = None;
-    let mut running = 0usize;
-    for (range, tokens) in sized {
-        match current {
-            Some(ref mut open) if running + tokens <= max_tokens => {
-                open.end = range.end;
-                running += tokens;
-            }
-            Some(open) => {
-                ranges.push(open);
-                running = tokens;
-                current = Some(range);
-            }
-            None => {
-                running = tokens;
-                current = Some(range);
-            }
-        }
-    }
-    if let Some(open) = current {
-        ranges.push(open);
-    }
-    if ranges.is_empty() {
-        ranges.push(0..text.len());
-    }
-    ranges
-}
-
-/// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
-/// always on char boundaries and covering the whole input. Windows prefer to
-/// end at a newline within the limit (PII rarely spans lines); a run with no
-/// newline under the limit is hard-split at the nearest lower char boundary.
-fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
-    let max_bytes = max_bytes.max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        if text.len() - start <= max_bytes {
-            ranges.push(start..text.len());
-            break;
-        }
-        // Provisional hard cap, walked back to a char boundary.
-        let mut end = start + max_bytes;
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        // Prefer to break just after the last newline inside the window.
-        if let Some(nl) = text[start..end].rfind('\n') {
-            end = start + nl + 1;
-        }
-        // Guard against no progress (e.g. a single multibyte char wider
-        // than the char-boundary walk left us): force at least one char.
-        if end <= start {
-            end = start + max_bytes;
-            while end < text.len() && !text.is_char_boundary(end) {
-                end += 1;
-            }
-        }
-        ranges.push(start..end);
-        start = end;
-    }
-    if ranges.is_empty() {
-        ranges.push(0..text.len());
-    }
-    ranges
-}
-
-/// Merge per-window spans into a single redaction over `text`. Each window
-/// carries its starting codepoint index; its spans are reported relative to
-/// that window, so shift them into full-text codepoint coordinates before
-/// the shared `apply_spans` validation/redaction pass.
-fn apply_windowed_spans(
-    text: &str,
-    windows: &[(usize, Vec<ClassifySpan>)],
-) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-    let mut all_spans = Vec::new();
-    for (codepoint_start, spans) in windows {
-        for span in spans {
-            all_spans.push(ClassifySpan {
-                category: span.category.clone(),
-                start: codepoint_start + span.start,
-                end: codepoint_start + span.end,
-                score: span.score,
-            });
-        }
-    }
-    apply_spans("near-ai", text, &all_spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These exercise the windowing helpers, which now live in the shared
+    // module because both backends window. The tests stayed here rather than
+    // moving with them: they are written against this backend's token budget
+    // and its measured endpoint behaviour.
+    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
         ClassifySpan {
@@ -1057,7 +893,9 @@ mod tests {
             (0usize, vec![]),
             (4usize, vec![span("private_email", 1, 16, 0.99)]),
         ];
-        let result = apply_windowed_spans(text, &windows).unwrap().unwrap();
+        let result = apply_windowed_spans("near-ai", text, &windows)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.redacted_text, "café [REDACTED:private_email]!");
         assert_eq!(result.summary.span_count, 1);
     }
