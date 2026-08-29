@@ -182,6 +182,49 @@ deployed code. Verify by string marker, not `git log`:
 strings /opt/tracecommons/bin/trace-commons-ingest | grep -c self_hosted
 ```
 
+## STOP: do not cut over on E2 hardware
+
+Measured on `tc-pilot-host` (`e2-standard-4`) on 2026-08-29, against real
+weights, warm:
+
+| Input | 2 threads | 4 threads |
+|---|---|---|
+| 36 chars | 1.0 s | -- |
+| 1,024 chars | 53.0 s | 34.5 s |
+| 2,048 chars | 86.3 s | -- |
+| ~41,000 chars | >13 min, killed unfinished | -- |
+
+Roughly 40 characters per second. **The adapter's default timeout is 30 s**
+(`TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS`), so on this hardware any field
+beyond a few hundred characters fails every attempt. Cutting over would wedge
+the PII backstop harder than the hosted backend does.
+
+The cause is hardware, not configuration:
+
+- `/proc/cpuinfo` on E2 reports **`avx2` only** -- no AVX-512, no AVX512-BF16,
+  no AMX. `torch.cpu._is_avx512_bf16_supported()` is `False`.
+- The checkpoint is `param_dtype: bfloat16`, so every matmul runs **emulated**
+  bf16 on AVX2.
+- Raising `OMP_NUM_THREADS` from the default 2 to 4 bought 1.5x. That is the
+  whole budget available from tuning; it does not close a ~100x gap.
+
+Do not "fix" this by raising the timeout. A 30-second-plus classify blocks the
+backstop driver for the duration, and the queue is already the bottleneck.
+
+Options, cheapest first, none yet validated:
+
+1. **ONNX runtime with the quantized weights.** The repo ships `model_q4.onnx`,
+   `model_q4f16.onnx` and `model_fp16.onnx` precisely for CPU and browser
+   inference; the PyTorch path we are using is not the optimized one. This is
+   the first thing to try and needs no new hardware.
+2. **A CPU with bf16 acceleration.** C3 (Sapphire Rapids) has AMX-BF16, which
+   is the instruction set this checkpoint's dtype assumes.
+3. **A GPU host.** 50M active parameters is trivial on a GPU; this is certain
+   to work and the most expensive.
+4. **Stay on `near-ai`** and treat self-hosting as unfinished.
+
+Until one of those is measured, leave `TRACE_PRIVACY_FILTER_BACKEND=near-ai`.
+
 ## 6. Cut the backend over
 
 In `/etc/tracecommons/ingest.env`:
