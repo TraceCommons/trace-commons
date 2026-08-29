@@ -22,6 +22,7 @@ pub(crate) struct ClassifySpan {
     pub(crate) score: f64,
 }
 pub(crate) fn apply_spans(
+    backend: &'static str,
     text: &str,
     spans: &[ClassifySpan],
 ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
@@ -44,7 +45,7 @@ pub(crate) fn apply_spans(
     for span in spans {
         if span.start > span.end || span.end >= boundaries.len() {
             return Err(TraceContributionError::RedactionFailed {
-                reason: "near-ai privacy classifier returned out-of-range span".to_string(),
+                reason: format!("{backend} privacy classifier returned out-of-range span"),
             });
         }
         byte_spans.push(ClassifySpan {
@@ -129,7 +130,7 @@ mod tests {
     fn replaces_single_span() {
         let text = "email me at alice@example.com please";
         let spans = vec![span("private_email", 12, 29, 0.99)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
+        let result = apply_spans("near-ai", text, &spans).unwrap().unwrap();
         assert_eq!(
             result.redacted_text,
             "email me at [REDACTED:private_email] please"
@@ -146,7 +147,7 @@ mod tests {
         // plus an emoji before the email).
         let text = "café 😀 reach me jane@example.com now";
         let spans = vec![span("private_email", 15, 32, 0.99)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
+        let result = apply_spans("near-ai", text, &spans).unwrap().unwrap();
         assert_eq!(
             result.redacted_text,
             "café 😀 reach me[REDACTED:private_email] now"
@@ -159,7 +160,7 @@ mod tests {
             span("private_email", 1, 5, 0.4),
             span("private_phone", 3, 7, 0.9),
         ];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
+        let result = apply_spans("near-ai", text, &spans).unwrap().unwrap();
         assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
         // span_count is raw, even though only one collapsed redaction.
         assert_eq!(result.summary.span_count, 2);
@@ -171,7 +172,7 @@ mod tests {
         // 'é' is codepoint index 1.
         let text = "héllo";
         let spans = vec![span("private_name", 1, 2, 0.9)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
+        let result = apply_spans("near-ai", text, &spans).unwrap().unwrap();
         assert_eq!(result.redacted_text, "h[REDACTED:private_name]llo");
     }
     #[test]
@@ -179,7 +180,7 @@ mod tests {
         // Codepoint index 9999 is far beyond the 5-codepoint string.
         let text = "short";
         let spans = vec![span("private_name", 0, 9999, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
+        let err = apply_spans("near-ai", text, &spans).unwrap_err();
         assert!(err.to_string().contains("out-of-range"));
     }
     #[test]
@@ -189,14 +190,14 @@ mod tests {
         // as a valid codepoint index).
         let text = "café";
         let spans = vec![span("private_name", 0, 5, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
+        let err = apply_spans("near-ai", text, &spans).unwrap_err();
         assert!(err.to_string().contains("out-of-range"));
     }
     #[test]
     fn unknown_category_maps_to_unknown_with_warning() {
         let text = "secret-text";
         let spans = vec![span("brand_new_category", 0, 6, 0.5)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
+        let result = apply_spans("near-ai", text, &spans).unwrap().unwrap();
         assert_eq!(result.redacted_text, "[REDACTED:unknown]-text");
         assert!(
             result

@@ -74,7 +74,7 @@ const _: () = assert!(
 /// what makes a failure attributable to specific content.
 pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 1;
 
-/// How many times a single `privacy/classify` request is attempted before/// How many times a single `privacy/classify` request is attempted before
+/// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few
 /// times with exponential backoff before failing the window closed.
 pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
@@ -754,7 +754,7 @@ fn apply_windowed_spans(
             });
         }
     }
-    apply_spans(text, &all_spans)
+    apply_spans("near-ai", text, &all_spans)
 }
 
 #[cfg(test)]
