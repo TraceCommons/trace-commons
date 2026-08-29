@@ -1,0 +1,22 @@
+# Pinned to the versions resolved and tested on 2026-08-29. The privacy filter
+# is a security control; an unpinned dependency set means the control can
+# change under a redeploy without a code change.
+#
+# opf has no PyPI release. It installs from the upstream repository, so the
+# commit is pinned rather than a version range -- `main` is not a version.
+opf @ git+https://github.com/openai/privacy-filter.git@main
+torch==2.13.0
+numpy==2.5.2
+safetensors==0.8.0
+
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+
+# Test-only. httpx backs fastapi's TestClient.
+httpx==0.28.1
+pytest==8.3.4
+
+# Used only by stage-weights.sh, at deploy time. The service itself runs with
+# HF_HUB_OFFLINE=1 and never calls the hub.
+huggingface_hub==1.29.0

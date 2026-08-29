@@ -1,0 +1,38 @@
+[Unit]
+Description=Trace Commons privacy filter (openai/privacy-filter)
+After=network.target
+
+[Service]
+Type=exec
+User=tc-privacy-filter
+Group=tc-privacy-filter
+
+# Weights are staged to local disk by stage-weights.sh at deploy time. Both of
+# these make a boot that would reach the network fail loudly instead of
+# hanging on a dependency the fail-closed convention says we should not have.
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=PRIVACY_FILTER_DEVICE=cpu
+Environment=OPF_CHECKPOINT=/opt/tracecommons-privacy-filter/models/privacy_filter
+
+WorkingDirectory=/opt/tracecommons-privacy-filter
+ExecStart=/opt/tracecommons-privacy-filter/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8471 --workers 1
+Restart=on-failure
+RestartSec=5
+
+# The service classifies unredacted contributor prose. It needs no privileges,
+# no home directory, and no non-loopback network.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+ReadOnlyPaths=/opt/tracecommons-privacy-filter
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

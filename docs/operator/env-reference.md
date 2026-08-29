@@ -445,7 +445,7 @@ audit-relevant and is included in gate version hash derivation.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| `self-hosted` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
 | `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
@@ -461,6 +461,33 @@ audit-relevant and is included in gate version hash derivation.
 
 ---
 
+### Self-hosted privacy filter
+
+Set when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. The backend talks to the
+`trace-commons-privacy-filter` service on loopback (see
+`deploy/pilot-gcp/privacy-filter/`), which serves the same `openai/privacy-filter`
+weights the hosted endpoint serves.
+
+Prefer it to `near-ai`. The hosted endpoint serves a model reporting
+`context_length: 512` behind an internal splitter and fails above ~3,000 input
+tokens, so that backend windows every field at a 2,000-token budget, issues one
+sequential request per window, and stitches the spans back together. Locally the
+model has its real 128k context: one field, one request, no stitching, and no
+unredacted prose leaving the host.
+
+It fails closed on adapter error, alongside `near-ai` rather than `sidecar`.
+Running on loopback makes it more reliable, not less required.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL` | R when `self-hosted` | (none, refuses boot) | Base URL of the loopback shim, including the `/v1` suffix, e.g. `http://127.0.0.1:8471/v1`. A configured backend with no endpoint refuses at startup rather than defaulting. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL` | optional | `openai/privacy-filter` | Passed through in the classify request. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS` | optional | `30000` | Higher than the near-ai default of 10s: one request now carries a whole field rather than a 2,000-token window, and CPU inference is slower per call while needing far fewer calls. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_BYTES` | optional | `MAX_TRACE_ENVELOPE_BYTES` | Resource bound on a single classify request. |
+
+No API key variable exists for this backend by design; the transport never
+leaves the machine.
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.
@@ -472,6 +499,7 @@ These aren't env vars but they gate which envs even matter at runtime.
 | `local-gpu-models` | Compiles the mistralrs perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. A2.3 migrated the scorer off candle-direct; architecture is auto-detected from `config.json`. |
 | `local-gpu-models-cuda` | Implies `local-gpu-models`, adds the mistralrs CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
 | `near-ai-privacy-filter` | Compiles the NEAR AI Cloud privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=near-ai`. Pilot builds enable this feature. |
+| `self-hosted-privacy-filter` | Compiles the loopback privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. Pilot builds enable this feature. |
 
 Production build command:
 
