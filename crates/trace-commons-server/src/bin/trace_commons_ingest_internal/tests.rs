@@ -81805,6 +81805,19 @@ impl Drop for NearAiEnvGuard {
     }
 }
 
+/// The adapter the driver tick is given, built from the NEAR-AI env the
+/// backstop tests already set via `NearAiEnvGuard`.
+///
+/// The tick takes its adapter as an argument rather than reading process env,
+/// so these tests do not have to mutate `TRACE_PRIVACY_FILTER_BACKEND`. That
+/// variable is read by `test_state`, so setting it process-wide was visible to
+/// every other test running in parallel.
+fn backstop_test_adapter()
+-> Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter> {
+    trace_commons_protocol::privacy_filter_near_ai::build_from_env()
+        .expect("near-ai adapter builds from the guarded test env")
+}
+
 fn backstop_driver_config() -> PiiBackstopDriverConfig {
     PiiBackstopDriverConfig {
         interval: StdDuration::from_secs(30),
@@ -82039,9 +82052,13 @@ async fn pii_backstop_driver_tick_releases_held_submission() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::Healthy).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("healthy tick succeeds");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("healthy tick succeeds");
     assert_eq!(
         (summary.done, summary.failed, summary.exhausted),
         (1, 0, 0),
@@ -82106,9 +82123,13 @@ async fn pii_backstop_driver_tick_holds_and_bumps_on_permanent_classifier_failur
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
     assert_eq!(
         (summary.done, summary.failed, summary.exhausted),
         (0, 1, 0),
@@ -82152,7 +82173,7 @@ async fn pii_backstop_driver_tick_below_threshold_still_holds_and_retries() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82215,7 +82236,7 @@ async fn pii_backstop_driver_tick_quarantines_on_attempt_exhaustion() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82298,9 +82319,13 @@ async fn pii_backstop_driver_tick_transient_failure_does_not_bump() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
     assert_eq!(
         (
             summary.done,
@@ -82359,7 +82384,7 @@ async fn pii_backstop_transient_failures_never_exhaust_a_trace() {
     // trace would have been excluded before this loop finished.
     let config = backstop_driver_config();
     for round in 1..=(config.max_attempts + 2) {
-        let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
             .await
             .expect("tick itself succeeds");
         assert_eq!(
@@ -82410,7 +82435,7 @@ async fn pii_backstop_driver_tick_breaker_aborts_after_consecutive_failures() {
 
     let mut config = backstop_driver_config();
     config.batch_size = ids.len() as i64;
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82475,7 +82500,7 @@ async fn pii_backstop_driver_tick_below_breaker_processes_rest_of_batch() {
 
     let mut config = backstop_driver_config();
     config.batch_size = (poisoned.len() + 1) as i64;
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82537,7 +82562,7 @@ async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
 
     // Tick 1: the poisoned head fills the batch and trips the breaker, so
     // nothing else is reached. This much was true before the fix too.
-    let first = run_pii_backstop_driver_tick(state.clone(), &config)
+    let first = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82556,7 +82581,7 @@ async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
     // Tick 2: the poisoned three now carry a `last_attempt_at`, so the
     // never-attempted clean traces sort ahead of them and get processed.
     // Without the fix this tick is byte-for-byte identical to tick 1, forever.
-    let second = run_pii_backstop_driver_tick(state.clone(), &config)
+    let second = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82708,7 +82733,12 @@ async fn pii_backstop_driver_tick_aborts_when_canary_unhealthy() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::UnhealthyCanary).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let outcome = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config()).await;
+    let outcome = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await;
     assert!(
         outcome.is_err(),
         "an unhealthy canary must abort the tick, got {outcome:?}"

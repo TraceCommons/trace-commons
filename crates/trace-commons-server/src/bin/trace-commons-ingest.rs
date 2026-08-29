@@ -9411,7 +9411,32 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         move |state| {
             let config = tick_config.clone();
             async move {
-                let summary = run_pii_backstop_driver_tick(state, &config).await?;
+                // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
+                // than hardcoded to near-ai. Until #495 there was only one
+                // backend, so the hardcode was invisible; with a second one it
+                // meant the backend that boot logs, /health and the canary all
+                // report was NOT the one doing the work.
+                //
+                // Resolved here rather than inside the tick so the tick takes
+                // its adapter as an argument: it is the unit under test, and
+                // reading process env inside it made every test that sets the
+                // backend var visible to every other test running in parallel.
+                //
+                // An unset backend is refused rather than defaulted. This
+                // driver re-redacts traces being HELD pending a prose-PII
+                // check; running it with no filter would release them having
+                // checked nothing.
+                let adapter =
+                    trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
+                        .context("PII backstop adapter unavailable")?
+                        .map(|(adapter, _backend)| adapter)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "PII backstop requires a privacy filter backend (missing \
+                                 control: privacy_filter_backend)"
+                            )
+                        })?;
+                let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
                 tracing::info!(
                     done = summary.done,
                     failed = summary.failed,
@@ -40210,6 +40235,7 @@ fn is_transient_pii_backstop_failure(error: &anyhow::Error) -> bool {
 async fn run_pii_backstop_driver_tick(
     state: Arc<AppState>,
     config: &PiiBackstopDriverConfig,
+    adapter: Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter>,
 ) -> anyhow::Result<PiiBackstopDriverTickSummary> {
     let db = state
         .db_mirror
@@ -40217,16 +40243,6 @@ async fn run_pii_backstop_driver_tick(
         .ok_or(DriverTickError::MissingDbMirror {
             driver: PII_BACKSTOP_DRIVER_NAME,
         })?;
-
-    // Build the adapter ONCE per tick. A missing key fails the whole tick
-    // before any submission is loaded — nothing is processed, traces stay held.
-    //
-    // #438 fix round 1: `.context()` rather than `anyhow!("...: {err}")` --
-    // stringifying the error destroyed the `PrivacyFilterConfigError` the
-    // classifier reads to report `config_missing`. The string is only ever
-    // hashed, so changing it changes the hash and leaks nothing.
-    let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
-        .context("PII backstop adapter unavailable")?;
 
     // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
     // touching any real submission; abort without mutating anything when the
