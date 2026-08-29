@@ -6,17 +6,25 @@
 //! and what makes a shadow comparison between them a direct diff rather than
 //! a translation.
 //!
-//! Everything the hosted adapter carries to cope with a WAN upstream is
-//! deliberately absent here:
+//! Windowing here is bounded by TIME, not by an upstream context limit -- the
+//! difference that matters:
 //!
-//! - **No windowing.** The hosted endpoint serves a model reporting
-//!   `context_length: 512` behind an internal splitter, and fails above
-//!   ~3,000 input tokens, so that adapter budgets windows at 2,000 tokens and
-//!   stitches the spans back together. Run locally, the model has its real
-//!   128k context: one field, one request, no stitching.
-//! - **No tokenizer.** Nothing needs to be measured before sending.
-//! - **No window cache.** It exists to amortise a ~4.5 s round trip that
-//!   loopback does not have.
+//! - The hosted endpoint serves a model reporting `context_length: 512` behind
+//!   an internal splitter and fails above ~3,000 input tokens, so that adapter
+//!   MUST window at 2,000 tokens or the request errors.
+//! - The local model has its real 128k context, so a whole field would fit in
+//!   one request. But CPU inference is linear in input length and slow --
+//!   measured at ~58 characters/second on a c3-standard-4 -- so a large field
+//!   in one request runs for many minutes and trips the client timeout.
+//!
+//! So we still window, at a much larger budget, chosen so one window completes
+//! comfortably inside the configured timeout. Splitting does not reduce total
+//! work; it bounds per-request duration and keeps large fields covered instead
+//! of failing them closed.
+//!
+//! Still absent, because they exist only to cope with a WAN upstream:
+//!
+//! - **No window cache.** It amortises a ~4.5 s round trip loopback lacks.
 //! - **No retry loop.** Retries paper over a flaky vendor; a local process
 //!   that is down should surface as down.
 //! - **No bearer token.** The transport never leaves the machine.
@@ -27,7 +35,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_spans};
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -39,19 +47,31 @@ const BACKEND: &str = "self-hosted";
 
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 
-/// Generous compared with the hosted backend's 10 s.
+/// Input tokens per request.
 ///
-/// One request now carries a whole field rather than a 2,000-token window, and
-/// CPU inference is slower per call while needing far fewer calls. A timeout
-/// sized for the hosted per-window round trip would abort legitimate work on a
-/// large field.
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// Not an upstream limit -- the local model's context is 128k and it would
+/// accept the whole field. This is a DURATION budget: CPU inference runs at
+/// roughly 58 characters/second, so ~4,000 tokens (~16 KB of prose) is about
+/// five minutes, comfortably inside the default timeout while keeping the
+/// number of windows low.
+///
+/// Raise it only alongside the timeout, and only with a measurement: the two
+/// are a pair, and a budget that outruns the timeout fails every large field.
+pub const DEFAULT_MAX_INPUT_TOKENS: usize = 4_000;
+
+/// Per-window timeout. Generous compared with the hosted backend's 10 s.
+///
+/// A window is up to `DEFAULT_MAX_INPUT_TOKENS`, which at measured CPU speed
+/// is about five minutes. Ten minutes leaves headroom for a slower host or a
+/// token-dense window without aborting legitimate work.
+pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 
 pub struct SelfHostedPrivacyFilterAdapter {
     client: reqwest::Client,
     base_url: String,
     model: String,
     max_input_bytes: usize,
+    max_input_tokens: usize,
 }
 
 #[derive(Serialize)]
@@ -77,6 +97,7 @@ impl SelfHostedPrivacyFilterAdapter {
         model: impl Into<String>,
         timeout: Duration,
         max_input_bytes: usize,
+        max_input_tokens: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
@@ -90,6 +111,7 @@ impl SelfHostedPrivacyFilterAdapter {
             base_url: base_url.into(),
             model: model.into(),
             max_input_bytes,
+            max_input_tokens: max_input_tokens.max(1),
         })
     }
 }
@@ -113,6 +135,40 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
             });
         }
 
+        // Split into windows sized by DURATION, not by any upstream limit.
+        // Sequential on purpose: the shim is one process on shared cores, and
+        // issuing windows concurrently would contend with itself (and with
+        // ingest and the embedder) rather than finishing sooner.
+        let ranges = chunk_token_ranges(text, self.max_input_tokens);
+
+        // Each window's spans come back in that window's own codepoint
+        // coordinates, so record where each window starts in codepoints and
+        // let apply_windowed_spans shift them into full-text coordinates.
+        let mut codepoint_starts = Vec::with_capacity(ranges.len());
+        let mut seen = 0usize;
+        for range in &ranges {
+            codepoint_starts.push(seen);
+            seen += text[range.clone()].chars().count();
+        }
+
+        let mut windows = Vec::with_capacity(ranges.len());
+        for (range, codepoint_start) in ranges.into_iter().zip(codepoint_starts) {
+            let spans = self.classify_window(&text[range]).await?;
+            windows.push((codepoint_start, spans));
+        }
+
+        apply_windowed_spans(BACKEND, text, &windows)
+    }
+}
+
+impl SelfHostedPrivacyFilterAdapter {
+    /// POST one window and return its spans, in that window's own codepoint
+    /// coordinates. Fail-closed on any transport error, non-2xx, malformed
+    /// body, or empty data array.
+    async fn classify_window(
+        &self,
+        text: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let response = self
             .client
@@ -148,7 +204,7 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
                     reason: format!("{BACKEND} privacy classifier response parse error: {err}"),
                 })?;
 
-        // Fail closed on a shape we do not understand. Returning Ok(None)
+        // Fail closed on a shape we do not understand. Returning no spans
         // here would pass unredacted text through the control while
         // reporting success.
         let entry = parsed.data.into_iter().next().ok_or_else(|| {
@@ -157,7 +213,7 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
             }
         })?;
 
-        apply_spans(BACKEND, text, &entry.spans)
+        Ok(entry.spans)
     }
 }
 
@@ -201,10 +257,22 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
             Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
         };
 
+    let max_input_tokens =
+        match std::env::var("TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_TOKENS") {
+            Ok(value) => value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_TOKENS",
+                    reason: err.to_string(),
+                }
+            })?,
+            Err(_) => DEFAULT_MAX_INPUT_TOKENS,
+        };
+
     Ok(Arc::new(SelfHostedPrivacyFilterAdapter::new(
         base_url,
         model,
         Duration::from_millis(timeout_ms),
         max_input_bytes,
+        max_input_tokens,
     )?))
 }

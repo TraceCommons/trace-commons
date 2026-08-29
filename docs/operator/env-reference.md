@@ -468,12 +468,17 @@ Set when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. The backend talks to the
 `deploy/pilot-gcp/privacy-filter/`), which serves the same `openai/privacy-filter`
 weights the hosted endpoint serves.
 
-Prefer it to `near-ai`. The hosted endpoint serves a model reporting
+Prefer it to `near-ai` for locality: no unredacted prose leaves the host.
+
+Both backends window, but for different reasons, and the difference decides how
+you tune them. The hosted endpoint serves a model reporting
 `context_length: 512` behind an internal splitter and fails above ~3,000 input
-tokens, so that backend windows every field at a 2,000-token budget, issues one
-sequential request per window, and stitches the spans back together. Locally the
-model has its real 128k context: one field, one request, no stitching, and no
-unredacted prose leaving the host.
+tokens, so it *must* window at 2,000 tokens. The local model has its real 128k
+context and would accept a whole field in one request -- but CPU inference is
+linear in input length and slow, so a large field in one request runs for
+minutes and trips the timeout. The local budget is therefore chosen from the
+timeout, not imposed by the model, and windowing keeps large fields covered
+rather than failing them closed.
 
 It fails closed on adapter error, alongside `near-ai` rather than `sidecar`.
 Running on loopback makes it more reliable, not less required.
@@ -482,8 +487,9 @@ Running on loopback makes it more reliable, not less required.
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL` | R when `self-hosted` | (none, refuses boot) | Base URL of the loopback shim, including the `/v1` suffix, e.g. `http://127.0.0.1:8471/v1`. A configured backend with no endpoint refuses at startup rather than defaulting. |
 | `TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL` | optional | `openai/privacy-filter` | Passed through in the classify request. |
-| `TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS` | optional | `30000` | Higher than the near-ai default of 10s: one request now carries a whole field rather than a 2,000-token window, and CPU inference is slower per call while needing far fewer calls. |
-| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_BYTES` | optional | `MAX_TRACE_ENVELOPE_BYTES` | Resource bound on a single classify request. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_TOKENS` | optional | `4000` | Input tokens per request. **Not an upstream limit** -- the local model's context is 128k and would take a whole field. This is a *duration* budget: CPU inference runs at roughly 58 characters/second, so 4,000 tokens (~16 KB of prose) is about five minutes. Raise it only alongside the timeout; a budget that outruns the timeout fails every large field. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS` | optional | `600000` | Per-window timeout, 10 minutes. Sized against the token budget above, with headroom for a slower host or a token-dense window. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_BYTES` | optional | `MAX_TRACE_ENVELOPE_BYTES` | Resource bound on a whole field before windowing. Fields are split to fit the token budget, so this does not need lowering to bound request duration. |
 
 No API key variable exists for this backend by design; the transport never
 leaves the machine.
