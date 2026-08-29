@@ -28,8 +28,21 @@ the bge-large ONNX embedder before anything is added. The filter needs roughly
 
 Go to `e2-standard-4`, not larger: with 50M active parameters per-token compute
 is small, and the binding constraint is memory shared with ingest and the
-embedder. e2 pricing is linear in vCPU and RAM, so this doubles the VM line
-item exactly.
+embedder.
+
+**Cost.** E2 pricing is linear in vCPU and RAM, so this doubles the VM line
+item exactly. From the Cloud Billing catalog API for `us-central1`, on-demand,
+priced 2026-08-29: `E2 Instance Core` $0.021811590/vCPU-hour and
+`E2 Instance Ram` $0.002923530/GiB-hour.
+
+| Machine type | vCPU | RAM | Hourly | ~Monthly (730h) |
+|---|---|---|---|---|
+| `e2-standard-2` (current) | 2 | 8 GiB | $0.06701 | $48.92 |
+| `e2-standard-4` (target) | 4 | 16 GiB | $0.13402 | $97.84 |
+
+**Delta: +$48.92/month** at on-demand rates. Sustained-use discounts apply to
+E2 and reduce both figures for a full month of running, so treat these as the
+ceiling rather than the bill.
 
 ```sh
 gcloud compute instances stop tc-pilot-host \
