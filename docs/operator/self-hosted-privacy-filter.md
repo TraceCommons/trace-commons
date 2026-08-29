@@ -19,9 +19,15 @@ request. Unredacted contributor prose also stops leaving the host.
 - A scheduled downtime window. **The resize stops the instance.**
 - `gcloud auth list` shows an account with compute admin on
   `tracecommons-pilot-2026`.
-- **At least 6 GB free on `/`.** The venv is ~2 GB and the weights ~3 GB. The
-  host ran at 67% used (13 GB free) before this was installed, so the margin is
-  real but not generous. Check with `df -h /` first.
+- **At least 10 GB free on `/`.** The venv is ~2 GB (CPU torch) and the
+  checkpoint 2.7 GB, but `snapshot_download` also fetches an `onnx/` tree of
+  ~10.5 GB unless restricted -- it took the host to 98% before being stopped.
+  Grow the disk rather than running close to the line.
+- **At least 8 GB RAM free.** The loaded service holds **~6 GB resident**, not
+  the ~3 GB a bf16 parameter count suggests. On the original `e2-standard-2`
+  (8 GB total, shared with ingest and the bge-large embedder) it would not have
+  fit at all.
+- **A CPU with AMX/AVX512-BF16** (C3 or newer). See the throughput section.
 
 ## 1. Resize the host
 
@@ -182,48 +188,70 @@ deployed code. Verify by string marker, not `git log`:
 strings /opt/tracecommons/bin/trace-commons-ingest | grep -c self_hosted
 ```
 
-## STOP: do not cut over on E2 hardware
+## Throughput: measured, and it is the deciding constraint
 
-Measured on `tc-pilot-host` (`e2-standard-4`) on 2026-08-29, against real
-weights, warm:
+Measured on `tc-pilot-host` against real weights, warm, 2026-08-29:
 
-| Input | 2 threads | 4 threads |
-|---|---|---|
-| 36 chars | 1.0 s | -- |
-| 1,024 chars | 53.0 s | 34.5 s |
-| 2,048 chars | 86.3 s | -- |
-| ~41,000 chars | >13 min, killed unfinished | -- |
+| Input | e2-standard-4 (2 thr) | e2-standard-4 (4 thr) | c3-standard-4 (AMX) |
+|---|---|---|---|
+| 36 chars | 1.0 s | -- | -- |
+| 1,024 chars | 53.0 s | 34.5 s | 17.5 s |
+| 2,048 chars | 86.3 s | -- | 34.8 s |
+| 4,096 chars | -- | -- | 69.4 s |
+| 8,192 chars | -- | -- | 140.2 s |
+| 16,384 chars | -- | -- | 279.8 s |
+| ~41,000 chars | >13 min, unfinished | -- | -- |
 
-Roughly 40 characters per second. **The adapter's default timeout is 30 s**
+Linear in input length. **~58 characters/second on C3**, ~46/s on dense PII
+prose. Three identical 2,048-char payloads took 35.38 s, 35.57 s, 35.73 s, so
+this is steady-state compute, not `torch.compile` warm-up.
+
+Moving from E2 to C3 bought **2x**, not the order of magnitude the instruction
+sets suggest. The hosted endpoint classifies a 2,000-token window in ~4.5 s, so
+self-hosting on CPU is roughly **20x slower end to end**.
+
+Detection quality is not the problem. On 2 KB of realistic PII prose the model
+returned 52 spans across all five expected categories (11 person, 11 email, 10
+phone, 12 address, 8 account_number), identical across three runs. **The adapter's default timeout is 30 s**
 (`TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS`), so on this hardware any field
 beyond a few hundred characters fails every attempt. Cutting over would wedge
 the PII backstop harder than the hosted backend does.
 
-The cause is hardware, not configuration:
+E2 was the worse of the two for a specific reason worth keeping: `/proc/cpuinfo`
+there reports **`avx2` only**, with no AVX-512, AVX512-BF16 or AMX, while the
+checkpoint is `param_dtype: bfloat16` -- so every matmul ran emulated. C3
+(Xeon Platinum 8481C) has `amx_bf16`, `amx_tile`, `avx512_bf16` and
+`avx512_vnni`, and torch reports both `avx512_bf16` and `amx` available. That
+is worth 2x and no more; the remaining gap is opf's PyTorch MoE path, not the
+silicon.
 
-- `/proc/cpuinfo` on E2 reports **`avx2` only** -- no AVX-512, no AVX512-BF16,
-  no AMX. `torch.cpu._is_avx512_bf16_supported()` is `False`.
-- The checkpoint is `param_dtype: bfloat16`, so every matmul runs **emulated**
-  bf16 on AVX2.
-- Raising `OMP_NUM_THREADS` from the default 2 to 4 bought 1.5x. That is the
-  whole budget available from tuning; it does not close a ~100x gap.
+Raising `OMP_NUM_THREADS` from its default of 2 to 4 was worth 1.5x on E2. Set
+it explicitly; nothing else in tuning moved the number.
 
-Do not "fix" this by raising the timeout. A 30-second-plus classify blocks the
-backstop driver for the duration, and the queue is already the bottleneck.
+### What this means for configuration
 
-Options, cheapest first, none yet validated:
+One request carries a whole field, so the 30-second adapter default is far too
+low and the 16 MB `MAX_INPUT_BYTES` default is far too high -- a 16 MB field at
+this rate is roughly 78 hours. Both must be set:
+
+```sh
+TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS=600000        # 10 minutes
+TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_BYTES=32768    # ~9.5 min worst case
+```
+
+**Fields above the cap fail closed and stay held.** The hosted backend covers
+them by windowing, so this is a real capability regression traded for keeping
+prose on the host. Decide deliberately.
+
+### If throughput matters more than locality
 
 1. **ONNX runtime with the quantized weights.** The repo ships `model_q4.onnx`,
-   `model_q4f16.onnx` and `model_fp16.onnx` precisely for CPU and browser
-   inference; the PyTorch path we are using is not the optimized one. This is
-   the first thing to try and needs no new hardware.
-2. **A CPU with bf16 acceleration.** C3 (Sapphire Rapids) has AMX-BF16, which
-   is the instruction set this checkpoint's dtype assumes.
-3. **A GPU host.** 50M active parameters is trivial on a GPU; this is certain
-   to work and the most expensive.
-4. **Stay on `near-ai`** and treat self-hosting as unfinished.
-
-Until one of those is measured, leave `TRACE_PRIVACY_FILTER_BACKEND=near-ai`.
+   `model_q4f16.onnx` and `model_fp16.onnx` for exactly this; transformers.js
+   runs this model in a browser, so a fast CPU path exists. opf has no ONNX
+   support, so this means owning the Viterbi decode and BIOES span extraction
+   -- and re-earning the offset guarantee.
+2. **A GPU host.** 50M active parameters is trivial on an L4.
+3. **Stay on `near-ai`.** Rollback is one env line.
 
 ## 6. Cut the backend over
 
