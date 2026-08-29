@@ -19,6 +19,9 @@ request. Unredacted contributor prose also stops leaving the host.
 - A scheduled downtime window. **The resize stops the instance.**
 - `gcloud auth list` shows an account with compute admin on
   `tracecommons-pilot-2026`.
+- **At least 6 GB free on `/`.** The venv is ~2 GB and the weights ~3 GB. The
+  host ran at 67% used (13 GB free) before this was installed, so the margin is
+  real but not generous. Check with `df -h /` first.
 
 ## 1. Resize the host
 
@@ -68,13 +71,32 @@ sudo mkdir -p /opt/tracecommons-privacy-filter/models
 sudo chown -R tc-privacy-filter:tc-privacy-filter /opt/tracecommons-privacy-filter
 
 sudo -u tc-privacy-filter python3 -m venv /opt/tracecommons-privacy-filter/venv
-sudo -u tc-privacy-filter /opt/tracecommons-privacy-filter/venv/bin/pip install \
+sudo -u tc-privacy-filter env HOME=/opt/tracecommons-privacy-filter \
+  /opt/tracecommons-privacy-filter/venv/bin/pip install \
   -r ~/trace-commons-server/deploy/pilot-gcp/privacy-filter/requirements.txt
 
 sudo install -o tc-privacy-filter -g tc-privacy-filter -m 644 \
   ~/trace-commons-server/deploy/pilot-gcp/privacy-filter/app.py \
   /opt/tracecommons-privacy-filter/app.py
 ```
+
+`requirements.txt` pins `torch==2.13.0+cpu` from PyTorch's own index on Linux.
+Do not "simplify" that to plain `torch`: on linux-x86_64 the default PyPI wheel
+pulls the entire CUDA runtime -- several GB, `nvidia-cufft` alone is 214 MB --
+onto a host with no GPU. Confirm after installing:
+
+```sh
+sudo -u tc-privacy-filter /opt/tracecommons-privacy-filter/venv/bin/python \
+  -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
+# expect: 2.13.0+cpu False
+sudo -u tc-privacy-filter /opt/tracecommons-privacy-filter/venv/bin/pip list \
+  --format=freeze | grep -i nvidia   # expect: no output
+```
+
+If you ever need to stop a run-away install, kill it by a self-excluding
+pattern such as `sudo pkill -f '[v]env/bin/pip'`. A plain
+`pkill -f 'pip install'` also matches the SSH command line carrying that
+string and will drop your own session.
 
 ## 3. Stage the weights
 
