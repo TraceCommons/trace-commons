@@ -112,6 +112,18 @@ sudo -u tc-privacy-filter \
 
 The script refuses to report success on an empty directory.
 
+**Point `OPF_CHECKPOINT` at the `original/` subdirectory, not the repo root.**
+The HF repo ships two things: a transformers-style `config.json` at the root,
+and opf's own native checkpoint under `original/` with its own `config.json`
+carrying the `encoding` field (`o200k_base`) that opf's loader requires. Aimed
+at the root, the service starts, reports healthy, and then fails every request
+with `ValueError: Checkpoint config field encoding must be a non-empty string`.
+
+The repo also ships an `onnx/` tree of ~10.5 GB -- fp16, quantized, q4 and q4f16
+variants for transformers.js and ONNX runtimes. **None of it is used here** and
+a full `snapshot_download` will pull all of it; it filled the pilot host to 98%
+before being stopped. Fetch only what is needed.
+
 ## 4. Start it
 
 ```sh

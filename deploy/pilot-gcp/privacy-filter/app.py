@@ -54,7 +54,17 @@ def _load():
     if _model is None:
         from opf import OPF
 
-        _model = OPF(model=CHECKPOINT) if CHECKPOINT else OPF()
+        # device MUST be passed explicitly: OPF defaults to "cuda", and on a
+        # CPU-only host that fails at first inference with "Torch not compiled
+        # with CUDA enabled" -- after the service has already started and
+        # reported healthy, so it looks like a runtime fault rather than a
+        # configuration one.
+        #
+        # output_mode="typed" is the default and is what yields detected_spans.
+        kwargs = {"device": DEVICE}
+        if CHECKPOINT:
+            kwargs["model"] = CHECKPOINT
+        _model = OPF(**kwargs)
     return _model
 
 
