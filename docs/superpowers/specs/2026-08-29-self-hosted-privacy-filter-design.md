@@ -1,14 +1,29 @@
 # Self-hosted OpenAI Privacy Filter as a privacy-filter backend
 
-The PII backstop is wedged. `project_pii_backstop_wedged_chunk_size` records
-the symptom: the 20 KB classify chunk now returns 502 on essentially every
-request, transient failures are charged to the submission, and 248 traces sit
-held on `awaiting_pii_backstop`. The upstream is NEAR AI Cloud's
-`/v1/privacy/classify`, and the model it serves is `openai/privacy-filter`
-(`privacy_filter_near_ai.rs:19`, `DEFAULT_MODEL`).
+The PII backstop has a history of wedging against NEAR AI Cloud's
+`/v1/privacy/classify`. The model that endpoint serves is
+`openai/privacy-filter` (`privacy_filter_near_ai.rs:20`, `DEFAULT_MODEL`),
+which is Apache 2.0 open weights. Nothing about the dependency is proprietary
+to NEAR AI. This document specifies running it ourselves.
 
-That model is Apache 2.0 open weights. Nothing about the dependency is
-proprietary to NEAR AI. This document specifies running it ourselves.
+**Status of the original symptom, stated precisely.** `main` has already
+absorbed substantial mitigation since the wedge was first recorded: the byte
+budget became a token budget (`MAX_CLASSIFY_INPUT_TOKENS`), a window cache was
+added, and transport failures now raise `TransientRedactionFailed` rather than
+being charged to the submission. So the acute "everything 502s and burns an
+attempt" failure described in `project_pii_backstop_wedged_chunk_size` should
+not be assumed to still be live on main.
+
+**The current held-submission count has not been verified against the pilot
+database for this document.** Any figure carried forward from earlier sessions
+is stale until re-counted. The drain plan below therefore begins with a
+measurement step rather than a number.
+
+What self-hosting addresses is not the acute symptom -- which was patched --
+but the structural position underneath it: a hard upstream token ceiling, a
+concurrency limit of one imposed by an unexplained collapse, a ~4.5 s WAN
+round trip per window, and unredacted contributor prose leaving our
+infrastructure to reach it.
 
 ## Why self-hosting is the right shape, not a workaround
 
@@ -22,12 +37,23 @@ the eight categories the existing adapter already parses -- `private_person`,
 
 Three consequences follow, and they are the whole argument:
 
-- **The 128k single-pass context retires chunking.** `CLASSIFY_CHUNK_BYTES`
-  (`privacy_filter_near_ai.rs:27`) exists because the hosted endpoint caps
-  tokens per request. Per `project_near_ai_classify_batching_and_rate_limit`,
-  that cap is signalled as a generic 502, which is why the wedge was hard to
-  diagnose. A local process has no such cap, so the window-and-stitch path --
-  the thing that broke -- is not merely fixed, it is deleted.
+- **The 128k single-pass context retires chunking -- and is unreachable
+  through NEAR AI.** This is the strongest argument, and it is recorded in
+  main's own source. The comment on `MAX_CLASSIFY_INPUT_TOKENS`
+  (`privacy_filter_near_ai.rs:51`) states that the served model reports
+  `context_length: 512` and the cloud-api wrapper splits internally.
+  Classification degrades from around 3,000 input tokens and fails totally by
+  6,000 (`MEASURED_CLASSIFY_TOKEN_LIMIT`), so the budget sits at 2,000 with
+  margin. **We are not currently getting a 128k model. We are getting a 512
+  model behind a splitter.** Running the weights ourselves is the only way to
+  obtain the single-pass behaviour the model card describes, and it deletes
+  the window-and-stitch path rather than retuning it.
+- **Concurrency becomes ours to set.** `MAX_CONCURRENT_CLASSIFY_WINDOWS` is
+  pinned at 1 because #456 raised it to 8 and pilot throughput collapsed to
+  `done=0 transient=3 breaker_tripped=true`. The cause was never established;
+  a rate-limit theory did not survive testing. Sequential-only against a
+  ~4.5 s round trip is the drain-rate ceiling today, and it is imposed by an
+  upstream we cannot instrument.
 - **The text stops leaving our infrastructure.** This is a strict upgrade over
   the status quo. The workload whose entire job is finding PII currently ships
   unredacted contributor prose to a third party. Self-hosting ends that.
@@ -63,8 +89,8 @@ yourself.
 Three options were weighed.
 
 Repointing `TRACE_NEAR_AI_PRIVACY_BASE_URL` at localhost needs zero Rust and
-is rejected outright: the API key would stay mandatory, chunking would stay at
-20 KB, and every log line, `/health` field and boot canary message would
+is rejected outright: the API key would stay mandatory, the 2,000-token window
+budget and its tokenizer would stay in the path, and every log line, `/health` field and boot canary message would
 report `near_ai` while talking to a local process. In a repo whose logging
 discipline is hash-only-but-accurate, that makes the backlog drain
 unauditable.
@@ -136,8 +162,10 @@ New `crates/trace-commons-protocol/src/privacy_filter_self_hosted.rs`:
   `/health` `privacy_filter_backend` field, and `run_privacy_filter_canary`
   all report which backend actually answered.
 - **No windowing.** One request per field. A hard `max_input_bytes` ceiling
-  remains as a resource bound, but `CLASSIFY_CHUNK_BYTES` and the stitching
-  path are not used by this backend.
+  remains as a resource bound, but `MAX_CLASSIFY_INPUT_TOKENS`,
+  `chunk_token_ranges`, the `o200k_base` tokenizer budget and the span-stitching
+  path are not used by this backend. Neither is the window cache: it exists to
+  amortise a ~4.5 s WAN round trip that loopback does not have.
 - A new cargo feature `self-hosted-privacy-filter = ["dep:reqwest"]`. No new
   third-party crate is introduced; `reqwest` is already an optional dependency
   of the protocol crate.
@@ -168,7 +196,8 @@ Then flip to `self-hosted` with `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER=1` still
 set, so a broken shim refuses the boot rather than silently degrading to
 deterministic-regex-only redaction.
 
-The 248 held traces are not drained in one step.
+The held traces are not drained in one step. Step 0 is counting them: no
+figure from an earlier session is trusted here.
 
 1. **Shadow comparison first.** Run both backends over a sample and diff the
    returned spans, hash-only. Same weights does not mean same output -- NEAR
