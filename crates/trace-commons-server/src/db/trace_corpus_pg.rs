@@ -1898,6 +1898,43 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The subquery restricts to submissions with an ACTIVE
+        // `rescrubbed_envelope`: that is both what the driver will read and
+        // what makes the row enumerable again. The `submitted_envelope` ref is
+        // deliberately left invalidated.
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET status = 'awaiting_pii_backstop',
+                     updated_at = NOW(),
+                     reviewed_at = NULL
+                 WHERE submission_id IN (
+                     SELECT s.submission_id
+                     FROM trace_submissions s
+                     JOIN trace_object_refs o
+                       ON o.tenant_id = s.tenant_id
+                      AND o.submission_id = s.submission_id
+                      AND o.artifact_kind = 'rescrubbed_envelope'
+                      AND o.invalidated_at IS NULL
+                      AND o.deleted_at IS NULL
+                     WHERE s.status = 'quarantined'
+                     ORDER BY s.received_at ASC
+                     LIMIT $1
+                 )",
+                &[&limit],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     async fn update_trace_submission_status(
         &self,
         tenant_id: &str,

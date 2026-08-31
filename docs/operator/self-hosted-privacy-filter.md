@@ -346,6 +346,42 @@ Two follow-ups gate it, and they are not in PR #495:
 Count the real backlog before planning it. Figures in earlier documents are
 stale.
 
+## Re-assessing quarantined submissions
+
+Quarantine is not always a verdict about the trace. A submission is quarantined
+when its POST-backstop residual risk is Medium or High, and that assessment is
+only as good as the classifier that produced it.
+
+The pilot's 114 historical quarantines were **all** assessed between 2026-08-25
+and 08-27 -- inside the window when the hosted classifier's token ceiling was
+collapsing (see the near-ai budget notes). 107 of them cite
+`residual_survivor`: PII a detector still found after re-scrubbing. That is
+indistinguishable from PII that went unredacted because its classify window
+failed. None cite incomplete coverage, so the data alone cannot separate the
+two explanations.
+
+`POST /v1/admin/pii-backstop-requeue-quarantined?limit=N` moves quarantined
+submissions back to `awaiting_pii_backstop` so the backstop re-decides with a
+working classifier. It does **not** clear quarantine and does not change any
+verdict -- it may well quarantine them again, which is a real answer.
+
+Run it as a **sample first**: requeue a handful with the GPU attached, compare
+the new verdicts against the recorded ones, and only requeue the rest if the
+survivors actually disappear. An omitted `limit` defaults to 10 for that reason.
+
+Mechanics worth knowing:
+
+- Only submissions with an ACTIVE `rescrubbed_envelope` are eligible. That is
+  what the driver reads (`process_one_pii_backstop` goes through the record's
+  own object pointers) and what makes the row enumerable again.
+- The `submitted_envelope` ref stays invalidated. Re-validating it would create
+  an active pre-scrub ref, which is the concurrent-read hazard that leaks the
+  PII the backstop exists to remove.
+- Re-scrubbing already-scrubbed content only ever removes more, never restores.
+- The attempt counter is **not** cleared. A risk-quarantined submission has
+  `attempts = 0` anyway, and resetting a counter that did exhaust would hide a
+  trace that repeatedly fails to process.
+
 ## Rollback
 
 ```sh
