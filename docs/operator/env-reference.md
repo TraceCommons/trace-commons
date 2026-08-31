@@ -366,6 +366,7 @@ checklist and drill.
 | `TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE` | optional | `5` | Held submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it (it stays held on `awaiting_pii_backstop`). Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS` | optional | `900` | Wall-clock ceiling on re-redacting ONE submission. Without it a single large trace monopolises the driver: on the pilot, one submission consumed 50 hours and ~1,250 classify windows while 210 others were never enumerated. A submission that outruns the budget is charged an attempt (being too large is a property of the trace, not the upstream), so backoff applies and it is eventually quarantined for review rather than retried forever. Clamped to `[1, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a re-redaction failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when enabled | (none, refuses boot) | See §7 above and [`pii-backstop.md`](pii-backstop.md). |
 

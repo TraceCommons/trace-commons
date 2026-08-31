@@ -818,6 +818,15 @@ const TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE: &str = "TRACE_COMMONS_PII_BACKSTOP_
 const TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS: &str = "TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS";
 const TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS: &str =
     "TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS";
+/// Wall-clock ceiling on re-redacting ONE submission.
+///
+/// Without it a single large trace monopolises the driver indefinitely: the
+/// pilot spent 50 hours and ~1,250 classify windows on one submission while
+/// 210 others were never touched, because the driver takes them oldest-first
+/// and nothing bounded the first one.
+const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1803,6 +1812,7 @@ struct PiiBackstopDriverConfig {
     batch_size: i64,
     max_attempts: i32,
     backoff_base_seconds: i64,
+    per_submission_timeout: StdDuration,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -6438,11 +6448,18 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
         0,
         86_400,
     )?;
+    let per_submission_timeout_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS,
+        1,
+        86_400,
+    )?;
     Ok(Some(PiiBackstopDriverConfig {
         interval: StdDuration::from_secs(interval_seconds),
         batch_size,
         max_attempts: max_attempts as i32,
         backoff_base_seconds,
+        per_submission_timeout: StdDuration::from_secs(per_submission_timeout_seconds as u64),
     }))
 }
 
@@ -40274,7 +40291,33 @@ async fn run_pii_backstop_driver_tick(
     // `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES`.
     let mut consecutive_failures = 0usize;
     for item in &items {
-        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
+        // Bound the work ONE submission may consume. A trace large enough to
+        // outrun this budget would otherwise hold the driver forever and
+        // starve every submission behind it -- observed on the pilot as 50
+        // hours and ~1,250 windows spent on a single submission while 210
+        // others were never enumerated.
+        //
+        // A timeout here is charged to the trace, not the upstream: being too
+        // large to process is a property of the submission, which is exactly
+        // the case the attempt counter and its backoff exist for. It spends
+        // the budget and is eventually quarantined for review rather than
+        // silently retried forever.
+        let attempt = tokio::time::timeout(
+            config.per_submission_timeout,
+            process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(anyhow::Error::new(
+                trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "PII backstop exceeded the per-submission budget of {}s",
+                        config.per_submission_timeout.as_secs()
+                    ),
+                },
+            ))
+        });
+        match attempt {
             Ok(()) => {
                 summary.done += 1;
                 consecutive_failures = 0;
