@@ -7596,6 +7596,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route(
+            "/v1/admin/pii-backstop-requeue-quarantined",
+            post(pii_backstop_requeue_quarantined_handler),
+        )
+        .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
         )
@@ -51064,6 +51068,79 @@ async fn run_recluster_dedup_pass(
 /// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
 /// a background task and returns a hash-only ack immediately. An optional
 /// `?limit=N` bounds the run.
+#[derive(Debug, Deserialize)]
+struct RequeueQuarantinedQuery {
+    /// Bounded on purpose. The first use of this route is a SAMPLE: re-run a
+    /// handful of quarantined submissions and compare the new verdict against
+    /// the recorded one before requeueing the rest.
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Count-only acknowledgement. No submission ids, no tenant, no reasons.
+#[derive(Debug, Serialize)]
+struct RequeueQuarantinedAck {
+    requeued: u64,
+}
+
+/// Move quarantined submissions back to `AwaitingPiiBackstop` for re-assessment.
+///
+/// Quarantine is not always a verdict about the trace. A submission is
+/// quarantined when its POST-backstop residual risk is Medium or High, and that
+/// assessment is only as good as the classifier that produced it -- the pilot's
+/// 114 quarantined submissions were all assessed between 2026-08-25 and 08-27,
+/// inside the window when the hosted classifier's token ceiling was collapsing.
+/// A window that failed leaves its PII unredacted, which then presents as a
+/// `residual_survivor` and reads exactly like a genuine finding.
+///
+/// So this exists to let a better classifier re-decide. It does not clear
+/// quarantine and it does not change any risk verdict: it puts submissions back
+/// in the queue and lets the backstop reach its own conclusion, which may well
+/// be quarantine again.
+///
+/// Bounded by `limit` so the first run can be a sample rather than all of them.
+async fn pii_backstop_requeue_quarantined_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RequeueQuarantinedQuery>,
+) -> ApiResult<Json<RequeueQuarantinedAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+
+    // Bounded, and never unbounded by omission: a missing limit is a small
+    // sample, not "every quarantined submission".
+    let limit = query.limit.unwrap_or(10).clamp(1, 1_000);
+
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "quarantined requeue requires a configured DB mirror",
+        )
+    })?;
+
+    let requeued = db
+        .requeue_quarantined_for_pii_backstop(&tenant.tenant_id, limit)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
+                "Trace Commons quarantined requeue failed"
+            );
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "quarantined requeue failed",
+            )
+        })?;
+
+    // Hash-only: a count and nothing identifying.
+    tracing::info!(
+        requeued,
+        limit,
+        "Trace Commons quarantined submissions requeued for PII backstop"
+    );
+    Ok(Json(RequeueQuarantinedAck { requeued }))
+}
+
 async fn recluster_dedup_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

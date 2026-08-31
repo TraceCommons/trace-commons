@@ -2176,6 +2176,32 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
 
+    /// Move quarantined submissions back to `AwaitingPiiBackstop` so the
+    /// backstop driver re-assesses them, oldest-received first, capped at
+    /// `limit`. Returns how many rows moved.
+    ///
+    /// Only submissions holding an ACTIVE `rescrubbed_envelope` ref are
+    /// eligible, for two reasons. It is what the driver will actually read --
+    /// `process_one_pii_backstop` goes through the record's own object
+    /// pointers, which address the rescrubbed artifact once a backstop pass has
+    /// run -- and it is what makes them enumerable again, since their
+    /// `submitted_envelope` ref was invalidated on release and must STAY
+    /// invalidated: an active pre-scrub ref is the concurrent-read hazard
+    /// documented on `process_one_pii_backstop`.
+    ///
+    /// Re-scrubbing already-scrubbed content is safe in the only direction that
+    /// matters: a second pass can remove more, never restore what was removed.
+    ///
+    /// Deliberately does NOT clear the attempt counter. A submission
+    /// quarantined by a risk verdict rather than by exhaustion already has
+    /// `attempts = 0`, and silently resetting a counter that DID exhaust would
+    /// hide a trace that repeatedly fails to process.
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<u64, DatabaseError>;
+
     async fn update_trace_submission_status(
         &self,
         tenant_id: &str,

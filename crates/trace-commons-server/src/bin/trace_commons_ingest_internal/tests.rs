@@ -66004,6 +66004,14 @@ impl PerplexityDriverTestDb {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerplexityDriverTestDb {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -71303,6 +71311,42 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
+}
+
+#[tokio::test]
+async fn pii_backstop_requeue_quarantined_requires_admin_token() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/pii-backstop-requeue-quarantined")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    // token-a is a contributor token in the fixture. This route moves
+    // submissions OUT of quarantine for re-assessment, so it is admin-only.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// An omitted `limit` must be a small sample, never "every quarantined
+/// submission". The first intended use of this route is a sample: re-run a
+/// handful and compare the new verdict against the recorded one.
+#[test]
+fn pii_backstop_requeue_limit_defaults_small_and_is_clamped() {
+    let clamp = |requested: Option<i64>| requested.unwrap_or(10).clamp(1, 1_000);
+    assert_eq!(clamp(None), 10, "omitted limit must be a sample");
+    assert_eq!(clamp(Some(0)), 1, "zero must not mean unbounded");
+    assert_eq!(clamp(Some(-5)), 1, "negative must not mean unbounded");
+    assert_eq!(clamp(Some(50)), 50);
+    assert_eq!(clamp(Some(100_000)), 1_000, "clamped to a sane ceiling");
 }
 
 #[tokio::test]
@@ -78320,6 +78364,14 @@ impl PerUserTestDeviceKeyDb {
 // never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerUserTestDeviceKeyDb {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -79257,6 +79309,14 @@ impl DeviceGrantScopeTestDb {
 // issuer device-key ceiling path never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for DeviceGrantScopeTestDb {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -80270,6 +80330,14 @@ impl MockDbWithChunkEntries {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for MockDbWithChunkEntries {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -82893,6 +82961,14 @@ fn awaiting_pii_backstop_excluded_from_export_until_released() {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBackstopDriverTestDb {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         write: StorageTraceSubmissionWrite,
@@ -85173,6 +85249,14 @@ async fn logging_out_a_native_token_revokes_its_session_row() {
 // this file stubs it.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,

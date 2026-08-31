@@ -5464,6 +5464,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::trace_corpus_storage::TraceCorpusStore for StubDeviceKeyDb {
+        async fn requeue_quarantined_for_pii_backstop(
+            &self,
+            _: &str,
+            _: i64,
+        ) -> Result<u64, DatabaseError> {
+            unimplemented!("device-key stub does not serve the PII backstop")
+        }
+
         async fn upsert_trace_submission(
             &self,
             _: TraceSubmissionWrite,
