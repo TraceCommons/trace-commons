@@ -22,6 +22,15 @@
 //! work; it bounds per-request duration and keeps large fields covered instead
 //! of failing them closed.
 //!
+//! Windows are issued with bounded concurrency. The hosted backend pins this
+//! at 1 because raising it collapsed throughput against the vendor; that
+//! finding is about NEAR AI's service and does not transfer to a local
+//! process. Measured on the pilot, against the running backstop: 2 concurrent
+//! windows gave 1.32x and 3 gave 1.58x. The headroom exists because this
+//! model's `hidden_size` is 640, so individual matmuls are too small to scale
+//! across threads -- one request saturates at ~1.75 of 4 cores, and the rest
+//! is only reachable by overlapping requests.
+//!
 //! Still absent, because they exist only to cope with a WAN upstream:
 //!
 //! - **No window cache.** It amortises a ~4.5 s round trip loopback lacks.
@@ -33,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
@@ -59,6 +69,18 @@ pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 /// are a pair, and a budget that outruns the timeout fails every large field.
 pub const DEFAULT_MAX_INPUT_TOKENS: usize = 4_000;
 
+/// How many windows for a single field may be in flight at once.
+///
+/// **Deliberately not 1**, unlike the hosted backend. That backend's limit is
+/// a scar from #456, where concurrency against NEAR AI collapsed pilot
+/// throughput to zero; the cause was never established but it was the vendor's
+/// service, not the client. A loopback process has none of that.
+///
+/// 3 rather than 2 or 4: measured on the pilot under load, 2 concurrent
+/// windows gave 1.32x and 3 gave 1.58x, with the gain already flattening. The
+/// ceiling is the box's 4 cores, and the backstop shares them with ingest.
+pub const DEFAULT_MAX_CONCURRENT_WINDOWS: usize = 3;
+
 /// Per-window timeout. Generous compared with the hosted backend's 10 s.
 ///
 /// A window is up to `DEFAULT_MAX_INPUT_TOKENS`, which at measured CPU speed
@@ -72,6 +94,7 @@ pub struct SelfHostedPrivacyFilterAdapter {
     model: String,
     max_input_bytes: usize,
     max_input_tokens: usize,
+    max_concurrent_windows: usize,
 }
 
 #[derive(Serialize)]
@@ -98,6 +121,7 @@ impl SelfHostedPrivacyFilterAdapter {
         timeout: Duration,
         max_input_bytes: usize,
         max_input_tokens: usize,
+        max_concurrent_windows: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
@@ -112,6 +136,7 @@ impl SelfHostedPrivacyFilterAdapter {
             model: model.into(),
             max_input_bytes,
             max_input_tokens: max_input_tokens.max(1),
+            max_concurrent_windows: max_concurrent_windows.max(1),
         })
     }
 }
@@ -151,11 +176,23 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
             seen += text[range.clone()].chars().count();
         }
 
-        let mut windows = Vec::with_capacity(ranges.len());
-        for (range, codepoint_start) in ranges.into_iter().zip(codepoint_starts) {
-            let spans = self.classify_window(&text[range]).await?;
-            windows.push((codepoint_start, spans));
-        }
+        // `buffered` preserves input order, so the (codepoint_start, spans)
+        // pairs stay aligned with their windows regardless of completion
+        // order. Getting that wrong would shift every span in the field.
+        let windows: Vec<(usize, Vec<ClassifySpan>)> =
+            futures::stream::iter(ranges.into_iter().zip(codepoint_starts).map(
+                |(range, codepoint_start)| {
+                    let window = &text[range];
+                    async move {
+                        self.classify_window(window)
+                            .await
+                            .map(|spans| (codepoint_start, spans))
+                    }
+                },
+            ))
+            .buffered(self.max_concurrent_windows)
+            .try_collect()
+            .await?;
 
         apply_windowed_spans(BACKEND, text, &windows)
     }
@@ -268,11 +305,23 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
             Err(_) => DEFAULT_MAX_INPUT_TOKENS,
         };
 
+    let max_concurrent_windows =
+        match std::env::var("TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS") {
+            Ok(value) => value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS",
+                    reason: err.to_string(),
+                }
+            })?,
+            Err(_) => DEFAULT_MAX_CONCURRENT_WINDOWS,
+        };
+
     Ok(Arc::new(SelfHostedPrivacyFilterAdapter::new(
         base_url,
         model,
         Duration::from_millis(timeout_ms),
         max_input_bytes,
         max_input_tokens,
+        max_concurrent_windows,
     )?))
 }
