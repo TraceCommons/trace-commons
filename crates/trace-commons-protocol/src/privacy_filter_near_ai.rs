@@ -44,15 +44,33 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 ///
 /// Sized against measurement, not the advertised context. The served model
 /// reports `context_length: 512` and the cloud-api wrapper splits internally,
-/// so requests spanning several context windows are normal and fine: 2,609
-/// tokens (5.1 windows) classified 6/6. Failures begin around 3,000 (1/3) and
-/// are total by 6,000 (0/3). This budget leaves ~1.5x margin under the point
-/// where failures start.
-pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 2_000;
+/// so requests spanning several context windows are normal.
+///
+/// **This ceiling moves, and it has moved down.** Re-measured 2026-08-31
+/// against the live endpoint, three trials per size:
+///
+/// | tokens | result |
+/// |--------|--------|
+/// | 50 - 1,000 | 3/3 HTTP 200, span counts scaling 6 -> 94 |
+/// | 1,500 | 0/3, HTTP 502 |
+/// | 2,000 - 24,000 | 0/3, HTTP 502 |
+///
+/// The previous budget of 2,000 was set on 2026-08-27, when failures began
+/// around 3,000. It is now ABOVE the ceiling, so every window sent to that
+/// backend fails -- which is what the "upstream unavailable" holds on
+/// 2026-08-28 were, and why this backend cannot currently serve as the
+/// fallback it is documented to be.
+///
+/// Re-measure before trusting this number. The failure is still reported as a
+/// generic 502, so an over-budget request is indistinguishable from an outage
+/// by status code alone.
+pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 1_000;
 
-/// Token count at which classification begins failing, measured 2026-08-27:
-/// 3,000 tokens classified 1-of-3, 6,000 classified 0-of-3.
-pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 3_000;
+/// Token count at which classification begins failing, measured 2026-08-31:
+/// 1,000 tokens classified 3-of-3, 1,500 classified 0-of-3.
+///
+/// Was 3,000 as measured on 2026-08-27. The endpoint regressed.
+pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 1_500;
 
 // Keep real margin under the measured failure point. The budget is not a
 // guess: exceeding it is what produced the intermittent 502s.
