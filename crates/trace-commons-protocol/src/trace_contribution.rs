@@ -4509,6 +4509,7 @@ pub async fn rescrub_envelope_prose_pii_with(
     let prior_risk = envelope.privacy.residual_pii_risk;
     let (resolved_risk, basis) = match residual {
         Ok(residual_findings) => {
+            log_residual_secret_locations(&residual_findings);
             let backstop_pass_risk = residual_risk(&envelope.consent, &report);
             let assessment = PostScrubAssessment {
                 complete_coverage: structured_complete && !uncovered_prose_present(envelope),
@@ -4757,6 +4758,42 @@ enum ResidualScanError {
 /// Returns `Err` on a serialization failure or a budget overrun rather than
 /// silently reporting "nothing found" - an envelope this scan cannot
 /// actually cover must never be treated as verified clean.
+/// Emit WHERE a residual secret survived, once, from whichever pass found it.
+///
+/// `residual_survivor` alone cannot distinguish a credential in a human
+/// correction -- preserved by design (S5), so redaction can never resolve it --
+/// from a field the typed traversal never visits, which is a real gap that
+/// would affect new traces too. Those need opposite responses.
+///
+/// Paths only. Object keys are collapsed to `{}` by `schema_shaped_key` unless
+/// they are schema-shaped identifiers, so no contributor string reaches a log.
+#[cfg(any(
+    feature = "near-ai-privacy-filter",
+    feature = "self-hosted-privacy-filter"
+))]
+fn log_residual_secret_locations(residual: &RedactionReport) {
+    if !residual.blocked_secret_detected {
+        return;
+    }
+    let locations: Vec<&str> = residual
+        .counts
+        .keys()
+        .filter_map(|label| label.strip_prefix("residual_secret_at:"))
+        .collect();
+    if !locations.is_empty() {
+        tracing::warn!(
+            residual_secret_locations = ?locations,
+            "Trace Commons residual secret survived redaction"
+        );
+    }
+}
+
+#[cfg(not(any(
+    feature = "near-ai-privacy-filter",
+    feature = "self-hosted-privacy-filter"
+)))]
+fn log_residual_secret_locations(_residual: &RedactionReport) {}
+
 fn residual_envelope_scan(
     redactor: &DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
@@ -4765,7 +4802,14 @@ fn residual_envelope_scan(
     let serialized =
         serde_json::to_value(envelope).map_err(|_| ResidualScanError::SerializationFailed)?;
     let mut nodes = 0usize;
-    scan_json_leaves(redactor, &serialized, &mut report, 0, &mut nodes)?;
+    scan_json_leaves(
+        redactor,
+        &serialized,
+        &mut report,
+        0,
+        &mut nodes,
+        "envelope",
+    )?;
     Ok(report)
 }
 
@@ -4775,6 +4819,7 @@ fn scan_json_leaves(
     report: &mut RedactionReport,
     depth: usize,
     nodes: &mut usize,
+    path: &str,
 ) -> Result<(), ResidualScanError> {
     if depth > RESIDUAL_SCAN_MAX_DEPTH {
         return Err(ResidualScanError::BudgetExceeded);
@@ -4786,11 +4831,15 @@ fn scan_json_leaves(
                 return Err(ResidualScanError::BudgetExceeded);
             }
             let (_, child_report) = redactor.redact_text(text);
+            note_residual_secret_location(report, &child_report, path);
             report.merge(child_report);
         }
         Value::Array(items) => {
+            // No index: the field is the diagnosis, and indices would make the
+            // label set unbounded.
+            let child_path = format!("{path}[]");
             for item in items {
-                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
+                scan_json_leaves(redactor, item, report, depth + 1, nodes, &child_path)?;
             }
         }
         Value::Object(entries) => {
@@ -4799,14 +4848,50 @@ fn scan_json_leaves(
                 if *nodes > RESIDUAL_SCAN_MAX_NODES {
                     return Err(ResidualScanError::BudgetExceeded);
                 }
+                let safe_key = schema_shaped_key(key);
+                let child_path = format!("{path}.{safe_key}");
                 let (_, child_report) = redactor.redact_text(key);
+                // A KEY that trips the detector is its own finding: this is the
+                // `key_finding` shape, and keys are never rewritten.
+                note_residual_secret_location(report, &child_report, &format!("{child_path}#key"));
                 report.merge(child_report);
-                scan_json_leaves(redactor, item, report, depth + 1, nodes)?;
+                scan_json_leaves(redactor, item, report, depth + 1, nodes, &child_path)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Object keys inside `structured_payload` are arbitrary tool output, so a key
+/// can BE the secret. Only emit keys that look like schema identifiers;
+/// everything else collapses to `{}`. That keeps a path diagnostic for the
+/// typed envelope while never putting an arbitrary contributor string into a
+/// label.
+fn schema_shaped_key(key: &str) -> &str {
+    let schema_shaped = !key.is_empty()
+        && key.len() <= 40
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if schema_shaped { key } else { "{}" }
+}
+
+/// Record WHERE a residual secret was found, not what it was.
+///
+/// Without this the scan reports only THAT a secret survived, which cannot
+/// distinguish the two causes: a credential in a human correction, which is
+/// preserved by design and can never be redacted, versus a field the typed
+/// redaction traversal does not visit, which is a real gap. Those need
+/// opposite responses, and the stored basis alone cannot tell them apart.
+fn note_residual_secret_location(
+    report: &mut RedactionReport,
+    child: &RedactionReport,
+    path: &str,
+) {
+    if child.blocked_secret_detected {
+        report.increment(format!("residual_secret_at:{path}"));
+    }
 }
 
 /// The result of attempting a complete, evidence-backed reassessment of an
@@ -12105,6 +12190,64 @@ mod tests {
     /// `resolve_post_scrub_risk`'s `residual_findings`, which `residual_risk`
     /// never sees. It is a distinct condition from anything the pass's own
     /// report carries, and it forces High.
+    /// An arbitrary object key must never reach a path label. Keys inside
+    /// `structured_payload` are tool output, so a key can BE the secret.
+    #[test]
+    fn residual_paths_never_carry_an_arbitrary_object_key() {
+        use super::schema_shaped_key;
+        // Schema-shaped identifiers are kept: they are what makes the path
+        // diagnostic at all.
+        assert_eq!(schema_shaped_key("human_correction"), "human_correction");
+        assert_eq!(
+            schema_shaped_key("structured_payload"),
+            "structured_payload"
+        );
+        assert_eq!(schema_shaped_key("events"), "events");
+
+        // Anything else collapses. These are the shapes a leaked key would
+        // take: an address, a token, a header, mixed case, or something long.
+        assert_eq!(schema_shaped_key("alice@example.com"), "{}");
+        assert_eq!(schema_shaped_key("Bearer sk-live-abc123"), "{}");
+        assert_eq!(schema_shaped_key("Authorization"), "{}");
+        assert_eq!(schema_shaped_key("AKIAIOSFODNN7EXAMPLE"), "{}");
+        assert_eq!(schema_shaped_key(""), "{}");
+        assert_eq!(schema_shaped_key(&"a".repeat(41)), "{}");
+        // 40 is the boundary and is allowed.
+        assert_eq!(schema_shaped_key(&"a".repeat(40)), "a".repeat(40));
+    }
+
+    /// The scan must say WHERE, not just THAT. Without a path, a credential in
+    /// a human correction (preserved by design) is indistinguishable from a
+    /// field the typed traversal never visits (a real gap).
+    #[test]
+    fn residual_scan_records_the_path_of_a_surviving_secret() {
+        let redactor = super::DeterministicTraceRedactor::bare();
+        let mut report = super::RedactionReport::default();
+        let mut nodes = 0usize;
+        let value = serde_json::json!({
+            "outcome": {
+                "human_correction": "the key is AKIAIOSFODNN7EXAMPLE and it broke"
+            },
+            "events": [{"redacted_content": "nothing interesting here"}]
+        });
+        super::scan_json_leaves(&redactor, &value, &mut report, 0, &mut nodes, "envelope")
+            .expect("scan completes");
+
+        let paths: Vec<&str> = report
+            .counts
+            .keys()
+            .filter_map(|k| k.strip_prefix("residual_secret_at:"))
+            .collect();
+        assert!(
+            report.blocked_secret_detected,
+            "fixture must trip the secret detector, else this test proves nothing"
+        );
+        assert_eq!(
+            paths,
+            vec!["envelope.outcome.human_correction"],
+            "the path must name the field the survivor sits in"
+        );
+    }
     #[test]
     fn a_survivor_from_the_residual_scan_is_its_own_condition() {
         use super::*;
