@@ -81805,6 +81805,73 @@ impl Drop for NearAiEnvGuard {
     }
 }
 
+/// A submission that outruns the per-submission budget is charged an attempt
+/// and the driver moves on.
+///
+/// Without this bound one large trace holds the driver forever: the pilot
+/// spent 50 hours and ~1,250 classify windows on a single submission while 210
+/// others were never enumerated. The timeout is charged to the TRACE, not the
+/// upstream -- being too large is a property of the submission -- so it spends
+/// the attempt budget and is eventually quarantined rather than retried
+/// forever.
+#[tokio::test]
+async fn pii_backstop_charges_an_attempt_when_a_submission_outruns_its_budget() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    // Reuse the standard responder so the canary still passes, and add a delay
+    // ONLY for this submission's content. Delaying the canary too would abort
+    // the tick before any submission is reached -- testing the canary rather
+    // than the budget.
+    let server = wiremock::MockServer::start().await;
+    let marker_owned = marker.to_string();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/privacy/classify"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            let response = near_ai_classify_response(input, &marker_owned, ClassifierMode::Healthy);
+            if input.contains(&marker_owned) {
+                response.set_delay(StdDuration::from_secs(30))
+            } else {
+                response
+            }
+        })
+        .mount(&server)
+        .await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let config = PiiBackstopDriverConfig {
+        per_submission_timeout: StdDuration::from_millis(200),
+        ..backstop_driver_config()
+    };
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
+        .await
+        .expect("the tick itself succeeds; the submission fails inside it");
+
+    assert_eq!(
+        (summary.done, summary.transient),
+        (0, 0),
+        "an over-budget submission is neither released nor treated as a transient upstream fault"
+    );
+    assert_eq!(
+        summary.failed + summary.exhausted,
+        1,
+        "the submission must be charged, so backoff applies and it cannot block forever"
+    );
+}
+
 /// The adapter the driver tick is given, built from the NEAR-AI env the
 /// backstop tests already set via `NearAiEnvGuard`.
 ///
@@ -81824,6 +81891,9 @@ fn backstop_driver_config() -> PiiBackstopDriverConfig {
         batch_size: 10,
         max_attempts: 5,
         backoff_base_seconds: 30,
+        // Generous: these tests exercise outcomes, not the budget. The
+        // budget's own behaviour has its own test below.
+        per_submission_timeout: StdDuration::from_secs(3_600),
     }
 }
 
