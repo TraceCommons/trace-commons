@@ -278,6 +278,59 @@ Both must say `self_hosted`. Note that application logs go to
 `/var/log/tracecommons/ingest.log`, not the journal — a clean `journalctl`
 proves nothing on this host.
 
+## Draining a backlog on an ephemeral GPU
+
+The CPU shim runs at ~58 characters/second. An L4 runs the same model at
+**~44,000** measured end-to-end through the same shim -- about 750x -- so a
+backlog that takes days on CPU is one short session. Keep no GPU between
+sessions.
+
+`scripts/operator/gpu-privacy-filter-batch.sh` does the whole cycle:
+
+```sh
+scripts/operator/gpu-privacy-filter-batch.sh up      # create + provision
+scripts/operator/gpu-privacy-filter-batch.sh attach  # local shim down, tunnel up
+scripts/operator/gpu-privacy-filter-batch.sh status  # watch the held count
+scripts/operator/gpu-privacy-filter-batch.sh detach  # tunnel down, local shim up
+scripts/operator/gpu-privacy-filter-batch.sh down    # delete, and VERIFY
+```
+
+Measured on an L4, warm, through the shim:
+
+| chars | seconds | chars/sec |
+|---|---|---|
+| 1,024 | 0.05 | 22,004 |
+| 16,384 | 0.37 | ~44,000 |
+| 262,144 | 6.11 | 42,918 |
+| 1,048,576 | 24.90 | 42,103 |
+
+The 14 MB submission that consumed 50 hours of CPU takes about 5.5 minutes.
+
+### Why ingest needs no change
+
+`attach` stops the pilot's local shim and opens an IAP tunnel on the same
+`127.0.0.1:8471`. Ingest keeps addressing loopback, so there is no config
+change, no restart, and no code change. Traffic is encrypted and authenticated
+by IAP rather than crossing the VPC in plaintext -- which matters, because the
+self-hosted adapter has **no TLS guard** for non-loopback endpoints.
+
+**No database credentials, KEK access or artifact keys reach the spot VM.** It
+runs the stateless classifier only; ingest still does envelope decrypt and
+release.
+
+`detach` and `down` are separate so a failed teardown never leaves ingest
+without a filter. If the GPU is preempted mid-drain, ingest sees a transport
+error, which the adapter types as transient and does not charge to the trace.
+
+### Two traps, both hit while building this
+
+- The image needs **`python3-dev`**. Without it Triton cannot JIT CUDA kernels,
+  and the real cause (`Python.h: No such file or directory`) is buried under a
+  `CalledProcessError` that reads like a CUDA fault.
+- Stage the checkpoint with **`allow_patterns=["original/*"]`**. A full
+  `snapshot_download` also pulls a ~10.5 GB `onnx/` tree nothing here uses; it
+  took the pilot host to 98% disk.
+
 ## 7. Do not drain the backlog yet
 
 Two follow-ups gate it, and they are not in PR #495:
