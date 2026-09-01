@@ -38,8 +38,12 @@ ACCOUNT="${TC_ACCOUNT:-zaki@iqlusion.io}"
 GPU_VM="${TC_GPU_VM:-opf-gpu-drain}"
 PILOT_VM="${TC_PILOT_VM:-tc-pilot-host}"
 PORT=8471
-TUNNEL_PIDFILE=/tmp/opf-gpu-tunnel.pid
+FW_TAG="${TC_FW_TAG:-opf-gpu-drain}"
+FW_RULE="${TC_FW_RULE:-opf-gpu-drain-8471}"
 
+# --project on EVERY call, never the account default. On 2026-09-01 a delete ran
+# against the account's default project (a different one), reported success, and
+# the verification agreed -- while the instance was still running and billing.
 G=(gcloud --account "$ACCOUNT" --project "$PROJECT")
 say() { printf '\n=== %s\n' "$*"; }
 
@@ -106,21 +110,63 @@ PY
 }
 
 cmd_attach() {
+  # The pilot's runtime service account is least-privilege and lacks
+  # compute.instances.list, so it CANNOT open an IAP tunnel to the GPU. The
+  # reverse (tunnelling from the GPU box, which does have the permission) fails
+  # too: its first `gcloud compute ssh` generates a keypair that needs metadata
+  # propagation the default SA cannot perform. Both were tried on 2026-08-31.
+  #
+  # What works is a VPC hop the pilot originates itself, narrowed to one source
+  # address, one port, and one target tag, with a loopback forwarder in front so
+  # ingest still addresses 127.0.0.1 and needs no config change.
+  local gpu_ip pilot_ip
+  gpu_ip=$("${G[@]}" compute instances describe "$GPU_VM" --zone "$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)')
+  pilot_ip=$("${G[@]}" compute instances describe "$PILOT_VM" --zone "$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)')
+  say "gpu=$gpu_ip pilot=$pilot_ip"
+
+  say "opening a narrow path: tcp:$PORT, from the pilot IP only, to the GPU tag"
+  "${G[@]}" compute instances add-tags "$GPU_VM" --zone "$ZONE" \
+    --tags="$FW_TAG" --quiet
+  if ! "${G[@]}" compute firewall-rules describe "$FW_RULE" >/dev/null 2>&1; then
+    "${G[@]}" compute firewall-rules create "$FW_RULE" \
+      --direction=INGRESS --action=ALLOW --rules="tcp:$PORT" \
+      --source-ranges="${pilot_ip}/32" --target-tags="$FW_TAG" \
+      --description="TEMPORARY: pilot -> ephemeral GPU privacy filter. Removed by 'down'."
+  fi
+
   say "stopping the pilot's local CPU shim (frees port $PORT)"
   "${G[@]}" compute ssh "$PILOT_VM" --zone "$ZONE" --tunnel-through-iap \
-    --command "sudo systemctl stop trace-commons-privacy-filter && systemctl is-active trace-commons-privacy-filter || true"
+    --command "sudo systemctl stop trace-commons-privacy-filter || true"
 
-  say "opening IAP tunnel  pilot:127.0.0.1:$PORT -> $GPU_VM:$PORT"
-  # Run the tunnel FROM the pilot host so ingest keeps talking to loopback.
+  say "forwarding pilot 127.0.0.1:$PORT -> $gpu_ip:$PORT"
+  # socat, not an SSH tunnel: no key distribution, and it survives the pilot's
+  # SSH sessions ending. Traffic stays inside the VPC, which GCP encrypts
+  # between VMs -- but note this is NOT application-layer TLS, and the
+  # self-hosted adapter has no TLS guard, so the firewall rule above is doing
+  # real work. Do not widen its source range.
   "${G[@]}" compute ssh "$PILOT_VM" --zone "$ZONE" --tunnel-through-iap --command "
-    setsid nohup gcloud compute start-iap-tunnel $GPU_VM $PORT \
-      --local-host-port=127.0.0.1:$PORT --zone $ZONE --project $PROJECT \
-      </dev/null > /tmp/opf-tunnel.log 2>&1 &
-    echo \$! | sudo tee $TUNNEL_PIDFILE >/dev/null
-    sleep 12
-    echo -n 'tunnel healthz: '; curl -s --max-time 30 localhost:$PORT/healthz || echo FAILED
+    command -v socat >/dev/null 2>&1 || sudo apt-get install -y -qq socat >/dev/null 2>&1
+    setsid nohup socat TCP-LISTEN:$PORT,fork,reuseaddr,bind=127.0.0.1 TCP:$gpu_ip:$PORT \
+      </dev/null > /tmp/opf-forward.log 2>&1 &
+    sleep 5
+    echo -n 'device via pilot loopback: '
+    curl -s --max-time 30 localhost:$PORT/healthz || echo FAILED
+    echo
   "
-  say "attached. ingest is unchanged and now served by the GPU."
+  say "attached. ingest is unchanged; verify the line above says device: cuda."
+
+  cat <<'NOTE'
+
+  While attached, raise window concurrency for the GPU and REVERT IT ON DETACH:
+
+    TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS=8   # GPU only
+
+  8 measured ~1,171 classify requests/minute. Against the local CPU shim the
+  same value pushes windows past the 600s timeout and every field fails; 2 is
+  the CPU value. Restart ingest after changing it.
+NOTE
 }
 
 cmd_status() {
@@ -134,16 +180,21 @@ cmd_status() {
 }
 
 cmd_detach() {
-  say "closing the tunnel and restoring the local CPU shim"
+  say "REVERT concurrency to 2 before the CPU shim serves again"
+  say "  (8 against the CPU shim pushes windows past the 600s timeout)"
   "${G[@]}" compute ssh "$PILOT_VM" --zone "$ZONE" --tunnel-through-iap --command "
-    sudo pkill -f '[s]tart-iap-tunnel' || true
-    sudo rm -f $TUNNEL_PIDFILE
+    sudo sed -i 's/^TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS=8/TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS=2/' /etc/tracecommons/ingest.env
+    sudo grep '^TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS' /etc/tracecommons/ingest.env
+    sudo pkill -f '[s]ocat TCP-LISTEN:$PORT' || true
+    sudo systemctl reset-failed trace-commons-privacy-filter 2>/dev/null || true
     sudo systemctl start trace-commons-privacy-filter
-    sleep 20
+    sudo systemctl restart trace-commons-ingest
+    sleep 25
     echo -n 'local shim: '; systemctl is-active trace-commons-privacy-filter
-    echo -n 'healthz: '; curl -s --max-time 60 localhost:$PORT/healthz || echo FAILED
+    echo -n 'device: '; curl -s --max-time 60 localhost:$PORT/healthz || echo FAILED
+    echo
   "
-  say "detached. the pilot is self-sufficient again."
+  say "detached. the pilot is self-sufficient again -- confirm device: cpu above."
 }
 
 cmd_down() {
@@ -156,6 +207,12 @@ cmd_down() {
     echo "ERROR: $GPU_VM still exists" >&2; exit 1
   fi
   echo "$GPU_VM is gone."
+  say "removing the temporary firewall rule"
+  "${G[@]}" compute firewall-rules delete "$FW_RULE" --quiet 2>/dev/null || true
+  if "${G[@]}" compute firewall-rules describe "$FW_RULE" >/dev/null 2>&1; then
+    echo "ERROR: $FW_RULE still exists" >&2; exit 1
+  fi
+  echo "$FW_RULE is gone."
   echo "orphaned disks:"
   "${G[@]}" compute disks list --filter='-users:*' --format='table(name,zone,sizeGb)'
 }
