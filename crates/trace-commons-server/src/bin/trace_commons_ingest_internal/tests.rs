@@ -70837,9 +70837,9 @@ fn gate_version_hash_moved_for_strided_chunk_selection() {
     const PRE_STRIDE_GOLDEN: &str =
         "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68";
     /// sha256 of the canonical string WITH
-    /// `chunk_selection=stride_endpoint_inclusive.v1`.
-    const POST_STRIDE_GOLDEN: &str =
-        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac";
+    /// `chunk_selection=stride_endpoint_inclusive.v1` and the `render=` line
+    /// that #211 added after it.
+    const POST_STRIDE_GOLDEN: &str = CURRENT_GATE_VERSION_HASH_GOLDEN;
 
     // The golden is only meaningful while the enclave still names this
     // algorithm exactly this way; the two are pinned together on purpose.
@@ -70856,6 +70856,53 @@ fn gate_version_hash_moved_for_strided_chunk_selection() {
     );
     assert_eq!(
         base, POST_STRIDE_GOLDEN,
+        "gate version hash drifted without a deliberate stamp change"
+    );
+}
+
+/// sha256 of the canonical string as it stands: `chunk_selection=` followed
+/// by `render=events.v1`. Named once and shared, because two tests pin the
+/// same number and a rotation that updated only one of them would leave the
+/// other passing against a stamp nothing produces.
+const CURRENT_GATE_VERSION_HASH_GOLDEN: &str =
+    "sha256:d1db609337e39b60a15e29339e8e61c0133eb044676ee5e6930592c6ec78eb97";
+
+/// The sibling of `gate_version_hash_moved_for_strided_chunk_selection`, for
+/// the dimension #211 added: which RENDERER produced the text inside the
+/// chunks, as distinct from which chunks survived the cap.
+///
+/// Selecting identical chunks says nothing about comparability if the text
+/// inside them was rendered differently — the whole premise of sub-project D
+/// is that a render change moves every similarity signal at once. Before this
+/// line, the stamp claimed a decision was reproducible when re-rendering the
+/// same envelope would have moved perplexity, novelty and the simhash
+/// together. The pre-render golden is the hash the baseline config produced
+/// then, and it is the value the strided-selection test pinned until #211;
+/// the rotation away from it is deliberate (design D7).
+#[test]
+fn gate_version_hash_moved_for_canonical_render() {
+    /// sha256 of the canonical string WITHOUT a `render=` line.
+    const PRE_RENDER_GOLDEN: &str =
+        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac";
+
+    // Same pinning as the selection test: the golden below is only meaningful
+    // while the enclave still names this renderer exactly this way. PR 1 of
+    // sub-project D binds the name with the value UNCHANGED, so the rotation
+    // here measures the plumbing and nothing else; PR 2 bumps the value and
+    // rotates it a second time.
+    assert_eq!(
+        trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+        "events.v1",
+        "bumping the canonical renderer must also move the golden below"
+    );
+
+    let base = base_gate_version_hash();
+    assert_ne!(
+        base, PRE_RENDER_GOLDEN,
+        "binding the canonical renderer MUST break the gate version stamp"
+    );
+    assert_eq!(
+        base, CURRENT_GATE_VERSION_HASH_GOLDEN,
         "gate version hash drifted without a deliberate stamp change"
     );
 }
@@ -71082,6 +71129,18 @@ fn compute_gate_version_hash_changes_on_any_dimension() {
             "gate_version_hash must change when {label} changes"
         );
     }
+
+    // The chunk-selection algorithm and the canonical renderer are the two
+    // dimensions that arrive as consts rather than arguments, so they cannot
+    // be permuted through this helper. Each has its own golden-pinned test
+    // above; what this asserts is that both are actually IN the hash, by
+    // pinning the current value the two of them produce. A const dropped from
+    // the canonical string would move it.
+    assert_eq!(
+        base, CURRENT_GATE_VERSION_HASH_GOLDEN,
+        "gate_version_hash must keep covering the const-valued dimensions \
+         (chunk selection and canonical render), not only its arguments"
+    );
 }
 
 /// A2.3 production-gate init test. Exercises

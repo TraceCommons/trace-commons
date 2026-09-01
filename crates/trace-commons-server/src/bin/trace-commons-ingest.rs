@@ -6012,8 +6012,9 @@ fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
 
 /// Stable canonical-bytes hash of every dimension that influences the gate
 /// decision: policy version, floors, top-k, both model identifiers + token
-/// caps, the vector index dim, the chunking knobs, and the chunk-SELECTION
-/// algorithm. Operators rotating any of these MUST see the audit trail break
+/// caps, the vector index dim, the chunking knobs, the chunk-SELECTION
+/// algorithm, and the canonical event RENDERER. Operators rotating any of
+/// these MUST see the audit trail break
 /// — the previous fixed `"sha256:enclave_mock_v1"` value stamped every
 /// decision regardless of configuration.
 ///
@@ -6052,8 +6053,15 @@ fn compute_gate_version_hash(
          embedder={embedder_model_id}:{embedder_max_tokens}:{embedder_matryoshka_dim:?}\n\
          vector_dim={vector_index_dim}\n\
          chunking={chunk_target_tokens},{chunk_max_tokens},{chunk_cap},{chunk_min_tokens},{embed_insert_novelty_micros}\n\
-         chunk_selection={chunk_selection}",
+         chunk_selection={chunk_selection}\n\
+         render={render}",
         chunk_selection = trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
+        // Which chunks survive the cap and what the text inside them says are
+        // separate dimensions: two decisions can select identical chunks and
+        // still be incomparable because the renderer changed underneath them.
+        // Without this line the stamp claims a decision is reproducible when
+        // re-rendering the same envelope would move every signal.
+        render = trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
     );
     let mut h = Sha256::new();
     h.update(canonical.as_bytes());
