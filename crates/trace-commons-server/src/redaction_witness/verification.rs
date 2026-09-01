@@ -8,8 +8,10 @@
 //!
 //! 1. the signature recovers to the witness signing address the operator
 //!    pinned;
-//! 2. `redacted_sha256` is the digest of the bytes actually on hand;
-//! 3. `witness_measurement` is one the operator pinned.
+//! 2. `witness_measurement` is one the operator pinned;
+//! 3. `redacted_sha256` is the digest of the bytes actually on hand.
+//!
+//! They run in that order, and a test pins it.
 //!
 //! [`WitnessCertificate::verify`] checks only the first. A caller who ran it
 //! and stopped there would have established that *some* enclave signed
@@ -221,45 +223,28 @@ impl VerifiedWitnessCertificate {
     /// Lowercase hex SHA-256 of the artifact this certificate covers, which
     /// verification has proven is the artifact the caller passed.
     pub fn redacted_sha256(&self) -> &str {
-        &self.certificate.redacted_sha256
-    }
-
-    /// The upstream inference conversation. Contributor-linked; do not log.
-    pub fn chat_id(&self) -> &str {
-        &self.certificate.chat_id
-    }
-
-    pub fn prompt_tokens(&self) -> u64 {
-        self.certificate.prompt_tokens
-    }
-
-    pub fn completion_tokens(&self) -> u64 {
-        self.certificate.completion_tokens
-    }
-
-    /// The upstream model slug. Contributor-linked; do not log.
-    pub fn model(&self) -> &str {
-        &self.certificate.model
-    }
-
-    /// Unix seconds at issue. Bound by the signature and **not** checked for
-    /// freshness by verification: a certificate is bearer evidence with no
-    /// nonce, so any freshness or replay window is a policy decision above
-    /// this module.
-    pub fn timestamp(&self) -> i64 {
-        self.certificate.timestamp
-    }
-
-    pub fn redaction_policy_version(&self) -> &str {
-        &self.certificate.redaction_policy_version
+        self.certificate.claimed_redacted_sha256()
     }
 
     /// The measurement the witness reported, which verification has proven is
-    /// one the operator pinned.
+    /// one the operator pinned. A caller reporting the strength of the check
+    /// wants this.
     pub fn witness_measurement(&self) -> &str {
-        &self.certificate.witness_measurement
+        self.certificate.claimed_witness_measurement()
     }
 }
+
+// There are deliberately no accessors for `chat_id`, `model`, the token
+// counts or the timestamp. Nothing consumes them yet, and adding a getter per
+// field would hand back exactly the unverified-read surface that making the
+// certificate's fields private just closed. They are contributor-linked, and
+// the moment something legitimately needs one is the moment to add it -- with
+// a caller in the same commit.
+//
+// `timestamp` in particular is bound by the signature and *not* checked for
+// freshness: a certificate has no nonce and is replayable against the same
+// artifact by anyone holding it, so any freshness window is a policy decision
+// above this module.
 
 /// Verify a witness certificate against the artifact the server holds.
 ///
@@ -293,9 +278,12 @@ pub fn verify_witness_certificate(
         .verify(signature_hex, &pin.signing_address)
         .map_err(WitnessVerificationError::Signature)?;
 
-    if !pin.measurements.contains(&certificate.witness_measurement) {
+    if !pin
+        .measurements
+        .contains(certificate.claimed_witness_measurement())
+    {
         return Err(WitnessVerificationError::MeasurementNotPinned {
-            reported: certificate.witness_measurement.clone(),
+            reported: certificate.claimed_witness_measurement().to_string(),
         });
     }
 
@@ -303,7 +291,10 @@ pub fn verify_witness_certificate(
     // The comparison is otherwise exact: a shorter certificate digest never
     // matches by prefix.
     let held = hex::encode(Sha256::digest(redacted_bytes));
-    if !certificate.redacted_sha256.eq_ignore_ascii_case(&held) {
+    if !certificate
+        .claimed_redacted_sha256()
+        .eq_ignore_ascii_case(&held)
+    {
         return Err(WitnessVerificationError::ArtifactMismatch);
     }
 
@@ -313,6 +304,7 @@ pub fn verify_witness_certificate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redaction_witness::certificate::CertificateDetails;
     use k256::ecdsa::SigningKey;
     use sha3::Keccak256;
 
@@ -331,9 +323,8 @@ mod tests {
     /// A certificate that covers [`ARTIFACT`] and reports the pinned
     /// measurement, with a distinctive value in every other field so that a
     /// formatter test cannot pass because two fields happened to be equal.
-    fn certificate() -> WitnessCertificate {
-        WitnessCertificate {
-            redacted_sha256: digest_of(ARTIFACT),
+    fn details() -> CertificateDetails {
+        CertificateDetails {
             chat_id: "chatcmpl-secret-session".to_string(),
             prompt_tokens: 1_204,
             completion_tokens: 337,
@@ -342,6 +333,26 @@ mod tests {
             redaction_policy_version: "policy-v3".to_string(),
             witness_measurement: PINNED_MEASUREMENT.to_string(),
         }
+    }
+
+    fn certificate() -> WitnessCertificate {
+        WitnessCertificate::from_parts(digest_of(ARTIFACT), details())
+    }
+
+    /// A certificate covering [`ARTIFACT`] but reporting `measurement`.
+    fn certificate_reporting(measurement: &str) -> WitnessCertificate {
+        WitnessCertificate::from_parts(
+            digest_of(ARTIFACT),
+            CertificateDetails {
+                witness_measurement: measurement.to_string(),
+                ..details()
+            },
+        )
+    }
+
+    /// A certificate claiming `digest` and reporting the pinned measurement.
+    fn certificate_claiming(digest: String) -> WitnessCertificate {
+        WitnessCertificate::from_parts(digest, details())
     }
 
     fn key(seed: &str) -> SigningKey {
@@ -379,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_verification_returns_the_certificate_fields() {
+    fn a_complete_verification_returns_the_certificate() {
         let (k, pin) = witness();
         let cert = certificate();
         let signature = sign(&k, &cert);
@@ -388,12 +399,6 @@ mod tests {
             verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT).expect("verifies");
 
         assert_eq!(verified.redacted_sha256(), digest_of(ARTIFACT));
-        assert_eq!(verified.chat_id(), "chatcmpl-secret-session");
-        assert_eq!(verified.prompt_tokens(), 1_204);
-        assert_eq!(verified.completion_tokens(), 337);
-        assert_eq!(verified.model(), "qwen3.6-27b-fp8");
-        assert_eq!(verified.timestamp(), 1_788_000_000);
-        assert_eq!(verified.redaction_policy_version(), "policy-v3");
         assert_eq!(verified.witness_measurement(), PINNED_MEASUREMENT);
     }
 
@@ -419,11 +424,9 @@ mod tests {
     #[test]
     fn a_certificate_from_an_unpinned_enclave_is_refused() {
         let (k, pin) = witness();
-        let mut cert = certificate();
-        cert.witness_measurement = "d".repeat(64);
-        // Signed after the change, by the real witness key: this is a
-        // genuine certificate from an enclave running an image nobody
-        // vouched for, not a tampered one.
+        // Signed by the real witness key: this is a genuine certificate from
+        // an enclave running an image nobody vouched for, not a tampered one.
+        let cert = certificate_reporting(&"d".repeat(64));
         let signature = sign(&k, &cert);
 
         let error = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
@@ -459,8 +462,7 @@ mod tests {
         // truncated digest in the certificate can, and without this test a
         // `starts_with` comparison passes the whole suite.
         let (k, pin) = witness();
-        let mut cert = certificate();
-        cert.redacted_sha256 = digest_of(ARTIFACT)[..32].to_string();
+        let cert = certificate_claiming(digest_of(ARTIFACT)[..32].to_string());
         let signature = sign(&k, &cert);
 
         let error = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
@@ -487,8 +489,7 @@ mod tests {
     #[test]
     fn an_uppercase_digest_in_the_certificate_still_matches_the_held_bytes() {
         let (k, pin) = witness();
-        let mut cert = certificate();
-        cert.redacted_sha256 = digest_of(ARTIFACT).to_ascii_uppercase();
+        let cert = certificate_claiming(digest_of(ARTIFACT).to_ascii_uppercase());
         let signature = sign(&k, &cert);
 
         verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
@@ -524,17 +525,14 @@ mod tests {
     #[test]
     fn swapping_in_a_pinned_measurement_after_signing_fails_the_signature() {
         let (k, pin) = witness();
-        let mut cert = certificate();
-        cert.witness_measurement = "d".repeat(64);
-        let signature = sign(&k, &cert);
-
         // The attacker holds a genuine certificate from an unpinned enclave
         // and edits the measurement to one that is pinned. The signature no
         // longer covers the certificate, and that is what must be reported --
         // not a measurement failure, which would send an operator to their
         // pin list rather than to the fact that somebody is editing signed
         // structures.
-        cert.witness_measurement = PINNED_MEASUREMENT.to_string();
+        let signature = sign(&k, &certificate_reporting(&"d".repeat(64)));
+        let cert = certificate();
         let error = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
             .expect_err("an edited certificate must be refused");
         assert_eq!(
@@ -565,8 +563,7 @@ mod tests {
     #[test]
     fn a_bad_signature_is_reported_before_the_measurement_it_claims() {
         let (_, pin) = witness();
-        let mut cert = certificate();
-        cert.witness_measurement = "d".repeat(64);
+        let cert = certificate_reporting(&"d".repeat(64));
         let signature = sign(&key("some other enclave"), &cert);
 
         // A certificate nobody vouched for must not get its self-reported
@@ -583,8 +580,7 @@ mod tests {
     #[test]
     fn measurements_are_compared_exactly_and_do_not_case_fold() {
         let (k, pin) = witness();
-        let mut cert = certificate();
-        cert.witness_measurement = PINNED_MEASUREMENT.to_ascii_uppercase();
+        let cert = certificate_reporting(&PINNED_MEASUREMENT.to_ascii_uppercase());
         let signature = sign(&k, &cert);
 
         let error = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
@@ -608,8 +604,7 @@ mod tests {
         assert_eq!(pin.pinned_measurement_count(), 2);
 
         for measurement in ["e".repeat(64), PINNED_MEASUREMENT.to_string()] {
-            let mut cert = certificate();
-            cert.witness_measurement = measurement.clone();
+            let cert = certificate_reporting(&measurement);
             let signature = sign(&k, &cert);
             let verified = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
                 .expect("a pinned measurement verifies");
@@ -648,19 +643,39 @@ mod tests {
     #[test]
     fn both_error_formatters_render_the_same_safe_text() {
         let errors = [
-            WitnessVerificationError::Unpinned {
-                control: EXPECTED_MEASUREMENT_CONTROL,
-            },
-            WitnessVerificationError::Signature(CertificateError::SignerMismatch),
-            WitnessVerificationError::ArtifactMismatch,
-            WitnessVerificationError::MeasurementNotPinned {
-                reported: PINNED_MEASUREMENT.to_string(),
-            },
+            (
+                WitnessVerificationError::Unpinned {
+                    control: EXPECTED_MEASUREMENT_CONTROL,
+                },
+                EXPECTED_MEASUREMENT_CONTROL,
+            ),
+            (
+                WitnessVerificationError::Signature(CertificateError::SignerMismatch),
+                "signed by a different signer",
+            ),
+            (
+                WitnessVerificationError::ArtifactMismatch,
+                "does not cover the artifact on hand",
+            ),
+            (
+                WitnessVerificationError::MeasurementNotPinned {
+                    reported: PINNED_MEASUREMENT.to_string(),
+                },
+                PINNED_MEASUREMENT,
+            ),
         ];
-        for error in errors {
+        for (error, expected) in errors {
             let display = format!("{error}");
             let debug = format!("{error:?}");
             assert_eq!(display, debug, "Debug renders more than Display");
+            // Positive control. Without it every leak assertion below holds
+            // vacuously for a blank formatter -- and most of them hold
+            // vacuously anyway, since no variant carries a token count or a
+            // certificate. This is the assertion that observes something.
+            assert!(
+                display.contains(expected),
+                "expected {expected} in the rendered error, got {display}"
+            );
             // Nothing that identifies a contributor or their session.
             for leak in [
                 "chatcmpl-secret-session",
@@ -676,12 +691,20 @@ mod tests {
             }
         }
 
-        for error in [
-            WitnessPinError::SigningAddressMalformed,
-            WitnessPinError::NoMeasurements,
-            WitnessPinError::MeasurementBlank,
+        for (error, expected) in [
+            (
+                WitnessPinError::SigningAddressMalformed,
+                "not a 20-byte hex address",
+            ),
+            (WitnessPinError::NoMeasurements, "named no expected"),
+            (
+                WitnessPinError::MeasurementBlank,
+                "blank expected measurement",
+            ),
         ] {
-            assert_eq!(format!("{error}"), format!("{error:?}"));
+            let display = format!("{error}");
+            assert_eq!(display, format!("{error:?}"));
+            assert!(display.contains(expected), "got {display}");
         }
     }
 

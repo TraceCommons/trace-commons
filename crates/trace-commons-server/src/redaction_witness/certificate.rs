@@ -49,6 +49,7 @@
 //! upstream conversation, so `Debug` is hand-written to withhold it; only the
 //! two digests render.
 
+use super::correspondence::CorrespondenceProof;
 use crate::near_attestation::receipt::{ReceiptError, decode_address, recover_eip191_signer};
 
 /// Domain separation. A signature over these bytes cannot be replayed as a
@@ -56,20 +57,19 @@ use crate::near_attestation::receipt::{ReceiptError, decode_address, recover_eip
 /// a future `.v2` layout cannot be confused with this one.
 const SIGNING_DOMAIN: &[u8] = b"trace_commons.redaction_witness_certificate.v1\n";
 
-/// What a witness signs on a successful correspondence check.
+/// What the witness reports about the inference behind a trace.
 ///
-/// Every field is bound by the signature. The server verifies the signature
-/// against the witness's attested signing address, then checks
-/// `redacted_sha256` against the bytes it actually holds; a certificate is
-/// therefore useless on any other artifact.
+/// Every one of these is witness self-report. None of it is checked against
+/// an inference receipt here, and this module holds no receipt to check it
+/// against -- the certificate carries the fields so that the witness service,
+/// which does hold one, can bind them. Public fields are right for this type:
+/// there is nothing here a witness could not have typed, and pretending
+/// otherwise would be decoration.
 ///
-/// Construct with public fields -- this is a record, not an invariant-bearing
-/// type. The invariant that matters lives in [`Self::signing_bytes`].
-#[derive(Clone, PartialEq, Eq)]
-pub struct WitnessCertificate {
-    /// Lowercase hex SHA-256 of the redacted artifact, as carried by
-    /// `CorrespondenceProof`.
-    pub redacted_sha256: String,
+/// The one field that is *not* here is `redacted_sha256`, which comes only
+/// from a [`CorrespondenceProof`]. That asymmetry is the point of the type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateDetails {
     /// The upstream inference conversation this trace came from.
     pub chat_id: String,
     /// Tokens the upstream inference billed.
@@ -87,6 +87,39 @@ pub struct WitnessCertificate {
     /// here -- this is what the certificate claims, and pinning is the
     /// server's separate check against it.
     pub witness_measurement: String,
+}
+
+/// What a witness signs on a successful correspondence check.
+///
+/// Every field is bound by the signature. The server verifies the signature
+/// against the witness's attested signing address, then checks
+/// `redacted_sha256` against the bytes it actually holds; a certificate is
+/// therefore useless on any other artifact.
+///
+/// # Construction
+///
+/// The fields are private and there is exactly one production constructor,
+/// [`Self::from_proof`], which consumes a [`CorrespondenceProof`] by value.
+/// A public-field record would have made that constructor decoration: anybody
+/// could write a struct literal with a digest they typed in, and the
+/// correspondence check -- the strongest link in this chain -- would have sat
+/// next to the weakest with nothing requiring it. Private fields are what
+/// make holding a proof a *requirement* rather than a convention.
+///
+/// The wire type's `into_certificate` will be the second path when the
+/// witness service slice lands. There is deliberately no third.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WitnessCertificate {
+    /// Lowercase hex SHA-256 of the redacted artifact, as carried by
+    /// `CorrespondenceProof`.
+    redacted_sha256: String,
+    chat_id: String,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    model: String,
+    timestamp: i64,
+    redaction_policy_version: String,
+    witness_measurement: String,
 }
 
 impl std::fmt::Debug for WitnessCertificate {
@@ -144,6 +177,65 @@ impl std::fmt::Debug for CertificateError {
 }
 
 impl WitnessCertificate {
+    /// Build a certificate from a correspondence proof and what the witness
+    /// reports.
+    ///
+    /// The proof is consumed by value, so `redacted_sha256` provably came out
+    /// of [`check_correspondence`](super::correspondence::check_correspondence)
+    /// and cannot be a digest somebody typed. Everything else is witness
+    /// self-report and is passed in as such.
+    ///
+    /// The digest is over the exact bytes `check_correspondence` compared. A
+    /// server verifying this certificate hashes the artifact bytes it holds,
+    /// so the witness must be handed the artifact byte for byte: any
+    /// re-encoding, wrapper, or added trailing newline between the two
+    /// produces a different digest and fails closed at
+    /// [`verify_witness_certificate`](super::verification::verify_witness_certificate).
+    pub fn from_proof(proof: CorrespondenceProof, details: CertificateDetails) -> Self {
+        WitnessCertificate {
+            redacted_sha256: proof.redacted_sha256().to_string(),
+            chat_id: details.chat_id,
+            prompt_tokens: details.prompt_tokens,
+            completion_tokens: details.completion_tokens,
+            model: details.model,
+            timestamp: details.timestamp,
+            redaction_policy_version: details.redaction_policy_version,
+            witness_measurement: details.witness_measurement,
+        }
+    }
+
+    /// Build a certificate with an arbitrary digest, for tests that need a
+    /// certificate covering bytes no proof was taken over.
+    ///
+    /// Deliberately not `pub`: a public test helper is a second construction
+    /// path, and would reopen exactly what private fields close.
+    #[cfg(test)]
+    pub(crate) fn from_parts(redacted_sha256: String, details: CertificateDetails) -> Self {
+        WitnessCertificate {
+            redacted_sha256,
+            chat_id: details.chat_id,
+            prompt_tokens: details.prompt_tokens,
+            completion_tokens: details.completion_tokens,
+            model: details.model,
+            timestamp: details.timestamp,
+            redaction_policy_version: details.redaction_policy_version,
+            witness_measurement: details.witness_measurement,
+        }
+    }
+
+    /// The digest the certificate claims, for the module's own artifact
+    /// check. Not public: outside this module the digest is only reachable
+    /// through a verified certificate.
+    pub(super) fn claimed_redacted_sha256(&self) -> &str {
+        &self.redacted_sha256
+    }
+
+    /// The measurement the certificate claims, for the module's own pin
+    /// check. Not public, for the same reason.
+    pub(super) fn claimed_witness_measurement(&self) -> &str {
+        &self.witness_measurement
+    }
+
     /// The canonical bytes a witness signs and a verifier reconstructs.
     ///
     /// Each string field is `u64`-little-endian length followed by its UTF-8
@@ -184,10 +276,13 @@ impl WitnessCertificate {
     ///
     /// This checks the signature and nothing else. It does not compare
     /// `redacted_sha256` against any artifact and does not pin
-    /// `witness_measurement`; both are the caller's separate checks, and
-    /// folding them in here would let a caller believe one call had done all
-    /// three.
-    pub fn verify(
+    /// `witness_measurement`, which is why it is `pub(super)`: a public
+    /// function that performs one of three required checks and returns
+    /// `Ok(())` is the "some enclave signed something" shape this module
+    /// exists to make unavailable, and a doc comment saying so is not a
+    /// guard. [`verify_witness_certificate`](super::verification::verify_witness_certificate)
+    /// is its only caller.
+    pub(super) fn verify(
         &self,
         signature_hex: &str,
         witness_signing_address: &str,
@@ -270,6 +365,45 @@ mod tests {
         let mut raw = signature.to_bytes().to_vec();
         raw.push(recovery_id.to_byte() + 27);
         format!("0x{}", hex::encode(raw))
+    }
+
+    #[test]
+    fn from_proof_takes_its_digest_from_the_proof_and_not_from_the_caller() {
+        // The only production constructor. Its point is that the digest is
+        // not an argument: it comes out of check_correspondence, so a
+        // certificate cannot claim a digest nobody proved.
+        let redacted = "call [REDACTED:private_name] back";
+        let proof = crate::redaction_witness::correspondence::check_correspondence(
+            "call alice back",
+            redacted,
+            &[super::super::correspondence::RedactionSpan {
+                start: 5,
+                end: 10,
+                replacement: "[REDACTED:private_name]".to_string(),
+            }],
+        )
+        .expect("the artifact corresponds");
+        let expected = proof.redacted_sha256().to_string();
+
+        let cert = WitnessCertificate::from_proof(
+            proof,
+            CertificateDetails {
+                chat_id: "chatcmpl-7f3a".to_string(),
+                prompt_tokens: 1_204,
+                completion_tokens: 337,
+                model: "qwen3.6-27b-fp8".to_string(),
+                timestamp: 1_788_000_000,
+                redaction_policy_version: "policy-v3".to_string(),
+                witness_measurement: "b".repeat(64),
+            },
+        );
+
+        assert_eq!(cert.redacted_sha256, expected);
+        assert_eq!(
+            cert.redacted_sha256,
+            hex::encode(sha2::Sha256::digest(redacted.as_bytes())),
+            "the digest is over the redacted bytes exactly"
+        );
     }
 
     #[test]
