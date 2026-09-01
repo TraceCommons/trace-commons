@@ -1,7 +1,7 @@
 # Register-stats public-read role
 
-The public register-stats endpoint (Task 4 of the credit-numbers API, not yet
-shipped) serves one aggregate row — `traces_accepted`, `contributors`,
+The public register-stats endpoint (`GET /v1/public/register-stats`) serves
+one aggregate row — `traces_accepted`, `contributors`,
 `points_issued`, `as_of`, `refreshed_at` — from `trace_register_stats` to an
 **unauthenticated** caller. An unauthenticated request has no tenant, so the
 ordinary RLS predicate (`tenant_id = trace_current_tenant_id()`) matches
@@ -88,12 +88,33 @@ UPDATE trace_register_stats SET traces_accepted = 0;  -- must be refused
                                                        -- for table ...")
 ```
 
+## The contributor floor
+
+`TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR` sets how many contributors
+the configured communities must hold before the endpoint publishes
+`contributors` and `points_issued` at all. It defaults to **25**, and an
+unset, blank, malformed or negative value resolves to that default rather
+than to a floor that suppresses nothing.
+
+Below the floor those two counts are **absent from the response**, not zero,
+and `withheld` is `true`. `traces_accepted` is published either way once the
+row has been refreshed: it counts submissions, not people. The endpoint also
+reports `scope: "configured_communities"`, because the refresh aggregates the
+tenants this deployment configured as communities, not every tenant the
+server holds.
+
+Set it lower only against a real contributor count. With few contributors a
+known cohort plus a published total is one person's earnings.
+
 ## Nothing schedules the refresh yet
 
 The refresh worker route (`POST /v1/workers/register-stats/refresh`,
 `RegisterStatsWorker` token role) computes and writes the aggregate. Nothing
 in this repo schedules it — wire it to a timer (cron, a scheduled Cloud Run
 job, systemd timer, etc.) as part of your deployment. Until it has run at
-least once, `refreshed_at` stays `NULL` and the public endpoint (Task 4)
-refuses to publish, because a zero would be a claim about the register that
-nobody made.
+least once, `refreshed_at` stays `NULL` and the public endpoint refuses to
+publish any figure at all -- not even `traces_accepted` -- because a zero
+would be a claim about the register that nobody made. The row's own
+`withheld` column has the same effect and doubles as an operator kill
+switch: set it `TRUE` and the endpoint publishes nothing until the next
+refresh clears it.

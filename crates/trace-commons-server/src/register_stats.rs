@@ -19,6 +19,15 @@ pub async fn fetch_register_stats_row(
     db.fetch_register_stats_row().await
 }
 
+/// Read the singleton row the way the unauthenticated public endpoint must:
+/// under the `trace_commons_public_read` role, which holds one column-scoped
+/// SELECT grant on this table and no grant on anything else.
+pub async fn fetch_public_register_stats_row(
+    db: &dyn Database,
+) -> Result<RegisterStatsRow, DatabaseError> {
+    db.fetch_register_stats_row_as_public_read().await
+}
+
 /// Recompute the public aggregate and write it. Batch-only and idempotent:
 /// callers may run this as often as they like, and each run replaces the
 /// row's figures wholesale rather than accumulating onto them.

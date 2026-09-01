@@ -87978,3 +87978,186 @@ fn classify_policy_env_defaults_closed() {
         }
     }
 }
+
+// -- Public register-stats endpoint -----------------------------------------
+//
+// Every assertion below runs WITHOUT PostgreSQL, on purpose. CI does not run
+// the pg suite, so the `let Some(backend) = ... else { return }` idiom used
+// elsewhere in this file makes a test that silently skips on every gating
+// machine. The suppression rule is the privacy-relevant behaviour in this
+// endpoint, so it lives in pure functions and is tested here directly.
+
+/// A materialised row in whatever state the assertion needs.
+fn register_stats_row_fixture(
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed: bool,
+) -> trace_commons_server::register_stats::RegisterStatsRow {
+    trace_commons_server::register_stats::RegisterStatsRow {
+        traces_accepted,
+        contributors,
+        points_issued,
+        // What a refresh leaves behind: the schema default is TRUE and every
+        // successful refresh clears it.
+        withheld: !refreshed,
+        as_of: Utc::now(),
+        refreshed_at: refreshed.then(Utc::now),
+    }
+}
+
+#[test]
+fn register_stats_withholds_one_contributor_below_the_floor() {
+    // The boundary in both directions, so an off-by-one in either sense fails.
+    assert!(register_stats_withheld(24, 25, true), "floor-1 is withheld");
+    assert!(
+        !register_stats_withheld(25, 25, true),
+        "the floor itself is not withheld"
+    );
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_however_large_the_count() {
+    // An unrefreshed row carries schema defaults. Publishing those would be a
+    // claim about the register that nobody computed.
+    assert!(register_stats_withheld(1_000_000, 25, false));
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_even_with_a_floor_of_zero() {
+    // A floor of 0 disables the cohort rule; it must not also disable the
+    // never-computed rule, which is a separate reason to say nothing.
+    assert!(register_stats_withheld(0, 0, false));
+    assert!(!register_stats_withheld(0, 0, true));
+}
+
+#[test]
+fn a_misconfigured_floor_falls_back_to_the_high_default_not_to_zero() {
+    // Every one of these is a misconfiguration, and the safe reading of a
+    // misconfigured floor is the high one: a zero would suppress nothing.
+    for raw in [None, Some(""), Some("   "), Some("many"), Some("-5")] {
+        assert_eq!(
+            register_stats_floor_from(raw),
+            REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR,
+            "raw {raw:?} must fall back to the default floor"
+        );
+    }
+    assert_eq!(register_stats_floor_from(Some("40")), 40);
+    // Explicitly disabling the floor is allowed, but only explicitly.
+    assert_eq!(register_stats_floor_from(Some("0")), 0);
+}
+
+#[test]
+fn register_stats_below_the_floor_omits_the_counts_rather_than_zeroing_them() {
+    // Absent, never a small number and never a zero: with few contributors a
+    // known cohort plus a total is one person's earnings, and a zero would
+    // read as nobody having contributed rather than as us declining to say.
+    let row = register_stats_row_fixture(900, 2, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+    // Submissions, not people: reported either way once the row is real.
+    assert_eq!(body["traces_accepted"], 900);
+}
+
+#[test]
+fn register_stats_above_the_floor_reports_the_counts() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], false);
+    assert_eq!(body["contributors"], 50);
+    assert_eq!(body["points_issued"], 4_500);
+    assert_eq!(body["traces_accepted"], 900);
+}
+
+#[test]
+fn an_unrefreshed_register_publishes_no_figure_at_all() {
+    // Not even the trace count: an unrefreshed zero is a false claim either
+    // way, and `as_of` plus a posture is all an unwired deployment may say.
+    let row = register_stats_row_fixture(0, 0, 0, false);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn the_stored_suppression_flag_stops_publication_on_its_own() {
+    // `withheld` on the row is an operator kill switch as well as the
+    // never-computed marker: a refreshed row still carrying it publishes
+    // nothing, whatever the counts say.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.withheld = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+}
+
+#[test]
+fn register_stats_carries_no_identifying_field() {
+    // The response is aggregate or it is nothing. Any of these appearing means
+    // a breakdown was added that can be differenced back to a person.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let text = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises")
+        .to_string();
+    for forbidden in ["tenant", "account", "principal", "submission_id", "sha256:"] {
+        assert!(!text.contains(forbidden), "response leaked {forbidden}");
+    }
+}
+
+#[test]
+fn register_stats_says_what_the_figures_cover() {
+    // The refresh is scoped to the configured community tenants, not to every
+    // tenant the server holds, so a client drawing a headline number can read
+    // what it is looking at without consulting a runbook.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["scope"], "configured_communities");
+}
+
+#[test]
+fn register_stats_reports_the_deployments_settlement_posture() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "dry_run"))
+        .expect("register stats serialises");
+    assert_eq!(body["posture"]["settlement"], "dry_run");
+    assert_eq!(body["posture"]["graded"], false);
+}
+
+/// The transport, end to end, including `SET ROLE trace_commons_public_read`.
+///
+/// Skips without PostgreSQL, so it proves nothing in CI -- which is exactly
+/// why the suppression rules above do not depend on it.
+#[tokio::test]
+async fn register_stats_handler_needs_no_credential() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // No headers, no bearer, no session cookie: the handler takes no auth
+    // extractor at all, which is what makes it servable outside every layer.
+    let (_, Json(body)) = register_stats_handler(State(state), HeaderMap::new())
+        .await
+        .expect("public register stats succeeds");
+    assert_eq!(body.scope, "configured_communities");
+}

@@ -2683,22 +2683,40 @@ impl Database for PgBackend {
     async fn fetch_register_stats_row(&self) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
         let client = self.trace_pool().get().await?;
         let row = client
-            .query_one(
-                "SELECT traces_accepted, contributors, points_issued, withheld, \
-                        as_of, refreshed_at \
-                 FROM trace_register_stats WHERE singleton = TRUE",
-                &[],
-            )
+            .query_one(REGISTER_STATS_SELECT_SQL, &[])
             .await
             .map_err(DatabaseError::Postgres)?;
-        Ok(crate::db::RegisterStatsRow {
-            traces_accepted: row.get("traces_accepted"),
-            contributors: row.get("contributors"),
-            points_issued: row.get("points_issued"),
-            withheld: row.get("withheld"),
-            as_of: row.get("as_of"),
-            refreshed_at: row.get("refreshed_at"),
-        })
+        Ok(register_stats_row_from(&row))
+    }
+
+    async fn fetch_register_stats_row_as_public_read(
+        &self,
+    ) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let pool = self.trace_pool();
+        let mut client = pool.get().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        // SET LOCAL, never a bare SET: the role reverts when this transaction
+        // ends, including on the error path, so a pooled connection can never
+        // be handed back to another request still wearing it.
+        //
+        // This fails loudly ("permission denied to set role") when the serving
+        // role is not a member of trace_commons_public_read, which is the
+        // fail-closed direction: a deployment that applied migrations as a
+        // different role gets an error on this endpoint rather than a quietly
+        // over-privileged read. See docs/operator/register-stats-role.md.
+        tx.batch_execute("SET LOCAL ROLE trace_commons_public_read")
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_one(REGISTER_STATS_SELECT_SQL, &[])
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let parsed = register_stats_row_from(&row);
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(parsed)
     }
 
     async fn write_register_stats_row(
@@ -5579,6 +5597,26 @@ fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> Stri
 fn sha256_prefixed(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     format!("sha256:{}", hex::encode(digest))
+}
+
+/// The six columns `trace_commons_public_read` is granted, and no others.
+///
+/// One constant rather than two copies: the runtime read and the public read
+/// must return the same shape, and the public role's GRANT is column-scoped,
+/// so a seventh column added to one copy would fail at request time under
+/// that role only.
+const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
+     withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
+
+fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStatsRow {
+    crate::db::RegisterStatsRow {
+        traces_accepted: row.get("traces_accepted"),
+        contributors: row.get("contributors"),
+        points_issued: row.get("points_issued"),
+        withheld: row.get("withheld"),
+        as_of: row.get("as_of"),
+        refreshed_at: row.get("refreshed_at"),
+    }
 }
 
 /// Guard for `PgBackend::compute_register_stats_totals`.

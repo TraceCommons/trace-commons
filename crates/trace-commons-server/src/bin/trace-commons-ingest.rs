@@ -7296,6 +7296,9 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/source", get(source_offer_handler))
+        // Unauthenticated, like /v1/source above and for the same structural
+        // reason: it is registered here, outside every auth layer, on purpose.
+        .route("/v1/public/register-stats", get(register_stats_handler))
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -50129,6 +50132,172 @@ async fn revocation_propagation_worker_handler(
         .await
         .map_err(maintenance_error)?;
     Ok(Json(response))
+}
+
+/// Per-IP cap on `GET /v1/public/register-stats` per window. Unauthenticated
+/// and cacheable for five minutes, so a well-behaved client needs a handful of
+/// requests a window and this is generous for anything that is not a flood.
+const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
+/// Coarse global cap, so a distributed flood is bounded too. Per-IP alone
+/// bounds one caller; this bounds the endpoint.
+const REGISTER_STATS_GLOBAL_LIMIT: u32 = 1200;
+/// Publicly cacheable: the figures move only when the refresh worker runs, and
+/// a cache in front of this is the cheapest defence it has.
+const REGISTER_STATS_CACHE_CONTROL: &str = "public, max-age=300";
+/// What the published figures actually cover, verbatim to clients.
+///
+/// Deliberately not a tenant-shaped word: it names an operator-chosen cohort,
+/// not the register as a whole, and it must not read as an identifier.
+const REGISTER_STATS_SCOPE: &str = "configured_communities";
+/// Contributors below which the counts are withheld. High by default because
+/// the failure mode of guessing low is publishing one person's earnings.
+const REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR: i64 = 25;
+
+/// The register's aggregate figures. No identity, at any aggregation, ever.
+///
+/// SCOPE: these figures cover the tenants this deployment configured as
+/// communities (`state.community_tenant_ids`, the cohort the refresh worker
+/// aggregates), not every tenant the server holds. `scope` says so on the
+/// wire, because on an unauthenticated endpoint a bare `traces_accepted`
+/// otherwise reads as a claim about the whole register.
+#[derive(Debug, Serialize)]
+struct RegisterStats {
+    /// Absent until a refresh has run. Reported regardless of the contributor
+    /// floor once it has: it counts submissions, not people, and does not
+    /// difference back to an individual.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traces_accepted: Option<i64>,
+    /// Absent below the contributor floor. Absent, not zero: a zero here would
+    /// read as "nobody has contributed" rather than "we are not saying".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contributors: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    points_issued: Option<i64>,
+    /// True when the floor, the stored suppression flag, or an unrefreshed row
+    /// suppressed the counts above.
+    withheld: bool,
+    /// What the figures cover. Constant, and not an identifier.
+    scope: &'static str,
+    as_of: DateTime<Utc>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+}
+
+/// Whether the counts are withheld, and why.
+///
+/// Pure, and deliberately so: this is the one privacy-relevant decision in
+/// the endpoint, and CI never runs PostgreSQL, so a test that reached for a
+/// database would silently skip on every gating machine and guard nothing.
+///
+/// `refreshed` false withholds regardless of the counts. An unrefreshed row
+/// carries schema defaults, and publishing those would be a claim about the
+/// register that nobody computed.
+fn register_stats_withheld(contributors: i64, floor: i64, refreshed: bool) -> bool {
+    !refreshed || contributors < floor
+}
+
+/// Contributors below which the counts are withheld.
+///
+/// Configurable because the right number depends on the real contributor
+/// count. A malformed or negative value is ignored in favour of the default
+/// rather than parsed into a floor that suppresses nothing.
+fn register_stats_contributor_floor() -> i64 {
+    register_stats_floor_from(
+        std::env::var("TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Parse the configured floor, or fall back to the default.
+///
+/// Pure so the fallback is testable without mutating process environment,
+/// which no parallel test can do safely. Unset, blank, malformed and negative
+/// all resolve to the default: every one of those is a misconfiguration, and
+/// the safe reading of a misconfigured floor is the high one, never a zero
+/// that suppresses nothing.
+fn register_stats_floor_from(raw: Option<&str>) -> i64 {
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|floor| *floor >= 0)
+        .unwrap_or(REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR)
+}
+
+/// Render one materialised row into what may be published.
+///
+/// Pure: no state, no database, no clock. The handler is then only transport,
+/// and every suppression rule below is unit-tested without PostgreSQL.
+///
+/// `row.withheld` is honoured as a blanket suppression: the column defaults to
+/// TRUE and every refresh clears it, so it is both the never-computed marker
+/// and an operator's kill switch, and either reading means publish nothing.
+fn register_stats_response(
+    row: &trace_commons_server::register_stats::RegisterStatsRow,
+    floor: i64,
+    settlement_mode: &str,
+) -> RegisterStats {
+    let publishable = !row.withheld && row.refreshed_at.is_some();
+    let withheld = !publishable
+        || register_stats_withheld(row.contributors, floor, row.refreshed_at.is_some());
+
+    RegisterStats {
+        traces_accepted: publishable.then_some(row.traces_accepted),
+        contributors: (!withheld).then_some(row.contributors),
+        points_issued: (!withheld).then_some(row.points_issued),
+        withheld,
+        scope: REGISTER_STATS_SCOPE,
+        as_of: row.as_of,
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+    }
+}
+
+/// `GET /v1/public/register-stats` — aggregate register facts, to anyone.
+///
+/// UNAUTHENTICATED by design, and registered outside every auth layer beside
+/// `/v1/source`. It reads one materialised row through the least-privileged
+/// `trace_commons_public_read` role and never queries a live table: a figure
+/// computed per request is a figure someone can poll to watch a single
+/// submission land.
+async fn register_stats_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<(
+    [(axum::http::HeaderName, HeaderValue); 1],
+    Json<RegisterStats>,
+)> {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("register-stats-ip:{client_ip}"),
+        REGISTER_STATS_PER_IP_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::fetch_public_register_stats_row(db.as_ref())
+        .await
+        .map_err(internal_error)?;
+
+    Ok((
+        [(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static(REGISTER_STATS_CACHE_CONTROL),
+        )],
+        Json(register_stats_response(
+            &row,
+            register_stats_contributor_floor(),
+            state.near_settlement_mode_label(),
+        )),
+    ))
 }
 
 #[derive(Debug, Serialize)]

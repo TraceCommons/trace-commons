@@ -387,6 +387,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Read the same singleton row, but under the dedicated
+    /// `trace_commons_public_read` role, for the unauthenticated public
+    /// endpoint.
+    ///
+    /// Separate from [`Database::fetch_register_stats_row`] on purpose. That
+    /// one runs as the ordinary runtime role, which reaches this row through
+    /// the unscoped `trace_register_stats_runtime_read` policy and could
+    /// reach every other table besides. The unauthenticated path takes the
+    /// least-privileged route V55 built for it: a NOBYPASSRLS role holding
+    /// one column-scoped SELECT grant and nothing else, so a mistake in this
+    /// handler cannot become a read of anything but six aggregate columns.
+    async fn fetch_register_stats_row_as_public_read(
+        &self,
+    ) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "fetch_register_stats_row_as_public_read not implemented".to_string(),
+        ))
+    }
+
     /// Write freshly computed totals into the `trace_register_stats`
     /// singleton row, stamping both `as_of` and `refreshed_at` to now, and
     /// clearing `withheld`. Returns the row as written.
