@@ -4172,6 +4172,87 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
 }
 
 #[tokio::test]
+async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
+    // The V56 grant, exercised the way production exercises it.
+    //
+    // `list_dedup_signals` runs on the NARROW trace_gate_driver pool, which
+    // holds column-level SELECT grants (V45/V47/V48), and PostgreSQL column
+    // privileges cover every column a query REFERENCES. So a missing or
+    // misspelled `GRANT SELECT (dedup_signal_version)` is a permission error
+    // on this query and on nothing else -- not a deploy failure, and not
+    // anything the in-memory double can model, because the double is a
+    // hand-written parity implementation with no grants in it at all.
+    //
+    // Worth stating why this matters more than a permission error usually
+    // does: the inline call site is
+    // `db.list_dedup_signals(i64::MAX).await.unwrap_or_default()`. That
+    // swallow is pre-existing and is not touched here, but it means a bad
+    // grant does not surface as an error anywhere -- clustering simply finds
+    // no candidates, every trace becomes a singleton, and
+    // `dedup_cluster_size` silently stops dividing the duplicate penalty.
+    // This test is the thing that would fail instead.
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-dedup-signals-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    let decision = sample_gate_decision(submission_id);
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision.clone())
+        .await
+        .expect("insert gate decision");
+
+    let cluster_id = Uuid::new_v4();
+    let signal_version = "events.v1+fnv1a-2shingle.v1";
+    backend
+        .update_trace_gate_decision_dedup(
+            &tenant_id,
+            decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 4242,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: 1,
+                dedup_signal_version: signal_version.to_string(),
+            },
+        )
+        .await
+        .expect("dedup update succeeds");
+
+    // Cross-tenant enumeration on the gate-driver pool, exactly as both the
+    // inline path and the recluster sweep call it.
+    let signals = backend
+        .list_dedup_signals(i64::MAX)
+        .await
+        .expect("list_dedup_signals runs on the gate-driver pool");
+
+    let seen = signals
+        .iter()
+        .find(|row| row.tenant_id == tenant_id && row.decision_id == decision_id)
+        .expect("the stamped decision is enumerated");
+
+    assert_eq!(seen.dedup_simhash, Some(4242));
+    assert_eq!(seen.dedup_cluster_id, Some(cluster_id));
+    assert_eq!(
+        seen.dedup_signal_version,
+        Some(signal_version.to_string()),
+        "the stamp survives the round trip through the narrow pool"
+    );
+    // And it decodes to itself, not to the legacy fallback: the fallback is
+    // for a NULL, and this row is not one.
+    assert_eq!(seen.effective_signal_version(), signal_version);
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+#[tokio::test]
 async fn revocation_propagation_failure_audit_metadata_round_trips() {
     // Phase A6: the typed RevocationPropagationFailure audit-metadata variant
     // is serialized as JSON into trace_audit_events.metadata_json. Exercise

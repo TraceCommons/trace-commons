@@ -4078,7 +4078,7 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
             "tenant-a",
             decision_id,
             trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
-                dedup_simhash: 42_,
+                dedup_simhash: 42,
                 dedup_cluster_id: Uuid::new_v4(),
                 dedup_cluster_size: 3,
                 dedup_signal_version:
@@ -4116,6 +4116,24 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
     assert_eq!(
         dedup_cluster, None,
         "the withdrawn trace must leave its dedup cluster"
+    );
+
+    // ...and its stamp goes with it. The version names the derivation behind
+    // `dedup_simhash`, and the withdrawal NULLs that simhash, so a row left
+    // holding the stamp would claim a derivation it no longer carries the
+    // output of -- and would read to the recluster sweep as a row whose
+    // version is known rather than one with nothing to cluster.
+    let dedup_stamp = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_signal_version FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_stamp, None,
+        "the withdrawn trace must lose the stamp naming how its simhash was made"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -69615,6 +69633,87 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
     for after in [&after_v1_a, &after_v1_b, &after_null, &after_v2] {
         assert_eq!(after.dedup_simhash, Some(shared_simhash));
     }
+}
+
+/// The version gate, exercised with the two stamps this build actually
+/// writes rather than a synthetic v2: a deterministic service's
+/// `digest-prefix.v1` and the enclave's composed render+simhash.
+///
+/// A deterministic service never sees plaintext, so its `dedup_simhash` is an
+/// eight-byte window of the decision digest -- not a simhash of anything. It
+/// lands in the same column as the enclave's, enters the same sweep, and
+/// before V56 nothing recorded the difference. Both rows here carry an
+/// IDENTICAL value, which is the case a threshold cannot save you from:
+/// Hamming distance 0 between two numbers that are not measuring the same
+/// thing.
+#[tokio::test]
+async fn recluster_dedup_pass_never_clusters_a_deterministic_row_with_an_enclave_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    const ENCLAVE: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    const DETERMINISTIC: &str =
+        trace_commons_server::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION;
+
+    let enclave_row = rescore_test_decision_row(Uuid::new_v4());
+    let deterministic_row = rescore_test_decision_row(Uuid::new_v4());
+    db.seed_gate_decision("tenant-a", enclave_row.clone());
+    db.seed_gate_decision("tenant-b", deterministic_row.clone());
+
+    for (tenant, row, stamp) in [
+        ("tenant-a", &enclave_row, ENCLAVE),
+        ("tenant-b", &deterministic_row, DETERMINISTIC),
+    ] {
+        db.update_trace_gate_decision_dedup(
+            tenant,
+            row.decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: shared_simhash,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 1,
+                dedup_signal_version: stamp.to_string(),
+            },
+        )
+        .await
+        .expect("seed dedup");
+    }
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(summary.reclustered, 2, "both rows sweep: {summary:?}");
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_enclave = db
+        .gate_decision_with_dedup_by_id("tenant-a", enclave_row.decision_id)
+        .expect("enclave row present");
+    let after_deterministic = db
+        .gate_decision_with_dedup_by_id("tenant-b", deterministic_row.decision_id)
+        .expect("deterministic row present");
+
+    assert_ne!(
+        after_enclave.dedup_cluster_id, after_deterministic.dedup_cluster_id,
+        "a digest window and a text simhash must never share a cluster, \
+         however equal the two numbers are"
+    );
+    assert_eq!(after_enclave.dedup_cluster_size, Some(1));
+    assert_eq!(after_deterministic.dedup_cluster_size, Some(1));
 }
 
 // -----------------------------------------------------------------------

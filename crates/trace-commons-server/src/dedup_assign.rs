@@ -232,6 +232,44 @@ mod tests {
         );
     }
 
+    /// The two stamps this build actually writes, named by symbol: a
+    /// deterministic service's digest window and the enclave's composed
+    /// render+simhash. They must never cluster together, and the reason is
+    /// not a threshold -- a `digest-prefix.v1` value is a window of a
+    /// decision digest, not a simhash of any text, so a Hamming distance
+    /// between the two is a comparison of unrelated numbers.
+    #[test]
+    fn the_two_stamps_this_build_writes_never_cluster_together() {
+        assert_ne!(
+            crate::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION,
+            LEGACY_DEDUP_SIGNAL_VERSION,
+            "the deterministic stamp and the enclave stamp must stay distinct"
+        );
+        let id = Uuid::from_u128(5);
+        let deterministic = cand_v(
+            id,
+            9,
+            42,
+            crate::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION,
+        );
+        assert_eq!(
+            assign_cluster(42, LEGACY_DEDUP_SIGNAL_VERSION, &[deterministic], &K),
+            ClusterAssignment::New,
+            "an enclave decision must not join a deterministic service's cluster"
+        );
+        let enclave = cand_v(id, 9, 42, LEGACY_DEDUP_SIGNAL_VERSION);
+        assert_eq!(
+            assign_cluster(
+                42,
+                crate::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION,
+                &[enclave],
+                &K
+            ),
+            ClusterAssignment::New,
+            "and the refusal holds in the other direction too"
+        );
+    }
+
     #[test]
     fn tie_breaks_to_larger_cluster() {
         // two clusters both match on simhash; join the larger
