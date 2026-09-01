@@ -229,8 +229,16 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
         Ok(r) => r,
         Err(p) => p.into_inner(),
     };
-    match r.remove(&ptr) {
-        Some(found) if found == kind => Ok(()),
+    // Inspect BEFORE removing. `remove` first would delete the entry and
+    // only then report the mismatch, so a refused cross-type free would
+    // unregister a live allocation: the pointer stays valid but every
+    // `registry_is` check on it fails from then on, and its real free is
+    // refused as unknown. A refusal must leave the registry untouched.
+    match r.get(&ptr) {
+        Some(found) if *found == kind => {
+            r.remove(&ptr);
+            Ok(())
+        }
         Some(_) => Err("cross-type-free"),
         None => Err("double-free-or-unknown-pointer"),
     }
@@ -1144,10 +1152,18 @@ pub unsafe extern "C" fn tc_subscribe(
 /// no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
-    if handle.is_null() || token == 0 {
+    if handle.is_null() {
         return;
     }
+    // Liveness first, then the token. Checking `token == 0` alongside the
+    // null check would let a freed or wrong-kind handle paired with a zero
+    // token return silently, with no `tc_last_error` -- and this function's
+    // own contract, and the header's, promise the label for every non-null
+    // handle that is not live.
     if !handle_pointer_is_live(handle) {
+        return;
+    }
+    if token == 0 {
         return;
     }
     if tokio::runtime::Handle::try_current().is_ok() {

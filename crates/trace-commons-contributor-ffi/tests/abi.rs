@@ -812,8 +812,13 @@ fn cross_type_free_of_a_preview_as_a_string_is_refused_not_ub() {
             .map(|e| e.contains("cross-type-free") || e.contains("unknown-pointer"))
             .unwrap_or(false)
     );
-    // The handle itself must still be intact: freeing it for real still
-    // works.
+    // The handle itself must still be intact. A refusal must not
+    // unregister it: `stop` alone asserts nothing, so prove the handle is
+    // still live by using it.
+    assert!(
+        !call(h, "status", "{}").contains("invalid-handle-pointer"),
+        "a refused cross-type free must leave the handle usable"
+    );
     stop(h);
 }
 
@@ -1941,4 +1946,49 @@ fn the_detector_export_never_carries_a_pattern() {
             );
         }
     }
+}
+
+#[test]
+fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    // A caller mistakes the handle for a string. The ABI promises to refuse
+    // this harmlessly -- the handle is NOT freed, so it must still work.
+    unsafe { tc_string_free(h as *mut c_char) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("cross-type-free"))
+            .unwrap_or(false),
+        "the refusal itself must still be reported"
+    );
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let s = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+    assert!(
+        !s.contains("invalid-handle-pointer"),
+        "a REFUSED cross-type free must not unregister the live handle: {s}"
+    );
+    stop(h);
+}
+
+/// A zero token must not shadow the liveness refusal: the contract promises
+/// `invalid-handle-pointer` for every non-null handle that is not live, and
+/// a binding is told to read `tc_last_error` after every `tc_unsubscribe`.
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let _ = last_error();
+    unsafe { tc_unsubscribe(h, 0) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false),
+        "a zero token must not skip the liveness refusal"
+    );
 }
