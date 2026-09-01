@@ -2001,6 +2001,26 @@ pub struct DedupSignalRow {
     pub dedup_signal_version: Option<String>,
 }
 
+impl DedupSignalRow {
+    /// The version this row's `dedup_simhash` was derived under. `NULL` (and
+    /// an empty string, which is a `NULL` that survived a round trip through
+    /// a text column) reads as
+    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
+    /// "unknown": an unknown would have to cluster either with everything or
+    /// with nothing, and both are wrong.
+    ///
+    /// This is the ONE place a stored `NULL` is decoded, and it sits on the
+    /// row because that is where the `Option` originates. A caller that
+    /// decoded it for itself would be a second answer to the question, free
+    /// to drift from this one.
+    pub fn effective_signal_version(&self) -> &str {
+        match self.dedup_signal_version.as_deref() {
+            Some(v) if !v.is_empty() => v,
+            _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        }
+    }
+}
+
 /// Correction-value signal for one decision row (migration V48), read
 /// cross-tenant through the narrow `trace_gate_driver` pool (no tenant GUC).
 /// `correction_simhash` / `correction_cluster_id` are `None` for every
@@ -3274,5 +3294,56 @@ mod residual_risk_basis_tests {
             ResidualRiskCondition::KeyFinding,
         ]);
         assert_eq!(stored, vec!["coverage_incomplete", "key_finding"]);
+    }
+}
+
+#[cfg(test)]
+mod dedup_signal_version_tests {
+    use super::DedupSignalRow;
+    use crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    use crate::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION;
+    use uuid::Uuid;
+
+    fn row(stored: Option<&str>) -> DedupSignalRow {
+        DedupSignalRow {
+            tenant_id: "tenant-a".to_string(),
+            decision_id: Uuid::from_u128(1),
+            dedup_cluster_id: None,
+            dedup_simhash: Some(42),
+            dedup_signal_version: stored.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_null_stamp_reads_as_the_legacy_v1_stamp() {
+        assert_eq!(
+            row(None).effective_signal_version(),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+        // An empty string is a NULL that survived a round trip through a text
+        // column, not a version anyone named.
+        assert_eq!(
+            row(Some("")).effective_signal_version(),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+    }
+
+    #[test]
+    fn a_named_stamp_is_returned_verbatim() {
+        assert_eq!(
+            row(Some("events.v2+fnv1a-2shingle.v1")).effective_signal_version(),
+            "events.v2+fnv1a-2shingle.v1"
+        );
+        // A deterministic service's stamp is its own version, not the legacy
+        // one: its value is a window of the decision digest, not a simhash of
+        // any rendered text, so it must never be read as the enclave's v1.
+        assert_eq!(
+            row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
+            DETERMINISTIC_DEDUP_SIGNAL_VERSION
+        );
+        assert_ne!(
+            row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
+            row(None).effective_signal_version()
+        );
     }
 }

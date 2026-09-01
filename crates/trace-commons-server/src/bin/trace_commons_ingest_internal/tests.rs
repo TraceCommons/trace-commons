@@ -65938,6 +65938,19 @@ struct DecisionRowWithContributorCap {
     contributor_cap_version: Option<i32>,
 }
 
+/// One entry of the in-memory `dedup` side table: what a single
+/// `update_trace_gate_decision_dedup` call recorded. Named rather than a
+/// 4-tuple so the write loop and the accessors read the fields by name — two
+/// of the four are opaque integers standing next to each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedDedup {
+    simhash: i64,
+    cluster_id: Uuid,
+    cluster_size: i32,
+    /// The column's own NULL: a row recorded before V56 existed.
+    signal_version: Option<String>,
+}
+
 struct PerplexityDriverTestDb {
     submissions:
         std::sync::RwLock<std::collections::HashMap<(String, Uuid), StorageTraceSubmissionRecord>>,
@@ -65971,10 +65984,7 @@ struct PerplexityDriverTestDb {
     /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
     /// isolation test can assert the base row is byte-identical before and
     /// after the dedup write.
-    #[allow(clippy::type_complexity)]
-    dedup: std::sync::RwLock<
-        std::collections::HashMap<(String, Uuid), (i64, Uuid, i32, Option<String>)>,
-    >,
+    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), RecordedDedup>>,
     /// Shadow-mode correction values written by
     /// `update_trace_gate_decision_correction_value`, keyed by `(tenant_id,
     /// decision_id)`: (simhash, cluster_id, cluster_size, novelty_micros,
@@ -66140,10 +66150,10 @@ impl PerplexityDriverTestDb {
             .cloned();
         Some(DecisionRowWithDedup {
             row,
-            dedup_simhash: dedup.as_ref().map(|(h, _, _, _)| *h),
-            dedup_cluster_id: dedup.as_ref().map(|(_, c, _, _)| *c),
-            dedup_cluster_size: dedup.as_ref().map(|(_, _, s, _)| *s),
-            dedup_signal_version: dedup.map(|(_, _, _, v)| v),
+            dedup_simhash: dedup.as_ref().map(|d| d.simhash),
+            dedup_cluster_id: dedup.as_ref().map(|d| d.cluster_id),
+            dedup_cluster_size: dedup.as_ref().map(|d| d.cluster_size),
+            dedup_signal_version: dedup.map(|d| d.signal_version),
         })
     }
 
@@ -66166,7 +66176,7 @@ impl PerplexityDriverTestDb {
         let entry = dedup
             .get_mut(&(tenant_id.to_string(), decision_id))
             .expect("dedup assignment must exist before its stamp is overwritten");
-        entry.3 = dedup_signal_version.map(str::to_string);
+        entry.signal_version = dedup_signal_version.map(str::to_string);
     }
 
     /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
@@ -67044,12 +67054,12 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
     ) -> Result<(), DatabaseError> {
         self.dedup.write().unwrap().insert(
             (tenant_id.to_string(), decision_id),
-            (
-                dedup_simhash,
-                dedup_cluster_id,
-                dedup_cluster_size,
-                Some(dedup_signal_version.to_string()),
-            ),
+            RecordedDedup {
+                simhash: dedup_simhash,
+                cluster_id: dedup_cluster_id,
+                cluster_size: dedup_cluster_size,
+                signal_version: Some(dedup_signal_version.to_string()),
+            },
         );
         Ok(())
     }
@@ -67251,12 +67261,12 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::DedupSignalRow {
                     tenant_id: tenant_id.clone(),
                     decision_id: row.decision_id,
-                    dedup_cluster_id: seen.map(|(_, c, _, _)| *c),
-                    dedup_simhash: seen.map(|(h, _, _, _)| *h),
+                    dedup_cluster_id: seen.map(|d| d.cluster_id),
+                    dedup_simhash: seen.map(|d| d.simhash),
                     // Flattened exactly as the real SELECT flattens it: a row
                     // that has never been through a dedup pass and a row
                     // written before V56 both surface as `None`.
-                    dedup_signal_version: seen.and_then(|(_, _, _, v)| v.clone()),
+                    dedup_signal_version: seen.and_then(|d| d.signal_version.clone()),
                 }
             })
             .collect())
@@ -67327,7 +67337,7 @@ impl Database for PerplexityDriverTestDb {
                         .map(|(q, _, _)| *q);
                     let dedup_cluster_size = dedup
                         .get(&(tenant_id.clone(), row.decision_id))
-                        .map(|(_, _, s, _)| *s);
+                        .map(|d| d.cluster_size);
                     Some(
                         trace_commons_server::trace_corpus_storage::ContributorCapSignalRow {
                             tenant_id: tenant_id.clone(),

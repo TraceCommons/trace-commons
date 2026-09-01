@@ -50866,37 +50866,36 @@ async fn evaluate_and_record_gate(
     // The representative carries its own signal version alongside its
     // simhash, for the same reason: a cluster's version is the version of the
     // row that created it, and a row may only join a cluster derived the same
-    // way it was.
-    let mut reps: std::collections::HashMap<uuid::Uuid, (i64, String)> =
+    // way it was. Borrowed from `signals`, which outlives every map built
+    // from it — the stamp is a short fixed name and copying it once per
+    // cluster bought nothing.
+    let mut reps: std::collections::HashMap<uuid::Uuid, (i64, &str)> =
         std::collections::HashMap::new();
     for s in &signals {
         if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
-            let version = trace_commons_server::dedup_assign::effective_dedup_signal_version(
-                s.dedup_signal_version.as_deref(),
-            )
-            .to_string();
-            reps.entry(cid).or_insert((sh, version));
+            reps.entry(cid)
+                .or_insert((sh, s.effective_signal_version()));
             *sizes.entry(cid).or_insert(0) += 1;
         }
     }
-    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+    // No version filter here: `assign_cluster` refuses a differently stamped
+    // candidate itself, so the gate is in one place and a new call site
+    // cannot forget it.
+    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
         .iter()
-        // A cluster whose representative was derived by a different renderer
-        // or a different simhash algorithm is not a candidate at any Hamming
-        // distance. NULL reads as the legacy v1 stamp, so pre-V56 rows and
-        // freshly stamped v1 rows still cluster together (D2).
-        .filter(|(_, (_, version))| version.as_str() == dedup_signal_version.as_str())
-        .map(
-            |(cluster_id, (simhash, _))| trace_commons_server::dedup_assign::ClusterCandidate {
+        .map(|(cluster_id, (simhash, version))| {
+            trace_commons_server::dedup_assign::ClusterCandidate {
                 cluster_id: *cluster_id,
                 size: *sizes.get(cluster_id).unwrap_or(&0),
                 simhash: *simhash as u64,
                 embed_cosine_micros: None,
-            },
-        )
+                signal_version: version,
+            }
+        })
         .collect();
     let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
         dedup_simhash as u64,
+        &dedup_signal_version,
         &candidates,
         &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
     ) {
@@ -50965,11 +50964,15 @@ async fn evaluate_and_record_gate(
                 .map(|sh| *sh as u64)
                 .collect::<Vec<u64>>(),
         );
-        // Deliberately NOT scoped by `dedup_signal_version`: the correction
-        // simhash is taken over `outcome.human_correction` alone, which no
-        // event renderer touches, so the render stamp says nothing about
-        // whether two correction simhashes are comparable.
-        let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> =
+        // The correction signal's derivation is the simhash algorithm alone:
+        // `correction_simhash_from_plaintext` takes it over
+        // `outcome.human_correction`, which no event renderer touches, and
+        // ends in `trace_simhash` — so a tokenizer bump would split every
+        // correction cluster exactly as a render bump splits the trace ones.
+        // The correction column stores no stamp today, so every candidate
+        // carries this same constant and behaviour is unchanged.
+        let correction_version = trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
+        let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> =
             correction_reps
                 .iter()
                 .map(
@@ -50978,11 +50981,13 @@ async fn evaluate_and_record_gate(
                         size: *correction_sizes.get(cluster_id).unwrap_or(&0),
                         simhash: *simhash as u64,
                         embed_cosine_micros: None,
+                        signal_version: correction_version,
                     },
                 )
                 .collect();
         let correction_cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
             correction_simhash as u64,
+            correction_version,
             &correction_candidates,
             &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
         ) {
@@ -51570,16 +51575,19 @@ async fn run_recluster_dedup_pass(
     // the signal version it was derived under (both taken from the row that
     // created the cluster); `counts` holds each cluster's running (and, after
     // the loop, final) membership.
-    let mut reps: std::collections::HashMap<uuid::Uuid, (u64, String)> =
+    let mut reps: std::collections::HashMap<uuid::Uuid, (u64, &str)> =
         std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
-    #[allow(clippy::type_complexity)]
-    let mut assigned: Vec<(
-        &trace_commons_server::trace_corpus_storage::DedupSignalRow,
-        i64,
-        uuid::Uuid,
-        String,
-    )> = Vec::new();
+    /// One row the sweep placed, carrying what pass 2 needs to write it.
+    /// Named rather than a tuple because the fields are read by name in the
+    /// write loop and two of them are opaque integers side by side.
+    struct AssignedRow<'a> {
+        row: &'a trace_commons_server::trace_corpus_storage::DedupSignalRow,
+        simhash: i64,
+        cluster_id: uuid::Uuid,
+        signal_version: &'a str,
+    }
+    let mut assigned: Vec<AssignedRow<'_>> = Vec::new();
 
     for row in &rows {
         let Some(simhash_i64) = row.dedup_simhash else {
@@ -51590,55 +51598,60 @@ async fn run_recluster_dedup_pass(
         let simhash_u64 = simhash_i64 as u64;
         // NULL reads as the legacy v1 stamp, never as unknown (V56, D2), so a
         // pre-V56 row and a freshly stamped v1 row still cluster together.
-        let row_version = trace_commons_server::dedup_assign::effective_dedup_signal_version(
-            row.dedup_signal_version.as_deref(),
-        )
-        .to_string();
-        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+        // Borrowed from `rows`, which outlives every map built from it.
+        let row_version = row.effective_signal_version();
+        // No version filter here: `assign_cluster` refuses a differently
+        // stamped candidate itself. That gate is what keeps the transition
+        // window honest — the pass reads stored simhashes and never
+        // re-renders, so without it a corpus holding both versions would fuse
+        // them silently.
+        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
             .iter()
-            // A cluster derived under a different renderer or a different
-            // simhash algorithm is not a candidate at any Hamming distance:
-            // the two numbers are not measuring the same thing. This is the
-            // net that keeps the transition window honest — the pass reads
-            // stored simhashes and never re-renders, so without it a corpus
-            // holding both versions would fuse them silently.
-            .filter(|(_, (_, version))| version.as_str() == row_version.as_str())
-            .map(|(cluster_id, (simhash, _))| {
+            .map(|(cluster_id, (simhash, version))| {
                 trace_commons_server::dedup_assign::ClusterCandidate {
                     cluster_id: *cluster_id,
                     size: *counts.get(cluster_id).unwrap_or(&0),
                     simhash: *simhash,
                     embed_cosine_micros: None,
+                    signal_version: version,
                 }
             })
             .collect();
         let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
             simhash_u64,
+            row_version,
             &candidates,
             &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
         ) {
             trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
             trace_commons_server::dedup_assign::ClusterAssignment::New => {
                 let id = uuid::Uuid::new_v4();
-                reps.insert(id, (simhash_u64, row_version.clone()));
+                reps.insert(id, (simhash_u64, row_version));
                 id
             }
         };
         *counts.entry(cluster_id).or_insert(0) += 1;
-        assigned.push((row, simhash_i64, cluster_id, row_version));
+        assigned.push(AssignedRow {
+            row,
+            simhash: simhash_i64,
+            cluster_id,
+            signal_version: row_version,
+        });
     }
 
     // Pass 2: write every assigned row with its cluster's FINAL total
     // membership count (computed after the whole sweep above).
     let mut summary = ReclusterDedupSummary::default();
-    for (row, simhash_i64, cluster_id, row_version) in assigned {
+    for assignment in assigned {
+        let row = assignment.row;
+        let cluster_id = assignment.cluster_id;
         let final_size =
             i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
         match db
             .update_trace_gate_decision_dedup(
                 &row.tenant_id,
                 row.decision_id,
-                simhash_i64,
+                assignment.simhash,
                 cluster_id,
                 final_size,
                 // The row's own version, re-stamped rather than recomputed:
@@ -51646,7 +51659,7 @@ async fn run_recluster_dedup_pass(
                 // so it has no standing to claim a row was derived any other
                 // way than it already says. A NULL row is stamped with the
                 // legacy version it was already being read as.
-                &row_version,
+                assignment.signal_version,
             )
             .await
         {

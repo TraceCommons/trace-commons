@@ -1,10 +1,14 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Pure cluster-assignment logic for cross-trace dedup. Signal-agnostic: the
-//! caller gathers candidate clusters from the cross-tenant simhash scan and/or
-//! the dedup vector index and hands them here. OR-match on either signal; tie
-//! -> larger cluster (deterministic); no match -> new singleton.
+//! Pure cluster-assignment logic for cross-trace dedup. The caller gathers
+//! candidate clusters from the cross-tenant simhash scan and/or the dedup
+//! vector index and hands them here, each carrying the signal version it was
+//! derived under. A candidate stamped differently from the incoming row is
+//! refused before any distance is computed: the two numbers are not measuring
+//! the same thing, so a small distance between them is a coincidence rather
+//! than evidence. Among the rest: OR-match on either signal; tie -> larger
+//! cluster (deterministic); no match -> new singleton.
 
 use crate::dedup_simhash::hamming_distance;
 use uuid::Uuid;
@@ -43,26 +47,18 @@ pub const DEDUP_CONSTANTS_V1: DedupConstants = DedupConstants {
 /// the column exists to prevent.
 pub const LEGACY_DEDUP_SIGNAL_VERSION: &str = "events.v1+fnv1a-2shingle.v1";
 
-/// The version a stored `dedup_signal_version` means. `NULL` maps to
-/// [`LEGACY_DEDUP_SIGNAL_VERSION`], never to "unknown": an unknown would have
-/// to either cluster with everything or with nothing, and both are wrong.
-///
-/// Every consumer that compares, clusters or caches on `dedup_simhash` must
-/// route the row's stored value through this and require equality before the
-/// two values are treated as comparable.
-pub fn effective_dedup_signal_version(stored: Option<&str>) -> &str {
-    match stored {
-        Some(v) if !v.is_empty() => v,
-        _ => LEGACY_DEDUP_SIGNAL_VERSION,
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
-pub struct ClusterCandidate {
+pub struct ClusterCandidate<'a> {
     pub cluster_id: Uuid,
     pub size: i64,
     pub simhash: u64,
     pub embed_cosine_micros: Option<i64>,
+    /// The signal version this cluster's REPRESENTATIVE was derived under —
+    /// a cluster's version is the version of the row that created it. A
+    /// caller reading rows from storage gets this from
+    /// [`crate::trace_corpus_storage::DedupSignalRow::effective_signal_version`],
+    /// which is where a stored `NULL` is decoded.
+    pub signal_version: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,12 +69,23 @@ pub enum ClusterAssignment {
 
 pub fn assign_cluster(
     new_simhash: u64,
-    candidates: &[ClusterCandidate],
+    new_version: &str,
+    candidates: &[ClusterCandidate<'_>],
     k: &DedupConstants,
 ) -> ClusterAssignment {
     // A candidate matches if EITHER signal is within threshold (OR semantics).
     let mut best: Option<(Uuid, i64)> = None; // (cluster_id, size)
     for c in candidates {
+        // Refused BEFORE any distance is computed, and refused here rather
+        // than in each caller's candidate filter: a cluster derived by a
+        // different renderer or a different simhash algorithm is not a
+        // candidate at any Hamming distance, and a gate that lives in the
+        // callers is a gate the next call site can forget. Both signals are
+        // covered, not only the simhash — an embedding produced under one
+        // renderer is no more comparable than a simhash is.
+        if c.signal_version != new_version {
+            continue;
+        }
         let simhash_match = hamming_distance(new_simhash, c.simhash) <= k.tau_hamming;
         let embed_match = c.embed_cosine_micros.is_some_and(|d| d <= k.tau_e_micros);
         if simhash_match || embed_match {
@@ -104,18 +111,32 @@ mod tests {
     use uuid::Uuid;
 
     const K: DedupConstants = DEDUP_CONSTANTS_V1;
-    fn cand(id: Uuid, size: i64, simhash: u64, cos: Option<i64>) -> ClusterCandidate {
+    /// Every candidate in a test that is not ABOUT versioning carries the
+    /// same stamp as the incoming row, which is what a single-version corpus
+    /// looks like.
+    const V1: &str = LEGACY_DEDUP_SIGNAL_VERSION;
+    fn cand(id: Uuid, size: i64, simhash: u64, cos: Option<i64>) -> ClusterCandidate<'static> {
         ClusterCandidate {
             cluster_id: id,
             size,
             simhash,
             embed_cosine_micros: cos,
+            signal_version: V1,
+        }
+    }
+    fn cand_v(id: Uuid, size: i64, simhash: u64, version: &str) -> ClusterCandidate<'_> {
+        ClusterCandidate {
+            cluster_id: id,
+            size,
+            simhash,
+            embed_cosine_micros: None,
+            signal_version: version,
         }
     }
 
     #[test]
     fn no_candidates_is_new_singleton() {
-        assert_eq!(assign_cluster(42, &[], &K), ClusterAssignment::New);
+        assert_eq!(assign_cluster(42, V1, &[], &K), ClusterAssignment::New);
     }
 
     #[test]
@@ -124,7 +145,7 @@ mod tests {
         // identical simhash -> Hamming 0 <= tau_hamming
         let c = cand(id, 1, 42, None);
         assert_eq!(
-            assign_cluster(42, &[c], &K),
+            assign_cluster(42, V1, &[c], &K),
             ClusterAssignment::Existing(id)
         );
     }
@@ -134,7 +155,7 @@ mod tests {
         let id = Uuid::from_u128(1);
         // Hamming distance >> tau_hamming, no embedding signal
         let c = cand(id, 1, u64::MAX, None);
-        assert_eq!(assign_cluster(0, &[c], &K), ClusterAssignment::New);
+        assert_eq!(assign_cluster(0, V1, &[c], &K), ClusterAssignment::New);
     }
 
     #[test]
@@ -142,45 +163,72 @@ mod tests {
         // heavy paraphrase: simhash far, but embedding cosine distance below tau_e
         let id = Uuid::from_u128(2);
         let c = cand(id, 1, u64::MAX, Some(K.tau_e_micros - 1));
-        assert_eq!(assign_cluster(0, &[c], &K), ClusterAssignment::Existing(id));
+        assert_eq!(
+            assign_cluster(0, V1, &[c], &K),
+            ClusterAssignment::Existing(id)
+        );
     }
 
     #[test]
     fn embedding_over_threshold_does_not_join_on_embedding_alone() {
         let id = Uuid::from_u128(2);
         let c = cand(id, 1, u64::MAX, Some(K.tau_e_micros + 1));
-        assert_eq!(assign_cluster(0, &[c], &K), ClusterAssignment::New);
+        assert_eq!(assign_cluster(0, V1, &[c], &K), ClusterAssignment::New);
     }
 
+    /// The gate this module exists for: an IDENTICAL simhash under a
+    /// different stamp is not a candidate. Hamming distance 0 is the
+    /// strongest possible match on the number, so if the version check is
+    /// removed this is the assertion that has to fail.
     #[test]
-    fn null_dedup_signal_version_reads_as_the_legacy_v1_stamp() {
+    fn an_identical_simhash_under_a_different_version_never_joins() {
+        let id = Uuid::from_u128(3);
+        let c = cand_v(id, 9, 42, "events.v2+fnv1a-2shingle.v1");
+        assert_eq!(assign_cluster(42, V1, &[c], &K), ClusterAssignment::New);
+    }
+
+    /// The other half of the same claim: the refusal is about the stamp and
+    /// nothing else, so the same pair under one stamp joins.
+    #[test]
+    fn an_identical_simhash_under_the_same_version_joins() {
+        let id = Uuid::from_u128(3);
+        let c = cand_v(id, 9, 42, V1);
         assert_eq!(
-            effective_dedup_signal_version(None),
-            LEGACY_DEDUP_SIGNAL_VERSION
-        );
-        // An empty string is a NULL that survived a round trip through a
-        // text column, not a version anyone named.
-        assert_eq!(
-            effective_dedup_signal_version(Some("")),
-            LEGACY_DEDUP_SIGNAL_VERSION
+            assign_cluster(42, V1, &[c], &K),
+            ClusterAssignment::Existing(id)
         );
     }
 
+    /// A differently stamped candidate is refused on the EMBEDDING side too,
+    /// not only on the simhash: an embedding produced under one renderer is
+    /// no more comparable than a simhash produced under it.
     #[test]
-    fn a_named_dedup_signal_version_is_returned_verbatim() {
+    fn a_different_version_is_refused_even_when_the_embedding_matches() {
+        let id = Uuid::from_u128(4);
+        let c = ClusterCandidate {
+            cluster_id: id,
+            size: 9,
+            simhash: u64::MAX,
+            embed_cosine_micros: Some(K.tau_e_micros - 1),
+            signal_version: "events.v2+fnv1a-2shingle.v1",
+        };
+        assert_eq!(assign_cluster(0, V1, &[c], &K), ClusterAssignment::New);
+    }
+
+    /// Version scoping must not become a tie-break: among same-stamped
+    /// candidates the larger cluster still wins, and a differently stamped
+    /// larger cluster does not beat a same-stamped smaller one.
+    #[test]
+    fn a_larger_cluster_under_another_version_loses_to_a_smaller_matching_one() {
+        let mine = Uuid::from_u128(10);
+        let theirs = Uuid::from_u128(20);
+        let cands = [
+            cand_v(mine, 1, 42, V1),
+            cand_v(theirs, 99, 42, "events.v2+fnv1a-2shingle.v1"),
+        ];
         assert_eq!(
-            effective_dedup_signal_version(Some("events.v2+fnv1a-2shingle.v1")),
-            "events.v2+fnv1a-2shingle.v1"
-        );
-        // A deterministic service's stamp is its own version, not the legacy
-        // one: its value is a digest window, not a simhash of any text.
-        assert_eq!(
-            effective_dedup_signal_version(Some("digest-prefix.v1")),
-            "digest-prefix.v1"
-        );
-        assert_ne!(
-            effective_dedup_signal_version(Some("digest-prefix.v1")),
-            effective_dedup_signal_version(None)
+            assign_cluster(42, V1, &cands, &K),
+            ClusterAssignment::Existing(mine)
         );
     }
 
@@ -191,7 +239,7 @@ mod tests {
         let large = Uuid::from_u128(20);
         let cands = [cand(small, 2, 42, None), cand(large, 9, 42, None)];
         assert_eq!(
-            assign_cluster(42, &cands, &K),
+            assign_cluster(42, V1, &cands, &K),
             ClusterAssignment::Existing(large)
         );
     }
