@@ -356,7 +356,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// `compute_corpus_analytics_summary` do: per-tenant transactions under
     /// the RLS tenant GUC, never a raw cross-tenant query and never
     /// `BYPASSRLS`.
-    async fn compute_register_stats_totals(&self) -> Result<RegisterStatsTotals, DatabaseError> {
+    ///
+    /// `configured_tenant_ids` is the same escape hatch
+    /// `compute_leaderboard_inputs` / `compute_corpus_analytics_summary`
+    /// take: when non-empty, enumerate exactly those tenants; when empty,
+    /// fall back to `SELECT tenant_id FROM trace_tenants`. That fallback
+    /// query carries no tenant GUC, and `trace_tenants` is itself
+    /// FORCE-RLS'd on `tenant_id = trace_current_tenant_id()` -- so under a
+    /// NOBYPASSRLS runtime role with no tenant context, it silently returns
+    /// zero rows rather than erroring. Implementations MUST refuse
+    /// (`Err`) rather than compute totals when the resolved tenant list is
+    /// empty: a zero here is indistinguishable from "the register really
+    /// has nothing" and from "RLS ate the enumeration," and only the first
+    /// is safe to publish. (This is why a superuser-connected pg test
+    /// cannot exercise the failure mode this guards against -- the owning
+    /// test principal bypasses the RLS that would otherwise produce it.)
+    async fn compute_register_stats_totals(
+        &self,
+        _configured_tenant_ids: &[String],
+    ) -> Result<RegisterStatsTotals, DatabaseError> {
         Err(DatabaseError::Pool(
             "compute_register_stats_totals not implemented".to_string(),
         ))

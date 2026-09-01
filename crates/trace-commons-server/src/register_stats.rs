@@ -22,9 +22,22 @@ pub async fn fetch_register_stats_row(
 /// Recompute the public aggregate and write it. Batch-only and idempotent:
 /// callers may run this as often as they like, and each run replaces the
 /// row's figures wholesale rather than accumulating onto them.
+///
+/// `configured_tenant_ids` is passed straight through to
+/// [`Database::compute_register_stats_totals`]: empty means "enumerate every
+/// tenant" (via that method's own fallback query), non-empty scopes the
+/// refresh to exactly those tenants. An empty *resolved* enumeration -- the
+/// override was empty and the fallback query found nothing, which is what
+/// happens when RLS silently eats an unset-tenant-context query -- makes
+/// that method refuse with an `Err` rather than hand back a zero. This
+/// function never writes when that happens: it always writes the totals
+/// `compute_register_stats_totals` actually returned, never a substitute.
 pub async fn run_register_stats_refresh(
     db: &dyn Database,
+    configured_tenant_ids: &[String],
 ) -> Result<RegisterStatsRow, DatabaseError> {
-    let totals = db.compute_register_stats_totals().await?;
+    let totals = db
+        .compute_register_stats_totals(configured_tenant_ids)
+        .await?;
     db.write_register_stats_row(totals).await
 }

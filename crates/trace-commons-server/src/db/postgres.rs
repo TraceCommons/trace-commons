@@ -2592,15 +2592,21 @@ impl Database for PgBackend {
 
     async fn compute_register_stats_totals(
         &self,
+        configured_tenant_ids: &[String],
     ) -> Result<crate::db::RegisterStatsTotals, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
-        let tenant_ids: Vec<String> = client
-            .query("SELECT tenant_id FROM trace_tenants", &[])
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .into_iter()
-            .map(|row| row.get::<_, String>("tenant_id"))
-            .collect();
+        let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
+            client
+                .query("SELECT tenant_id FROM trace_tenants", &[])
+                .await
+                .map_err(DatabaseError::Postgres)?
+                .into_iter()
+                .map(|row| row.get::<_, String>("tenant_id"))
+                .collect()
+        } else {
+            configured_tenant_ids.to_vec()
+        };
+        refuse_if_no_tenants_enumerated(&tenant_ids)?;
 
         let mut traces_accepted = 0_i64;
         let mut points_issued = 0_i64;
@@ -5550,6 +5556,29 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// Guard for `PgBackend::compute_register_stats_totals`: an empty resolved
+/// tenant enumeration must never proceed to compute (and a
+/// caller must never write) a "zero" register-stats total, because an empty
+/// enumeration is indistinguishable from RLS silently discarding every row
+/// of `SELECT tenant_id FROM trace_tenants` when no tenant GUC is set --
+/// which is exactly what happens to a NOBYPASSRLS runtime role. Extracted as
+/// a pure function so this exact guard is unit-testable without a database:
+/// the live masking scenario it protects against cannot be reproduced
+/// against a superuser-connected local test database (the connecting role
+/// bypasses RLS entirely), so the only thing that can be verified in CI is
+/// that this guard actually refuses on empty input.
+fn refuse_if_no_tenants_enumerated(tenant_ids: &[String]) -> Result<(), DatabaseError> {
+    if tenant_ids.is_empty() {
+        Err(DatabaseError::Pool(
+            "compute_register_stats_totals enumerated no tenants; refusing to \
+             publish a zero the register never earned"
+                .to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 async fn trace_tenant_context_is_transaction_local(
     client: &mut deadpool_postgres::Client,
 ) -> Result<bool, DatabaseError> {
@@ -6023,6 +6052,43 @@ mod tests {
             "V55's runtime policies must stay unscoped by role (no `TO`), \
              not widened to name trace_commons_public_read"
         );
+        assert!(
+            !V55.contains("FOR INSERT"),
+            "V55 must not let the runtime role INSERT: the singleton row is \
+             seeded once by the migration itself; a refresh that finds the \
+             row missing must fail loudly, not conjure a fresh one in a \
+             state nobody computed"
+        );
+        // Roles are cluster-wide: a bare CREATE ROLE aborts the whole
+        // batch_execute on a cluster where the role already exists (a
+        // second database, a recreated one), and since run_migrations
+        // records the version only after the batch succeeds, V55 would
+        // never record itself and would retry -- and fail -- on every boot.
+        assert!(
+            V55.contains(
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_commons_public_read')"
+            ) && V55.contains("DO $$"),
+            "V55 must guard CREATE ROLE with an existence check, like V30 \
+             and V42 do for their roles"
+        );
+        // Without this, nothing grants membership in the role, and Task 4's
+        // SET ROLE trace_commons_public_read fails in production with
+        // "permission denied to set role".
+        assert!(
+            V55.contains("GRANT trace_commons_public_read TO CURRENT_USER"),
+            "V55 must grant whoever applies the migration membership in the \
+             role, or nothing can ever assume it"
+        );
+    }
+
+    #[test]
+    fn refuse_if_no_tenants_enumerated_refuses_on_empty() {
+        assert!(refuse_if_no_tenants_enumerated(&[]).is_err());
+    }
+
+    #[test]
+    fn refuse_if_no_tenants_enumerated_proceeds_on_nonempty() {
+        assert!(refuse_if_no_tenants_enumerated(&["some-tenant".to_string()]).is_ok());
     }
 
     /// Same hand-rolled-`run_migrations` trap as V47, V53, and V54: wiring,

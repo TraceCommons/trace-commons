@@ -170,7 +170,9 @@ async fn a_refresh_stamps_the_row_that_was_never_computed() {
         assert!(before.withheld, "an uncomputed row must stay withheld");
     }
 
-    let after = run_register_stats_refresh(&backend).await.expect("refresh");
+    let after = run_register_stats_refresh(&backend, &[])
+        .await
+        .expect("refresh");
     assert!(after.refreshed_at.is_some(), "a refresh stamps the row");
     assert!(!after.withheld, "a refreshed row is no longer withheld");
 }

@@ -50145,6 +50145,14 @@ struct RegisterStatsRefreshResponse {
 /// row and stamps `refreshed_at`; until it has run at least once the public
 /// endpoint publishes nothing, because zeros would be a claim nobody made.
 ///
+/// Scoped to `state.community_tenant_ids` -- the same configured cohort
+/// `compute_corpus_analytics_summary` uses for the community-analytics
+/// snapshot -- rather than an unscoped enumeration: these are the tenants
+/// already judged safe to aggregate into a public-facing figure. When that
+/// list is empty (enumerate every tenant), `compute_register_stats_totals`
+/// refuses rather than write a zero if its own fallback query comes back
+/// empty, so this handler never silently publishes a wrong number.
+///
 /// Nothing schedules this yet -- an operator wires it to a timer. That is a
 /// decision left to whoever runs the deployment, not one made here.
 async fn register_stats_refresh_handler(
@@ -50159,9 +50167,12 @@ async fn register_stats_refresh_handler(
             "register stats refresh requires configured DB mirror",
         ));
     };
-    let row = trace_commons_server::register_stats::run_register_stats_refresh(db.as_ref())
-        .await
-        .map_err(internal_error)?;
+    let row = trace_commons_server::register_stats::run_register_stats_refresh(
+        db.as_ref(),
+        state.community_tenant_ids.as_ref(),
+    )
+    .await
+    .map_err(internal_error)?;
     let refreshed_at = row.refreshed_at.ok_or_else(|| {
         internal_error(anyhow::anyhow!(
             "register stats refresh did not stamp refreshed_at"

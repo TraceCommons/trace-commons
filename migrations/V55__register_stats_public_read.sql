@@ -25,10 +25,29 @@ INSERT INTO trace_register_stats (singleton) VALUES (TRUE)
 ALTER TABLE trace_register_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_register_stats FORCE ROW LEVEL SECURITY;
 
-CREATE ROLE trace_commons_public_read NOLOGIN NOBYPASSRLS;
+-- Roles are cluster-wide, not database-wide: on a cluster where this role
+-- already exists (a second database, a recreated one) a bare CREATE ROLE
+-- aborts the whole batch_execute, and since run_migrations records the
+-- version only after the batch succeeds, V55 would never record itself and
+-- would retry -- and fail -- on every boot. Wrapped exactly as
+-- trace_login_resolver (V30) and trace_invite_registry (V42) are.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_commons_public_read') THEN
+        CREATE ROLE trace_commons_public_read NOLOGIN NOBYPASSRLS;
+    END IF;
+END $$;
 
 GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
     ON trace_register_stats TO trace_commons_public_read;
+
+-- Nothing else grants membership in this role, so without this, Task 4's
+-- `SET ROLE trace_commons_public_read` fails in production with "permission
+-- denied to set role" -- the migration would have created a role nobody
+-- could ever assume. GRANT ... TO CURRENT_USER makes whoever applies this
+-- migration (the app's own runtime role, in every deployment) a member, and
+-- is deployment-agnostic: it does not bake in a runtime-role name that
+-- would vary per environment.
+GRANT trace_commons_public_read TO CURRENT_USER;
 
 -- Role-scoped rather than blanket: this row carries no tenant, so there is no
 -- tenant predicate to write, and the grant above is what bounds the columns.
