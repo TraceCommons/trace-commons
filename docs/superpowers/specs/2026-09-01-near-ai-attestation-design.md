@@ -22,20 +22,22 @@ accounts, which is the ratio that decides whether a credit ledger can be farmed.
 > confirmed from NEAR AI's own reference verifier rather than from prose. The
 > "nothing is buildable until we negotiate a receipt" premise was simply wrong.
 >
-> What is genuinely missing is narrower than the original blocker list, and
-> exactly the field the spec predicted would matter: **the receipt carries no
-> account subject**. Nothing in it says who ran the inference.
+> What is missing is one field, and smaller than the original spec's framing of
+> it: **the receipt carries nothing that distinguishes one payer from another.**
+> Not an identity — a *pseudonym* would do. See "What Object B does not carry".
 >
 > So the design splits along a different line than expected. **Half 1 — an
 > envelope carrying verifiable evidence that specific turns ran in a NEAR AI
 > enclave — is buildable now**, end to end, with no ask on NEAR AI. **Half 2 —
-> admitting uninvited contributors — is blocked**, because admission needs an
-> identity the receipt does not carry, and no configuration should be able to
-> reach it until one exists.
+> admitting uninvited contributors — is blocked**, and no configuration should
+> be able to reach it until that field exists.
 >
-> One consequence deserves stating up front: the cost floor and the
-> per-contributor cap were treated as one security argument and are not. The
-> floor survives without identity; the cap does not. See "Sybil economics".
+> Two consequences worth stating up front. The cost floor and the
+> per-contributor cap were treated as one security argument and are not: the
+> floor survives without a pseudonym, the cap does not. And the cap only
+> *matters* if a trace earns more credit than the inference that produced it
+> costs — which is a pricing relationship, not a cryptographic one. See "Sybil
+> economics".
 
 This spec depends on
 [`2026-09-01-ironwire-ledger-enrichment-design.md`](./2026-09-01-ironwire-ledger-enrichment-design.md)
@@ -143,21 +145,47 @@ a specific attestation was used for this completion.
 
 ### What Object B does not carry
 
-**No account subject. No user identifier. Nothing about who ran it.** The signed
-text is hashes and an optional prefix. This is the field the original spec named
-as load-bearing and said to insist on, and it is absent.
+**Nothing that distinguishes one caller from another.** The signed text is hashes
+and an optional prefix.
 
 The API key gates *fetching* a signature, which is a real but weak binding: it
 proves whoever fetched it held a key at fetch time, and the artifact is a bearer
-token afterwards. It does not prove to us which account produced the inference,
-and two people can present the same receipt.
+token afterwards. It does not tell us which account produced the inference, and
+two people can present the same receipt.
+
+**What this costs is narrower than "the account subject is load-bearing"
+suggests**, and the original spec overstated it. Identity is *not* needed to
+authenticate a submission — our own auth does that, and the contributor already
+holds a Trace Commons account. It is *not* needed to accrue credit, for the same
+reason. And it is *not* needed to prove the inference was paid for: the request
+and response hashes establish that with no idea who ran it.
+
+It is needed for exactly one thing: **binding sybils to a single cap.** The
+per-contributor cap accumulates per `(auth_principal_ref, epoch_index)`
+(`trace-commons-ingest.rs:51356`), and enrollment derives a tenant through
+`derive_user_tenant_id(instance_id, user_subject)`
+(`onboarding.rs:133`). That chain is what makes one person resolve to one
+principal however many times they enroll. With nothing to derive from, every
+enrollment mints a fresh principal and one attacker holds N caps instead of one.
+
+**And a stable pseudonym would do that job as well as an identity would.** What
+the cap needs is a value that is *the same across requests from the same payer
+and different across payers*. It does not need to be an account name, an email,
+or anything NEAR AI could resolve to a person. A salted opaque identifier is
+sufficient — and is how we already store it: `user_subject_hash`
+(`db/postgres.rs:3152`), never the subject in the clear.
+
+That reframes the ask, and makes it one a confidential-computing provider can
+plausibly grant. "Include a stable per-account pseudonym in the signed text" is
+a much smaller request than "tell us who your users are", which sits badly
+inside a product whose entire proposition is that they cannot see your prompts.
 
 So the original table below is now a comparison between what was wanted and what
 exists, not a specification to build:
 
 | Field | Why it was wanted | Present? |
 |---|---|---|
-| account subject | Binds the turn to a contributor **and** is the identity onboarding uses. | **No** |
+| stable per-account pseudonym | Binds sybils to one cap. Was framed as "account subject"; a salted opaque value is sufficient and is all we store anyway. | **No** |
 | request hash, response hash | Binds the receipt to specific content, so it cannot be moved to a trace it did not cover. | **Yes**, SHA-256 of both |
 | model | Provenance, and lets a coverage claim name what served it. | Query parameter, not signed |
 | timestamp | Freshness, and ordering against the transcript. | **No** |
@@ -178,9 +206,15 @@ not a weaker gate but an absent one.
 
 ### The ask on NEAR AI
 
-Object B: the receipt format above, **with the account subject the priority
-field**, plus a published rotating keyset. Object A is no longer part of the ask
-— it ships today.
+**One field.** A stable per-account pseudonym inside the signed text — the same
+value for every request from one payer, different across payers, and opaque.
+Explicitly *not* an account name, email, or anything resolvable to a person: we
+hash it on arrival regardless (`user_subject_hash`), so a pre-hashed or salted
+value costs us nothing and costs them much less to agree to.
+
+Object A is no longer part of the ask; nor is the receipt format, which ships
+today. A rotating keyset remains desirable but is not blocking, since
+`?signing_address=` 404s on mismatch and gives a working per-signature check.
 
 Ask them first whether a completion response is already signed by
 `signing_address`, since the key exists and is already bound to the enclave
@@ -288,9 +322,9 @@ the clear, or the request/response hashes' preimages.
 ## Onboarding
 
 > **Blocked, and now for a precise reason.** Object B exists but carries no
-> account subject, and Object A is a public document identifying a machine.
-> Neither can admit anyone. Nothing here is reachable until a receipt names an
-> account.
+> value distinguishing one payer from another, and Object A is a public document
+> identifying a machine. Neither can bind a sybil to a cap. Nothing here is
+> reachable until a receipt carries a stable per-account pseudonym.
 
 NEAR AI becomes a second trusted issuer in the existing instance-enroll flow.
 
@@ -322,8 +356,9 @@ or absent admission method requires attestation rather than waiving it.
 | unknown / absent | attestation required (fail closed) |
 
 **The `NEAR attestation` row is not reachable yet, and the column is worth
-building anyway.** It depends on an account subject, which neither object
-carries — Object B omits it, and Object A identifies a machine, not a person.
+building anyway.** It depends on a stable per-account pseudonym, which neither
+object carries — Object B omits it, and Object A identifies a machine, not a
+payer.
 
 Build the column, the provenance, and the fail-closed default now; leave that
 one row unreachable until Object B exists. The column is what makes the gate
@@ -389,11 +424,22 @@ for the inference that produced it — whether or not we know whose account paid
 The receipt's request and response hashes bind it to *this* trace, so it cannot
 be reused across submissions. That property is available now.
 
-**The per-contributor cap does need identity.** The cap binds sybils together by
-computing across tenants per `auth_principal_ref`, which relies on one NEAR
-account resolving to one principal. With no account subject in the receipt there
-is nothing to derive that principal from, so an attacker with many API keys —
-or one key and many enrollments — gets a fresh cap each time.
+**The per-contributor cap needs a stable pseudonym.** It binds sybils by
+computing across tenants per `auth_principal_ref`, which relies on one payer
+resolving to one principal. With nothing payer-distinguishing in the receipt
+there is nothing to derive that principal from, so an attacker with many API
+keys — or one key and many enrollments — gets a fresh cap each time.
+
+**And that only bites under one condition.** If a trace earns less credit than
+the inference producing it costs, an attacker holding a thousand principals
+simply loses money a thousand ways, and the missing field buys nothing. The cap
+is insurance against the inversion, not against farming as such.
+
+The inversion is unusually easy to check here, because credit is redeemable
+against NEAR AI inference: cost and reward are denominated in the same thing.
+The question is literally *does a trace earn more inference than it consumes?*
+Today it does not. That is a parameter we control only partly, so the cap is
+worth restoring — but its absence is a monitored risk, not an open door.
 
 The consequence for admission is precise rather than fatal. Attestation-gated
 admission gives a **per-trace cost floor without a per-attacker ceiling**. Which
@@ -433,9 +479,16 @@ to *verified present*, and the work it unblocks is real.
 
 **Still blocked:**
 
-6. **An account subject.** Confirmed absent from Object B. This blocks
-   attestation-gated *admission* and the per-contributor cap's sybil binding —
-   not coverage. It is now the entire remaining ask on NEAR AI.
+6. **A stable per-account pseudonym in the signed text.** Confirmed absent from
+   Object B. It blocks the per-contributor cap's sybil binding, and through that
+   attestation-gated *admission* — not coverage, which needs no such value. This
+   is the entire remaining ask on NEAR AI, and deliberately not a request for
+   identity: an opaque salted value is sufficient, and is all we store anyway.
+
+   Note the blocking is conditional. Without it, attestation-gated admission
+   still imposes a real per-trace cost floor; what it loses is the per-attacker
+   ceiling. Shipping without it is a pricing judgement rather than an open
+   door — see "Sybil economics" — but it should be made deliberately.
 7. **A published, rotating keyset.** Confirmed absent (404). Object A
    self-publishes its key inside the report and
    `?signing_address=` returns 404 on mismatch, which is adequate for verifying
@@ -451,10 +504,15 @@ to *verified present*, and the work it unblocks is real.
 
 ## Open items
 
-- ~~Whether NEAR AI's receipt includes the account subject.~~ **Settled, and
-  against us.** The only confirmed artifact carries no identity at all, so
-  onboarding needs a separate identity attestation and this spec has split. What
-  remains open is what that identity attestation is.
+- ~~Whether NEAR AI's receipt includes the account subject.~~ **Settled: it does
+  not.** But the follow-on is smaller than the original framing assumed — what
+  onboarding needs is a stable pseudonym, not an identity. Open: whether NEAR AI
+  will add one, and whether a per-key value or a per-account value is the right
+  granularity (per-key is easier for them and weaker for us, since one payer can
+  hold many keys).
+- Whether the cap's absence is tolerable in the interim, which reduces to
+  whether credit per trace stays below inference cost per trace. This wants a
+  monitored number, not a one-time judgement.
 - Whether a completion response is already signed by `signing_address`. The key
   exists and is bound to the enclave measurement, so this may be a question of
   exposure rather than construction. Ask before specifying anything new.
