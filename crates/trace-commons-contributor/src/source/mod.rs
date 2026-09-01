@@ -111,7 +111,7 @@ pub struct SessionEvent {
     pub success: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionTranscript {
     /// Provenance: the harness that produced this session. For the native
     /// adapters this equals the adapter name; for trajectory files it is the
@@ -143,6 +143,15 @@ pub struct SessionTranscript {
     /// than being decided again at send time.
     pub subagent_count: u32,
     pub subagents_dropped: u32,
+    /// Routing and cost data for the inference hops behind this session, when
+    /// a local proxy recorded them and the session could be joined to them.
+    ///
+    /// Empty is the normal state, not a failure: most contributors run no
+    /// proxy, and a session that predates one is only partly covered even
+    /// where one exists. The transcript is the single carrier of everything
+    /// the envelope builder needs, which is why this lives here rather than
+    /// being threaded through the four builders separately.
+    pub routing: Vec<crate::routing::RoutedExchange>,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across

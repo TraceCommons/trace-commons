@@ -478,6 +478,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         events,
         subagent_count: 0,
         subagents_dropped: 0,
+        routing: Vec::new(),
     })
 }
 

@@ -543,6 +543,7 @@ impl TraceSource for TrajectorySource {
             events: parsed.events,
             subagent_count: 0,
             subagents_dropped: 0,
+            routing: Vec::new(),
         })
     }
 }

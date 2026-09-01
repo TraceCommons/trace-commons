@@ -1902,6 +1902,7 @@ mod tests {
             ],
             subagent_count: 0,
             subagents_dropped: 0,
+            routing: Vec::new(),
         };
         super::strip_reasoning(&mut t);
         let kinds: Vec<_> = t.events.iter().map(|e| e.kind.clone()).collect();

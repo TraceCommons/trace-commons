@@ -456,6 +456,7 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
         // back-reference to a parent, so nothing is ever merged in.
         subagent_count: 0,
         subagents_dropped: 0,
+        routing: Vec::new(),
     })
 }
 

@@ -22,6 +22,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+pub mod enriched;
 pub mod ironwire;
 
 /// One inference hop, as the proxy recorded it.
