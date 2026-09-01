@@ -125,12 +125,14 @@ pub fn envelope_digest(envelope: &TraceContributionEnvelope) -> Result<String> {
     strip_volatile(&mut value);
     // Sort every object's keys before serializing. This is what makes the
     // digest stable: `serde_json::Value`'s map is key-ordered only while it
-    // is a `BTreeMap`, and any dependency in the build enabling
-    // `serde_json/preserve_order` swaps it for an insertion-ordered map.
-    // Under today's feature set the call changes nothing, which is why it
-    // could be adopted without moving the pinned digest below. See
-    // `trace_commons_protocol::canonical_json`, whose guard test fails
-    // loudly if that feature is ever switched on.
+    // is a `BTreeMap`, and `serde_json/preserve_order` swaps it for an
+    // insertion-ordered map. `dcap-qvl` enables that feature, and this
+    // crate's cfg(not(windows)) dev-dependency on trace-commons-server pulls
+    // it in, so `a_known_envelope_pins_a_known_digest` below runs against an
+    // IndexMap and fails if this call is removed -- measured, not assumed.
+    // Under a `BTreeMap` the call changes nothing, which is why it could be
+    // adopted without moving that pinned digest. See
+    // `trace_commons_protocol::canonical_json`.
     canonical_json::canonicalize(&mut value);
     //
     // The canonical bytes are hashed as the serializer produces them rather

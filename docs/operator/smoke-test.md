@@ -63,6 +63,7 @@ Run each of these (POST, empty body). All must return HTTP 200 with
 | Object store migration | `POST /v1/admin/object-store-migration-drill` |
 | Rollback | `POST /v1/admin/rollback-drill` |
 | Credit settlement | `POST /v1/admin/credit-settlement-drill` |
+| NEAR AI attestation | `POST /v1/admin/near-attestation-drill` (JSON body; costs one minimal paid completion — see [`near-attestation-drill.md`](near-attestation-drill.md)) |
 
 Example:
 

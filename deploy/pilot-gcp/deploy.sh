@@ -15,7 +15,13 @@
 #
 # Required features when building the ingest binary on the host:
 #   cargo build --release --bin trace-commons-ingest \
-#     --features gcs-client,gcp-kms,near-ai-scorer
+#     --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
+#
+# near-attestation-collateral compiles the Intel DCAP collateral client. Without
+# it POST /v1/admin/near-attestation-drill runs but refuses at its collateral
+# step with missing_control:near_ai_attestation_collateral_client, so the pilot
+# would hold a drill that can never pass. See
+# docs/operator/near-attestation-drill.md.
 
 set -euo pipefail
 

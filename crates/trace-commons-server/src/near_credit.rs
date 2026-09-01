@@ -350,13 +350,18 @@ mod tests {
     /// than a failed one -- there is no error to notice.
     ///
     /// Pinned to a literal, over args whose `json!` declaration order is
-    /// deliberately not alphabetical. Today that passes either way, because
-    /// `serde_json::Map` is a `BTreeMap` and hands back sorted keys with or
-    /// without `canonicalize`. Under `serde_json/preserve_order` it does not:
-    /// drop the canonicalization in `raw` and the args serialize in
-    /// declaration order, the key moves off this literal, and this test
-    /// fails. That is what the `serde_json preserve_order guard` CI job
-    /// exercises.
+    /// deliberately not alphabetical.
+    ///
+    /// This crate depends on `dcap-qvl`, whose mandatory `std` feature turns
+    /// on `serde_json/preserve_order`, so `serde_json::Map` here is an
+    /// insertion-ordered `IndexMap` and this test is **falsifiable in the
+    /// ordinary suite**: drop the canonicalization in `raw` and the args
+    /// serialize in declaration order, the key moves off this literal, and
+    /// this fails. It used to pass either way, under a `BTreeMap` that handed
+    /// back sorted keys with or without `canonicalize`, and only the
+    /// `serde_json preserve_order guard` CI job made it mean anything. That
+    /// job now covers `trace-commons-protocol` alone, which is the graph
+    /// still backed by a `BTreeMap`.
     #[test]
     fn the_settle_idempotency_key_is_pinned_over_key_ordered_args() {
         let call = NearCreditReceiptCall::settle("credit.tracecommons.near", fixture_receipt())
