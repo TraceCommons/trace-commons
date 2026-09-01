@@ -20,6 +20,7 @@ pub mod dedup_simhash;
 pub mod driver_liveness;
 pub mod error;
 pub mod instance_enroll_guard;
+pub mod near_attestation;
 pub mod near_credit;
 pub mod near_legion_claim;
 pub mod register_stats;

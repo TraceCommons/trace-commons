@@ -422,6 +422,8 @@ fn group_session_ref(
     let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
     Some(SessionRef {
         source: SOURCE_CLAUDE_CODE,
+        // A native adapter is what it is; nothing to declare.
+        declared_source: None,
         path,
         project: discovery_project,
         cwd,

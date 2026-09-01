@@ -362,27 +362,58 @@ const AUTO_PARSE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
 /// hard-rejects with its reason label because the contributor named it.
 /// Checked here rather than at load so the skip happens before a session is
 /// ever offered.
-fn parses_as_a_trajectory(path: &Path) -> bool {
+/// The `meta.source` of a file auto-discovery found, or `None` when it is
+/// not a trajectory at all.
+///
+/// The declared source comes back with the decision rather than being
+/// fetched separately, because the decision IS a parse and it runs under a
+/// 64 MB budget. Reading the file a second time to learn a string the first
+/// read already had would make `list` walk every staged conversation twice.
+///
+/// `meta.source` is required and validated, so a file that parses always has
+/// one: `Some` here means both "this is a trajectory" and "this is what it
+/// says it came from".
+fn parsed_source(path: &Path) -> Option<String> {
     match std::fs::metadata(path) {
         Ok(m) if m.len() <= AUTO_PARSE_BUDGET => {}
-        _ => return false,
+        _ => return None,
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    parse_trajectory(&bytes).is_ok()
+    let bytes = std::fs::read(path).ok()?;
+    parse_trajectory(&bytes).ok().map(|p| p.source)
+}
+
+/// What a scope decided about a file.
+enum Accepted {
+    /// Not this scope's file.
+    No,
+    /// Accepted on its name alone. The contributor named this path, so it is
+    /// offered without a discovery-time parse and nothing knows what it
+    /// declares until it is loaded.
+    WithoutParse,
+    /// Accepted by parsing it, which also read what it declares itself to be
+    /// -- `antigravity` for an imported conversation, and so on.
+    Parsed(String),
 }
 
 impl Scope {
     /// Whether this scope offers `path`, given that it is a real file
     /// directly inside the scope's directory.
-    fn accepts(&self, path: &Path) -> bool {
+    fn accepts(&self, path: &Path) -> Accepted {
+        let parsed = |path: &Path| match parsed_source(path) {
+            Some(source) => Accepted::Parsed(source),
+            None => Accepted::No,
+        };
         match self {
-            Scope::Declared(_) => is_trajectory_file(path),
-            Scope::WorkingDirectory(_) => {
-                has_trajectory_suffix(path) && parses_as_a_trajectory(path)
+            Scope::Declared(_) => {
+                if is_trajectory_file(path) {
+                    Accepted::WithoutParse
+                } else {
+                    Accepted::No
+                }
             }
-            Scope::Staging(_) => is_trajectory_file(path) && parses_as_a_trajectory(path),
+            Scope::WorkingDirectory(_) if has_trajectory_suffix(path) => parsed(path),
+            Scope::Staging(_) if is_trajectory_file(path) => parsed(path),
+            Scope::WorkingDirectory(_) | Scope::Staging(_) => Accepted::No,
         }
     }
 
@@ -393,7 +424,7 @@ impl Scope {
     }
 }
 
-fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
+fn session_ref_for(path: PathBuf, declared_source: Option<String>) -> Option<SessionRef> {
     let metadata = std::fs::metadata(&path).ok()?;
     let started_at = metadata
         .modified()
@@ -405,6 +436,7 @@ fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
     // trajectory files.
     Some(SessionRef {
         source: SOURCE_TRAJECTORY,
+        declared_source,
         path,
         project: None,
         cwd: None,
@@ -429,7 +461,10 @@ impl TraceSource for TrajectorySource {
             // A declared path that names a file IS the session; every other
             // scope is a directory read non-recursively.
             if matches!(scope, Scope::Declared(_)) && scope.dir().is_file() {
-                match session_ref_for(scope.dir().to_path_buf()) {
+                // No declared source: a named path is offered without a
+                // discovery-time parse, and inventing one by parsing here
+                // would undo that.
+                match session_ref_for(scope.dir().to_path_buf(), None) {
                     Some(r) => sessions.push(r),
                     None => skipped += 1,
                 }
@@ -444,10 +479,15 @@ impl TraceSource for TrajectorySource {
                     continue;
                 };
                 let path = entry.path();
-                if !path.is_file() || !scope.accepts(&path) {
+                if !path.is_file() {
                     continue;
                 }
-                match session_ref_for(path) {
+                let declared_source = match scope.accepts(&path) {
+                    Accepted::No => continue,
+                    Accepted::WithoutParse => None,
+                    Accepted::Parsed(source) => Some(source),
+                };
+                match session_ref_for(path, declared_source) {
                     Some(r) => sessions.push(r),
                     None => skipped += 1,
                 }
@@ -470,39 +510,30 @@ impl TraceSource for TrajectorySource {
     /// nested file the walk never sees must not be addressable, and a
     /// mapping laxer than discovery would be a way to name a file the
     /// contributor never agreed to.
+    /// Returns the address AND what the accepting scope decided about it,
+    /// so `session_at` can describe the file exactly as `discover` would.
+    /// Re-deriving the declared source here instead -- by parsing the file
+    /// unconditionally -- would make a watch event report a source that a
+    /// full sweep of the same scope does not, which
+    /// `session_at_describes_a_trajectory_exactly_as_discover_does` exists
+    /// to forbid.
     fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
-        for scope in &self.scopes {
-            if matches!(scope, Scope::Declared(_)) && scope.dir().is_file() {
-                // A single declared file is the whole scope. Compared
-                // rather than resolved: the contributor named this exact
-                // path.
-                if path == scope.dir() {
-                    return Some(scope.dir().to_path_buf());
-                }
-                continue;
-            }
-            let Some(real) = real_file_within_root(scope.dir(), path) else {
-                continue;
-            };
-            if real.parent() == Some(scope.dir()) && scope.accepts(&real) {
-                return Some(real);
-            }
-        }
-        None
+        self.addressed(path).map(|(address, _)| address)
     }
 
     /// The ref for whichever trajectory file a changed path names.
     ///
-    /// `session_for_path` resolves the address and `session_ref_for`
-    /// describes it -- the same function `discover` uses -- so a scoped
-    /// scan and a full sweep cannot disagree. `session_ref_for` already
-    /// answers `None` for a file it cannot stat, which is what a file
-    /// deleted between the event and this lookup looks like.
+    /// `addressed` resolves the address AND carries the accepting scope's
+    /// decision, and `session_ref_for` describes it -- the same function
+    /// `discover` uses -- so a scoped scan and a full sweep cannot
+    /// disagree. `session_ref_for` already answers `None` for a file it
+    /// cannot stat, which is what a file deleted between the event and this
+    /// lookup looks like.
     fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
-        let Some(address) = self.session_for_path(path) else {
+        let Some((address, declared_source)) = self.addressed(path) else {
             return Ok(None);
         };
-        Ok(session_ref_for(address))
+        Ok(session_ref_for(address, declared_source))
     }
 
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
@@ -544,6 +575,43 @@ impl TraceSource for TrajectorySource {
             subagent_count: 0,
             subagents_dropped: 0,
         })
+    }
+}
+
+impl TrajectorySource {
+    /// The address a changed path maps to, together with what the accepting
+    /// scope decided about it.
+    ///
+    /// The decision travels with the address so `session_at` can describe a
+    /// file exactly as `discover` would. Re-deriving the declared source by
+    /// parsing here instead would make a watch event report an origin that
+    /// a full sweep of the same scope does not, which
+    /// `session_at_describes_a_trajectory_exactly_as_discover_does` exists
+    /// to forbid.
+    fn addressed(&self, path: &Path) -> Option<(PathBuf, Option<String>)> {
+        for scope in &self.scopes {
+            if matches!(scope, Scope::Declared(_)) && scope.dir().is_file() {
+                // A single declared file is the whole scope. Compared
+                // rather than resolved: the contributor named this exact
+                // path.
+                if path == scope.dir() {
+                    return Some((scope.dir().to_path_buf(), None));
+                }
+                continue;
+            }
+            let Some(real) = real_file_within_root(scope.dir(), path) else {
+                continue;
+            };
+            if real.parent() != Some(scope.dir()) {
+                continue;
+            }
+            match scope.accepts(&real) {
+                Accepted::No => continue,
+                Accepted::WithoutParse => return Some((real, None)),
+                Accepted::Parsed(source) => return Some((real, Some(source))),
+            }
+        }
+        None
     }
 }
 

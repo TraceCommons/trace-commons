@@ -169,6 +169,7 @@ fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef>
         .map(|s| s.to_string());
     Some(SessionRef {
         source: SOURCE_CODEX,
+        declared_source: None,
         path,
         project,
         cwd,

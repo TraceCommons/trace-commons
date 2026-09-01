@@ -51,6 +51,7 @@ the link.
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
+| Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
@@ -112,6 +113,11 @@ Every runbook in this directory, with a one-line description.
   the authoritative top-of-funnel doc.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
+- [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI
+  attestation drill: what its nine steps prove, what the paid completion
+  costs, where expected measurements legitimately come from (a verified
+  quote, never the endpoint's own JSON), and why a measurement mismatch after
+  an image upgrade is fixed by re-pinning and never by disabling the check.
 - [`./env-reference.md`](./env-reference.md) — table of every
   `TRACE_COMMONS_*` env, default, required/optional, and surface touched.
 - [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) — append-only ledger of

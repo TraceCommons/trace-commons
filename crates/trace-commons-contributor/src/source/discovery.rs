@@ -46,7 +46,8 @@ const JSON_EXTENSION: &str = "json";
 /// One candidate session store, described well enough to consent to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceCandidate {
-    /// `claude-code`, `codex` or `gemini-cli`, matching the adapter names.
+    /// The adapter name this candidate belongs to, e.g. `claude-code`,
+    /// `codex` or `gemini-cli`.
     pub source: String,
     /// Where this store would be watched.
     pub path: PathBuf,

@@ -127,6 +127,20 @@ enum Command {
         #[arg(long)]
         invite: Option<String>,
     },
+    /// Import Antigravity conversations. Requires the Antigravity IDE to be
+    /// running, since its conversations are only readable through the local
+    /// API it serves.
+    ///
+    /// Imported conversations are staged, not submitted: run `submit`
+    /// afterwards to redact and upload them.
+    ImportAntigravity {
+        /// Only import conversations for this project (default: the current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Import every conversation the running instance exposes, not just this project's
+        #[arg(long, conflicts_with = "project")]
+        all: bool,
+    },
     /// Show server-side status of previously submitted sessions
     Status,
     /// Fetch a server-signed attestation of your own scores, for handing to
@@ -322,7 +336,7 @@ async fn main() -> std::process::ExitCode {
         Err(error) => {
             if json
                 && error
-                    .downcast_ref::<commands::RenderedSubmitFailure>()
+                    .downcast_ref::<commands::RenderedJsonFailure>()
                     .is_some()
             {
                 return std::process::ExitCode::FAILURE;
@@ -407,6 +421,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 invite: invite.as_deref(),
             };
             commands::submit(&store, &sel).await
+        }
+        Command::ImportAntigravity { project, all } => {
+            commands::import_antigravity(&store, project.as_deref(), all, cli.json).await
         }
         Command::Status => commands::status(&store).await,
         Command::Attest { out } => commands::attest(&store, out.as_deref(), cli.json).await,

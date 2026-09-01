@@ -68,6 +68,19 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::near_attestation::client::{
+    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
+    AttestationClient as NearAttestationClient,
+    BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
+    MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
+};
+use trace_commons_server::near_attestation::drill::{
+    NearAttestationDrillOutcome, generate_drill_nonce,
+    run_near_attestation_drill as run_near_attestation_drill_steps,
+};
+use trace_commons_server::near_attestation::measurements::{
+    EXPECTED_MEASUREMENTS_ENV, ExpectedMeasurements,
+};
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
@@ -444,6 +457,10 @@ const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
 const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// Intel PCS / caching-PCCS base URL for the attestation drill's collateral
+// fetch. Defaults to Intel's own service: the collateral is what a quote is
+// verified against, so the shorter the trust path to Intel the better.
+const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 #[allow(dead_code)]
@@ -1471,6 +1488,24 @@ struct AppState {
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     require_object_store_versioning: bool,
+    /// The NEAR AI inference endpoint the attestation drill probes, or
+    /// `None` when the base URL / model / API key are not all configured.
+    /// A drill run against `None` refuses with a named missing control; it
+    /// never reports a pass it did not earn.
+    near_attestation_client: Option<Arc<dyn NearAttestationClient>>,
+    /// Frozen clock for the attestation drill's collateral-validity check.
+    ///
+    /// `None` means wall-clock time, which is the only correct production
+    /// value, and [`AppState::from_env`] sets it to `None` unconditionally --
+    /// it is deliberately not readable from the environment, so it can never
+    /// become a lever for making an expired-collateral failure go away.
+    ///
+    /// It exists because the handler is the one place in this slice where the
+    /// verification clock would otherwise be implicit: a test driving the
+    /// handler against a captured collateral fixture would start failing on
+    /// the fixture's `nextUpdate` date rather than on a code change, and a
+    /// test that fails on a calendar date is worse than no test.
+    near_attestation_verification_clock: Option<DateTime<Utc>>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,
@@ -3880,8 +3915,12 @@ impl AppState {
             None => None,
         };
 
+        let near_attestation_client = build_near_attestation_client_from_env()?;
+
         Ok(Self {
             root,
+            near_attestation_client,
+            near_attestation_verification_clock: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
@@ -7645,6 +7684,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-settlement-drill",
             post(credit_settlement_drill_handler),
+        )
+        .route(
+            "/v1/admin/near-attestation-drill",
+            post(near_attestation_drill_handler),
         )
         .route(
             "/v1/workers/credit-settlements/run",
@@ -24485,7 +24528,7 @@ fn credit_settlement_drill_evidence_hash(
             ),
         );
     }
-    sha256_prefixed(&evidence.to_string())
+    json_evidence_hash(&evidence)
 }
 
 async fn run_credit_settlement(
@@ -45227,22 +45270,19 @@ fn rollback_drill_evidence_hash(
     db_tombstone_count: usize,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_rollback_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "active_rollout_flags": active_rollout_flags,
-            "file_submission_count": file_submission_count,
-            "db_submission_count": db_submission_count,
-            "file_audit_event_count": file_audit_event_count,
-            "db_audit_event_count": db_audit_event_count,
-            "file_tombstone_count": file_tombstone_count,
-            "db_tombstone_count": db_tombstone_count,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_rollback_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "active_rollout_flags": active_rollout_flags,
+        "file_submission_count": file_submission_count,
+        "db_submission_count": db_submission_count,
+        "file_audit_event_count": file_audit_event_count,
+        "db_audit_event_count": db_audit_event_count,
+        "file_tombstone_count": file_tombstone_count,
+        "db_tombstone_count": db_tombstone_count,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45263,28 +45303,25 @@ fn audit_chain_drill_evidence_hash(
     blocking_gaps: &[String],
     failure_hashes: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_audit_chain_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "file_verified": file_verified,
-            "file_event_count": file_event_count,
-            "file_legacy_event_count": file_legacy_event_count,
-            "file_mismatch_count": file_mismatch_count,
-            "file_last_event_hash": file_last_event_hash,
-            "db_verified": db_verified,
-            "db_event_count": db_event_count,
-            "db_legacy_event_count": db_legacy_event_count,
-            "db_payload_verified_event_count": db_payload_verified_event_count,
-            "db_payload_unverified_event_count": db_payload_unverified_event_count,
-            "db_mismatch_count": db_mismatch_count,
-            "db_last_event_hash": db_last_event_hash,
-            "blocking_gaps": blocking_gaps,
-            "failure_hashes": failure_hashes,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_audit_chain_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "file_verified": file_verified,
+        "file_event_count": file_event_count,
+        "file_legacy_event_count": file_legacy_event_count,
+        "file_mismatch_count": file_mismatch_count,
+        "file_last_event_hash": file_last_event_hash,
+        "db_verified": db_verified,
+        "db_event_count": db_event_count,
+        "db_legacy_event_count": db_legacy_event_count,
+        "db_payload_verified_event_count": db_payload_verified_event_count,
+        "db_payload_unverified_event_count": db_payload_unverified_event_count,
+        "db_mismatch_count": db_mismatch_count,
+        "db_last_event_hash": db_last_event_hash,
+        "blocking_gaps": blocking_gaps,
+        "failure_hashes": failure_hashes,
+    }))
 }
 
 fn db_reconciliation_drill_evidence_hash(
@@ -45517,34 +45554,31 @@ fn postgres_rls_drill_evidence_hash(
 ) -> String {
     let expected_runtime_role_hash_matched = expected_runtime_role_hash
         .map(|expected_hash| diagnostics.runtime_role_matches_expected_hash(Some(expected_hash)));
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_postgres_rls_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "rls_ready": diagnostics.rls_ready(),
-            "force_rls_ready": diagnostics.force_rls_ready(),
-            "production_ready": diagnostics.production_ready(),
-            "production_ready_with_expected_runtime_role": diagnostics
-                .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
-            "expected_table_count": diagnostics.expected_table_count,
-            "policy_installed_count": diagnostics.policy_installed_count,
-            "rls_enabled_count": diagnostics.rls_enabled_count,
-            "force_rls_enabled_count": diagnostics.force_rls_enabled_count,
-            "missing_policy_table_count": diagnostics.missing_policy_tables.len(),
-            "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
-            "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
-            "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
-            "current_role_hash": &diagnostics.current_role_hash,
-            "expected_runtime_role_hash_configured": expected_runtime_role_hash.is_some(),
-            "expected_runtime_role_hash_matched": expected_runtime_role_hash_matched,
-            "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
-            "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
-            "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_postgres_rls_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "rls_ready": diagnostics.rls_ready(),
+        "force_rls_ready": diagnostics.force_rls_ready(),
+        "production_ready": diagnostics.production_ready(),
+        "production_ready_with_expected_runtime_role": diagnostics
+            .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
+        "expected_table_count": diagnostics.expected_table_count,
+        "policy_installed_count": diagnostics.policy_installed_count,
+        "rls_enabled_count": diagnostics.rls_enabled_count,
+        "force_rls_enabled_count": diagnostics.force_rls_enabled_count,
+        "missing_policy_table_count": diagnostics.missing_policy_tables.len(),
+        "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
+        "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
+        "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
+        "current_role_hash": &diagnostics.current_role_hash,
+        "expected_runtime_role_hash_configured": expected_runtime_role_hash.is_some(),
+        "expected_runtime_role_hash_matched": expected_runtime_role_hash_matched,
+        "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+        "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
+        "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn retention_dry_run_drill_evidence_hash(
@@ -45552,31 +45586,28 @@ fn retention_dry_run_drill_evidence_hash(
     response: &TraceMaintenanceResponse,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_retention_dry_run_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "revoked_submission_count": response.revoked_submission_count,
-            "expired_submission_count": response.expired_submission_count,
-            "records_marked_revoked": response.records_marked_revoked,
-            "records_marked_expired": response.records_marked_expired,
-            "records_marked_purged": response.records_marked_purged,
-            "derived_marked_revoked": response.derived_marked_revoked,
-            "derived_marked_expired": response.derived_marked_expired,
-            "export_cache_files_pruned": response.export_cache_files_pruned,
-            "export_provenance_invalidated": response.export_provenance_invalidated,
-            "benchmark_artifacts_invalidated": response.benchmark_artifacts_invalidated,
-            "trace_object_files_deleted": response.trace_object_files_deleted,
-            "encrypted_artifacts_deleted": response.encrypted_artifacts_deleted,
-            "db_mirror_backfilled": response.db_mirror_backfilled,
-            "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
-            "vector_entries_indexed": response.vector_entries_indexed,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_retention_dry_run_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "revoked_submission_count": response.revoked_submission_count,
+        "expired_submission_count": response.expired_submission_count,
+        "records_marked_revoked": response.records_marked_revoked,
+        "records_marked_expired": response.records_marked_expired,
+        "records_marked_purged": response.records_marked_purged,
+        "derived_marked_revoked": response.derived_marked_revoked,
+        "derived_marked_expired": response.derived_marked_expired,
+        "export_cache_files_pruned": response.export_cache_files_pruned,
+        "export_provenance_invalidated": response.export_provenance_invalidated,
+        "benchmark_artifacts_invalidated": response.benchmark_artifacts_invalidated,
+        "trace_object_files_deleted": response.trace_object_files_deleted,
+        "encrypted_artifacts_deleted": response.encrypted_artifacts_deleted,
+        "db_mirror_backfilled": response.db_mirror_backfilled,
+        "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
+        "vector_entries_indexed": response.vector_entries_indexed,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn vector_index_drill_evidence_hash(
@@ -45584,29 +45615,26 @@ fn vector_index_drill_evidence_hash(
     response: &TraceVectorIndexDrillResponse,
     state: &AppState,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_vector_index_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "limit": response.limit,
-            "require_candidates": response.require_candidates,
-            "private_embedder_configured": state.vector_embedder.is_some(),
-            "private_embedder_required": state.require_external_vector_embedder,
-            "private_searcher_configured": state.vector_searcher.is_some(),
-            "private_searcher_required": state.require_external_vector_searcher,
-            "scheduler_enabled": state.vector_index_scheduler.is_some(),
-            "checked_count": response.checked_count,
-            "vector_entries_indexed": response.vector_entries_indexed,
-            "skipped_existing_count": response.skipped_existing_count,
-            "pending_after_count": response.pending_after_count,
-            "candidate_count": response.candidate_count,
-            "nearest_neighbor_policy_gap_count": response.nearest_neighbor_policy_gap_count,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_vector_index_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "limit": response.limit,
+        "require_candidates": response.require_candidates,
+        "private_embedder_configured": state.vector_embedder.is_some(),
+        "private_embedder_required": state.require_external_vector_embedder,
+        "private_searcher_configured": state.vector_searcher.is_some(),
+        "private_searcher_required": state.require_external_vector_searcher,
+        "scheduler_enabled": state.vector_index_scheduler.is_some(),
+        "checked_count": response.checked_count,
+        "vector_entries_indexed": response.vector_entries_indexed,
+        "skipped_existing_count": response.skipped_existing_count,
+        "pending_after_count": response.pending_after_count,
+        "candidate_count": response.candidate_count,
+        "nearest_neighbor_policy_gap_count": response.nearest_neighbor_policy_gap_count,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn analytics_release_drill_evidence_hash(
@@ -45616,113 +45644,104 @@ fn analytics_release_drill_evidence_hash(
     min_cell_count: Option<usize>,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_analytics_release_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "min_cell_count": state.analytics_min_cell_count,
-            "min_cell_count_configured": min_cell_count.is_some(),
-            "broad_release_noise_configured": state.analytics_broad_release_noise.is_some(),
-            "broad_release_noise_max_delta": state
-                .analytics_broad_release_noise
-                .as_ref()
-                .map(|config| config.max_delta),
-            "privacy_accounting_configured": state
-                .analytics_broad_release_privacy_accounting
-                .is_some(),
-            "epsilon_micros_per_release": budget.epsilon_micros_per_release,
-            "max_epsilon_micros": budget.max_epsilon_micros,
-            "epsilon_spent_micros": budget.epsilon_spent_micros,
-            "epsilon_remaining_micros": budget.epsilon_remaining_micros,
-            "released_cell_count": budget.released_cell_count,
-            "suppressed_cell_count": budget.suppressed_cell_count,
-            "suppression_applied": budget.suppression_applied,
-            "noise_applied": budget.noise_applied,
-            "noise_max_delta": budget.noise_max_delta,
-            "noisy_cell_count": budget.noisy_cell_count,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_analytics_release_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "min_cell_count": state.analytics_min_cell_count,
+        "min_cell_count_configured": min_cell_count.is_some(),
+        "broad_release_noise_configured": state.analytics_broad_release_noise.is_some(),
+        "broad_release_noise_max_delta": state
+            .analytics_broad_release_noise
+            .as_ref()
+            .map(|config| config.max_delta),
+        "privacy_accounting_configured": state
+            .analytics_broad_release_privacy_accounting
+            .is_some(),
+        "epsilon_micros_per_release": budget.epsilon_micros_per_release,
+        "max_epsilon_micros": budget.max_epsilon_micros,
+        "epsilon_spent_micros": budget.epsilon_spent_micros,
+        "epsilon_remaining_micros": budget.epsilon_remaining_micros,
+        "released_cell_count": budget.released_cell_count,
+        "suppressed_cell_count": budget.suppressed_cell_count,
+        "suppression_applied": budget.suppression_applied,
+        "noise_applied": budget.noise_applied,
+        "noise_max_delta": budget.noise_max_delta,
+        "noisy_cell_count": budget.noisy_cell_count,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn benchmark_readiness_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceBenchmarkReadinessDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_benchmark_readiness_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "require_artifacts": response.require_artifacts,
-            "require_external_evaluator": response.require_external_evaluator,
-            "require_registry_submitter": response.require_registry_submitter,
-            "require_registry_confirmer": response.require_registry_confirmer,
-            "total_artifact_count": response.total_artifact_count,
-            "candidate_not_evaluated_count": response.candidate_not_evaluated_count,
-            "evaluated_passed_unpublished_count": response.evaluated_passed_unpublished_count,
-            "publishable_count": response.publishable_count,
-            "published_count": response.published_count,
-            "revoked_count": response.revoked_count,
-            "registry_submitter_configured": response.registry_submitter_configured,
-            "registry_submitter_auth_configured": response.registry_submitter_auth_configured,
-            "registry_confirmer_configured": response.registry_confirmer_configured,
-            "registry_confirmer_auth_configured": response.registry_confirmer_auth_configured,
-            "registry_require_adapter_auth": response.registry_require_adapter_auth,
-            "external_evaluator_configured": response.external_evaluator_configured,
-            "registry_outbox_pending_count": response.registry_outbox_pending_count,
-            "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
-            "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
-            "registry_outbox_failed_count": response.registry_outbox_failed_count,
-            "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
-            "registry_outbox_pending_without_submitter_auth_count": response.registry_outbox_pending_without_submitter_auth_count,
-            "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
-            "registry_outbox_submitted_without_confirmer_auth_count": response.registry_outbox_submitted_without_confirmer_auth_count,
-            "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
-            "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
-            "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
-            "blocker_reasons": response.blocker_reasons,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_benchmark_readiness_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "require_artifacts": response.require_artifacts,
+        "require_external_evaluator": response.require_external_evaluator,
+        "require_registry_submitter": response.require_registry_submitter,
+        "require_registry_confirmer": response.require_registry_confirmer,
+        "total_artifact_count": response.total_artifact_count,
+        "candidate_not_evaluated_count": response.candidate_not_evaluated_count,
+        "evaluated_passed_unpublished_count": response.evaluated_passed_unpublished_count,
+        "publishable_count": response.publishable_count,
+        "published_count": response.published_count,
+        "revoked_count": response.revoked_count,
+        "registry_submitter_configured": response.registry_submitter_configured,
+        "registry_submitter_auth_configured": response.registry_submitter_auth_configured,
+        "registry_confirmer_configured": response.registry_confirmer_configured,
+        "registry_confirmer_auth_configured": response.registry_confirmer_auth_configured,
+        "registry_require_adapter_auth": response.registry_require_adapter_auth,
+        "external_evaluator_configured": response.external_evaluator_configured,
+        "registry_outbox_pending_count": response.registry_outbox_pending_count,
+        "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
+        "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
+        "registry_outbox_failed_count": response.registry_outbox_failed_count,
+        "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
+        "registry_outbox_pending_without_submitter_auth_count": response.registry_outbox_pending_without_submitter_auth_count,
+        "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
+        "registry_outbox_submitted_without_confirmer_auth_count": response.registry_outbox_submitted_without_confirmer_auth_count,
+        "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
+        "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
+        "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
+        "blocker_reasons": response.blocker_reasons,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn ranking_model_readiness_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceRankingModelReadinessDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_ranking_model_readiness_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "require_active_model": response.require_active_model,
-            "require_ready_credit": response.require_ready_credit,
-            "require_clean_adjudication": response.require_clean_adjudication,
-            "require_process_evaluator": response.require_process_evaluator,
-            "process_evaluator_configured": response.process_evaluator_configured,
-            "active_model_count": response.active_model_count,
-            "monitored_model_count": response.monitored_model_count,
-            "at_risk_model_count": response.at_risk_model_count,
-            "risk_code_counts": response.risk_code_counts,
-            "calibration_dataset_count": response.calibration_dataset_count,
-            "calibration_dataset_manifest_conflict_count": response.calibration_dataset_manifest_conflict_count,
-            "ready_model_target_count": response.ready_model_target_count,
-            "blocked_model_target_count": response.blocked_model_target_count,
-            "dataset_reason_code_counts": response.dataset_reason_code_counts,
-            "adjudication_issue_group_count": response.adjudication_issue_group_count,
-            "adjudication_reason_counts": response.adjudication_reason_counts,
-            "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
-            "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
-            "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
-            "credit_blocked_reason_counts": response.credit_blocked_reason_counts,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_ranking_model_readiness_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "require_active_model": response.require_active_model,
+        "require_ready_credit": response.require_ready_credit,
+        "require_clean_adjudication": response.require_clean_adjudication,
+        "require_process_evaluator": response.require_process_evaluator,
+        "process_evaluator_configured": response.process_evaluator_configured,
+        "active_model_count": response.active_model_count,
+        "monitored_model_count": response.monitored_model_count,
+        "at_risk_model_count": response.at_risk_model_count,
+        "risk_code_counts": response.risk_code_counts,
+        "calibration_dataset_count": response.calibration_dataset_count,
+        "calibration_dataset_manifest_conflict_count": response.calibration_dataset_manifest_conflict_count,
+        "ready_model_target_count": response.ready_model_target_count,
+        "blocked_model_target_count": response.blocked_model_target_count,
+        "dataset_reason_code_counts": response.dataset_reason_code_counts,
+        "adjudication_issue_group_count": response.adjudication_issue_group_count,
+        "adjudication_reason_counts": response.adjudication_reason_counts,
+        "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
+        "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
+        "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
+        "credit_blocked_reason_counts": response.credit_blocked_reason_counts,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn revocation_propagation_drill_evidence_hash(
@@ -45730,52 +45749,46 @@ fn revocation_propagation_drill_evidence_hash(
     response: &TraceRevocationPropagationWorkerResponse,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_propagation_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "checked": response.checked,
-            "completed": response.completed,
-            "failed": response.failed,
-            "skipped": response.skipped,
-            "pending": response.pending,
-            "next_attempt_scheduled": response.next_attempt_scheduled,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_propagation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "checked": response.checked,
+        "completed": response.completed,
+        "failed": response.failed,
+        "skipped": response.skipped,
+        "pending": response.pending,
+        "next_attempt_scheduled": response.next_attempt_scheduled,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn revocation_effects_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceRevocationEffectsDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_effects_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "canary_revocation_found": response.canary_revocation_found,
-            "credit_reversal_item_count": response.credit_reversal_item_count,
-            "credit_reversal_done_count": response.credit_reversal_done_count,
-            "reversed_credit_event_count": response.reversed_credit_event_count,
-            "near_reversal_outbox_count": response.near_reversal_outbox_count,
-            "delayed_credit_reversal_ready": response.delayed_credit_reversal_ready,
-            "object_delete_item_count": response.object_delete_item_count,
-            "object_delete_done_count": response.object_delete_done_count,
-            "deleted_object_ref_count": response.deleted_object_ref_count,
-            "physical_delete_receipt_count": response.physical_delete_receipt_count,
-            "object_deletion_refs_ready": response.object_deletion_refs_ready,
-            "worker_queue_invalidation_item_count": response.worker_queue_invalidation_item_count,
-            "worker_queue_invalidation_done_count": response.worker_queue_invalidation_done_count,
-            "worker_queue_invalidation_ready": response.worker_queue_invalidation_ready,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_effects_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "canary_revocation_found": response.canary_revocation_found,
+        "credit_reversal_item_count": response.credit_reversal_item_count,
+        "credit_reversal_done_count": response.credit_reversal_done_count,
+        "reversed_credit_event_count": response.reversed_credit_event_count,
+        "near_reversal_outbox_count": response.near_reversal_outbox_count,
+        "delayed_credit_reversal_ready": response.delayed_credit_reversal_ready,
+        "object_delete_item_count": response.object_delete_item_count,
+        "object_delete_done_count": response.object_delete_done_count,
+        "deleted_object_ref_count": response.deleted_object_ref_count,
+        "physical_delete_receipt_count": response.physical_delete_receipt_count,
+        "object_deletion_refs_ready": response.object_deletion_refs_ready,
+        "worker_queue_invalidation_item_count": response.worker_queue_invalidation_item_count,
+        "worker_queue_invalidation_done_count": response.worker_queue_invalidation_done_count,
+        "worker_queue_invalidation_ready": response.worker_queue_invalidation_ready,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn revocation_effects_drill_check_evidence_hash(
@@ -45784,148 +45797,130 @@ fn revocation_effects_drill_check_evidence_hash(
     check_name: &str,
     passed: bool,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_effects_drill_check.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "aggregate_evidence_hash": aggregate_evidence_hash,
-            "check_name": check_name,
-            "passed": passed,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_effects_drill_check.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "aggregate_evidence_hash": aggregate_evidence_hash,
+        "check_name": check_name,
+        "passed": passed,
+    }))
 }
 
 fn canary_read_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceCanaryReadDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_canary_read_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "isolation_tenant_storage_ref": response.isolation_tenant_storage_ref,
-            "canary_submission_found": response.canary_submission_found,
-            "submit_status_visible": response.submit_status_visible,
-            "tenant_canary_isolated": response.tenant_canary_isolated,
-            "contributor_credit_visible": response.contributor_credit_visible,
-            "reviewer_metadata_visible": response.reviewer_metadata_visible,
-            "replay_export_selection_visible": response.replay_export_selection_visible,
-            "audit_read_count": response.audit_read_count,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_canary_read_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "isolation_tenant_storage_ref": response.isolation_tenant_storage_ref,
+        "canary_submission_found": response.canary_submission_found,
+        "submit_status_visible": response.submit_status_visible,
+        "tenant_canary_isolated": response.tenant_canary_isolated,
+        "contributor_credit_visible": response.contributor_credit_visible,
+        "reviewer_metadata_visible": response.reviewer_metadata_visible,
+        "replay_export_selection_visible": response.replay_export_selection_visible,
+        "audit_read_count": response.audit_read_count,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_primary_read_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceObjectPrimaryReadDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_primary_read_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "fallback_tenant_storage_ref": response.fallback_tenant_storage_ref,
-            "canary_submission_found": response.canary_submission_found,
-            "object_store_eligible": response.object_store_eligible,
-            "object_primary_submit_review_enabled": response.object_primary_submit_review_enabled,
-            "object_primary_replay_export_enabled": response.object_primary_replay_export_enabled,
-            "submitted_object_ref_present": response.submitted_object_ref_present,
-            "submitted_object_ref_service_owned": response.submitted_object_ref_service_owned,
-            "submitted_object_ref_readable": response.submitted_object_ref_readable,
-            "review_body_object_ref_readable": response.review_body_object_ref_readable,
-            "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
-            "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
-            "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_primary_read_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "fallback_tenant_storage_ref": response.fallback_tenant_storage_ref,
+        "canary_submission_found": response.canary_submission_found,
+        "object_store_eligible": response.object_store_eligible,
+        "object_primary_submit_review_enabled": response.object_primary_submit_review_enabled,
+        "object_primary_replay_export_enabled": response.object_primary_replay_export_enabled,
+        "submitted_object_ref_present": response.submitted_object_ref_present,
+        "submitted_object_ref_service_owned": response.submitted_object_ref_service_owned,
+        "submitted_object_ref_readable": response.submitted_object_ref_readable,
+        "review_body_object_ref_readable": response.review_body_object_ref_readable,
+        "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
+        "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
+        "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_store_migration_probe_ref_hash(
     object_store_name: &str,
     receipt: &EncryptedTraceArtifactReceipt,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "object_store_name": object_store_name,
-            "tenant_storage_ref": receipt.tenant_storage_ref,
-            "artifact_kind": receipt.artifact_kind,
-            "object_key": receipt.object_key,
-            "ciphertext_sha256": receipt.ciphertext_sha256,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "object_store_name": object_store_name,
+        "tenant_storage_ref": receipt.tenant_storage_ref,
+        "artifact_kind": receipt.artifact_kind,
+        "object_key": receipt.object_key,
+        "ciphertext_sha256": receipt.ciphertext_sha256,
+    }))
 }
 
 fn object_store_migration_manifest_hash(
     tenant: &TenantAuth,
     response: &TraceObjectStoreMigrationDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_store_migration_manifest.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "generated_at": response.generated_at,
-            "purpose_hash": sha256_prefixed(&response.purpose),
-            "object_store_configured": response.object_store_configured,
-            "object_store_name": response.object_store_name,
-            "object_store_eligible": response.object_store_eligible,
-            "object_io_enabled": response.object_io_enabled,
-            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
-            "require_delete": response.require_delete,
-            "require_versioning": response.require_versioning,
-            "object_versioning_supported": response.object_versioning_supported,
-            "restore_after_delete_supported": response.restore_after_delete_supported,
-            "write_succeeded": response.write_succeeded,
-            "read_succeeded": response.read_succeeded,
-            "delete_succeeded": response.delete_succeeded,
-            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
-            "probe_object_ref_hash": response.probe_object_ref_hash,
-            "io_error_hashes": response.io_error_hashes,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_store_migration_manifest.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "generated_at": response.generated_at,
+        "purpose_hash": sha256_prefixed(&response.purpose),
+        "object_store_configured": response.object_store_configured,
+        "object_store_name": response.object_store_name,
+        "object_store_eligible": response.object_store_eligible,
+        "object_io_enabled": response.object_io_enabled,
+        "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+        "require_delete": response.require_delete,
+        "require_versioning": response.require_versioning,
+        "object_versioning_supported": response.object_versioning_supported,
+        "restore_after_delete_supported": response.restore_after_delete_supported,
+        "write_succeeded": response.write_succeeded,
+        "read_succeeded": response.read_succeeded,
+        "delete_succeeded": response.delete_succeeded,
+        "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
+        "probe_object_ref_hash": response.probe_object_ref_hash,
+        "io_error_hashes": response.io_error_hashes,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_store_migration_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceObjectStoreMigrationDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_store_migration_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "migration_manifest_hash": response.migration_manifest_hash,
-            "object_store_configured": response.object_store_configured,
-            "object_store_name": response.object_store_name,
-            "object_store_eligible": response.object_store_eligible,
-            "object_io_enabled": response.object_io_enabled,
-            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
-            "require_delete": response.require_delete,
-            "require_versioning": response.require_versioning,
-            "object_versioning_supported": response.object_versioning_supported,
-            "restore_after_delete_supported": response.restore_after_delete_supported,
-            "write_succeeded": response.write_succeeded,
-            "read_succeeded": response.read_succeeded,
-            "delete_succeeded": response.delete_succeeded,
-            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
-            "probe_object_ref_hash": response.probe_object_ref_hash,
-            "io_error_hashes": response.io_error_hashes,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_store_migration_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "migration_manifest_hash": response.migration_manifest_hash,
+        "object_store_configured": response.object_store_configured,
+        "object_store_name": response.object_store_name,
+        "object_store_eligible": response.object_store_eligible,
+        "object_io_enabled": response.object_io_enabled,
+        "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+        "require_delete": response.require_delete,
+        "require_versioning": response.require_versioning,
+        "object_versioning_supported": response.object_versioning_supported,
+        "restore_after_delete_supported": response.restore_after_delete_supported,
+        "write_succeeded": response.write_succeeded,
+        "read_succeeded": response.read_succeeded,
+        "delete_succeeded": response.delete_succeeded,
+        "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
+        "probe_object_ref_hash": response.probe_object_ref_hash,
+        "io_error_hashes": response.io_error_hashes,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn canary_read_drill_check_evidence_hash(
@@ -45934,17 +45929,14 @@ fn canary_read_drill_check_evidence_hash(
     check_name: &str,
     passed: bool,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_canary_read_drill_check.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "aggregate_evidence_hash": aggregate_evidence_hash,
-            "check_name": check_name,
-            "passed": passed,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_canary_read_drill_check.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "aggregate_evidence_hash": aggregate_evidence_hash,
+        "check_name": check_name,
+        "passed": passed,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45966,30 +45958,27 @@ fn key_rotation_drill_evidence_hash(
     signed_token_require_jti: bool,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_key_rotation_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "signed_token_auth_enabled": signed_token_auth_enabled,
-            "require_eddsa_signed_tokens": state.require_eddsa_signed_tokens,
-            "require_managed_eddsa_signed_tokens": state.require_managed_eddsa_signed_tokens,
-            "signed_token_managed_eddsa_key_count": signed_token_managed_eddsa_key_count,
-            "signed_token_managed_eddsa_active_key_count": signed_token_managed_eddsa_active_key_count,
-            "signed_token_managed_eddsa_inactive_key_count": signed_token_managed_eddsa_inactive_key_count,
-            "signed_token_eddsa_keyset_url_refresh_enabled": signed_token_eddsa_keyset_url_refresh_enabled,
-            "signed_token_eddsa_keyset_url_max_stale_seconds": signed_token_eddsa_keyset_url_max_stale_seconds,
-            "signed_token_eddsa_keyset_url_last_refresh_success_at": signed_token_eddsa_keyset_url_last_refresh_success_at,
-            "signed_token_eddsa_keyset_url_last_refresh_failure_at": signed_token_eddsa_keyset_url_last_refresh_failure_at,
-            "signed_token_eddsa_keyset_url_stale": signed_token_eddsa_keyset_url_stale,
-            "signed_token_issuer_configured": signed_token_issuer_configured,
-            "signed_token_audience_configured": signed_token_audience_configured,
-            "signed_token_max_ttl_seconds": signed_token_max_ttl_seconds,
-            "signed_token_require_jti": signed_token_require_jti,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_key_rotation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "signed_token_auth_enabled": signed_token_auth_enabled,
+        "require_eddsa_signed_tokens": state.require_eddsa_signed_tokens,
+        "require_managed_eddsa_signed_tokens": state.require_managed_eddsa_signed_tokens,
+        "signed_token_managed_eddsa_key_count": signed_token_managed_eddsa_key_count,
+        "signed_token_managed_eddsa_active_key_count": signed_token_managed_eddsa_active_key_count,
+        "signed_token_managed_eddsa_inactive_key_count": signed_token_managed_eddsa_inactive_key_count,
+        "signed_token_eddsa_keyset_url_refresh_enabled": signed_token_eddsa_keyset_url_refresh_enabled,
+        "signed_token_eddsa_keyset_url_max_stale_seconds": signed_token_eddsa_keyset_url_max_stale_seconds,
+        "signed_token_eddsa_keyset_url_last_refresh_success_at": signed_token_eddsa_keyset_url_last_refresh_success_at,
+        "signed_token_eddsa_keyset_url_last_refresh_failure_at": signed_token_eddsa_keyset_url_last_refresh_failure_at,
+        "signed_token_eddsa_keyset_url_stale": signed_token_eddsa_keyset_url_stale,
+        "signed_token_issuer_configured": signed_token_issuer_configured,
+        "signed_token_audience_configured": signed_token_audience_configured,
+        "signed_token_max_ttl_seconds": signed_token_max_ttl_seconds,
+        "signed_token_require_jti": signed_token_require_jti,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -56901,6 +56890,23 @@ fn trace_record_artifact_object_store_for_ref(
         .to_string()
 }
 
+/// Exempt from the `canonical_json` treatment the other envelope-hashing
+/// paths got, deliberately.
+///
+/// This serializes a typed struct, so the serializer writes its fields in
+/// declaration order with no map involved -- `serde_json/preserve_order`
+/// cannot move them. The only ordering-sensitive part is the nested
+/// `structured_payload` values, and those arrive here already key-ordered:
+/// the envelope is read back from stored bytes, and the redaction pipeline
+/// canonicalizes every payload before it is stored
+/// (`canonicalize_event_payloads` in `trace-commons-protocol`).
+///
+/// Making it canonical anyway would mean either cloning the whole envelope
+/// to sort payloads in a copy, or routing it through `serde_json::to_value`
+/// -- and that second one would sort the *struct* fields too and move this
+/// hash today, which is exactly what the canonicalization work was required
+/// not to do. Nothing re-verifies a stored value of this hash against a
+/// rebuild in any case; the export verifier re-hashes raw file bytes.
 fn envelope_plaintext_hash(envelope: &TraceContributionEnvelope) -> anyhow::Result<String> {
     let envelope_json = serde_json::to_string_pretty(envelope)
         .context("failed to serialize trace envelope for hashing")?;
@@ -67955,6 +67961,20 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// `sha256_prefixed` over key-ordered JSON, for the drill evidence hashes.
+///
+/// Each of those is a hash of a `serde_json::Value` built by `json!`, whose
+/// map is key-ordered only while `serde_json::Map` is a `BTreeMap`. Routing
+/// them all through one canonicalizing helper keeps a dependency enabling
+/// `serde_json/preserve_order` from quietly changing every stored evidence
+/// hash. A no-op under today's feature set -- these hashes do not move.
+fn json_evidence_hash(evidence: &serde_json::Value) -> String {
+    sha256_prefixed(
+        &trace_commons_protocol::canonical_json::to_canonical_string(evidence)
+            .unwrap_or_else(|_| evidence.to_string()),
+    )
+}
+
 fn hash_fragment(hash: &str, len: usize) -> String {
     hash.strip_prefix("sha256:")
         .unwrap_or(hash)
@@ -72412,6 +72432,7 @@ impl TraceOperationalSummaryResponse {
             &promotion_gates,
             &inputs.rollout_smoke_evidence,
             inputs.generated_at,
+            inputs.state.near_attestation_client.is_some(),
         );
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
@@ -72700,6 +72721,248 @@ fn trace_revocation_propagation_summary_from_audit_event(
     })())
 }
 
+/// Build the NEAR AI attestation client from env, or `None` when the
+/// endpoint is not fully configured.
+///
+/// A partial configuration returns `None` rather than failing startup: the
+/// drill's job is to name missing controls, and a boot failure would name it
+/// to nobody. [`near_attestation_missing_controls`] is what turns the `None`
+/// back into a list an operator can act on.
+fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<dyn NearAttestationClient>>>
+{
+    let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
+    let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
+    let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
+    let (Some(base_url), Some(model), Some(api_key)) = (base_url, model, api_key) else {
+        return Ok(None);
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let timeout_seconds = match trimmed_env(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
+        Some(raw) => raw.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
+        })?,
+        None => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
+    };
+    anyhow::ensure!(
+        timeout_seconds > 0,
+        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
+    );
+    let client = HttpAttestationClient::new(
+        base_url,
+        model,
+        SecretString::from(api_key),
+        pccs_url,
+        StdDuration::from_secs(timeout_seconds),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(Some(Arc::new(client)))
+}
+
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Which of the endpoint controls the drill needs are not configured.
+///
+/// Read from env at call time rather than cached at boot, because the only
+/// thing this is used for is telling an operator what to set; process env
+/// does not change underneath it.
+fn near_attestation_missing_controls() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL).is_none() {
+        missing.push(NEAR_ATTESTATION_BASE_URL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL).is_none() {
+        missing.push(NEAR_ATTESTATION_MODEL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY).is_none() {
+        missing.push(NEAR_ATTESTATION_API_KEY_CONTROL);
+    }
+    missing
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TraceNearAttestationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearAttestationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    /// Named so an operator reading a refusal knows what to set.
+    expected_measurements_env: &'static str,
+    /// Absent when the drill did not run at all -- a missing endpoint control
+    /// or an unparseable pin set. Absent is not a pass; `ready` is false and
+    /// `blocking_gaps` says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<NearAttestationDrillOutcome>,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+fn near_attestation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    purpose: &str,
+    outcome: Option<&NearAttestationDrillOutcome>,
+    blocking_gaps: &[String],
+) -> String {
+    let evidence = serde_json::json!({
+        "schema": "trace_commons_near_attestation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "purpose_hash": sha256_prefixed(purpose),
+        "outcome": outcome,
+        "blocking_gaps": blocking_gaps,
+    });
+    sha256_prefixed(&evidence.to_string())
+}
+
+/// Prove the inference endpoint is the enclave we think it is.
+///
+/// The drill is deliberately cheap to fail and expensive only to pass: every
+/// check that costs nothing runs first, and the paid completion is reached
+/// only once the endpoint has been established as a TDX enclave running a
+/// pinned image and answering our nonce. See
+/// `docs/operator/near-attestation-drill.md`.
+async fn run_near_attestation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearAttestationDrillRequest,
+) -> ApiResult<TraceNearAttestationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_near_attestation_drill")
+        .to_string();
+
+    let mut blocking_gaps: Vec<String> = Vec::new();
+    let mut outcome = None;
+
+    // Fail closed on configuration before anything reaches the network, so a
+    // misconfigured deployment gets a named control rather than a timeout.
+    let expected = match ExpectedMeasurements::from_env() {
+        Ok(expected) => expected,
+        Err(error) => {
+            // The error names a key, never a value.
+            blocking_gaps.push(format!("expected_measurements_config_invalid:{error}"));
+            None
+        }
+    };
+    let expected_measurements_valid = blocking_gaps.is_empty();
+
+    match state.near_attestation_client.as_ref() {
+        Some(client) if expected_measurements_valid => {
+            let nonce = generate_drill_nonce();
+            let now_unix = state
+                .near_attestation_verification_clock
+                .unwrap_or(generated_at)
+                .timestamp()
+                .max(0) as u64;
+            outcome = Some(
+                run_near_attestation_drill_steps(
+                    client.as_ref(),
+                    expected.as_ref(),
+                    &nonce,
+                    now_unix,
+                )
+                .await,
+            );
+        }
+        Some(_) => {}
+        None => {
+            let missing = near_attestation_missing_controls();
+            if missing.is_empty() {
+                // The endpoint controls are all set yet no client exists.
+                // That should be unreachable -- both come from the same env
+                // read at boot -- but an empty gap list beside `ready:false`
+                // would be a refusal with no stated reason, which is worse
+                // than a slightly awkward label.
+                blocking_gaps.push("near_attestation_client_unavailable".to_string());
+            }
+            for control in missing {
+                blocking_gaps.push(format!("missing_control:{control}"));
+            }
+        }
+    }
+
+    if let Some(outcome) = outcome.as_ref() {
+        blocking_gaps.extend(outcome.blocking_steps());
+    }
+    let ready = blocking_gaps.is_empty() && outcome.as_ref().is_some_and(|outcome| outcome.passed);
+    let evidence_hash =
+        near_attestation_drill_evidence_hash(tenant, &purpose, outcome.as_ref(), &blocking_gaps);
+
+    let mut response = TraceNearAttestationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready,
+        evidence_hash,
+        expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
+        outcome,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "near_attestation".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .map_err(internal_error)?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn near_attestation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceNearAttestationDrillRequest>,
+) -> ApiResult<Json<TraceNearAttestationDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_near_attestation_drill(state.as_ref(), &tenant, request).await?;
+    Ok(Json(response))
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "submit_status",
     "tenant_canary_isolation",
@@ -72718,6 +72981,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "benchmark_pipeline",
     "ranking_model_readiness",
     "credit_settlement",
+    "near_attestation",
     "object_primary_reads",
     "object_store_migration",
     "postgres_rls_readiness",
@@ -72725,6 +72989,33 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "object_deletion_refs",
     "worker_queue_invalidation",
 ];
+/// Checks that are required only when the surface they cover is in use.
+///
+/// `near_attestation` proves the NEAR AI inference endpoint is the enclave we
+/// pinned. A deployment that routes no inference through NEAR AI has nothing
+/// for it to prove, and holding a permanently red required check over such a
+/// deployment teaches operators to ignore red checks -- which is the failure
+/// this whole surface exists to prevent.
+///
+/// This keys on **whether the surface is configured at all**, never on the
+/// drill's result. A deployment that does use NEAR AI cannot opt out of a red
+/// drill; there is no allow-list, no severity dial and no acknowledgement
+/// flag. That distinction is the whole of it.
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] = &["near_attestation"];
+
+/// The required checks for a deployment, given which conditional surfaces it
+/// has configured.
+fn rollout_smoke_required_checks(near_attestation_configured: bool) -> Vec<&'static str> {
+    TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        .iter()
+        .copied()
+        .filter(|check| {
+            !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check)
+                || (*check == "near_attestation" && near_attestation_configured)
+        })
+        .collect()
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -72944,6 +73235,11 @@ struct TraceOperationalRolloutSmokeSummary {
     failed_evidence_count: usize,
     stale_evidence_count: usize,
     required_checks: Vec<String>,
+    /// Conditional checks this deployment does not require, and why they are
+    /// absent from `required_checks`. Reported rather than silently omitted:
+    /// a check that vanished from the list without a word would be
+    /// indistinguishable from one that was quietly dropped.
+    not_applicable_checks: Vec<String>,
     passed_evidence_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     failed_evidence_checks: Vec<String>,
@@ -72956,16 +73252,26 @@ impl TraceOperationalRolloutSmokeSummary {
         promotion_gates: &TraceOperationalPromotionGateSummary,
         evidence: &[TraceRolloutSmokeEvidenceResponse],
         generated_at: DateTime<Utc>,
+        near_attestation_configured: bool,
     ) -> Self {
-        let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        let applicable = rollout_smoke_required_checks(near_attestation_configured);
+        let required_checks = applicable
             .iter()
             .map(|check| (*check).to_string())
             .collect::<Vec<_>>();
-        let latest_evidence_by_check =
-            latest_rollout_smoke_evidence_map(evidence.iter().filter(|record| {
-                TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
-                    .contains(&record.check_name.as_str())
-            }));
+        let not_applicable_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+            .iter()
+            .filter(|check| !applicable.contains(check))
+            .map(|check| (*check).to_string())
+            .collect::<Vec<_>>();
+        // Evidence for a check this deployment does not require must not
+        // count towards stale or failed either -- it is not a gap, and
+        // counting it would reintroduce the red check by another route.
+        let latest_evidence_by_check = latest_rollout_smoke_evidence_map(
+            evidence
+                .iter()
+                .filter(|record| applicable.contains(&record.check_name.as_str())),
+        );
         let stale_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
@@ -73045,6 +73351,7 @@ impl TraceOperationalRolloutSmokeSummary {
             failed_evidence_count: failed_evidence_checks.len(),
             stale_evidence_count: stale_evidence_checks.len(),
             required_checks,
+            not_applicable_checks,
             passed_evidence_checks,
             missing_evidence_checks,
             failed_evidence_checks,

@@ -1,0 +1,1671 @@
+{
+  "steps": [
+    {
+      "type": "CORTEX_STEP_TYPE_USER_INPUT",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "createdAt": "2026-08-29T10:13:36.119719Z",
+        "source": "CORTEX_STEP_SOURCE_USER_EXPLICIT",
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:36.159372Z"
+            }
+          ]
+        }
+      },
+      "userInput": {
+        "items": [
+          {
+            "text": "Tell me about this repo"
+          }
+        ],
+        "userResponse": "Tell me about this repo",
+        "activeUserState": {},
+        "userConfig": {
+          "plannerConfig": {
+            "conversational": {
+              "plannerMode": "CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+              "agenticMode": true
+            },
+            "customizationDiscoveryConfig": {
+              "profiles": {
+                "activeProfile": "",
+                "enablePersonal": true
+              }
+            },
+            "toolConfig": {
+              "runCommand": {
+                "autoCommandConfig": {
+                  "autoExecutionPolicy": "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER"
+                }
+              },
+              "notifyUser": {
+                "artifactReviewMode": "ARTIFACT_REVIEW_MODE_TURBO"
+              },
+              "permissionConfig": {
+                "defaultGrants": {
+                  "ask": [
+                    "read_url(*)"
+                  ]
+                }
+              }
+            },
+            "requestedModel": {
+              "model": "MODEL_PLACEHOLDER_M298"
+            },
+            "knowledgeConfig": {
+              "enabled": true
+            }
+          },
+          "conversationHistoryConfig": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_CONVERSATION_HISTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "createdAt": "2026-08-29T10:13:36.160533Z",
+        "startedAt": "2026-08-29T10:13:36.160761Z",
+        "completedAt": "2026-08-29T10:13:36.161025Z",
+        "source": "CORTEX_STEP_SOURCE_SYSTEM",
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 1,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:36.160534Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:36.160899Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:36.161026Z"
+            }
+          ]
+        }
+      },
+      "conversationHistory": {}
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_KNOWLEDGE_ARTIFACTS",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "createdAt": "2026-08-29T10:13:36.160668Z",
+        "startedAt": "2026-08-29T10:13:36.161204Z",
+        "completedAt": "2026-08-29T10:13:36.161385Z",
+        "source": "CORTEX_STEP_SOURCE_SYSTEM",
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 2,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:36.160669Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:36.161272Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:36.161386Z"
+            }
+          ]
+        }
+      },
+      "knowledgeArtifacts": {}
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:36.162448Z",
+        "viewableAt": "2026-08-29T10:13:37.722363Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:37.840861Z",
+        "startedAt": "2026-08-29T10:13:37.840861Z",
+        "completedAt": "2026-08-29T10:13:37.840861Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "28221",
+          "outputTokens": "173",
+          "thinkingOutputTokens": "125",
+          "responseOutputTokens": "48",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 3,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:37.722382Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:37.840865Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_304828",
+            "name": "list_dir",
+            "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server\",\"toolAction\":\"Listing root directory\",\"toolSummary\":\"List root files\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "list_dir"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_LIST_DIRECTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:37.722755Z",
+        "viewableAt": "2026-08-29T10:13:37.840100Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:37.840100Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:37.840094Z",
+        "startedAt": "2026-08-29T10:13:37.841451Z",
+        "completedAt": "2026-08-29T10:13:37.842727Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_304828",
+          "name": "list_dir",
+          "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server\",\"toolAction\":\"Listing root directory\",\"toolSummary\":\"List root files\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "list_dir"
+        },
+        "argumentsOrder": [
+          "DirectoryPath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 33,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 4,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:37.840117Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:37.841851Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:37.844340Z"
+            }
+          ]
+        },
+        "toolSummary": "List root files",
+        "toolAction": "Listing root directory"
+      },
+      "listDirectory": {
+        "directoryPathUri": "file:///Users/anonymized/code/trace-commons-server",
+        "results": [
+          {
+            "name": ".claude",
+            "isDir": true
+          },
+          {
+            "name": ".gcloudignore",
+            "sizeBytes": "566"
+          },
+          {
+            "name": ".git",
+            "isDir": true
+          },
+          {
+            "name": ".gitattributes",
+            "sizeBytes": "1100"
+          },
+          {
+            "name": ".github",
+            "isDir": true
+          },
+          {
+            "name": ".gitignore",
+            "sizeBytes": "1700"
+          },
+          {
+            "name": ".linux-settings-bucket.png",
+            "sizeBytes": "56664"
+          },
+          {
+            "name": ".linux-settings-ordinary.png",
+            "sizeBytes": "55754"
+          },
+          {
+            "name": ".superpowers",
+            "isDir": true
+          },
+          {
+            "name": ".worktrees",
+            "isDir": true
+          },
+          {
+            "name": "CLAUDE.md",
+            "sizeBytes": "9294"
+          },
+          {
+            "name": "Cargo.lock",
+            "sizeBytes": "220681"
+          },
+          {
+            "name": "Cargo.toml",
+            "sizeBytes": "1363"
+          },
+          {
+            "name": "LICENSE",
+            "sizeBytes": "146"
+          },
+          {
+            "name": "LICENSE-APACHE",
+            "sizeBytes": "9157"
+          },
+          {
+            "name": "LICENSE-MIT",
+            "sizeBytes": "1108"
+          },
+          {
+            "name": "NOTICE",
+            "sizeBytes": "249"
+          },
+          {
+            "name": "README.md",
+            "sizeBytes": "21680"
+          },
+          {
+            "name": "assets",
+            "isDir": true
+          },
+          {
+            "name": "cloudbuild.yaml",
+            "sizeBytes": "3564"
+          },
+          {
+            "name": "community",
+            "isDir": true
+          },
+          {
+            "name": "crates",
+            "isDir": true
+          },
+          {
+            "name": "deploy",
+            "isDir": true
+          },
+          {
+            "name": "docs",
+            "isDir": true
+          },
+          {
+            "name": "imports",
+            "isDir": true
+          },
+          {
+            "name": "macos",
+            "isDir": true
+          },
+          {
+            "name": "migrations",
+            "isDir": true
+          },
+          {
+            "name": "scripts",
+            "isDir": true
+          },
+          {
+            "name": "target",
+            "isDir": true
+          },
+          {
+            "name": "tests",
+            "isDir": true
+          },
+          {
+            "name": "windows",
+            "isDir": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_CHECKPOINT",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "createdAt": "2026-08-29T10:13:37.848922Z",
+        "startedAt": "2026-08-29T10:13:37.849359Z",
+        "completedAt": "2026-08-29T10:13:38.668616Z",
+        "source": "CORTEX_STEP_SOURCE_SYSTEM",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M50",
+          "inputTokens": "97",
+          "outputTokens": "3",
+          "responseOutputTokens": "3",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "retryInfos": [
+          {
+            "usage": {
+              "model": "MODEL_PLACEHOLDER_M50",
+              "inputTokens": "97",
+              "outputTokens": "3",
+              "responseOutputTokens": "3",
+              "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+              "responseHeader": {
+                "sessionID": "REDACTED-SESSIONID"
+              },
+              "responseId": "REDACTED-RESPONSEID"
+            }
+          }
+        ],
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 5,
+          "metadataIndex": 1,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:37.848926Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:37.849604Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:38.668620Z"
+            }
+          ]
+        }
+      },
+      "checkpoint": {
+        "intentOnly": true,
+        "includedStepIndexEnd": 5,
+        "userIntent": "Repository Overview Request",
+        "conversationLogUris": [
+          "file:///Users/anonymized/.gemini/antigravity-ide/brain/39f32a85-508b-430a-98fb-a67e89b4e689/.system_generated/logs/transcript.jsonl"
+        ],
+        "userRequests": [
+          "Tell me about this repo"
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:37.850992Z",
+        "viewableAt": "2026-08-29T10:13:39.064938Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:39.076608Z",
+        "startedAt": "2026-08-29T10:13:39.076608Z",
+        "completedAt": "2026-08-29T10:13:39.076608Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "4426",
+          "outputTokens": "95",
+          "thinkingOutputTokens": "41",
+          "responseOutputTokens": "54",
+          "cacheReadTokens": "24489",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 6,
+          "metadataIndex": 1,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:39.064952Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:39.076745Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_428501",
+            "name": "view_file",
+            "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/Cargo.toml\",\"toolAction\":\"Viewing Cargo.toml\",\"toolSummary\":\"View workspace Cargo.toml\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "view_file"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:39.065399Z",
+        "viewableAt": "2026-08-29T10:13:39.076350Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:39.076350Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:39.076346Z",
+        "startedAt": "2026-08-29T10:13:39.076639Z",
+        "completedAt": "2026-08-29T10:13:39.080193Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_428501",
+          "name": "view_file",
+          "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/Cargo.toml\",\"toolAction\":\"Viewing Cargo.toml\",\"toolSummary\":\"View workspace Cargo.toml\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "view_file"
+        },
+        "argumentsOrder": [
+          "AbsolutePath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 37,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 7,
+          "metadataIndex": 1,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:39.076357Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:39.076833Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:39.080198Z"
+            }
+          ]
+        },
+        "toolSummary": "View workspace Cargo.toml",
+        "toolAction": "Viewing Cargo.toml"
+      },
+      "viewFile": {
+        "absolutePathUri": "file:///Users/anonymized/code/trace-commons-server/Cargo.toml",
+        "endLine": 33,
+        "content": "[workspace]\nmembers = [\n    \"crates/trace-commons-build-info\",\n    \"crates/trace-commons-contributor\",\n    \"crates/trace-commons-contributor-ffi\",\n    \"crates/trace-commons-gate-api\",\n    \"crates/trace-commons-gate-enclave\",\n    \"crates/trace-commons-mark\",\n    \"crates/trace-commons-operator-client\",\n    \"crates/trace-commons-protocol\",\n    \"crates/trace-commons-server\",\n]\n# The Linux contributor shell is its own workspace. Excluding it keeps the\n# GTK dependency tree out of this lockfile, and keeps a `cargo check` here\n# from depending on GTK 4 and libadwaita being installed.\n#\n# It does NOT mean the shell cannot be built on macOS: with Homebrew's gtk4\n# and libadwaita present it builds and its whole test suite runs there. The\n# comment here used to say it could not, which is worth correcting rather\n# than deleting -- believing it meant the crate went unbuilt and unchecked\n# by anyone developing on a Mac, and it drifted accordingly.\n#\n# Being outside this workspace also puts it outside `cargo fmt --all` and the\n# root clippy job, so ci.yml runs both against its own manifest explicitly.\n# Build it with scripts/linux-build.sh.\nexclude = [\"crates/trace-commons-contributor-gtk\"]\nresolver = \"2\"\n\n[workspace.package]\nedition = \"2024\"\nrust-version = \"1.92\"\nlicense = \"MIT OR Apache-2.0\"\nrepository = \"https://github.com/zmanian/trace-commons-server\"\n",
+        "lineRangeBytes": 1363,
+        "numLines": 34,
+        "numBytes": 1363
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:39.082608Z",
+        "viewableAt": "2026-08-29T10:13:53.308775Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:53.452313Z",
+        "startedAt": "2026-08-29T10:13:53.452313Z",
+        "completedAt": "2026-08-29T10:13:53.452313Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "5206",
+          "outputTokens": "97",
+          "thinkingOutputTokens": "23",
+          "responseOutputTokens": "74",
+          "cacheReadTokens": "24483",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 8,
+          "metadataIndex": 2,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:53.308789Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:53.452315Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_307594",
+            "name": "view_file",
+            "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/CLAUDE.md\",\"EndLine\":200,\"StartLine\":1,\"toolAction\":\"Viewing CLAUDE.md\",\"toolSummary\":\"View project instructions in CLAUDE.md\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "view_file"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:53.309020Z",
+        "viewableAt": "2026-08-29T10:13:53.452014Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:53.452013Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:53.452006Z",
+        "startedAt": "2026-08-29T10:13:53.452458Z",
+        "completedAt": "2026-08-29T10:13:53.456235Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_307594",
+          "name": "view_file",
+          "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/CLAUDE.md\",\"EndLine\":200,\"StartLine\":1,\"toolAction\":\"Viewing CLAUDE.md\",\"toolSummary\":\"View project instructions in CLAUDE.md\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "view_file"
+        },
+        "argumentsOrder": [
+          "AbsolutePath",
+          "EndLine",
+          "StartLine",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 47,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 9,
+          "metadataIndex": 2,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:53.452021Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:53.452616Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:53.456240Z"
+            }
+          ]
+        },
+        "toolSummary": "View project instructions in CLAUDE.md",
+        "toolAction": "Viewing CLAUDE.md"
+      },
+      "viewFile": {
+        "absolutePathUri": "file:///Users/anonymized/code/trace-commons-server/CLAUDE.md",
+        "endLine": 175,
+        "content": "# Repository Guidance \u2014 trace-commons-server\n\nThis file pins repo-specific facts that override the global CLAUDE.md guidance.\n\n## What this repo is\n\n`trace-commons-server` is the **standalone hosted server-side control plane for\nTrace Commons / TraceCommons**. It is no longer part of Ironclaw \u2014 extracted from\nIronclaw's `gecko-pass` worktree and now owns its own database schema, object\nstorage, encrypted artifact store, upload-claim issuer, and shared protocol\ncrate. Ironclaw should depend on `crates/trace-commons-protocol` when the\nclient-side integration is rewired, but it does not live in this tree.\n\nThere is **no Ironclaw path dependency**. Do not look for one. Do not propose\nadding one.\n\n## Database backend\n\nThis repo is **PostgreSQL-only**. There is no libsql build configuration.\n\nThe global CLAUDE.md guidance to \"verify ALL relevant feature flags compile\ncleanly (e.g., both postgres and libsql builds)\" does **not** apply here. A\nsingle `cargo check -p trace-commons-server` is sufficient. Do not add libsql\nfeature flags, do not propose dual-backend testing, do not run libsql-specific\nverification.\n\n## Where to look\n\n- `README.md` \u2014 current phase status, open production gaps, operator promotion\n  checklist. Lead with this when orienting on the repo.\n- `docs/trace-commons.md` \u2014 envelope contract and threat model (authoritative).\n- `docs/trace-commons-storage.md` \u2014 storage contract (authoritative).\n- `docs/trace-commons-roadmap.md` \u2014 the production-gap queue and phase plan.\n- `docs/superpowers/specs/` \u2014 per-slice design specs.\n- `docs/superpowers/plans/` \u2014 per-slice implementation plans.\n- `docs/operator/README.md` \u2014 operator runbook index. Current runbooks:\n  A2.6 result handler, pilot-bootstrap first-100-traces, HF cache hygiene,\n  GPU cost ledger.\n\nWhen in doubt about what to build next, read the **\"Production Gap Queue\"**\nsection of the roadmap.\n\n## Binaries\n\n- `trace-commons-ingest` \u2014 hosted ingest / review / admin / worker API.\n- `trace-commons-upload-claim-issuer` \u2014 EdDSA/Ed25519 upload-claim issuer.\n- `trace-commons-gate-calibrate` \u2014 calibration tooling. Subcommands include\n  `tail-floor --sidecar <path> --db-url <url> --percentile <n>` for tail-floor\n  calibration, and the scorer flags `--scorer perplexity|token-rarity|both`\n  with `--token-rarity-k <N>` for per-token rarity. The real-scorer path\n  (`LocalPerplexityScorer`) is deferred at `BakeoffRealRarityNotImplemented`\n  pending A.5a.\n\n## Local development\n\n```bash\nRUSTFLAGS=\"-D warnings\" cargo check -p trace-commons-server --bins\nRUSTFLAGS=\"-D warnings\" cargo test -p trace-commons-server --no-run\ncargo clippy -p trace-commons-server --all-targets -- \\\n  -A clippy::type_complexity -A clippy::collapsible_if \\\n  -A clippy::manual_option_as_slice -A clippy::useless_vec \\\n  -A clippy::redundant_pattern_matching\ncargo test -p trace-commons-server --test trace_corpus_storage_contract\ncargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL\n```\n\nCI applies `RUSTFLAGS=-D warnings` to check + test, so plain `cargo check`\nwill not catch what CI catches. Always use the `RUSTFLAGS` form locally\nbefore claiming green. Clippy is CI-enforced \u2014 run it locally too.\n\nThe protocol crate is `crates/trace-commons-protocol`; the server crate is\n`crates/trace-commons-server`. Migrations live in `migrations/`.\n\n## CI\n\nEvery job in `.github/workflows/ci.yml` gates every PR. There are sixteen\nas of 2026-08-25; the list below covers the long-standing ones and is not\na full inventory -- read the workflow for that. (It said \"nine\" while the\nfile held fifteen, so treat any count here as stale until re-checked.)\n\n- `cargo fmt --check` \u2014 runs `cargo fmt --all -- --check`. Run `cargo fmt --all`\n  before committing.\n- `cargo clippy` with the allow-list above (`-A clippy::type_complexity\n  -A clippy::collapsible_if -A clippy::manual_option_as_slice\n  -A clippy::useless_vec -A clippy::redundant_pattern_matching`). Do not\n  widen the allow-list without explicit approval.\n- `cargo check (default features)` (with `RUSTFLAGS=-D warnings`).\n- `cargo check (local-gpu-models, non-CUDA)` (with `RUSTFLAGS=-D warnings`).\n  Note this feature IS checked in CI even though it cannot link locally without\n  a CUDA toolchain \u2014 a change that only compiles under default features will\n  fail here.\n- `cargo check (near-ai-scorer)` (with `RUSTFLAGS=-D warnings`). This is the\n  configuration the pilot builds.\n- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).\n- `pilot-bootstrap smoke` \u2014 `scripts/operator/pilot-bootstrap-smoke.sh`,\n  exercising the JSONL loader path. Do not break it.\n- `operator-binaries smoke`.\n- `macOS app tests` \u2014 `swift test` in `macos/`, on `macos-26`. The only\n  thing that runs the Swift suite; before it existed those tests gated\n  nothing. Needs `cargo build -p trace-commons-contributor-ffi` first,\n  because the Swift package links that dylib.\n- `windows named-pipe ACL` \u2014 the only `windows-latest` job. Runs\n  `scripts/windows/verify-pipe-acl.ps1`, which creates a second,\n  non-administrator local account and requires it to be denied when opening\n  the contributor daemon's named pipe. That DACL is the sole access control\n  on the daemon IPC socket on Windows, and it is not observable from a\n  cross-compile, so this job is the only thing standing behind the claim\n  that it works. Do not weaken it to a smoke test.\n\nGitHub Actions runners are on Node 24; pinned actions are\n`actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold\nthose versions unless intentionally upgrading.\n\n## Conventions specific to this repo\n\n- **Hash-only audit and logging.** Audit rows, error logs, and operational\n  surfaces are hash-only or label-only. Never include raw URLs, bearer tokens,\n  ARNs, account references, transaction hashes, contributor identity, trace\n  bodies, or any operator-secret material in stored rows or log strings.\n- **Fail-closed by default.** When a required gate is configured but its\n  dependency is missing, refuse the path with a safe missing-control name.\n  Never silently fall back to plaintext or to a less-restricted backend.\n- **Tenant scoping.** Every read/write path must be driven by auth-derived\n  tenant + actor context. Envelope tenant fields are attribution only.\n- **PostgreSQL RLS is forced** on every Trace Commons table. Tenant predicates\n  go through `trace_current_tenant_id()`; the raw pool is restricted.\n- **No emojis in commits, PRs, code, or reports.** Match the existing commit\n  style (short imperative subjects without `feat:` / `fix:` prefixes).\n- **Gate contracts live in `trace-commons-gate-api`.** Traits, result types, and\n  decision types belong there; scoring implementations do not. Code that holds a\n  scorer, embedder, or vector index must hold it as a trait object, never as a\n  concrete type \u2014 a proprietary backend substitutes at that seam, and a concrete\n  type cannot participate in one. The `Reference*` implementations in that crate\n  are real but deliberately simple and uncalibrated; the `Mock*` types in\n  `trace-commons-gate-enclave` are hash-derived test doubles and must never gate\n  anything. See `crates/trace-commons-gate-api/README.md`.\n\n## Working with this codebase\n\n- Files have grown large (e.g. `bin/trace-commons-ingest.rs` is huge). Do not\n  unilaterally split files unless a spec asks for it. Add new modules beside\n  existing code when possible.\n- Worker routes follow a consistent auth pattern \u2014 find an existing handler\n  and copy its shape rather than inventing a new one.\n- Worker-route credentials are scoped: utility, review, retention, vector,\n  benchmark, process-evaluation, revocation, export, and revocation-propagation\n  each have their own bearer-token gate. Do not mix them.\n- Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke\n  required checks. When you add a drill, wire it into the smoke evidence path.\n- `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is ~61k LOC of\n  production code. Its ~60k LOC test module has been extracted to a sibling\n  file via `#[cfg(test)] #[path = \"trace_commons_ingest_internal/tests.rs\"] mod\n  tests;`. Reuse this pattern if other binaries need the same split; do not\n  inline the tests back.\n- Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were\n  removed; do not reintroduce them. See\n  `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.\n\n## Known gotchas\n\n- Plain `cargo check` does not apply `-D warnings`; CI does. Always verify\n  with `RUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins` and\n  `RUSTFLAGS='-D warnings' cargo test -p trace-commons-server --no-run` before\n  claiming green. Dead-code and warning regressions slip through plain\n  `cargo check`.\n- Pilot-bootstrap loader streams JSONL session files; parquet support was\n  removed. See `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.\n- `trace-commons-ingest.rs` test module is extracted to\n  `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`.\n\n## Memory\n\nPersistent memory for this project is under\n`~/.claude/projects/-Users-anonymized-code-trace-commons-server/memory/`. Check it\non session start for any project-specific facts not captured here.\n",
+        "lineRangeBytes": 9294,
+        "numLines": 176,
+        "numBytes": 9294
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:53.458556Z",
+        "viewableAt": "2026-08-29T10:13:56.731582Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:56.747795Z",
+        "startedAt": "2026-08-29T10:13:56.747795Z",
+        "completedAt": "2026-08-29T10:13:56.747795Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "4557",
+          "outputTokens": "91",
+          "thinkingOutputTokens": "26",
+          "responseOutputTokens": "65",
+          "cacheReadTokens": "28566",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 10,
+          "metadataIndex": 3,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:56.731590Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:56.747796Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_473259",
+            "name": "view_file",
+            "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/README.md\",\"EndLine\":250,\"StartLine\":1,\"toolAction\":\"Viewing README.md\",\"toolSummary\":\"View README.md\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "view_file"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:56.731791Z",
+        "viewableAt": "2026-08-29T10:13:56.747555Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:56.747555Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:56.747549Z",
+        "startedAt": "2026-08-29T10:13:56.747894Z",
+        "completedAt": "2026-08-29T10:13:56.751329Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_473259",
+          "name": "view_file",
+          "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/README.md\",\"EndLine\":250,\"StartLine\":1,\"toolAction\":\"Viewing README.md\",\"toolSummary\":\"View README.md\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "view_file"
+        },
+        "argumentsOrder": [
+          "AbsolutePath",
+          "EndLine",
+          "StartLine",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 41,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 11,
+          "metadataIndex": 3,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:56.747563Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:56.748055Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:56.751333Z"
+            }
+          ]
+        },
+        "toolSummary": "View README.md",
+        "toolAction": "Viewing README.md"
+      },
+      "viewFile": {
+        "absolutePathUri": "file:///Users/anonymized/code/trace-commons-server/README.md",
+        "endLine": 249,
+        "content": "# TraceCommons\n\n**A user-owned register of AI agent work.**\n\nWhen an AI agent does work for someone, it leaves a record of what actually\nhappened: the tools it called, the places it failed, the result it gave back.\nThat record is becoming valuable. The companies building the next generation\nof agents need millions of those records to train against, and most of them\nlive inside private user sessions today \u2014 collected unilaterally by whoever\nruns the model, on terms the user never specifically agreed to.\n\nTraceCommons keeps the record under the contributor's control. Capture and\nscrubbing both happen on the user's machine; only the scrubbed version moves\nto a shared server, where two checks decide whether the record is worth\nkeeping. One asks whether the record is genuinely different from everything\nalready filed. The other asks whether it is substantive work rather than\ntemplate-shaped filler. Both must pass. Accepted records are signed, dated,\nand filed into a register. Frontier labs, auditors, and regulators can query\nthe register under selective disclosure; they see what they need, and the\nrest stays encrypted.\n\nA **Trace Credit** is the signed, on-chain record that one of a contributor's\nsubmissions was accepted into the register. Credits are how recognition flows\nback when buyers later pay to query the evidence. They are non-transferable.\n\nThe contract is \"local-first, opt-in, scrub before upload\":\n\n- Trace contribution is **off by default**. Raw traces stay on the user's\n  device unless they explicitly opt in.\n- Uploads carry only `ironclaw.trace_contribution.v1` envelopes \u2014 text and\n  tool payloads are stripped or replaced with stable placeholders during\n  local deterministic scrubbing.\n- The server gates incoming envelopes on **two** axes \u2014 novelty against the\n  existing register and substantive-work signal against a frontier model.\n  In Phase A this runs on regular GPU hardware in NEAR AI's TEE-hosted vLLM;\n  the Phase B milestone moves scoring inside attested hardware that even the\n  operators of the server cannot read.\n- Accepted, settled records mint **Trace Credits** through a hash-only\n  utility-attestation pipeline. Credits are non-transferable, bound to\n  reviewed evidence, and settle on-chain via NEAR; uploads alone don't pay.\n\nThis repository \u2014 `trace-commons-server` \u2014 is the hosted control plane:\ningest, review, retention, revocation, encrypted artifact storage,\nupload-claim issuing, audit chain, and credit settlement. It also ships\n`trace-commons-contributor`, a standalone CLI contributors run on their own\nmachine to discover, locally redact, and submit Claude Code / Codex\nsession traces. Ironclaw is a separate, TEE-hosted trace source with its\nown client integration; the shared protocol DTOs live in\n`crates/trace-commons-protocol`.\n\n## Status: Pilot Deployment\n\nTraceCommons is **in pilot deployment as of May 2026**. What that means\nconcretely:\n\n| Component | State |\n|---|---|\n| Hosted server (this repo) | Phase A code-complete, smoke-validated, deployable. |\n| Scoring backend | **NEAR AI Cloud** (TEE-hosted vLLM, Intel TDX + NVIDIA GPU TEE) \u2014 chosen so a pilot host needs no local CUDA stack. Smoke-validated against `Qwen3.6-35B-A3B-FP8`. |\n| Gate floors | Recalibration against the hosted model is required before first contributor traffic \u2014 see [`docs/operator/a27-perplexity-floor-calibration.md`](docs/operator/a27-perplexity-floor-calibration.md). |\n| Contributor gate | Invite-code allowlist on the upload-claim issuer; off by default, enabled for the pilot \u2014 see [`docs/operator/pilot-allowlist.md`](docs/operator/pilot-allowlist.md). |\n| KMS / KEK | Cloud KMS (GCP first) with envelope-encrypted per-object DEKs. Phase A trust boundary. |\n| TEE trust upgrade | Phase B \u2014 move the gate service into an attested dstack enclave once dstack-GPU primitives stabilize. The current KEK boundary is honestly weaker than the Phase B target; this is documented, not papered over. |\n| Contributor client | `trace-commons-contributor` (this repo) is available for direct human contributors: `login`, `submit`, `status`, `whoami`, `logout`, `mint-grant`. Ironclaw integration (a TEE-hosted trace source) is separate, ongoing work. The `trace-commons-pilot-bootstrap` binary stands in as a load-generation harness against real HF agent-traces sessions so calibration and end-to-end validation can proceed without either. |\n| Credits | Settlement, hash-only attestation pipeline, central-issuer ABAC, NEAR receipt outbox \u2014 all in. Credit-bearing routes are gated by a central-issuer principal allowlist. |\n\nPilot intentionally **scopes down** from the original design: regular GPU\nhardware (in NEAR AI's TEE) instead of an attested local enclave; cloud\nKMS as the KEK; a single calibrated model rather than per-tenant selection.\nPhase B narrows the trust gap; Phase A proves the path with operators.\n\nThe full phasing and open work queue lives in\n[`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md). Per-slice\ndesign specs and implementation plans live under\n[`docs/superpowers/`](docs/superpowers/).\n\n## Architecture\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  Ironclaw client   \u2502    \u2502  trace-commons-    \u2502    \u2502  NEAR AI Cloud   \u2502\n\u2502  (separate repo)   \u2502\u2500\u2500\u2500\u25b6\u2502  ingest (this repo)\u2502\u2500\u2500\u2500\u25b6\u2502  (TEE-hosted vLLM\u2502\n\u2502  local redaction   \u2502    \u2502                    \u2502    \u2502   scoring)       \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518    \u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u2502    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                          \u2502  \u2502 gate-enclave \u2502  \u2502\n                          \u2502  \u2502  orchestrator\u2502  \u2502\n                          \u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2502\n                          \u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u2502    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n                          \u2502  \u2502  PostgreSQL  \u2502\u25c0\u2500\u253c\u2500\u2500\u2500\u25b6\u2502  Object storage  \u2502\n                          \u2502  \u2502  with RLS    \u2502  \u2502    \u2502  (GCS, FS, local)\u2502\n                          \u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2502    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                          \u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u2502    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n                          \u2502  \u2502  credit      \u2502\u2500\u2500\u253c\u2500\u2500\u2500\u25b6\u2502  NEAR receipt    \u2502\n                          \u2502  \u2502  settlement  \u2502  \u2502    \u2502  outbox          \u2502\n                          \u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2502    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                          \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\nAuthoritative contracts to read before changing anything substantive:\n\n- [`docs/trace-commons.md`](docs/trace-commons.md) \u2014 envelope contract and\n  threat model\n- [`docs/trace-commons-storage.md`](docs/trace-commons-storage.md) \u2014 storage\n  contract\n- [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md) \u2014 phased\n  open work and \"Production Gap Queue\"\n- [`docs/contributor-daemon-ipc-v1_1.md`](docs/contributor-daemon-ipc-v1_1.md) \u2014\n  IPC contract between the contributor background daemon and the native\n  menu-bar and window applications\n\n## Repository Layout\n\n```\ncrates/\n\u251c\u2500\u2500 trace-commons-protocol/      DTOs + redaction helpers shared with the client.\n\u251c\u2500\u2500 trace-commons-gate-api/      Public gate contracts plus the reference scorer.\n\u251c\u2500\u2500 trace-commons-gate-enclave/  Scoring orchestrator (perplexity, embedder, vector index).\n\u2502                                Two real perplexity backends: mistralrs (local CUDA,\n\u2502                                feature `local-gpu-models`) and NEAR AI Cloud HTTP\n\u2502                                (feature `near-ai-scorer`).\n\u251c\u2500\u2500 trace-commons-contributor/   Contributor-facing CLI: login, list, submit, status,\n\u2502                                whoami, logout, mint-grant. See its own README.\n\u2514\u2500\u2500 trace-commons-server/        All hosted binaries.\n    \u2514\u2500\u2500 src/bin/\n        \u251c\u2500\u2500 trace-commons-ingest                 Hosted ingest / review / admin / worker API.\n        \u251c\u2500\u2500 trace-commons-upload-claim-issuer    EdDSA/Ed25519 upload-claim issuer.\n        \u251c\u2500\u2500 trace-commons-gate-calibrate         Offline calibration + model bake-off.\n        \u251c\u2500\u2500 trace-commons-pilot-bootstrap        HF agent-traces load generator for pilot.\n        \u2514\u2500\u2500 trace-commons-vector-replay          Vector-index replay tool.\n\nmigrations/                      PostgreSQL schema.\ndocs/\n\u251c\u2500\u2500 trace-commons.md, trace-commons-storage.md, trace-commons-roadmap.md  Authoritative contracts.\n\u251c\u2500\u2500 operator/                    Operator runbooks (per slice).\n\u2514\u2500\u2500 superpowers/                 Per-slice design specs + implementation plans.\n.github/workflows/ci.yml         CI gates.\n```\n\n## Getting Started\n\n### Build + Test\n\n```bash\n# Minimum: default-features build + tests (no GPU, no external scoring)\ncargo check -p trace-commons-server --bins\ncargo test  -p trace-commons-server\n\n# With the NEAR AI scoring backend (pilot configuration)\ncargo check -p trace-commons-server --bins --features near-ai-scorer\n\n# With local CUDA scoring (mistralrs; needs CUDA toolchain for the cuda subfeature)\ncargo check -p trace-commons-server --bins --features local-gpu-models\n```\n\nCI applies `RUSTFLAGS=-D warnings` to every cargo invocation, so warnings\nfail the build. To catch what CI catches before pushing:\n\n```bash\nRUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins\nRUSTFLAGS='-D warnings' cargo test  -p trace-commons-server --no-run\ncargo clippy -p trace-commons-server --all-targets -- \\\n  -D warnings \\\n  -A clippy::type_complexity -A clippy::collapsible_if \\\n  -A clippy::manual_option_as_slice -A clippy::useless_vec \\\n  -A clippy::redundant_pattern_matching\ncargo fmt --all -- --check\n```\n\nPostgreSQL integration tests require a live database; export\n`TRACE_COMMONS_PG_TEST_DATABASE_URL` and run:\n\n```bash\ncargo test -p trace-commons-server --test trace_corpus_pg_store\n```\n\n### Contributor CLI\n\nSigned binaries are published per release, so contributors do not need this\nrepository or a Rust toolchain. https://tracecommons.ai/install/ is the fuller\nguide, including how to verify a download by hand; the short form follows.\n\nOn macOS or Linux, the installer script works out which build you need,\nverifies it, and puts it in `~/.local/bin` \u2014 no `sudo`, nothing outside your\nhome directory:\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh\nsh install.sh\n```\n\nIt refuses to install anything it cannot verify: the published checksum has to\nmatch, and on macOS the signature has to be valid *and* name our Developer ID.\nThere is no flag to skip either check. `--dir <path>` (or `TC_INSTALL_DIR`)\npicks a different destination, and `TC_VERSION=<x.y.z>` pins a release instead\nof resolving the newest `contributor-v*` tag.\n\nOn macOS, from the Homebrew tap instead:\n\n```bash\nbrew tap TraceCommons/tap\nbrew trust tracecommons/tap          # Homebrew refuses untrusted third-party taps\nbrew install trace-commons-contributor\n```\n\nOn Windows, in PowerShell \u2014 same verification policy, installs to\n`%LOCALAPPDATA%\\Programs\\TraceCommons` and appends it to your user `PATH`, so\nreopen the terminal afterwards:\n\n```powershell\nirm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1\n.\\install.ps1\n```\n\nOtherwise take a binary from the [current CLI release][releases]: macOS on both\narchitectures and Windows on x86_64 are code-signed \u2014 Developer ID and notarized,\nAuthenticode and RFC3161-timestamped respectively \u2014 and the Linux x86_64 binary\nis not signed, so use the published checksum beside it. Follow that link rather\nthan GitHub's \"latest release\": CLI releases are tagged `contributor-v*` and\ndesktop-app releases `app-v*`, so \"latest\" is whichever stream was cut most\nrecently \u2014 today `contributor-v0.4.6` and `app-v0.4.6` were cut minutes apart, and\nan app tag carries no CLI binary.\n\nConfirm the install with:\n\n```bash\ntrace-commons-contributor --version\n```\n\nThe desktop app ships as a universal notarized DMG\n(`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows\nas a self-contained Authenticode-signed zip \u2014 unpack it and run\n`TraceCommons.exe`; the .NET runtime and Windows App SDK are inside, so there is\nnothing to install first. https://docs.tracecommons.ai/cli/quickstart/ is the\nfuller guide.\n\nTo build it from this checkout instead \u2014 necessary on any platform without a\npublished binary, Linux on arm64 for instance:\n\n```bash\ncargo build --release --bin trace-commons-contributor\n./target/release/trace-commons-contributor login\n```\n\n[releases]: https://github.com/TraceCommons/trace-commons/releases/tag/contributor-v0.4.6\n\nSee [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)\nfor the full quickstart, consent model, and subcommand reference. Consent is\nscope-based, not capped to a single default: the contributor requests\nscopes at login (interactive prompt or `--scopes`), the server clamps the\nrequest to the enrollment-stored instance-policy ceiling at claim-mint",
+        "lineRangeBytes": 13657,
+        "numLines": 434,
+        "numBytes": 21680
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:56.754760Z",
+        "viewableAt": "2026-08-29T10:13:58.147424Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:58.168870Z",
+        "startedAt": "2026-08-29T10:13:58.168870Z",
+        "completedAt": "2026-08-29T10:13:58.168870Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "4972",
+          "outputTokens": "94",
+          "thinkingOutputTokens": "43",
+          "responseOutputTokens": "51",
+          "cacheReadTokens": "32653",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 12,
+          "metadataIndex": 4,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:58.147435Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:58.168871Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_336610",
+            "name": "list_dir",
+            "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/crates\",\"toolAction\":\"Listing crates directory\",\"toolSummary\":\"List crates in workspace\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "list_dir"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_LIST_DIRECTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:58.147664Z",
+        "viewableAt": "2026-08-29T10:13:58.168572Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:58.168571Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:58.168565Z",
+        "startedAt": "2026-08-29T10:13:58.169026Z",
+        "completedAt": "2026-08-29T10:13:58.169436Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_336610",
+          "name": "list_dir",
+          "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/crates\",\"toolAction\":\"Listing crates directory\",\"toolSummary\":\"List crates in workspace\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "list_dir"
+        },
+        "argumentsOrder": [
+          "DirectoryPath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 37,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 13,
+          "metadataIndex": 4,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:58.168580Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:58.169212Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:58.169437Z"
+            }
+          ]
+        },
+        "toolSummary": "List crates in workspace",
+        "toolAction": "Listing crates directory"
+      },
+      "listDirectory": {
+        "directoryPathUri": "file:///Users/anonymized/code/trace-commons-server/crates",
+        "results": [
+          {
+            "name": "trace-commons-build-info",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-contributor",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-contributor-ffi",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-contributor-gtk",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-gate-api",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-gate-enclave",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-mark",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-operator-client",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-protocol",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-server",
+            "isDir": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:58.173223Z",
+        "viewableAt": "2026-08-29T10:13:59.438386Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:59.555732Z",
+        "startedAt": "2026-08-29T10:13:59.555732Z",
+        "completedAt": "2026-08-29T10:13:59.555732Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "37973",
+          "outputTokens": "85",
+          "thinkingOutputTokens": "35",
+          "responseOutputTokens": "50",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 14,
+          "metadataIndex": 5,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:13:59.438393Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:59.555734Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_278832",
+            "name": "list_dir",
+            "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/docs\",\"toolAction\":\"Listing docs directory\",\"toolSummary\":\"List docs files\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "list_dir"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_LIST_DIRECTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:59.438577Z",
+        "viewableAt": "2026-08-29T10:13:59.555386Z",
+        "finishedGeneratingAt": "2026-08-29T10:13:59.555386Z",
+        "lastCompletedChunkAt": "2026-08-29T10:13:59.555382Z",
+        "startedAt": "2026-08-29T10:13:59.555853Z",
+        "completedAt": "2026-08-29T10:13:59.556340Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_278832",
+          "name": "list_dir",
+          "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/docs\",\"toolAction\":\"Listing docs directory\",\"toolSummary\":\"List docs files\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "list_dir"
+        },
+        "argumentsOrder": [
+          "DirectoryPath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 34,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 15,
+          "metadataIndex": 5,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:13:59.555394Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:13:59.556071Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:13:59.556342Z"
+            }
+          ]
+        },
+        "toolSummary": "List docs files",
+        "toolAction": "Listing docs directory"
+      },
+      "listDirectory": {
+        "directoryPathUri": "file:///Users/anonymized/code/trace-commons-server/docs",
+        "results": [
+          {
+            "name": "collector-integration.md",
+            "sizeBytes": "9517"
+          },
+          {
+            "name": "contributor-daemon-ipc-v1_1.md",
+            "sizeBytes": "98053"
+          },
+          {
+            "name": "extraction-boundary.md",
+            "sizeBytes": "1696"
+          },
+          {
+            "name": "images",
+            "isDir": true
+          },
+          {
+            "name": "legal-counsel-review-checklist.md",
+            "sizeBytes": "7821"
+          },
+          {
+            "name": "operator",
+            "isDir": true
+          },
+          {
+            "name": "release-runbook.md",
+            "sizeBytes": "12076"
+          },
+          {
+            "name": "superpowers",
+            "isDir": true
+          },
+          {
+            "name": "trace-commons-roadmap.md",
+            "sizeBytes": "26176"
+          },
+          {
+            "name": "trace-commons-storage.md",
+            "sizeBytes": "170892"
+          },
+          {
+            "name": "trace-commons.md",
+            "sizeBytes": "79142"
+          },
+          {
+            "name": "trace-spec.md",
+            "sizeBytes": "31959"
+          },
+          {
+            "name": "upload-claim-issuer.md",
+            "sizeBytes": "12567"
+          }
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:13:59.560480Z",
+        "viewableAt": "2026-08-29T10:14:00.665960Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:00.788510Z",
+        "startedAt": "2026-08-29T10:14:00.788510Z",
+        "completedAt": "2026-08-29T10:14:00.788510Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "5750",
+          "outputTokens": "68",
+          "thinkingOutputTokens": "16",
+          "responseOutputTokens": "52",
+          "cacheReadTokens": "32638",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 16,
+          "metadataIndex": 6,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:14:00.665968Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:00.788511Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_389404",
+            "name": "list_dir",
+            "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/macos\",\"toolAction\":\"Listing macos directory\",\"toolSummary\":\"List macos directory\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "list_dir"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_LIST_DIRECTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:00.666138Z",
+        "viewableAt": "2026-08-29T10:14:00.788149Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:00.788148Z",
+        "lastCompletedChunkAt": "2026-08-29T10:14:00.788145Z",
+        "startedAt": "2026-08-29T10:14:00.788618Z",
+        "completedAt": "2026-08-29T10:14:00.789032Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_389404",
+          "name": "list_dir",
+          "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/macos\",\"toolAction\":\"Listing macos directory\",\"toolSummary\":\"List macos directory\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "list_dir"
+        },
+        "argumentsOrder": [
+          "DirectoryPath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 36,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 17,
+          "metadataIndex": 6,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:14:00.788155Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:14:00.788788Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:00.789034Z"
+            }
+          ]
+        },
+        "toolSummary": "List macos directory",
+        "toolAction": "Listing macos directory"
+      },
+      "listDirectory": {
+        "directoryPathUri": "file:///Users/anonymized/code/trace-commons-server/macos",
+        "results": [
+          {
+            "name": ".build",
+            "isDir": true
+          },
+          {
+            "name": ".gitignore",
+            "sizeBytes": "18"
+          },
+          {
+            "name": "Package.resolved",
+            "sizeBytes": "387"
+          },
+          {
+            "name": "Package.swift",
+            "sizeBytes": "6241"
+          },
+          {
+            "name": "Sources",
+            "isDir": true
+          },
+          {
+            "name": "Tests",
+            "isDir": true
+          },
+          {
+            "name": "scripts",
+            "isDir": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:00.792643Z",
+        "viewableAt": "2026-08-29T10:14:02.077817Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:02.218732Z",
+        "startedAt": "2026-08-29T10:14:02.218732Z",
+        "completedAt": "2026-08-29T10:14:02.218732Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "6001",
+          "outputTokens": "60",
+          "thinkingOutputTokens": "10",
+          "responseOutputTokens": "50",
+          "cacheReadTokens": "32631",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 18,
+          "metadataIndex": 7,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:14:02.077825Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:02.218734Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_287017",
+            "name": "list_dir",
+            "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/windows\",\"toolAction\":\"Listing windows directory\",\"toolSummary\":\"List windows directory\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "list_dir"
+          }
+        ],
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_LIST_DIRECTORY",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:02.078042Z",
+        "viewableAt": "2026-08-29T10:14:02.218407Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:02.218407Z",
+        "lastCompletedChunkAt": "2026-08-29T10:14:02.218403Z",
+        "startedAt": "2026-08-29T10:14:02.219020Z",
+        "completedAt": "2026-08-29T10:14:02.219603Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_287017",
+          "name": "list_dir",
+          "argumentsJson": "{\"DirectoryPath\":\"/Users/anonymized/code/trace-commons-server/windows\",\"toolAction\":\"Listing windows directory\",\"toolSummary\":\"List windows directory\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "list_dir"
+        },
+        "argumentsOrder": [
+          "DirectoryPath",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 37,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 19,
+          "metadataIndex": 7,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:14:02.218415Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:14:02.219325Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:02.220691Z"
+            }
+          ]
+        },
+        "toolSummary": "List windows directory",
+        "toolAction": "Listing windows directory"
+      },
+      "listDirectory": {
+        "directoryPathUri": "file:///Users/anonymized/code/trace-commons-server/windows",
+        "results": [
+          {
+            "name": ".gitignore",
+            "sizeBytes": "137"
+          },
+          {
+            "name": "README.md",
+            "sizeBytes": "21732"
+          },
+          {
+            "name": "TraceCommons.sln",
+            "sizeBytes": "2626"
+          },
+          {
+            "name": "docs",
+            "isDir": true
+          },
+          {
+            "name": "global.json",
+            "sizeBytes": "594"
+          },
+          {
+            "name": "packaging",
+            "isDir": true
+          },
+          {
+            "name": "scripts",
+            "isDir": true
+          },
+          {
+            "name": "src",
+            "isDir": true
+          },
+          {
+            "name": "tests",
+            "isDir": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:02.226678Z",
+        "viewableAt": "2026-08-29T10:14:05.251005Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:05.561205Z",
+        "startedAt": "2026-08-29T10:14:05.561205Z",
+        "completedAt": "2026-08-29T10:14:05.561205Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "2197",
+          "outputTokens": "623",
+          "thinkingOutputTokens": "545",
+          "responseOutputTokens": "78",
+          "cacheReadTokens": "36701",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 20,
+          "metadataIndex": 8,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:14:05.251028Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:05.561206Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "thinking": "**Examining Crate Purposes**\n\nI'm now diving into the `crates/trace-commons-protocol` crate. I'm focusing on its role in defining DTOs, message envelopes (`ironclaw.trace_contribution.v1`), redaction helpers, and serialization. Understanding these building blocks is key.\n\n\n**Analyzing Component Dependencies**\n\nI've shifted my focus to the `trace-commons` family. I'm taking notes on the API definitions and implementations. I'm charting the relationships between the contributor CLI, GTK GUI, and the server's ingest API. I'm exploring how the scoring orchestrator and backends fit into the mix. Also taking notes on the FFI bindings.\n\n\n",
+        "messageId": "REDACTED-MESSAGEID",
+        "toolCalls": [
+          {
+            "id": "call_300783",
+            "name": "view_file",
+            "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/crates/trace-commons-server/Cargo.toml\",\"EndLine\":60,\"StartLine\":1,\"toolAction\":\"Viewing server Cargo.toml\",\"toolSummary\":\"View trace-commons-server Cargo.toml\"}",
+            "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+            "originalName": "view_file"
+          }
+        ],
+        "thinkingDuration": "0.309689s",
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:05.539301Z",
+        "viewableAt": "2026-08-29T10:14:05.560892Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:05.560892Z",
+        "lastCompletedChunkAt": "2026-08-29T10:14:05.560886Z",
+        "startedAt": "2026-08-29T10:14:05.561598Z",
+        "completedAt": "2026-08-29T10:14:05.565054Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "toolCall": {
+          "id": "call_300783",
+          "name": "view_file",
+          "argumentsJson": "{\"AbsolutePath\":\"/Users/anonymized/code/trace-commons-server/crates/trace-commons-server/Cargo.toml\",\"EndLine\":60,\"StartLine\":1,\"toolAction\":\"Viewing server Cargo.toml\",\"toolSummary\":\"View trace-commons-server Cargo.toml\"}",
+          "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+          "originalName": "view_file"
+        },
+        "argumentsOrder": [
+          "AbsolutePath",
+          "EndLine",
+          "StartLine",
+          "toolAction",
+          "toolSummary"
+        ],
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "toolCallOutputTokens": 55,
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 21,
+          "metadataIndex": 8,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_PENDING",
+              "timestamp": "2026-08-29T10:14:05.560898Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_RUNNING",
+              "timestamp": "2026-08-29T10:14:05.561801Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:05.565057Z"
+            }
+          ]
+        },
+        "toolSummary": "View trace-commons-server Cargo.toml",
+        "toolAction": "Viewing server Cargo.toml"
+      },
+      "viewFile": {
+        "absolutePathUri": "file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-server/Cargo.toml",
+        "endLine": 59,
+        "content": "[package]\nname = \"trace-commons-server\"\nversion = \"0.1.0\"\nedition.workspace = true\nrust-version.workspace = true\nlicense.workspace = true\nrepository.workspace = true\n\n[dependencies]\naes-gcm = \"0.10\"\nanyhow = \"1\"\nbytes = \"1\"\nasync-trait = \"0.1\"\naxum = \"0.8\"\nbase64 = \"0.22\"\n# bech32/k256/ripemd together implement the Cosmos half of the self-serve\n# invite claims: ADR-036 secp256k1 signature verification and the\n# `bech32(hrp, ripemd160(sha256(pubkey)))` address derivation that binds a\n# signing key to the address it controls. `cosmrs` would have been one crate\n# instead of three, but drags in tendermint-rs, prost and tonic for what is\n# one signature check and one digest pipeline.\nbech32 = \"0.11\"\nborsh = { version = \"1\", features = [\"derive\"] }\nbs58 = \"0.5\"\nchrono = { version = \"0.4\", features = [\"serde\"] }\ncookie = \"0.18\"\nclap = { version = \"4\", features = [\"derive\", \"env\"] }\ndeadpool-postgres = \"0.14\"\ndotenvy = \"0.15\"\ndirs = \"6\"\nhex = \"0.4\"\nhkdf = \"0.12\"\njsonwebtoken = \"9\"\nk256 = \"0.13\"\nrand = \"0.8\"\nreqwest = { version = \"0.12\", default-features = false, features = [\"json\", \"rustls-tls-native-roots\"] }\nring = \"0.17\"\nripemd = \"0.1\"\nsecrecy = { version = \"0.10\", features = [\"serde\"] }\nzeroize = \"1\"\nserde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\nsha2 = \"0.10\"\ntar = \"0.4\"\ntempfile = \"3\"\nthiserror = \"2\"\ntokio = { version = \"1\", features = [\"full\"] }\ntoml = \"1\"\nzstd = \"0.13\"\ntokio-postgres = { version = \"0.7\", features = [\"with-uuid-1\", \"with-chrono-0_4\", \"with-serde_json-1\"] }\ntrace-commons-build-info = { path = \"../trace-commons-build-info\" }\ntrace-commons-gate-enclave = { path = \"../trace-commons-gate-enclave\" }\ntrace-commons-operator-client = { path = \"../trace-commons-operator-client\" }\ntrace-commons-protocol = { path = \"../trace-commons-protocol\", features = [\"near-ai-privacy-filter\"] }\ntracing = \"0.1\"\ntracing-subscriber = { version = \"0.3\", features = [\"env-filter\", \"json\"] }\ntower-http = { version = \"0.6\", features = [\"cors\"] }\nuuid = { version = \"1\", features = [\"v4\", \"v5\", \"serde\"] }\nwebauthn-rs = { version = \"0.5\", features = [\"conditional-ui\"] }\ngoogle-cloud-storage = { version = \"0.24\", optional = true }",
+        "lineRangeBytes": 2167,
+        "numLines": 141,
+        "numBytes": 5848
+      }
+    },
+    {
+      "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+      "status": "CORTEX_STEP_STATUS_DONE",
+      "metadata": {
+        "stepGenerationVersion": 1,
+        "createdAt": "2026-08-29T10:14:05.568406Z",
+        "viewableAt": "2026-08-29T10:14:09.054829Z",
+        "finishedGeneratingAt": "2026-08-29T10:14:13.222131Z",
+        "startedAt": "2026-08-29T10:14:13.222131Z",
+        "completedAt": "2026-08-29T10:14:13.222131Z",
+        "source": "CORTEX_STEP_SOURCE_MODEL",
+        "modelUsage": {
+          "model": "MODEL_PLACEHOLDER_M298",
+          "inputTokens": "4029",
+          "outputTokens": "2183",
+          "thinkingOutputTokens": "696",
+          "responseOutputTokens": "1487",
+          "cacheReadTokens": "36700",
+          "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+          "responseHeader": {
+            "sessionID": "REDACTED-SESSIONID"
+          },
+          "responseId": "REDACTED-RESPONSEID"
+        },
+        "generatorModel": "MODEL_PLACEHOLDER_M298",
+        "requestedModel": {
+          "model": "MODEL_PLACEHOLDER_M298"
+        },
+        "executionId": "REDACTED-EXECUTIONID",
+        "sourceTrajectoryStepInfo": {
+          "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+          "stepIndex": 22,
+          "metadataIndex": 9,
+          "cascadeId": "39f32a85-508b-430a-98fb-a67e89b4e689"
+        },
+        "internalMetadata": {
+          "statusTransitions": [
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_GENERATING",
+              "timestamp": "2026-08-29T10:14:09.054840Z"
+            },
+            {
+              "updatedStatus": "CORTEX_STEP_STATUS_DONE",
+              "timestamp": "2026-08-29T10:14:13.222144Z"
+            }
+          ]
+        }
+      },
+      "plannerResponse": {
+        "response": "**TraceCommons** (`trace-commons-server`) is a **user-owned, privacy-preserving register of AI agent work**.\n\nWhen AI agents perform tasks (running shell commands, tool calls, debugging, writing code), they generate execution traces. TraceCommons provides a decentralized, verifiable infrastructure where users can capture, scrub, and contribute their agent execution traces, earn **Trace Credits** settled on-chain via NEAR, and selectively disclose verified data to frontier labs and auditors.\n\n---\n\n### Key Concepts & Workflow\n\n1. **Local-First & Opt-In Redaction**:\n   - Traces are captured and scrubbed locally on the user's machine (e.g., from Claude Code or Codex sessions).\n   - Sensitive text and tool arguments are stripped or replaced with deterministic placeholders before leaving the device in `ironclaw.trace_contribution.v1` envelopes.\n2. **Two-Axis Quality & Novelty Gating**:\n   - **Novelty**: Tested against the existing trace vector register using embeddings.\n   - **Substantive Work**: Evaluated via perplexity scoring (hosted in TEE-backed vLLM on NEAR AI Cloud or local GPU).\n   - Ingest accepts envelopes only if both gating criteria pass.\n3. **Encrypted Storage & Selective Disclosure**:\n   - Accepted records are stored in object storage (GCS / FS) encrypted with envelope keys (KMS DEK/KEK) and registered in PostgreSQL.\n4. **Trace Credits & Settlement**:\n   - Contributions mint non-transferable, utility-attested **Trace Credits** recorded and settled via a NEAR receipt outbox pipeline.\n\n---\n\n### System Architecture & Crates\n\n```\ncrates/\n\u251c\u2500\u2500 [trace-commons-protocol](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-protocol)\n\u2502   Shared envelope DTOs (ironclaw.trace_contribution.v1), validation, and redaction logic.\n\u251c\u2500\u2500 [trace-commons-gate-api](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-gate-api)\n\u2502   Public traits and contracts for gating, scoring, embedding, and vector indexing.\n\u251c\u2500\u2500 [trace-commons-gate-enclave](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-gate-enclave)\n\u2502   Scoring orchestrator supporting NEAR AI Cloud (TEE vLLM) and local CUDA/MistralRS backends.\n\u251c\u2500\u2500 [trace-commons-contributor](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor)\n\u2502   Local contributor CLI (`login`, `submit`, `status`, `mint-grant`) and background daemon.\n\u251c\u2500\u2500 [trace-commons-contributor-ffi](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor-ffi)\n\u2502   C-FFI bindings exposing contributor functionality to native UI clients.\n\u251c\u2500\u2500 [trace-commons-contributor-gtk](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor-gtk)\n\u2502   Linux GTK 4 + Libadwaita desktop GUI client.\n\u251c\u2500\u2500 [trace-commons-mark](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-mark)\n\u2502   Watermarking and cryptographic verification helpers.\n\u251c\u2500\u2500 [trace-commons-operator-client](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-operator-client)\n\u2502   Operator SDK for admin and review endpoints.\n\u2514\u2500\u2500 [trace-commons-server](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-server)\n    Main hosted server implementation containing key binaries:\n    \u251c\u2500\u2500 `trace-commons-ingest`              (Axum-based ingest, review, retention, and credit worker API)\n    \u251c\u2500\u2500 `trace-commons-upload-claim-issuer` (Ed25519-signed upload claim minting)\n    \u251c\u2500\u2500 `trace-commons-gate-calibrate`      (Offline calibration & model bake-off tooling)\n    \u251c\u2500\u2500 `trace-commons-pilot-bootstrap`     (Hugging Face agent-traces load-generator)\n    \u2514\u2500\u2500 `trace-commons-vector-replay`       (Vector index replay tool)\n```\n\n#### Native Desktop Applications:\n- **macOS App**: [macos/](file:///Users/anonymized/code/trace-commons-server/macos) (Swift / SwiftUI menu-bar and desktop client linking against `trace-commons-contributor-ffi`).\n- **Windows App**: [windows/](file:///Users/anonymized/code/trace-commons-server/windows) (C# / WinUI 3 desktop client).\n\n---\n\n### Core Engineering & Security Principles\n\n- **PostgreSQL with Strict RLS**: The backend is PostgreSQL-only. Every tenant table strictly enforces Row Level Security (`trace_current_tenant_id()`).\n- **Hash-Only Audit Logging**: Error logs, operational metrics, and audit rows are hash- or label-only. Raw trace contents, tokens, URLs, and secrets are never logged.\n- **Fail-Closed Design**: If any required gate or security control dependency is unavailable, operations fail closed rather than falling back to unencrypted or unverified states.\n- **Scoped Credentials**: Worker endpoints use fine-grained bearer tokens (utility, review, retention, vector, settlement, export, etc.).\n\n---\n\n### Key Documentation Links\n\n- [README.md](file:///Users/anonymized/code/trace-commons-server/README.md) \u2014 Project overview, installation guides, and quickstart.\n- [CLAUDE.md](file:///Users/anonymized/code/trace-commons-server/CLAUDE.md) \u2014 Repo-specific developer guidelines and CI requirements.\n- [docs/trace-commons.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons.md) \u2014 Envelope protocol and threat model specification.\n- [docs/trace-commons-storage.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons-storage.md) \u2014 Storage contract and cryptographic key management.\n- [docs/trace-commons-roadmap.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons-roadmap.md) \u2014 Production gap queue and development phases.\n- [docs/contributor-daemon-ipc-v1_1.md](file:///Users/anonymized/code/trace-commons-server/docs/contributor-daemon-ipc-v1_1.md) \u2014 Contributor daemon IPC specification.",
+        "modifiedResponse": "**TraceCommons** (`trace-commons-server`) is a **user-owned, privacy-preserving register of AI agent work**.\n\nWhen AI agents perform tasks (running shell commands, tool calls, debugging, writing code), they generate execution traces. TraceCommons provides a decentralized, verifiable infrastructure where users can capture, scrub, and contribute their agent execution traces, earn **Trace Credits** settled on-chain via NEAR, and selectively disclose verified data to frontier labs and auditors.\n\n---\n\n### Key Concepts & Workflow\n\n1. **Local-First & Opt-In Redaction**:\n   - Traces are captured and scrubbed locally on the user's machine (e.g., from Claude Code or Codex sessions).\n   - Sensitive text and tool arguments are stripped or replaced with deterministic placeholders before leaving the device in `ironclaw.trace_contribution.v1` envelopes.\n2. **Two-Axis Quality & Novelty Gating**:\n   - **Novelty**: Tested against the existing trace vector register using embeddings.\n   - **Substantive Work**: Evaluated via perplexity scoring (hosted in TEE-backed vLLM on NEAR AI Cloud or local GPU).\n   - Ingest accepts envelopes only if both gating criteria pass.\n3. **Encrypted Storage & Selective Disclosure**:\n   - Accepted records are stored in object storage (GCS / FS) encrypted with envelope keys (KMS DEK/KEK) and registered in PostgreSQL.\n4. **Trace Credits & Settlement**:\n   - Contributions mint non-transferable, utility-attested **Trace Credits** recorded and settled via a NEAR receipt outbox pipeline.\n\n---\n\n### System Architecture & Crates\n\n```\ncrates/\n\u251c\u2500\u2500 [trace-commons-protocol](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-protocol)\n\u2502   Shared envelope DTOs (ironclaw.trace_contribution.v1), validation, and redaction logic.\n\u251c\u2500\u2500 [trace-commons-gate-api](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-gate-api)\n\u2502   Public traits and contracts for gating, scoring, embedding, and vector indexing.\n\u251c\u2500\u2500 [trace-commons-gate-enclave](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-gate-enclave)\n\u2502   Scoring orchestrator supporting NEAR AI Cloud (TEE vLLM) and local CUDA/MistralRS backends.\n\u251c\u2500\u2500 [trace-commons-contributor](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor)\n\u2502   Local contributor CLI (`login`, `submit`, `status`, `mint-grant`) and background daemon.\n\u251c\u2500\u2500 [trace-commons-contributor-ffi](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor-ffi)\n\u2502   C-FFI bindings exposing contributor functionality to native UI clients.\n\u251c\u2500\u2500 [trace-commons-contributor-gtk](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-contributor-gtk)\n\u2502   Linux GTK 4 + Libadwaita desktop GUI client.\n\u251c\u2500\u2500 [trace-commons-mark](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-mark)\n\u2502   Watermarking and cryptographic verification helpers.\n\u251c\u2500\u2500 [trace-commons-operator-client](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-operator-client)\n\u2502   Operator SDK for admin and review endpoints.\n\u2514\u2500\u2500 [trace-commons-server](file:///Users/anonymized/code/trace-commons-server/crates/trace-commons-server)\n    Main hosted server implementation containing key binaries:\n    \u251c\u2500\u2500 `trace-commons-ingest`              (Axum-based ingest, review, retention, and credit worker API)\n    \u251c\u2500\u2500 `trace-commons-upload-claim-issuer` (Ed25519-signed upload claim minting)\n    \u251c\u2500\u2500 `trace-commons-gate-calibrate`      (Offline calibration & model bake-off tooling)\n    \u251c\u2500\u2500 `trace-commons-pilot-bootstrap`     (Hugging Face agent-traces load-generator)\n    \u2514\u2500\u2500 `trace-commons-vector-replay`       (Vector index replay tool)\n```\n\n#### Native Desktop Applications:\n- **macOS App**: [macos/](file:///Users/anonymized/code/trace-commons-server/macos) (Swift / SwiftUI menu-bar and desktop client linking against `trace-commons-contributor-ffi`).\n- **Windows App**: [windows/](file:///Users/anonymized/code/trace-commons-server/windows) (C# / WinUI 3 desktop client).\n\n---\n\n### Core Engineering & Security Principles\n\n- **PostgreSQL with Strict RLS**: The backend is PostgreSQL-only. Every tenant table strictly enforces Row Level Security (`trace_current_tenant_id()`).\n- **Hash-Only Audit Logging**: Error logs, operational metrics, and audit rows are hash- or label-only. Raw trace contents, tokens, URLs, and secrets are never logged.\n- **Fail-Closed Design**: If any required gate or security control dependency is unavailable, operations fail closed rather than falling back to unencrypted or unverified states.\n- **Scoped Credentials**: Worker endpoints use fine-grained bearer tokens (utility, review, retention, vector, settlement, export, etc.).\n\n---\n\n### Key Documentation Links\n\n- [README.md](file:///Users/anonymized/code/trace-commons-server/README.md) \u2014 Project overview, installation guides, and quickstart.\n- [CLAUDE.md](file:///Users/anonymized/code/trace-commons-server/CLAUDE.md) \u2014 Repo-specific developer guidelines and CI requirements.\n- [docs/trace-commons.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons.md) \u2014 Envelope protocol and threat model specification.\n- [docs/trace-commons-storage.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons-storage.md) \u2014 Storage contract and cryptographic key management.\n- [docs/trace-commons-roadmap.md](file:///Users/anonymized/code/trace-commons-server/docs/trace-commons-roadmap.md) \u2014 Production gap queue and development phases.\n- [docs/contributor-daemon-ipc-v1_1.md](file:///Users/anonymized/code/trace-commons-server/docs/contributor-daemon-ipc-v1_1.md) \u2014 Contributor daemon IPC specification.",
+        "thinking": "**Defining TraceCommons' Core**\n\nOkay, I'm focusing on clearly explaining TraceCommons. I'm starting with its core concept: a user-owned registry for AI agent interaction traces. Privacy-preserving scrubbing on the user's machine is key, along with a dedication to quality and responsible AI development. I aim to create a concise mission statement.\n\n\n**Outlining Novelty and Credits**\n\nI've been drilling into novelty gating before ingest and Trace Credits. I'm thinking of how Trace Credits will be minted for accepted contributions, and settled on NEAR. I'm focusing on the architectural design, with a strong emphasis on the local contributor setup, server components, and the quality and novelty gating process. My plan outlines the trace-commons-contributor for local session discovery.\n\n\n",
+        "thinkingSignature": "REDACTED-THINKING-SIGNATURE",
+        "messageId": "REDACTED-MESSAGEID",
+        "thinkingDuration": "0.420050s",
+        "stopReason": "STOP_REASON_STOP_PATTERN"
+      }
+    }
+  ]
+}

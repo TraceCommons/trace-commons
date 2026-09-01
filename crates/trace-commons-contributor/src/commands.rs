@@ -70,12 +70,18 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
     }
 }
 
-/// Signals that a JSON submit result has already been rendered to stdout.
-/// The binary uses this to return a failing exit status without appending a
-/// second JSON document.
+/// Signals that a command's JSON result has already been rendered to
+/// stdout. The binary uses this to return a failing exit status without
+/// appending a second JSON document.
+///
+/// `--json` exists for callers driving this CLI programmatically, and a
+/// strict `json.load(stdout)` fails on trailing data, so a failing command
+/// that has already printed its own document must not let the binary print
+/// `trace_commons.cli_error.v1` after it. This message is never shown: the
+/// binary recognizes the type before it formats anything.
 #[derive(Debug, thiserror::Error)]
-#[error("one or more sessions were refused or failed")]
-pub struct RenderedSubmitFailure;
+#[error("the run failed; its JSON document on stdout carries the error")]
+pub struct RenderedJsonFailure;
 
 /// The result of a non-interactive enrollment attempt.
 ///
@@ -569,12 +575,66 @@ fn cwd_matches_project(
     legacy_project == Some(basename) || path.starts_with(project)
 }
 
+/// True when a ref's `--project` eligibility cannot be decided from the
+/// cheap `SessionRef` alone: no cwd, and no legacy basename either. This is
+/// a property of the ref, not of which source produced it -- an adapter
+/// whose true working directory lives inside the session content itself,
+/// rather than being cheaply knowable at discovery, always looks like
+/// this, but the check itself must stay keyed on the missing fields
+/// rather than the source name so it cannot silently drift out of sync
+/// with a new adapter that has the same limitation.
+fn project_filter_undecided(r: &SessionRef) -> bool {
+    r.cwd.is_none() && r.project.is_none()
+}
+
+/// Resolve every ref `discover_filtered` could not decide against
+/// `project` (see `project_filter_undecided`) by loading it and checking
+/// the loaded transcript's real `cwd`. A ref already decided (it has a cwd
+/// or a legacy project basename) is passed through unchanged; a ref this
+/// function cannot even load is dropped rather than guessed into the
+/// result.
+fn resolve_undecided_project_refs(
+    refs: Vec<SessionRef>,
+    project: &Path,
+    trajectory: Option<&Path>,
+) -> Vec<SessionRef> {
+    refs.into_iter()
+        .filter(|r| {
+            if !project_filter_undecided(r) {
+                return true;
+            }
+            let Some(source) = source_for(r.source, trajectory) else {
+                return false;
+            };
+            let Ok(transcript) = source.load(r) else {
+                return false;
+            };
+            // Canonicalize the same way the cheap pass above does, so a
+            // symlinked path compares equal on both sides here too.
+            let cwd = transcript.cwd.as_deref().map(|c| {
+                std::fs::canonicalize(c)
+                    .map(|abs| abs.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| c.to_string())
+            });
+            cwd_matches_project(
+                cwd.as_deref(),
+                transcript.project.as_deref(),
+                &r.path,
+                project,
+            )
+        })
+        .collect()
+}
+
 /// Discover every locally discoverable session across all sources, applying
 /// optional `source`/`project`/`since` filters. `project` matches the
 /// session's true decoded working directory when available; otherwise falls
-/// back to the legacy heuristic (basename match or path prefix). `since`
-/// filters against `started_at` (falls back to excluding sessions with no
-/// timestamp when set).
+/// back to the legacy heuristic (basename match or path prefix). A ref with
+/// neither is carried through undecided rather than excluded -- see
+/// `project_filter_undecided` -- so a caller applying `project` must follow
+/// up with `resolve_undecided_project_refs` before treating the result as
+/// final. `since` filters against `started_at` (falls back to excluding
+/// sessions with no timestamp when set).
 fn discover_filtered(
     source_filter: Option<&str>,
     project_filter: Option<&Path>,
@@ -617,6 +677,14 @@ fn discover_filtered(
     refs.retain(|r| {
         let project_ok = match project_filter {
             None => true,
+            // A ref with neither a cwd nor a legacy project basename cannot
+            // be decided here at all -- resolving it against `r.path` would
+            // wrongly exclude a session from an adapter whose real cwd
+            // lives inside its conversation content and is never on the
+            // cheap `SessionRef`. Carry it through undecided; the caller
+            // resolves it against the loaded transcript via
+            // `resolve_undecided_project_refs` before it reaches upload.
+            Some(_) if project_filter_undecided(r) => true,
             Some(p) => {
                 // Canonicalize the session cwd too when it still exists, so a
                 // symlinked path (e.g. macOS /tmp -> /private/tmp) compares
@@ -675,10 +743,18 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// What to call this session's origin in a table: what it declares itself
+/// to be when discovery knows, and otherwise the adapter that found it.
+///
+/// See `SessionRef::declared_source` for why the two differ at all.
+fn displayed_source(r: &SessionRef) -> &str {
+    r.declared_source.as_deref().unwrap_or(r.source)
+}
+
 fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     vec![
         (idx + 1).to_string(),
-        r.source.to_string(),
+        displayed_source(r).to_string(),
         r.project.clone().unwrap_or_else(|| "-".to_string()),
         format_age(r.started_at),
         format_size(r.size_bytes),
@@ -727,8 +803,13 @@ pub fn list(trajectory: Option<&Path>, json: bool) -> Result<()> {
         let items: Vec<serde_json::Value> = sessions
             .iter()
             .map(|r| {
+                // `source` stays the adapter, because a consumer uses it to
+                // ask for the same session again (`--source`). The origin is
+                // ADDED beside it rather than replacing it, so this stays
+                // the field it has always been.
                 serde_json::json!({
                     "source": r.source,
+                    "declared_source": r.declared_source,
                     "project": r.project,
                     "started_at": r.started_at,
                     "size_bytes": r.size_bytes,
@@ -1079,6 +1160,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
 
     let since = sel.since.map(picker::parse_since).transpose()?;
     let mut refs = discover_filtered(sel.source, scope.as_deref(), since, sel.trajectory)?;
+    // `discover_filtered` carries through any ref it could not decide
+    // against `scope` from the cheap `SessionRef` alone (see
+    // `project_filter_undecided`); resolve those now, before anything is
+    // shown or selected, against each one's loaded transcript.
+    if let Some(p) = scope.as_deref() {
+        refs = resolve_undecided_project_refs(refs, p, sel.trajectory);
+    }
     refs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
 
     if refs.is_empty() {
@@ -1214,7 +1302,7 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         }
         println!("{}", serde_json::to_string_pretty(&document)?);
         if submit::outcomes_have_failure(&outcomes, sel.dry_run) {
-            return Err(RenderedSubmitFailure.into());
+            return Err(RenderedJsonFailure.into());
         }
         return Ok(());
     }
@@ -1493,9 +1581,222 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
+/// Why an import staged nothing. Three distinguishable causes, and the
+/// whole reason the summary carries counts at all: `imported: 0` alone is
+/// the same output in all three.
+///
+/// Order matters. `skipped_no_content` is checked FIRST because a non-zero
+/// value means conversations DID match this project -- saying "nothing here
+/// matched" over the top of that is false, and it is exactly the case a
+/// contributor most needs told apart from a mis-scoped run.
+///
+/// The fourth cause -- the IDE is not running -- never reaches here: it
+/// comes back from `discover` as `ERR_NOT_RUNNING` and this function is
+/// never called.
+fn zero_import_explanation(
+    skipped_other_projects: usize,
+    skipped_no_content: usize,
+) -> &'static str {
+    if skipped_no_content > 0 {
+        "every conversation that matched had no transcript to import; nothing was staged"
+    } else if skipped_other_projects > 0 {
+        "nothing here matched; run from the project you worked in, or pass --all"
+    } else {
+        "the running Antigravity instance exposed no conversations"
+    }
+}
+
+/// The `--json` output for one import run: the single document that reaches
+/// stdout, and the status the command returns alongside it.
+///
+/// Both halves of a partial import travel in that one document -- the
+/// counts of what was staged, and the error that stopped the run -- because
+/// a programmatic caller parses stdout with a strict reader and a second
+/// document is trailing data to it. The non-zero exit is carried by
+/// [`RenderedJsonFailure`], which the binary turns into a failing status
+/// without printing anything more.
+fn antigravity_import_json(
+    outcome: crate::antigravity::import::ImportOutcome,
+) -> (serde_json::Value, Result<()>) {
+    let summary = &outcome.summary;
+    let mut document = serde_json::json!({
+        "schema_version": "trace_commons.antigravity_import.v1",
+        "imported": summary.imported,
+        "skipped_other_projects": summary.skipped_other_projects,
+        "skipped_no_content": summary.skipped_no_content,
+        "staged_dir": summary.staged_dir.display().to_string(),
+    });
+    let status = match outcome.error {
+        Some(err) => {
+            document["error"] = serde_json::json!(format!("{err:#}"));
+            Err(RenderedJsonFailure.into())
+        }
+        None => Ok(()),
+    };
+    (document, status)
+}
+
+/// Import Antigravity IDE conversations into the trajectory staging folder.
+///
+/// The counts are the point of the output. `imported: 0` on its own reads
+/// as "you have no conversations"; alongside a non-zero skip count it reads
+/// as "you are standing in the wrong directory", which is a thing the
+/// contributor can act on. Both lines are therefore always printed, even
+/// when they are zero.
+///
+/// Nothing here can name the discovered endpoint: every failure below
+/// arrives as one of the module's fixed labels, and the port and CSRF token
+/// never leave `antigravity::endpoint`.
+pub async fn import_antigravity(
+    store: &ConfigStore,
+    project: Option<&Path>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
+    let project = match project {
+        Some(p) => Some(
+            p.to_str()
+                .context("--project must be valid UTF-8")?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let outcome =
+        crate::antigravity::import::import_antigravity(store, project.as_deref(), all).await?;
+
+    if json {
+        let (document, status) = antigravity_import_json(outcome);
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        return status;
+    }
+    let summary = &outcome.summary;
+
+    println!("imported {} conversation(s)", summary.imported);
+    println!(
+        "skipped {} belonging to another project",
+        summary.skipped_other_projects
+    );
+    if summary.skipped_no_content > 0 {
+        println!(
+            "skipped {} with no transcript to import",
+            summary.skipped_no_content
+        );
+    }
+    if summary.imported > 0 {
+        println!("staged in {}", summary.staged_dir.display());
+        println!("run `trace-commons-contributor submit` to redact and upload them");
+    } else if outcome.error.is_none() {
+        // Only when the run actually finished: none of the three
+        // explanations is true of a run that stopped early, and telling a
+        // contributor whose IDE quit that "the instance exposed no
+        // conversations" would send them looking in the wrong place.
+        println!(
+            "{}",
+            zero_import_explanation(summary.skipped_other_projects, summary.skipped_no_content)
+        );
+    }
+    // The counts are printed first and the run still exits non-zero: what
+    // reached the staging directory is live either way, because the
+    // trajectory source discovers it without `--trajectory`.
+    match outcome.error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three zero-import causes must each get their own sentence, and
+    /// in particular a run whose matches were all empty must NOT be told
+    /// the instance exposed no conversations -- it exposed some, they were
+    /// this project's, and they were empty.
+    #[test]
+    fn each_zero_import_cause_gets_its_own_sentence() {
+        let nothing_exists = zero_import_explanation(0, 0);
+        let wrong_project = zero_import_explanation(3, 0);
+        let matched_but_empty = zero_import_explanation(0, 3);
+
+        assert_ne!(nothing_exists, wrong_project);
+        assert_ne!(nothing_exists, matched_but_empty);
+        assert_ne!(wrong_project, matched_but_empty);
+        assert_eq!(
+            matched_but_empty,
+            zero_import_explanation(3, 3),
+            "matches that were empty outrank the skip count: something did match"
+        );
+        assert!(!matched_but_empty.contains("no conversations"));
+    }
+
+    /// `--json` is for callers driving this CLI programmatically, and a
+    /// strict reader fails on trailing data. A partial import must
+    /// therefore print exactly ONE document, carrying both the counts of
+    /// what was staged and the error that stopped the run -- and the error
+    /// it returns must be the one the binary recognizes as
+    /// already-rendered, or a second `trace_commons.cli_error.v1` document
+    /// follows it onto stdout.
+    #[test]
+    fn a_partial_import_prints_one_json_document_with_both_halves() {
+        use crate::antigravity::import::{ImportOutcome, ImportSummary};
+
+        let outcome = ImportOutcome {
+            summary: ImportSummary {
+                imported: 2,
+                skipped_other_projects: 1,
+                skipped_no_content: 0,
+                staged_dir: std::path::PathBuf::from("/tmp/staging"),
+            },
+            error: Some(anyhow::anyhow!("antigravity-api-failed")),
+        };
+        let (document, status) = antigravity_import_json(outcome);
+        let printed = serde_json::to_string_pretty(&document).unwrap();
+
+        // Exactly one document, the way a strict caller reads stdout.
+        let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&printed)
+            .into_iter::<serde_json::Value>()
+            .collect::<std::result::Result<_, _>>()
+            .expect("stdout must parse");
+        assert_eq!(documents.len(), 1, "one document, no trailing data");
+
+        let only = &documents[0];
+        assert_eq!(
+            only["schema_version"],
+            "trace_commons.antigravity_import.v1"
+        );
+        assert_eq!(only["imported"], 2, "what was staged is still reported");
+        assert_eq!(only["skipped_other_projects"], 1);
+        assert_eq!(only["staged_dir"], "/tmp/staging");
+        assert_eq!(only["error"], "antigravity-api-failed");
+
+        // Non-zero exit, and of the shape that suppresses the binary's own
+        // error document -- the two properties together are the fix.
+        let err = status.expect_err("a partial import still fails");
+        assert!(
+            err.downcast_ref::<RenderedJsonFailure>().is_some(),
+            "the binary must recognize this as already rendered"
+        );
+    }
+
+    /// A run that finished carries no `error` key at all, so a caller can
+    /// test for its presence rather than parse a message.
+    #[test]
+    fn a_complete_import_prints_one_document_and_no_error_key() {
+        use crate::antigravity::import::{ImportOutcome, ImportSummary};
+
+        let outcome = ImportOutcome {
+            summary: ImportSummary {
+                imported: 1,
+                skipped_other_projects: 0,
+                skipped_no_content: 0,
+                staged_dir: std::path::PathBuf::from("/tmp/staging"),
+            },
+            error: None,
+        };
+        let (document, status) = antigravity_import_json(outcome);
+        assert!(document.get("error").is_none());
+        assert!(status.is_ok());
+    }
 
     #[test]
     fn scopes_cell_renders_wire_names() {
@@ -1914,7 +2215,11 @@ mod tests {
 
 #[cfg(test)]
 mod project_filter_tests {
-    use super::cwd_matches_project;
+    use super::{
+        cwd_matches_project, project_filter_undecided, resolve_undecided_project_refs, session_row,
+        submit_picker_row,
+    };
+    use crate::source::SessionRef;
     use std::path::Path;
 
     #[tokio::test]
@@ -2025,6 +2330,135 @@ mod project_filter_tests {
             Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
             Path::new("/Users/dev/code/my-hack"),
         ));
+    }
+
+    /// A ref that can never be decided against `--project` from the cheap
+    /// `SessionRef` alone -- both `cwd` and `project` unset -- must survive
+    /// `discover_filtered`'s retain pass rather than being resolved against
+    /// `r.path`.
+    fn undecided_ref(path: std::path::PathBuf) -> SessionRef {
+        SessionRef {
+            source: "test-source",
+            declared_source: None,
+            path,
+            project: None,
+            cwd: None,
+            started_at: None,
+            size_bytes: 0,
+            group_modified_at: None,
+            group_member_count: 0,
+        }
+    }
+
+    /// `list` and the picker name what a trace came FROM, not how it is
+    /// stored.
+    ///
+    /// An imported Antigravity conversation is staged as a trajectory file
+    /// and read by the `trajectory` adapter, so both tables called it
+    /// `trajectory`. That is a word for the storage format and not the one
+    /// the contributor typed to collect it -- someone who ran
+    /// `import-antigravity` and then `list` saw no row that said so.
+    ///
+    /// The adapter name stays on `source`, because that is what pairs a ref
+    /// back to something that can load it. Only the display changes.
+    #[test]
+    fn a_row_names_the_declared_source_when_discovery_knows_it() {
+        let imported = SessionRef {
+            source: crate::source::SOURCE_TRAJECTORY,
+            declared_source: Some("antigravity".to_string()),
+            ..undecided_ref("/staged/conversation.json".into())
+        };
+        assert_eq!(
+            session_row(0, &imported)[1],
+            "antigravity",
+            "an imported conversation must not be listed under the adapter that stores it"
+        );
+        // The picker is the same row plus its marker, so it follows.
+        assert_eq!(
+            submit_picker_row(0, &imported, Some(false))[1],
+            "antigravity"
+        );
+
+        // A named `--trajectory` path is offered without a discovery-time
+        // parse, so nothing is known to declare: fall back to the adapter
+        // rather than printing an empty column or guessing.
+        let named = SessionRef {
+            source: crate::source::SOURCE_TRAJECTORY,
+            declared_source: None,
+            ..undecided_ref("/named/file.json".into())
+        };
+        assert_eq!(session_row(0, &named)[1], "trajectory");
+    }
+
+    #[test]
+    fn a_ref_with_no_cwd_survives_the_cheap_project_filter_undecided() {
+        assert!(project_filter_undecided(&undecided_ref(
+            "/whatever/uuid.db".into()
+        )));
+        assert!(!project_filter_undecided(&SessionRef {
+            project: Some("trace-commons-server".to_string()),
+            ..undecided_ref("/whatever/uuid.db".into())
+        }));
+    }
+
+    /// A Trajectory ref: `session_ref_for` in `source/trajectory.rs` always
+    /// leaves `cwd`/`project` unset at discovery (determining the real cwd
+    /// requires a full parse), so every trajectory ref is exactly the
+    /// undecided shape `resolve_undecided_project_refs` exists to resolve.
+    fn undecided_trajectory_ref(path: std::path::PathBuf) -> SessionRef {
+        SessionRef {
+            source: crate::source::SOURCE_TRAJECTORY,
+            ..undecided_ref(path)
+        }
+    }
+
+    fn write_trajectory_with_cwd(dir: &std::path::Path, cwd: &str) -> std::path::PathBuf {
+        let p = dir.join("a.json");
+        std::fs::write(
+            &p,
+            format!(
+                r#"[{{"role":"meta","source":"pi","cwd":"{cwd}"}},
+                    {{"role":"user","content":"hi","timestamp":"2026-07-10T12:00:00Z"}}]"#
+            ),
+        )
+        .unwrap();
+        p
+    }
+
+    #[test]
+    fn resolve_undecided_project_refs_keeps_a_real_cwd_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let p =
+            write_trajectory_with_cwd(dir.path(), "/Users/anonymized/code/trace-commons-server");
+        let r = undecided_trajectory_ref(p.clone());
+        let kept = resolve_undecided_project_refs(
+            vec![r],
+            Path::new("/Users/anonymized/code/trace-commons-server"),
+            Some(&p),
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "the loaded transcript's real cwd sits under the requested project"
+        );
+    }
+
+    #[test]
+    fn resolve_undecided_project_refs_drops_a_real_cwd_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let p =
+            write_trajectory_with_cwd(dir.path(), "/Users/anonymized/code/trace-commons-server");
+        let r = undecided_trajectory_ref(p.clone());
+        let kept = resolve_undecided_project_refs(
+            vec![r],
+            Path::new("/Users/anonymized/code/some-other-project"),
+            Some(&p),
+        );
+        assert!(
+            kept.is_empty(),
+            "the loaded transcript's real cwd does not sit under the requested \
+             project, so it must not reach upload"
+        );
     }
 
     #[test]
@@ -3540,6 +3974,7 @@ mod submit_scope_tests {
     fn a_ref(cwd: &str, project: &str, at: &str) -> SessionRef {
         SessionRef {
             source: crate::source::SOURCE_CLAUDE_CODE,
+            declared_source: None,
             path: Path::new("/store/s.jsonl").to_path_buf(),
             project: Some(project.to_string()),
             cwd: Some(cwd.to_string()),
