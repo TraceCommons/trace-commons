@@ -50,6 +50,70 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # deny.toml has carried the AGPL-combinability licence allow list and the
+  # RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
+  # / AGENTS.md both instruct contributors to run `cargo deny check licenses`
+  # by hand under all three feature sets before pushing -- but no job in this
+  # workflow ever ran cargo-deny, so the config was enforced by convention
+  # only. This job wires it in.
+  #
+  # `check bans` is deliberately not run here: [bans] in deny.toml sets only
+  # `multiple-versions = "allow"`, which opts OUT of the one thing that
+  # section polices and configures no deny/skip/wildcards list, so the check
+  # is a standing no-op -- confirmed empty output (`bans ok`, zero findings)
+  # under the default features, both individual feature sets, and
+  # --all-features together. `check sources` IS run: `unknown-registry =
+  # "deny"` is a real, currently-enforced policy against dependency-confusion
+  # style registries, worth locking in even though nothing in today's graph
+  # trips it (also confirmed clean under every feature combination, so one
+  # feature-independent run is enough).
+  #
+  # The cargo-deny-action v2 tag pins cargo-deny 0.20.2 in its own
+  # Dockerfile -- the same version this job's commands were verified with
+  # locally.
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # `arguments: ''` overrides the action's own `--all-features` default.
+      # Leaving that default in place would check every feature unioned
+      # together instead of each set in isolation, defeating the reason
+      # AGENTS.md has three separate invocations: "the feature sets pull in
+      # different trees." deny.toml's own `[graph] all-features = false`
+      # exists for the same reason.
+      - name: cargo deny check licenses (default features)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: ''
+          command-arguments: licenses
+      - name: cargo deny check licenses (near-ai-scorer)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features near-ai-scorer
+          command-arguments: licenses
+      - name: cargo deny check licenses (local-gpu-models)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features local-gpu-models
+          command-arguments: licenses
+      - name: cargo deny check advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: ''
+          command-arguments: advisories
+      - name: cargo deny check sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: ''
+          command-arguments: sources
+
   mark-assets-drift:
     name: mark assets match the generator
     runs-on: ubuntu-latest
