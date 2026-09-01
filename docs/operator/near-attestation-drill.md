@@ -26,7 +26,7 @@ reported as `not_run` and is not a pass.
 | `signer_binding_default_mode` | `report_data[20..32]` are zero, so `[0..20]` is a raw signing address. See "the zero-padding assertion" below. |
 | `measurements_pinned` | Every pinned measurement register matches the verified quote. |
 | `completion_performed` | One minimal completion succeeded. **This is the step that costs money.** |
-| `receipt_verified` | Its receipt is validly signed over the exact request bytes we sent and the response text we received. |
+| `receipt_verified` | Its receipt is validly signed over the exact request bytes we sent, the exact response body we received, and the model we asked for. |
 | `receipt_signer_is_attested_key` | The receipt's recovered signer is the address the quote attests. |
 
 The last step is the point of the drill. The other eight can all pass while

@@ -7,22 +7,38 @@
 //! enclave running an image we pinned. That says nothing about any particular
 //! inference. A receipt is the other half: alongside a completion, NEAR AI
 //! returns a short `text` carrying the SHA-256 of the request body and of the
-//! response text, signed by the enclave's signing key. Verifying it binds one
+//! response body, signed by the enclave's signing key. Verifying it binds one
 //! specific request/response pair to that key.
 //!
 //! The mechanism follows NEAR AI's own reference verifier
 //! (`nearai/nearai-cloud-verifier`, `py/chat_verifier.py`):
 //!
 //! 1. `text` splits on `:` into two or three parts. With three, the hashes are
-//!    `parts[1]` and `parts[2]` -- a leading part (a request identifier)
-//!    shifts them. With two, they are `parts[0]` and `parts[1]`.
+//!    `parts[1]` and `parts[2]` -- a leading part shifts them. With two, they
+//!    are `parts[0]` and `parts[1]`.
 //! 2. Both are SHA-256 hex: of the request body *as sent*, and of the
-//!    response text.
+//!    **entire raw response body** as received.
 //! 3. `signature` is an EIP-191 `personal_sign` over `text`:
 //!    `keccak256("\x19Ethereum Signed Message:\n" + len(text) + text)`, then
 //!    secp256k1 public-key recovery. The signer's Ethereum address is the
 //!    last 20 bytes of `keccak256(uncompressed_pubkey[1..])`.
 //! 4. The recovered address must equal `signing_address`, case-insensitively.
+//!
+//! Two places where this departs from that reference verifier, both settled
+//! by a real captured triple rather than by reading:
+//!
+//! - The second hash is over the **whole response body bytes**, not over
+//!   `choices[0].message.content`. Reading the parsed content instead is a
+//!   verifier that always fails; against a thinking model whose `content` is
+//!   `null` it does not even parse. `crates/trace-commons-server/tests/
+//!   near_ai_live_receipt.rs` pins this against real bytes.
+//! - The three-part form's leading part is the **model name**, not an opaque
+//!   request identifier. The reference verifier discards it; this one checks
+//!   it against the model the caller asked for, so the receipt binds the
+//!   model as well as the bytes. A mismatch is
+//!   [`ReceiptError::ModelMismatch`] -- a receipt for a completion some other
+//!   model served, which is exactly the substitution nobody would otherwise
+//!   notice.
 //!
 //! Two deliberate choices where this is stricter or looser than the prose:
 //!
@@ -65,6 +81,9 @@ pub struct ReceiptVerdict {
     pub request_sha256: String,
     pub response_sha256: String,
     pub signing_address: String,
+    /// The model the receipt binds, when it carried one. `None` for the
+    /// two-part form, which binds no model at all.
+    pub model: Option<String>,
 }
 
 /// Why a receipt was refused.
@@ -102,24 +121,40 @@ pub enum ReceiptError {
     /// The receipt is validly signed, but not over this request body.
     #[error("receipt request hash does not match the request body")]
     RequestHashMismatch,
-    /// The receipt is validly signed, but not over this response text.
-    #[error("receipt response hash does not match the response text")]
+    /// The receipt is validly signed, but not over this response body.
+    #[error("receipt response hash does not match the response body")]
     ResponseHashMismatch,
+    /// The receipt is validly signed, but names a different model than the
+    /// one the caller asked for.
+    ///
+    /// Carries neither name: the requested model is configuration and the
+    /// bound one is provider data, and this module puts no payload in an
+    /// error.
+    #[error("receipt binds a different model than the one requested")]
+    ModelMismatch,
 }
 
-/// Verify a receipt against the request body as sent and the response text.
+/// Verify a receipt against the request body as sent and the response body as
+/// received.
 ///
-/// `request_body` must be the exact bytes put on the wire: re-serializing the
-/// request from a parsed form will change the digest.
+/// Both must be the exact bytes on the wire. Re-serializing the request from a
+/// parsed form changes its digest, and passing anything read *out* of the
+/// response -- the assistant message content in particular -- is not what the
+/// receipt hashes.
+///
+/// `expected_model` is the model the caller asked for. It is compared against
+/// the receipt's leading part when there is one; a two-part receipt binds no
+/// model and `expected_model` is then unused.
 pub fn verify_receipt(
     payload: &ReceiptPayload,
     request_body: &[u8],
-    response_text: &str,
+    response_body: &[u8],
+    expected_model: &str,
 ) -> Result<ReceiptVerdict, ReceiptError> {
     let parts: Vec<&str> = payload.text.split(':').collect();
-    let (request_hex, response_hex) = match parts.len() {
-        2 => (parts[0], parts[1]),
-        3 => (parts[1], parts[2]),
+    let (bound_model, request_hex, response_hex) = match parts.len() {
+        2 => (None, parts[0], parts[1]),
+        3 => (Some(parts[0]), parts[1], parts[2]),
         n => return Err(ReceiptError::TextPartCount { parts: n }),
     };
 
@@ -138,14 +173,22 @@ pub fn verify_receipt(
     if Sha256::digest(request_body).as_slice() != signed_request_hash {
         return Err(ReceiptError::RequestHashMismatch);
     }
-    if Sha256::digest(response_text.as_bytes()).as_slice() != signed_response_hash {
+    if Sha256::digest(response_body).as_slice() != signed_response_hash {
         return Err(ReceiptError::ResponseHashMismatch);
+    }
+    // Last, so a receipt bound to different bytes is reported as that rather
+    // than as a model problem: the bytes are the stronger statement.
+    if let Some(model) = bound_model {
+        if model != expected_model {
+            return Err(ReceiptError::ModelMismatch);
+        }
     }
 
     Ok(ReceiptVerdict {
         request_sha256: hex::encode(signed_request_hash),
         response_sha256: hex::encode(signed_response_hash),
         signing_address: format!("0x{}", hex::encode(recovered)),
+        model: bound_model.map(str::to_string),
     })
 }
 
@@ -235,8 +278,19 @@ mod tests {
     const IMPOSTOR_KEY_HEX: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
 
+    const MODEL: &str = "Qwen/Qwen3.6-27B-FP8";
     const REQUEST_BODY: &[u8] = br#"{"model":"qwen3","messages":[{"role":"user","content":"hi"}]}"#;
-    const RESPONSE_TEXT: &str = "Hello. How can I help?";
+    /// The *whole* response body, not the assistant content read out of it.
+    /// The content here is `null`, as a thinking model's is, so a verifier
+    /// that reached for `choices[0].message.content` could not even produce a
+    /// string to hash.
+    const RESPONSE_BODY: &[u8] =
+        br#"{"choices":[{"message":{"content":null,"reasoning_content":"hm","role":"assistant"}}],"id":"c1"}"#;
+
+    /// The common case: this request, this response, this model.
+    fn verify(payload: &ReceiptPayload) -> Result<ReceiptVerdict, ReceiptError> {
+        verify_receipt(payload, REQUEST_BODY, RESPONSE_BODY, MODEL)
+    }
 
     /// Which encoding of the recovery byte to put in the 65th position.
     #[derive(Clone, Copy)]
@@ -271,10 +325,16 @@ mod tests {
     }
 
     fn two_part_text() -> String {
+        format!("{}:{}", sha256_hex(REQUEST_BODY), sha256_hex(RESPONSE_BODY))
+    }
+
+    /// The form the live service actually returns: model, then both hashes.
+    fn three_part_text(model: &str) -> String {
         format!(
-            "{}:{}",
+            "{}:{}:{}",
+            model,
             sha256_hex(REQUEST_BODY),
-            sha256_hex(RESPONSE_TEXT.as_bytes())
+            sha256_hex(RESPONSE_BODY)
         )
     }
 
@@ -292,15 +352,31 @@ mod tests {
     #[test]
     fn a_valid_receipt_verifies_and_binds_both_hashes() {
         let payload = receipt_over(&two_part_text());
-        let verdict = verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect("verifies");
+        let verdict = verify(&payload).expect("verifies");
         assert_eq!(verdict.request_sha256, sha256_hex(REQUEST_BODY));
-        assert_eq!(
-            verdict.response_sha256,
-            sha256_hex(RESPONSE_TEXT.as_bytes())
-        );
+        assert_eq!(verdict.response_sha256, sha256_hex(RESPONSE_BODY));
         assert_eq!(
             verdict.signing_address,
             address_string(&key(SIGNER_KEY_HEX))
+        );
+        // A two-part receipt binds no model, and the verdict says so rather
+        // than quietly reporting the one the caller asked for.
+        assert_eq!(verdict.model, None);
+    }
+
+    #[test]
+    fn the_response_hash_is_over_the_whole_body_not_the_message_content() {
+        // The bug this replaced: hashing `choices[0].message.content`. Here
+        // that field is `null`, so its stand-in is the empty string, and the
+        // two digests are measured to differ rather than assumed to.
+        let payload = receipt_over(&two_part_text());
+        assert!(verify(&payload).is_ok());
+
+        let content_digest = sha256_hex(b"");
+        assert_ne!(content_digest, sha256_hex(RESPONSE_BODY));
+        assert_eq!(
+            verify_receipt(&payload, REQUEST_BODY, b"", MODEL).expect_err("refused"),
+            ReceiptError::ResponseHashMismatch
         );
     }
 
@@ -308,7 +384,7 @@ mod tests {
     fn a_receipt_whose_request_hash_does_not_match_is_rejected() {
         // This is what stops a receipt being moved onto a different trace.
         let payload = receipt_over(&two_part_text());
-        let err = verify_receipt(&payload, b"a different request body", RESPONSE_TEXT)
+        let err = verify_receipt(&payload, b"a different request body", RESPONSE_BODY, MODEL)
             .expect_err("must be refused");
         assert_eq!(err, ReceiptError::RequestHashMismatch);
     }
@@ -316,7 +392,7 @@ mod tests {
     #[test]
     fn a_receipt_whose_response_hash_does_not_match_is_rejected() {
         let payload = receipt_over(&two_part_text());
-        let err = verify_receipt(&payload, REQUEST_BODY, "a different completion")
+        let err = verify_receipt(&payload, REQUEST_BODY, b"a different completion", MODEL)
             .expect_err("must be refused");
         assert_eq!(err, ReceiptError::ResponseHashMismatch);
     }
@@ -333,8 +409,7 @@ mod tests {
             signature: sign(&impostor, &text, VEncoding::Ethereum),
             signing_address: claimed,
         };
-        let err =
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("must be refused");
+        let err = verify(&payload).expect_err("must be refused");
         assert_eq!(err, ReceiptError::SignerMismatch);
     }
 
@@ -344,28 +419,37 @@ mod tests {
         // reading parts[0..2] would compare the leading part against the
         // request body and still "work" for the two-part case, so only this
         // test catches it.
-        //
-        // The leading part is itself a well-formed 64-character lowercase hex
-        // digest, so a verifier reading parts[0..2] fails on a *mismatch*
-        // rather than on malformedness -- the test still catches it even if
-        // the shape check were dropped.
-        let decoy = sha256_hex(b"a request identifier that is not either hash");
-        assert_ne!(decoy, sha256_hex(REQUEST_BODY));
-        assert_ne!(decoy, sha256_hex(RESPONSE_TEXT.as_bytes()));
-        assert_eq!(decoy.len(), 64);
-
-        let text = format!(
-            "{}:{}:{}",
-            decoy,
-            sha256_hex(REQUEST_BODY),
-            sha256_hex(RESPONSE_TEXT.as_bytes())
-        );
-        let payload = receipt_over(&text);
-        let verdict = verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect("verifies");
+        let payload = receipt_over(&three_part_text(MODEL));
+        let verdict = verify(&payload).expect("verifies");
         assert_eq!(verdict.request_sha256, sha256_hex(REQUEST_BODY));
+        assert_eq!(verdict.response_sha256, sha256_hex(RESPONSE_BODY));
+        assert_eq!(verdict.model.as_deref(), Some(MODEL));
+    }
+
+    #[test]
+    fn a_receipt_bound_to_a_different_model_is_rejected() {
+        // The leading part is the model name, and checking it is what makes a
+        // receipt unusable for a completion some other model served. A
+        // verifier that discarded the part -- as NEAR AI's reference one does
+        // -- would pass this.
+        let other = "Qwen/Qwen3.6-35B-A3B-FP8";
+        assert_ne!(other, MODEL);
+        let payload = receipt_over(&three_part_text(other));
         assert_eq!(
-            verdict.response_sha256,
-            sha256_hex(RESPONSE_TEXT.as_bytes())
+            verify(&payload).expect_err("refused"),
+            ReceiptError::ModelMismatch
+        );
+    }
+
+    #[test]
+    fn a_model_mismatch_is_reported_only_once_the_bytes_agree() {
+        // Both wrong: the caller must be told the bytes do not match, which is
+        // the stronger statement and the one that changes what they do next.
+        let payload = receipt_over(&three_part_text("some/other-model"));
+        assert_eq!(
+            verify_receipt(&payload, b"different bytes", RESPONSE_BODY, MODEL)
+                .expect_err("refused"),
+            ReceiptError::RequestHashMismatch
         );
     }
 
@@ -375,7 +459,7 @@ mod tests {
         assert_eq!(one.split(':').count(), 1);
         let payload = receipt_over(&one);
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::TextPartCount { parts: 1 }
         );
 
@@ -384,11 +468,11 @@ mod tests {
             sha256_hex(b"lead"),
             sha256_hex(b"extra"),
             sha256_hex(REQUEST_BODY),
-            sha256_hex(RESPONSE_TEXT.as_bytes())
+            sha256_hex(RESPONSE_BODY)
         );
         let payload = receipt_over(&four);
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::TextPartCount { parts: 4 }
         );
     }
@@ -411,7 +495,7 @@ mod tests {
                 signature,
                 signing_address: address_string(&k),
             };
-            assert!(verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).is_ok());
+            assert!(verify(&payload).is_ok());
         }
     }
 
@@ -423,7 +507,7 @@ mod tests {
         raw[64] = 5;
         payload.signature = format!("0x{}", hex::encode(raw));
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::RecoveryIdUnsupported { v: 5 }
         );
     }
@@ -434,18 +518,13 @@ mod tests {
         // length and the character count of `text` differ. A verifier that
         // rendered the character count into the preamble digests something
         // else and recovers a different signer.
-        let lead = "id-\u{00e9}\u{4f60}";
-        let text = format!(
-            "{}:{}:{}",
-            lead,
-            sha256_hex(REQUEST_BODY),
-            sha256_hex(RESPONSE_TEXT.as_bytes())
-        );
+        let model = "vendor/mod\u{00e8}le-\u{4f60}";
+        let text = three_part_text(model);
         // Measured, not reasoned: the two counts really do differ for this text.
         assert_ne!(text.len(), text.chars().count());
 
         let payload = receipt_over(&text);
-        assert!(verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).is_ok());
+        assert!(verify_receipt(&payload, REQUEST_BODY, RESPONSE_BODY, model).is_ok());
 
         // And the char-count preamble is genuinely a different digest, so the
         // assertion above is load-bearing.
@@ -463,7 +542,7 @@ mod tests {
         let mut payload = receipt_over(&text);
         payload.signature = "0xdeadbeef".to_string();
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::SignatureMalformed
         );
     }
@@ -474,24 +553,24 @@ mod tests {
         let mut payload = receipt_over(&text);
         payload.signing_address = "not-an-address".to_string();
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::SigningAddressMalformed
         );
     }
 
     #[test]
     fn a_hash_position_that_is_not_a_digest_is_named_for_its_position() {
-        let response_hash = sha256_hex(RESPONSE_TEXT.as_bytes());
+        let response_hash = sha256_hex(RESPONSE_BODY);
         let payload = receipt_over(&format!("not-a-digest:{response_hash}"));
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::RequestHashMalformed
         );
 
         let request_hash = sha256_hex(REQUEST_BODY);
         let payload = receipt_over(&format!("{request_hash}:not-a-digest"));
         assert_eq!(
-            verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect_err("refused"),
+            verify(&payload).expect_err("refused"),
             ReceiptError::ResponseHashMalformed
         );
     }
@@ -504,10 +583,10 @@ mod tests {
         let text = format!(
             "{}:{}",
             sha256_hex(REQUEST_BODY).to_uppercase(),
-            sha256_hex(RESPONSE_TEXT.as_bytes()).to_uppercase()
+            sha256_hex(RESPONSE_BODY).to_uppercase()
         );
         let payload = receipt_over(&text);
-        let verdict = verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).expect("verifies");
+        let verdict = verify(&payload).expect("verifies");
         // The verdict re-renders in lowercase regardless of what came in.
         assert_eq!(verdict.request_sha256, sha256_hex(REQUEST_BODY));
     }
@@ -520,6 +599,6 @@ mod tests {
         let mut payload = receipt_over(&text);
         payload.signing_address = payload.signing_address.to_uppercase().replace("0X", "0x");
         assert!(payload.signing_address.contains(char::is_uppercase));
-        assert!(verify_receipt(&payload, REQUEST_BODY, RESPONSE_TEXT).is_ok());
+        assert!(verify(&payload).is_ok());
     }
 }
