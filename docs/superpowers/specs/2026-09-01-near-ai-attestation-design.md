@@ -301,6 +301,45 @@ structured data on an event, so it lands under the same
 must not flip `tool_payloads`. If the routing_metadata category is dropped from
 that plan, this spec inherits the same silent quarantine regression.
 
+## Redaction severs the receipt's binding to the trace
+
+**This is the hardest problem in the design and it has no cheap answer.**
+
+Object B binds `SHA256(request_body_as_sent)` and `SHA256(response_text)`. NEAR
+AI hashes the bytes it received. But redaction is **client-side and
+pre-upload** -- `DeterministicTraceRedactor` in
+`crates/trace-commons-contributor/src/envelope.rs`, and the wire field is
+literally `redacted_content` (`trace_contribution.rs:276`). The server never
+holds the bytes NEAR AI hashed, so it can never reproduce the hash, so it can
+never verify a contributor's receipt against their trace.
+
+Not a downstream bug. Structural: the receipt binds the *inference input*, the
+trace stores the *publishable artifact*, and they are different objects by
+construction.
+
+Four resolutions, and only one keeps the property:
+
+| Option | Consequence |
+|---|---|
+| Trust a client-computed verdict | Rejected. Coverage gates admission, so it is authorization, and self-reported coverage from contributor-controlled software is what the enrichment spec's attribution-only rule exists to refuse. |
+| Drop content binding; require each `chat_id` to be used once | Keeps "one paid inference per submitted trace" but an attacker satisfies it with a one-token completion. The floor collapses from *inference over the whole trace* to *a trivial call per trace*, which is nearly free. |
+| Send raw bytes to the server | Rejected. Defeats the redaction design entirely. |
+| **Redact before inference** | The proxy scrubs outbound, so what NEAR AI hashes is what the trace stores. Hashes match and the binding survives. |
+
+Redacting before inference is the only option that preserves the security
+argument, and it carries an independent benefit: the contributor's unredacted
+text never leaves their machine at all. Its costs are real and should not be
+waved through -- the agent then reasons over redacted text, which changes the
+work and probably degrades it, and it only applies to the proxy-mediated path.
+It also sits oddly against NEAR AI being a TEE, where the premise is that
+sending sensitive data is safe.
+
+**Consequence for sequencing.** This must be settled before the contributor
+slice is planned, because it decides whether the proxy redacts outbound -- an
+IronWire behaviour change, not a server one. It does **not** block verifying our
+own inference path, where we hold both the exact request bytes and the response
+and nothing is redacted.
+
 ## Attestation material is never scored and never scrubbed
 
 Receipts, quotes, signatures and signing addresses must never enter an event's
