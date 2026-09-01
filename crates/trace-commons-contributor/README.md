@@ -253,9 +253,10 @@ remove that too if you are uninstalling.
   instance has actually loaded are reachable this way, so open the relevant
   project in Antigravity before importing. `--project <path>` scopes the
   import to that project (default: the current directory); `--all` takes
-  every conversation the running instance exposes. Conversations created
-  before Antigravity's storage-format change are not listed by the API and
-  are therefore not imported, even though the IDE can still open them.
+  every conversation the running instance exposes. Only Antigravity's
+  current conversation format is in scope: conversations created before its
+  storage-format change are not listed by the API and are not imported,
+  which is a deliberate limit rather than a gap awaiting a fix.
   Imported conversations are staged, not submitted — run `submit`
   afterwards to redact and upload them. Staged files are discovered without
   `--trajectory`, so a later bare `submit` offers them: an import is not
