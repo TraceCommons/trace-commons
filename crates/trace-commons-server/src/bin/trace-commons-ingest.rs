@@ -7600,6 +7600,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(pii_backstop_requeue_quarantined_handler),
         )
         .route(
+            "/v1/admin/pii-backstop-clear-stale-prior-risk",
+            post(pii_backstop_clear_stale_prior_risk_handler),
+        )
+        .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
         )
@@ -51068,6 +51072,149 @@ async fn run_recluster_dedup_pass(
 /// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
 /// a background task and returns a hash-only ack immediately. An optional
 /// `?limit=N` bounds the run.
+#[derive(Debug, Deserialize)]
+struct ClearStalePriorRiskQuery {
+    /// Bounded on purpose; an omitted limit is a sample, never everything.
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Counts only. No submission ids, no tenant content, no risk values.
+#[derive(Debug, Serialize)]
+struct ClearStalePriorRiskAck {
+    cleared: u64,
+    failed: u64,
+}
+
+/// Clear a stale prior risk so the backstop can re-decide from scratch.
+///
+/// Residual risk is a ratchet: `max(prior, derived)` unless `can_downgrade`,
+/// which requires the classifier to have FOUND something. A trace whose
+/// credential PR #506 already removed therefore cannot clear itself -- the
+/// re-run finds nothing, so the stale High survives every pass.
+///
+/// Relaxing the ratchet was attempted and rejected. Redefining
+/// `useful_classifier_result` as "a classifier examined this" reinstates a
+/// bypass this repository already removed: a classifier can pass the canary and
+/// still silently fail on real content, which is what the
+/// `CanaryHealthyButFindsNoRealPii` fixture exists to demonstrate. So the
+/// ratchet is untouched here, and the escape hatch is this: an operator
+/// asserting that the cause was fixed, which is a claim a person is accountable
+/// for rather than an inference from silence.
+///
+/// Prior risk lives in the envelope artifact, not a column, so clearing it
+/// rewrites the envelope and re-holds the submission on `AwaitingPiiBackstop`.
+/// The trace is HELD throughout, never released: this buys it a fair
+/// re-assessment, not a pass. A cause that is still present re-derives and
+/// re-quarantines.
+async fn pii_backstop_clear_stale_prior_risk_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ClearStalePriorRiskQuery>,
+) -> ApiResult<Json<ClearStalePriorRiskAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clearing stale prior risk requires a configured DB mirror",
+        )
+    })?;
+
+    let limit = query.limit.unwrap_or(10).clamp(1, 1_000);
+    let targets = db
+        .list_quarantined_with_only_residual_survivor(&tenant.tenant_id, limit)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
+                "Trace Commons stale-prior-risk enumeration failed"
+            );
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stale prior risk enumeration failed",
+            )
+        })?;
+
+    let mut cleared = 0u64;
+    let mut failed = 0u64;
+    for (target_tenant, submission_id) in targets {
+        match clear_one_stale_prior_risk(state.as_ref(), db, &target_tenant, submission_id).await {
+            Ok(()) => cleared += 1,
+            Err(error) => {
+                failed += 1;
+                // Hash-only: one submission failing must not abort the batch,
+                // and must not put anything identifying in the log.
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons stale prior risk clear failed for one submission"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        cleared,
+        failed,
+        limit,
+        "Trace Commons stale prior risk cleared"
+    );
+    Ok(Json(ClearStalePriorRiskAck { cleared, failed }))
+}
+
+/// Rewrite one envelope's prior risk to `Low` and re-hold the submission.
+///
+/// Mirrors the ordering `process_one_pii_backstop` uses when it stores a
+/// rescrubbed artifact, with one simplification: the target status here is
+/// `AwaitingPiiBackstop`, which is MORE restrictive than the current
+/// `Quarantined`. The concurrent-read hazard that ordering guards against is a
+/// status becoming consumer-visible as released before the new artifact is
+/// active; moving to a held status cannot do that.
+async fn clear_one_stale_prior_risk(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) -> anyhow::Result<()> {
+    let mut record = read_submission_record(&state.root, tenant_id, submission_id)?
+        .ok_or_else(|| anyhow::anyhow!("submission record not found"))?;
+    let mut envelope = read_envelope_by_record(state, &record)?;
+
+    // The ONLY mutation. Redaction state, findings, and the recorded
+    // `residual_risk_basis` are all left exactly as they are: the basis is the
+    // evidence for whether this action was justified, and blanking it would
+    // destroy the ability to tell later.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+
+    let stored = store_envelope(
+        state,
+        tenant_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        PII_BACKSTOP_REDACTION_LABEL,
+        &envelope,
+    )?;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    record.status = TraceCorpusStatus::AwaitingPiiBackstop;
+    write_submission_record(&state.root, &record)?;
+
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        &record, &envelope, None,
+    )?)
+    .await?;
+    db.update_trace_submission_status(
+        tenant_id,
+        submission_id,
+        storage_corpus_status(TraceCorpusStatus::AwaitingPiiBackstop),
+        PII_BACKSTOP_DRIVER_ACTOR_REF,
+        Some(PII_BACKSTOP_REDACTION_LABEL),
+    )
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct RequeueQuarantinedQuery {
     /// Bounded on purpose. The first use of this route is a SAMPLE: re-run a
