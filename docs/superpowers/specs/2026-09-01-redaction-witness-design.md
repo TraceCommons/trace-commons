@@ -273,7 +273,22 @@ quote — unlike Confidential Space, which is token-based — but that is not th
 same as confirming dstack-cloud presents it through the endpoint and layout we
 verified against NEAR AI.
 
-**Confirm this before choosing the GCP path.** If it diverges we would be
+**ASSUMED WORKING (Zaki, 2026-09-01), not verified.** The decision is to plan
+against dstack's attestation being the same wherever it runs, including
+`dstack-cloud` on a GCP Confidential VM, rather than block on confirming it.
+
+Recorded as an assumption because it is load-bearing and cheap to be wrong
+about: if the quote shape diverges, the client-side verifier has to be written
+twice, which is the cost the dstack choice exists to avoid. Twice on 2026-09-01
+a documented behaviour turned out wrong when probed -- the receipt hashed the
+whole response body rather than `message.content`, and `report_data`'s layout
+contradicted NEAR AI's own README. Both would have shipped as defects.
+
+The cheap check remains available at any point: stand up a trial dstack app and
+fetch its attestation. Phala Cloud needs no such check -- it is the
+configuration verified live.
+
+**Original guidance, superseded:** If it diverges we would be
 writing a second verifier, which is the cost the dstack decision exists to
 avoid. Phala Cloud is the safe default precisely because it is the configuration
 we have already verified against, live.
