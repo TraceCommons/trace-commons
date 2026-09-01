@@ -11,14 +11,22 @@
 # HOW IT AVOIDS TOUCHING THE SERVER
 #
 # Ingest keeps pointing at 127.0.0.1:8471 throughout. `attach` stops the local
-# CPU shim and opens an IAP TCP tunnel on that same port to the GPU box, so:
+# CPU shim and runs a socat forwarder on that same port to the GPU box, so:
 #
 #   - no ingest config change, no restart, no code change;
-#   - traffic is encrypted and authenticated by IAP rather than crossing the
-#     VPC in plaintext (the self-hosted adapter has no TLS guard);
 #   - no database credentials, KEK access or artifact keys ever reach the
 #     ephemeral spot VM. It runs the stateless classifier only; ingest still
 #     does envelope decrypt and release.
+#
+# The hop to the GPU crosses the VPC. An earlier version of this header claimed
+# the traffic was "encrypted and authenticated by IAP"; that described a tunnel
+# design that does not work here and was removed -- the pilot's service account
+# cannot call compute.instances.list, so it cannot open an IAP tunnel at all.
+# GCP encrypts VM-to-VM traffic, but there is no application-layer TLS on this
+# hop and the self-hosted adapter has no TLS guard. Trace content crosses it.
+# What bounds the exposure is the firewall rule `attach` creates: tcp:8471, one
+# source address, one target tag. Do not widen it, and run `down` when the
+# batch ends.
 #
 # USAGE
 #   gpu-privacy-filter-batch.sh up       # create + provision the GPU box
@@ -101,10 +109,21 @@ PY
     export PRIVACY_FILTER_DEVICE=cuda
     export OPF_CHECKPOINT=\$HOME/opfmodel/original
     export TORCHDYNAMO_DISABLE=1
-    setsid nohup \$HOME/opfgpu/bin/uvicorn app:app --host 127.0.0.1 --port $PORT \
+    # Bind the VM's internal address, NOT loopback. `attach` reaches this from
+    # the pilot over the VPC, and a 127.0.0.1-only listener is unreachable from
+    # another box no matter how the firewall is set -- which is exactly how this
+    # shipped broken: attach was rewritten to use socat while this line still
+    # said 127.0.0.1, so every attach failed at the healthz check. Bind the
+    # single internal IP rather than 0.0.0.0: the VM has no external address,
+    # and this keeps the listener off any other interface it may acquire.
+    GPU_IP=\$(curl -s -H 'Metadata-Flavor: Google' \
+      http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip)
+    setsid nohup \$HOME/opfgpu/bin/uvicorn app:app --host \$GPU_IP --port $PORT \
       --workers 1 </dev/null > \$HOME/shim.log 2>&1 &
     sleep 25
-    curl -s --max-time 30 localhost:$PORT/healthz; echo
+    # Probe the internal IP, not localhost. A localhost probe passes against a
+    # loopback-bound shim and would have hidden the bug above.
+    curl -s --max-time 30 \$GPU_IP:$PORT/healthz; echo
   "
   say "GPU ready. Next: $0 attach"
 }
@@ -152,9 +171,23 @@ cmd_attach() {
       </dev/null > /tmp/opf-forward.log 2>&1 &
     sleep 5
     echo -n 'device via pilot loopback: '
-    curl -s --max-time 30 localhost:$PORT/healthz || echo FAILED
+    curl -sf --max-time 30 localhost:$PORT/healthz
     echo
-  "
+  " || {
+    # Do not announce success over a broken path. This previously printed
+    # FAILED and then said 'attached', which reads as done at a glance while
+    # ingest has no filter at all: the local CPU shim is already stopped by
+    # this point, so a half-finished attach is worse than no attach.
+    say "ATTACH FAILED -- the GPU did not answer through the pilot loopback."
+    say "ingest currently has NO privacy filter. Restoring the CPU shim now."
+    "${G[@]}" compute ssh "$PILOT_VM" --zone "$ZONE" --tunnel-through-iap \
+      --command "sudo pkill -f '[s]ocat TCP-LISTEN:$PORT' || true
+                 sudo systemctl start trace-commons-privacy-filter" || true
+    say "check, in order: the GPU shim is bound to $gpu_ip (not 127.0.0.1);"
+    say "the firewall rule $FW_RULE allows tcp:$PORT from ${pilot_ip}/32;"
+    say "the VM carries tag $FW_TAG."
+    return 1
+  }
   say "attached. ingest is unchanged; verify the line above says device: cuda."
 
   cat <<'NOTE'
