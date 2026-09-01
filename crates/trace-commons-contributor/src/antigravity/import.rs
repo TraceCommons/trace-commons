@@ -564,6 +564,41 @@ mod tests {
     /// Parsing is not enough on its own -- a file that parses can still
     /// have lost or reordered turns on the way to disk -- so the turns are
     /// asserted through the staged BYTES, by content and in order.
+    /// The end a contributor actually sees: after importing, `list` names
+    /// the conversation `antigravity`, not the adapter that stores it.
+    ///
+    /// The unit test on `session_row` pins the rendering; this pins the
+    /// whole path -- convert writes `meta.source`, staging puts the file
+    /// where the trajectory source reads it, and discovery carries that
+    /// value out on the ref. A break anywhere along it lands here.
+    #[tokio::test]
+    async fn a_staged_conversation_is_discovered_as_antigravity_not_as_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = FixtureApi::new();
+        import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
+            .await
+            .into_result()
+            .unwrap();
+
+        // The staging directory is exactly the scope the trajectory source
+        // auto-reads, so point one at it the way the daemon does.
+        let source =
+            crate::source::trajectory::TrajectorySource::auto(None, Some(dir.path().to_path_buf()));
+        let refs = crate::source::TraceSource::discover(&source).unwrap();
+        assert_eq!(refs.len(), 1, "the staged conversation must be discovered");
+
+        assert_eq!(
+            refs[0].source,
+            crate::source::SOURCE_TRAJECTORY,
+            "the adapter is still what loads it -- `source` must stay resolvable"
+        );
+        assert_eq!(
+            refs[0].declared_source.as_deref(),
+            Some("antigravity"),
+            "but what it declares itself to be is what a contributor is shown"
+        );
+    }
+
     #[tokio::test]
     async fn a_staged_file_round_trips_its_turns_through_the_trajectory_source() {
         let dir = tempfile::tempdir().unwrap();

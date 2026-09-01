@@ -119,6 +119,7 @@ fn session_ref_for(path: PathBuf, cwd: Option<String>) -> Option<SessionRef> {
     let project = project_label(&project_dir, cwd.as_deref());
     Some(SessionRef {
         source: SOURCE_GEMINI_CLI,
+        declared_source: None,
         path,
         project,
         cwd,
