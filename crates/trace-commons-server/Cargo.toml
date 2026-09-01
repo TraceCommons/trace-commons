@@ -103,6 +103,18 @@ local-gpu-models-cuda = ["local-gpu-models", "trace-commons-gate-enclave/local-g
 # `--scorer-backend=near-ai` arm. Independent of `local-gpu-models` so a
 # TEE-hosted scoring host compiles without the mistralrs/candle/CUDA stack.
 near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
+# Compile the Intel DCAP collateral client used by the NEAR AI attestation
+# drill (`POST /v1/admin/near-attestation-drill`). Forwards to `dcap-qvl`'s
+# `report` feature, which is that crate's collateral client and which pulls a
+# second async HTTP stack (reqwest 0.13) plus `futures` into the build --
+# nothing else in this workspace compiles reqwest 0.13 by default. Off by
+# default for that reason. With it off the drill still exists and still runs;
+# its collateral step refuses with the missing control
+# `near_ai_attestation_collateral_client`, so the gap is a red drill with a
+# named cause rather than an absent route. Fetching the PCS endpoints by hand
+# is not the alternative: FMSPC extraction and CRL handling are exactly what
+# `dcap-qvl` gets right.
+near-attestation-collateral = ["dcap-qvl/report"]
 
 [[bin]]
 name = "trace-commons-gate-calibrate"

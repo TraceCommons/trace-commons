@@ -68,6 +68,19 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::near_attestation::client::{
+    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
+    AttestationClient as NearAttestationClient,
+    BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
+    MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
+};
+use trace_commons_server::near_attestation::drill::{
+    NearAttestationDrillOutcome, generate_drill_nonce,
+    run_near_attestation_drill as run_near_attestation_drill_steps,
+};
+use trace_commons_server::near_attestation::measurements::{
+    EXPECTED_MEASUREMENTS_ENV, ExpectedMeasurements,
+};
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
@@ -444,6 +457,10 @@ const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
 const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// Intel PCS / caching-PCCS base URL for the attestation drill's collateral
+// fetch. Defaults to Intel's own service: the collateral is what a quote is
+// verified against, so the shorter the trust path to Intel the better.
+const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 #[allow(dead_code)]
@@ -1471,6 +1488,11 @@ struct AppState {
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     require_object_store_versioning: bool,
+    /// The NEAR AI inference endpoint the attestation drill probes, or
+    /// `None` when the base URL / model / API key are not all configured.
+    /// A drill run against `None` refuses with a named missing control; it
+    /// never reports a pass it did not earn.
+    near_attestation_client: Option<Arc<dyn NearAttestationClient>>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,
@@ -3868,8 +3890,11 @@ impl AppState {
             None => None,
         };
 
+        let near_attestation_client = build_near_attestation_client_from_env()?;
+
         Ok(Self {
             root,
+            near_attestation_client,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
@@ -7622,6 +7647,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-settlement-drill",
             post(credit_settlement_drill_handler),
+        )
+        .route(
+            "/v1/admin/near-attestation-drill",
+            post(near_attestation_drill_handler),
         )
         .route(
             "/v1/workers/credit-settlements/run",
@@ -72014,6 +72043,244 @@ fn trace_revocation_propagation_summary_from_audit_event(
     })())
 }
 
+/// Build the NEAR AI attestation client from env, or `None` when the
+/// endpoint is not fully configured.
+///
+/// A partial configuration returns `None` rather than failing startup: the
+/// drill's job is to name missing controls, and a boot failure would name it
+/// to nobody. [`near_attestation_missing_controls`] is what turns the `None`
+/// back into a list an operator can act on.
+fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<dyn NearAttestationClient>>>
+{
+    let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
+    let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
+    let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
+    let (Some(base_url), Some(model), Some(api_key)) = (base_url, model, api_key) else {
+        return Ok(None);
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let timeout_seconds = match trimmed_env(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
+        Some(raw) => raw.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
+        })?,
+        None => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
+    };
+    anyhow::ensure!(
+        timeout_seconds > 0,
+        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
+    );
+    let client = HttpAttestationClient::new(
+        base_url,
+        model,
+        SecretString::from(api_key),
+        pccs_url,
+        StdDuration::from_secs(timeout_seconds),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(Some(Arc::new(client)))
+}
+
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Which of the endpoint controls the drill needs are not configured.
+///
+/// Read from env at call time rather than cached at boot, because the only
+/// thing this is used for is telling an operator what to set; process env
+/// does not change underneath it.
+fn near_attestation_missing_controls() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL).is_none() {
+        missing.push(NEAR_ATTESTATION_BASE_URL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL).is_none() {
+        missing.push(NEAR_ATTESTATION_MODEL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY).is_none() {
+        missing.push(NEAR_ATTESTATION_API_KEY_CONTROL);
+    }
+    missing
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TraceNearAttestationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearAttestationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    /// Named so an operator reading a refusal knows what to set.
+    expected_measurements_env: &'static str,
+    /// Absent when the drill did not run at all -- a missing endpoint control
+    /// or an unparseable pin set. Absent is not a pass; `ready` is false and
+    /// `blocking_gaps` says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<NearAttestationDrillOutcome>,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+fn near_attestation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    purpose: &str,
+    outcome: Option<&NearAttestationDrillOutcome>,
+    blocking_gaps: &[String],
+) -> String {
+    let evidence = serde_json::json!({
+        "schema": "trace_commons_near_attestation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "purpose_hash": sha256_prefixed(purpose),
+        "outcome": outcome,
+        "blocking_gaps": blocking_gaps,
+    });
+    sha256_prefixed(&evidence.to_string())
+}
+
+/// Prove the inference endpoint is the enclave we think it is.
+///
+/// The drill is deliberately cheap to fail and expensive only to pass: every
+/// check that costs nothing runs first, and the paid completion is reached
+/// only once the endpoint has been established as a TDX enclave running a
+/// pinned image and answering our nonce. See
+/// `docs/operator/near-attestation-drill.md`.
+async fn run_near_attestation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearAttestationDrillRequest,
+) -> ApiResult<TraceNearAttestationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_near_attestation_drill")
+        .to_string();
+
+    let mut blocking_gaps: Vec<String> = Vec::new();
+    let mut outcome = None;
+
+    // Fail closed on configuration before anything reaches the network, so a
+    // misconfigured deployment gets a named control rather than a timeout.
+    let expected = match ExpectedMeasurements::from_env() {
+        Ok(expected) => expected,
+        Err(error) => {
+            // The error names a key, never a value.
+            blocking_gaps.push(format!("expected_measurements_config_invalid:{error}"));
+            None
+        }
+    };
+    let expected_measurements_valid = blocking_gaps.is_empty();
+
+    match state.near_attestation_client.as_ref() {
+        Some(client) if expected_measurements_valid => {
+            let nonce = generate_drill_nonce();
+            let now_unix = generated_at.timestamp().max(0) as u64;
+            outcome = Some(
+                run_near_attestation_drill_steps(
+                    client.as_ref(),
+                    expected.as_ref(),
+                    &nonce,
+                    now_unix,
+                )
+                .await,
+            );
+        }
+        Some(_) => {}
+        None => {
+            let missing = near_attestation_missing_controls();
+            if missing.is_empty() {
+                // The endpoint controls are all set yet no client exists.
+                // That should be unreachable -- both come from the same env
+                // read at boot -- but an empty gap list beside `ready:false`
+                // would be a refusal with no stated reason, which is worse
+                // than a slightly awkward label.
+                blocking_gaps.push("near_attestation_client_unavailable".to_string());
+            }
+            for control in missing {
+                blocking_gaps.push(format!("missing_control:{control}"));
+            }
+        }
+    }
+
+    if let Some(outcome) = outcome.as_ref() {
+        blocking_gaps.extend(outcome.blocking_steps());
+    }
+    let ready = blocking_gaps.is_empty() && outcome.as_ref().is_some_and(|outcome| outcome.passed);
+    let evidence_hash =
+        near_attestation_drill_evidence_hash(tenant, &purpose, outcome.as_ref(), &blocking_gaps);
+
+    let mut response = TraceNearAttestationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready,
+        evidence_hash,
+        expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
+        outcome,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "near_attestation".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .map_err(internal_error)?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn near_attestation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceNearAttestationDrillRequest>,
+) -> ApiResult<Json<TraceNearAttestationDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_near_attestation_drill(state.as_ref(), &tenant, request).await?;
+    Ok(Json(response))
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "submit_status",
     "tenant_canary_isolation",
@@ -72032,6 +72299,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "benchmark_pipeline",
     "ranking_model_readiness",
     "credit_settlement",
+    "near_attestation",
     "object_primary_reads",
     "object_store_migration",
     "postgres_rls_readiness",

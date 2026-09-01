@@ -4743,6 +4743,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
+        near_attestation_client: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -25576,6 +25577,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
+        near_attestation_client: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -60238,11 +60240,11 @@ async fn operational_summary_reports_rollout_smoke_preflight_evidence_gap() {
     );
     assert_eq!(
         operational_json["rollout_smoke"]["required_check_count"],
-        serde_json::json!(23)
+        serde_json::json!(24)
     );
     assert_eq!(
         operational_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(23)
+        serde_json::json!(24)
     );
     assert!(
         operational
@@ -60332,7 +60334,7 @@ async fn operational_summary_reports_rollout_smoke_preflight_evidence_gap() {
         operational
             .rollout_smoke
             .blocker_reasons
-            .contains(&"smoke_rehearsal_evidence_missing=23".to_string())
+            .contains(&"smoke_rehearsal_evidence_missing=24".to_string())
     );
 }
 
@@ -60412,7 +60414,7 @@ async fn admin_rollout_smoke_evidence_records_clear_required_check_gap() {
     );
     assert_eq!(
         operational_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(22)
+        serde_json::json!(23)
     );
     assert!(
         !operational
@@ -61188,7 +61190,7 @@ async fn admin_rollout_smoke_preflight_returns_latest_hash_only_evidence() {
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["required_check_count"],
-        serde_json::json!(23)
+        serde_json::json!(24)
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -61200,7 +61202,7 @@ async fn admin_rollout_smoke_preflight_returns_latest_hash_only_evidence() {
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(22)
+        serde_json::json!(23)
     );
     assert_eq!(
         preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -61702,7 +61704,7 @@ async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
             "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"restore_after_delete_supported\"}} 0"
         )));
     assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 23"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 24"
         )));
     assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_check{{tenant_storage_ref=\"{tenant_ref}\",check_name=\"submit_status\",state=\"missing\"}} 1"
@@ -87621,4 +87623,189 @@ fn classify_policy_env_defaults_closed() {
             None => std::env::remove_var(VAR),
         }
     }
+}
+
+// -- NEAR AI attestation drill --------------------------------------------
+//
+// The verification logic itself is exercised against a stub endpoint in
+// `near_attestation::drill`. What these cover is the part that only exists
+// here: admin auth, the refusal when the endpoint is not configured, the
+// rollout-smoke evidence row, and that nothing secret reaches the response
+// body an operator will paste into a ticket.
+
+/// A stub endpoint that serves the captured fixture report and collateral.
+///
+/// It signs receipts with a key that is emphatically not the attested one --
+/// nobody outside the enclave holds that -- so a drill driven by this stub
+/// gets all the way to the last step and fails there. That is the strongest
+/// end-to-end shape available offline, and it is what proves the handler
+/// really hands its client to the drill.
+struct FixtureAttestationEndpoint;
+
+#[async_trait::async_trait]
+impl trace_commons_server::near_attestation::client::AttestationClient
+    for FixtureAttestationEndpoint
+{
+    fn model(&self) -> &str {
+        "Qwen/Qwen3.6-35B-A3B-FP8"
+    }
+
+    async fn fetch_report(
+        &self,
+        _nonce: &str,
+    ) -> Result<
+        trace_commons_server::near_attestation::AttestationReport,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        Ok(
+            trace_commons_server::near_attestation::AttestationReport::from_json(include_str!(
+                "../../../tests/fixtures/near_ai_attestation_report.json"
+            ))
+            .expect("fixture report parses"),
+        )
+    }
+
+    async fn fetch_collateral(
+        &self,
+        _quote: &[u8],
+    ) -> Result<
+        trace_commons_server::near_attestation::quote::Collateral,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        Ok(
+            trace_commons_server::near_attestation::quote::parse_collateral(include_str!(
+                "../../../tests/fixtures/near_ai_attestation_collateral.json"
+            ))
+            .expect("fixture collateral parses"),
+        )
+    }
+
+    async fn complete(
+        &self,
+        _request_body: &[u8],
+    ) -> Result<
+        trace_commons_server::near_attestation::client::CompletionOutcome,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        unreachable!("the drill must never pay for a completion after an earlier step failed")
+    }
+
+    async fn fetch_receipt(
+        &self,
+        _chat_id: &str,
+    ) -> Result<
+        trace_commons_server::near_attestation::receipt::ReceiptPayload,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        unreachable!("no receipt is fetched without a completion")
+    }
+}
+
+#[tokio::test]
+async fn near_attestation_drill_requires_an_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = near_attestation_drill_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect_err("a contributor token must not run an admin drill");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn near_attestation_drill_refuses_when_the_endpoint_is_not_configured() {
+    // A missing endpoint is a named refusal, never a skip to a pass.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect("the drill reports a refusal rather than failing the request");
+
+    assert!(!drill.ready);
+    assert!(drill.outcome.is_none());
+    assert!(
+        !drill.blocking_gaps.is_empty(),
+        "a refusal must say why: {drill:?}"
+    );
+    assert!(drill.recorded_evidence.is_none());
+    assert_eq!(
+        drill.expected_measurements_env,
+        "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS"
+    );
+}
+
+#[tokio::test]
+async fn near_attestation_drill_records_failed_smoke_evidence() {
+    // A red drill must record red evidence. Recording a pass here is the
+    // single most damaging thing this route could do.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest {
+            purpose: Some("drill an unconfigured endpoint".to_string()),
+            record_evidence: true,
+        }),
+    )
+    .await
+    .expect("the drill records evidence for a refusal");
+
+    let evidence = drill.recorded_evidence.expect("evidence was recorded");
+    assert_eq!(evidence.check_name, "near_attestation");
+    assert_eq!(evidence.status, TraceRolloutSmokeEvidenceStatus::Failed);
+    assert_eq!(evidence.evidence_hash, drill.evidence_hash);
+    // The check name must be one rollout-smoke actually requires, or the
+    // evidence is recorded into a bucket nothing reads.
+    assert!(TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&"near_attestation"));
+}
+
+#[tokio::test]
+async fn near_attestation_drill_runs_the_configured_endpoint_and_leaks_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::get_mut(&mut state)
+        .expect("the test holds the only reference")
+        .near_attestation_client = Some(Arc::new(FixtureAttestationEndpoint));
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect("the drill runs against the configured endpoint");
+
+    // The handler really passed its client through: the quote was fetched
+    // and verified rather than the drill refusing on configuration.
+    let outcome = drill.outcome.as_ref().expect("the drill ran");
+    assert_eq!(
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.step
+                == trace_commons_server::near_attestation::drill::NearAttestationDrillStep::QuoteVerified)
+            .map(|step| step.status),
+        Some(trace_commons_server::near_attestation::drill::NearAttestationStepStatus::Passed)
+    );
+    assert!(!drill.ready);
+
+    let body = serde_json::to_string(&drill).expect("the response serializes");
+    for forbidden in ["sk-", "Bearer", "0x"] {
+        assert!(
+            !body.contains(forbidden),
+            "drill response leaked {forbidden}"
+        );
+    }
+    assert!(!body.contains("e5d0fec43b001f181a3410b96715ec54171f36da"));
 }

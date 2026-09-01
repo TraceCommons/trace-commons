@@ -17,6 +17,8 @@
 //! quote's signature chain against Intel collateral lives in [`quote`], and
 //! pinning the image measurements it carries lives in [`measurements`].
 
+pub mod client;
+pub mod drill;
 pub mod measurements;
 pub mod quote;
 pub mod receipt;
