@@ -81,6 +81,7 @@ mod tests {
 
     fn row(session: Option<&str>, offset: i64) -> RoutedExchange {
         RoutedExchange {
+            id: None,
             started_at: at(offset),
             client_session_id: session.map(str::to_string),
             total_ms: Some(1200),

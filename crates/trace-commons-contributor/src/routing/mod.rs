@@ -36,6 +36,12 @@ pub mod ironwire;
 /// degrades a row rather than dropping it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RoutedExchange {
+    /// The proxy's rowid for this exchange, and the cursor a reader pages on.
+    ///
+    /// `None` on a proxy older than the release that exposes it, which costs
+    /// only the ability to page: a single window still reads.
+    #[serde(default)]
+    pub id: Option<i64>,
     pub started_at: DateTime<Utc>,
     /// The agent session the proxy saw on the request. `None` on a proxy older
     /// than the release that records it, which simply means this row cannot be
@@ -118,6 +124,7 @@ mod tests {
 
     fn row(session: &str, offset: i64) -> RoutedExchange {
         RoutedExchange {
+            id: None,
             started_at: at(offset),
             client_session_id: Some(session.to_string()),
             total_ms: Some(1200),

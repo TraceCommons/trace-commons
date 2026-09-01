@@ -981,6 +981,7 @@ mod tests {
 
     fn sample_routed_exchange() -> crate::routing::RoutedExchange {
         crate::routing::RoutedExchange {
+            id: None,
             started_at: chrono::Utc::now(),
             client_session_id: Some("s-1".to_string()),
             total_ms: Some(1200),
