@@ -344,6 +344,73 @@ backwards against a TEE: confidential inference exists so that real data *can*
 be sent, and scrubbing on the way in is strictly worse than scrubbing on the way
 out.
 
+### The resolution: a redaction witness in a TEE
+
+**Zaki, 2026-09-01.** A service running in an attested TEE sees both the
+unredacted and the redacted feed, checks they correspond, and issues a
+certificate over the *redacted* artifact that grants admission.
+
+This dissolves the impasse. The receipt binds raw bytes; the server holds
+redacted bytes; nobody can bridge the two without seeing both. So put "seeing
+both" inside an enclave whose code the contributor can verify before trusting
+it -- the same bargain NEAR AI offers us, which is what makes it coherent rather
+than hypocritical.
+
+**The trap, found on inspection.** `DeterministicTraceRedactor`
+(`trace_contribution.rs:3501`) is not fully deterministic: it holds
+`privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>`, the model-based
+prose-PII classifier. The pattern half reproduces; a model call does not. A
+witness that recomputes `redact(raw)` and compares would therefore **fail on
+honest submissions**. Any implementation that assumes reproducibility is wrong
+before it starts.
+
+**So the correspondence check is exact rather than reproductive.** The
+contributor sends three things:
+
+1. the raw request and response,
+2. the redacted artifact it intends to upload,
+3. the **redaction span list** -- offsets and replacements, which the client
+   already computes.
+
+The witness applies the spans to raw and requires **byte equality** with the
+submitted redacted artifact. No fuzzy alignment and no classifier replay, so
+there is no loose matcher for an attacker to exploit. Offsets are already
+treated as untrusted-and-enforced elsewhere in this codebase; the same
+discipline applies.
+
+Note what is and is not being checked: **faithfulness, not sufficiency.** The
+witness proves the redacted artifact derives from the raw one and was not
+fabricated. Whether the redaction removed enough PII remains the policy's job
+and the backstop's.
+
+**The certificate**, signed by the witness enclave and verifiable against its
+own attestation:
+
+```
+H(redacted) | chat_id | prompt+completion tokens | model | timestamp
+            | redaction policy version | witness enclave measurement
+```
+
+The server verifies it against the redacted bytes it already holds.
+
+**What this collapses.** Both upstream asks largely disappear:
+
+- Content binding is restored without NEAR AI signing usage, because the witness
+  sees the real bytes.
+- The pseudonym stops being an ask: the witness observes the API key when it
+  fetches `/v1/signature/{chat_id}`, so it can emit a stable salted
+  `H(salt, key)` itself. That is per-**key**, not per-account, so a payer with
+  several keys still gets several caps -- weaker than what we would have asked
+  NEAR AI for, but it needs nobody's cooperation and can be strengthened later.
+
+**Costs, stated plainly.** It is a new service to build, operate and keep
+attested -- the largest single component in this design, and a central chokepoint
+on the submission path. Raw data transits to it, so a compromised witness is a
+real exposure. It also inherits the redaction policy version as a compatibility
+surface: a policy change invalidates the ability to re-derive old certificates.
+
+**This wants its own spec.** It is a system, not a section.
+
 ### The requirement was never content identity
 
 All four options fail, which is the signal that the problem was framed wrongly.
