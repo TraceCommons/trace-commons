@@ -10,6 +10,14 @@
 //! demands the token (401 unauthenticated with no header) and then accepts
 //! this exact candidate's token (200 with the header).
 //!
+//! The sweep is two passes. First `open_ports` asks, concurrently, which
+//! ports in the window have anything listening; it opens a TCP connection
+//! and closes it, carrying no credential. Then the 401/200 check above runs
+//! sequentially, lowest port first, against only those. The split is there
+//! because a closed port is not free on Windows -- see `PROBE_TIMEOUT` --
+//! and because the concurrency that fixes this must not be applied to the
+//! pass that sends the token; see `open_ports`.
+//!
 //! **What that check buys, and what it does not.** It rules out the
 //! accident this sweep would otherwise cause: a port in the window that
 //! merely answers, belonging to some unrelated local service, which would
@@ -58,13 +66,22 @@ const CSRF_HEADER: &str = "x-codeium-csrf-token";
 /// single guess.
 const PROBE_WINDOW: std::ops::RangeInclusive<u16> = 1..=64;
 
-/// Per-request timeout for a single probe. A closed port refuses the
-/// connection immediately, so a typical sweep is fast; only a blackholed
-/// port (one that accepts the connection but never replies) pays the full
-/// timeout, and each port pays it at most once (a timed-out first request
-/// aborts that port's probe before the second request is ever sent). Worst
-/// case across the whole window is 64 ports x 250ms ~= 16s, not "a few
-/// seconds" -- bounded, not fast.
+/// Per-request timeout for a single probe, and for the liveness connect in
+/// `open_ports`.
+///
+/// This doc used to say a closed port refuses the connection immediately, so
+/// only a blackholed port pays the full timeout. That is true on macOS and
+/// Linux and false on Windows, which does not refuse a connect to a closed
+/// loopback port -- it runs the timeout out. CI proved it: the probe test
+/// failed there on `is_timeout()`, not on a slow refusal.
+///
+/// So the window's cost is set by how many timeouts can overlap, not by how
+/// many ports are closed. `open_ports` runs the liveness connects
+/// concurrently, which puts the worst case at roughly one timeout rather
+/// than `PROBE_WINDOW` x `PROBE_TIMEOUT` (~16s). Only the ports that
+/// actually listen go on to the sequential HTTP probe, and a blackholed one
+/// among those still pays the timeout at most once -- a timed-out first
+/// request aborts that port's probe before the second is ever sent.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The discovered API: the port it listens on and the CSRF token it expects.
@@ -155,6 +172,62 @@ pub(crate) async fn discover() -> Result<Endpoint> {
         .ok_or_else(|| anyhow::anyhow!(ERR_API_NOT_FOUND))
 }
 
+/// Which of `ports` have something listening, in the order given.
+///
+/// This exists because a closed port is not free on every platform. On
+/// Windows a connect to a closed loopback port is not refused -- it runs the
+/// timeout out. Swept one port at a time that made the window cost
+/// `PROBE_WINDOW` x `PROBE_TIMEOUT`, about sixteen seconds, before `discover`
+/// could so much as report that Antigravity is not running. Concurrently the
+/// same window costs about one timeout.
+///
+/// **Why the concurrency is here and not around `probe_port`.** Probing the
+/// HTTP surface concurrently would be simpler and would also fix the
+/// latency, but `probe_port` sends the CSRF token, and today it sends it to
+/// at most one port at a time, only after that port has answered 401, and
+/// never at all to ports above the one that matched. Sixty-four concurrent
+/// HTTP probes would hand a live token to every local listener that answers
+/// 401 in the same instant -- widening exactly the residual the module doc
+/// describes. This layer moves no credential: it opens a TCP connection and
+/// closes it. The token path above stays sequential, lowest-port-first, and
+/// now runs only against ports that are actually listening, which is a
+/// strictly smaller set than before.
+async fn open_ports(ports: Vec<u16>) -> Vec<u16> {
+    // Spawned rather than awaited in a loop: a spawned task starts
+    // immediately, so all of these connects are in flight together. The
+    // handles are collected in the order `ports` gave, and awaited in that
+    // order, so the result preserves it -- `probe_candidates` returns the
+    // first match and must still pick the lowest qualifying port.
+    let handles: Vec<(u16, tokio::task::JoinHandle<bool>)> = ports
+        .into_iter()
+        .map(|port| (port, tokio::spawn(is_listening(port))))
+        .collect();
+
+    let mut open = Vec::new();
+    for (port, handle) in handles {
+        // A panicked or cancelled probe is "not listening", never a reason
+        // to abandon the sweep: one unusable port must not make the other
+        // sixty-three unreachable.
+        if handle.await.unwrap_or(false) {
+            open.push(port);
+        }
+    }
+    open
+}
+
+/// Whether anything accepts a TCP connection on `port`. Opens and drops it;
+/// sends nothing.
+async fn is_listening(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
 async fn probe_candidates(candidates: &[Candidate]) -> Option<Endpoint> {
     // One client, reused across every port and candidate -- a fresh client
     // per port would rebuild a connection pool up to 64 times per candidate
@@ -165,14 +238,19 @@ async fn probe_candidates(candidates: &[Candidate]) -> Option<Endpoint> {
         .ok()?;
 
     for candidate in candidates {
-        for offset in PROBE_WINDOW {
-            // `offset` is always >= 1 (see PROBE_WINDOW), so this only
-            // saturates when `extension_server_port` is already within 64 of
-            // u16::MAX; `checked_add` skips that port instead of re-probing
-            // u16::MAX repeatedly.
-            let Some(port) = candidate.extension_server_port.checked_add(offset) else {
-                continue;
-            };
+        // `offset` is always >= 1 (see PROBE_WINDOW), so this only saturates
+        // when `extension_server_port` is already within 64 of u16::MAX;
+        // `checked_add` skips that port instead of re-probing u16::MAX
+        // repeatedly.
+        let window: Vec<u16> = PROBE_WINDOW
+            .filter_map(|offset| candidate.extension_server_port.checked_add(offset))
+            .collect();
+
+        // Narrow to ports that are actually listening before sending
+        // anything. Concurrent, so a window of closed ports costs about one
+        // timeout instead of sixty-four; see `open_ports` for why the
+        // concurrency stops here and does not extend to the token probe.
+        for port in open_ports(window).await {
             if probe_port(&client, port, &candidate.token).await {
                 return Some(Endpoint {
                     port,
@@ -235,6 +313,75 @@ async fn probe_port(client: &reqwest::Client, port: u16, token: &str) -> bool {
 mod tests {
     use super::*;
     use axum::{Json, Router, response::IntoResponse, routing::post};
+
+    /// Binds a port, then drops the listener, so the port is known-closed.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    #[tokio::test]
+    async fn open_ports_reports_only_the_ports_with_a_listener() {
+        let live_a = spawn(Router::new()).await;
+        let live_b = spawn(Router::new()).await;
+        let dead = closed_port().await;
+
+        let mut asked = vec![live_a, live_b, dead];
+        asked.sort_unstable();
+        let open = open_ports(asked).await;
+
+        let mut expected = vec![live_a, live_b];
+        expected.sort_unstable();
+        assert_eq!(
+            open, expected,
+            "only ports with a listener may be handed on to the HTTP probe"
+        );
+        // Ascending order is load-bearing: `probe_candidates` walks this list
+        // in order and returns the first match, so the lowest qualifying port
+        // must win exactly as it did when the sweep was sequential.
+        assert!(open.windows(2).all(|w| w[0] < w[1]), "must stay ascending");
+    }
+
+    #[tokio::test]
+    async fn closed_ports_do_not_serialize_their_timeouts() {
+        // The whole point of the liveness pre-check. Windows does not refuse
+        // a connect to a closed loopback port -- it runs the timeout out (CI
+        // proved this on `worktree-antigravity-trajectory-probe`, where the
+        // reworked probe test failed on `is_timeout()`). Swept one at a time
+        // that is 64 x 250ms ~= 16s before `discover` can report that
+        // Antigravity is not there.
+        //
+        // Unlike the assertion this replaces, there is a real gap to put a
+        // threshold in: sequential costs the full window, concurrent costs
+        // about one timeout. The bound below sits at a quarter of the
+        // sequential cost -- roughly 4x under what a serialized sweep must
+        // exceed and many times over what a concurrent one needs -- so it
+        // separates the two behaviours without measuring scheduling noise.
+        let ports: Vec<u16> = {
+            let mut v = Vec::new();
+            for _ in 0..PROBE_WINDOW.count() {
+                v.push(closed_port().await);
+            }
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let asked = ports.len();
+        let serialized_cost = PROBE_TIMEOUT * u32::try_from(asked).unwrap();
+
+        let started = std::time::Instant::now();
+        let open = open_ports(ports).await;
+        let elapsed = started.elapsed();
+
+        assert!(open.is_empty(), "nothing is listening on any of them");
+        assert!(
+            elapsed < serialized_cost / 4,
+            "sweeping {asked} closed ports took {elapsed:?}; serialized they would cost \
+             {serialized_cost:?}, so this is not being done concurrently"
+        );
+    }
 
     /// Binds a router to a real 127.0.0.1 socket and returns the port it is
     /// listening on. Matches the shape already used in this crate's other
