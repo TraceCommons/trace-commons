@@ -446,7 +446,17 @@ enum DaemonEvent: Equatable {
     case snapshot(pending: [QueueEntry], status: DaemonStatus)
     case queueChanged
     case statusChanged
-    case digestDue(pending: Int, text: String)
+    /// `contributed` and `creditPending` describe what went out unasked
+    /// since the last digest. They are zero on a daemon that predates them,
+    /// which degrades this to the waiting-only digest that shipped before
+    /// rather than to a wrong number.
+    case digestDue(
+        pending: Int,
+        contributed: Int,
+        contributedProjects: [String],
+        creditPending: Double,
+        text: String
+    )
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.

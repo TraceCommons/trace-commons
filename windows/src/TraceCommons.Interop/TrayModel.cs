@@ -313,6 +313,50 @@ public static class DigestText
     }
 
     /// <summary>
+    /// The contribution half: what went out unasked since the last digest.
+    /// Null when nothing did -- a line reading "0 sessions contributed" is
+    /// worse than no line.
+    /// </summary>
+    /// <remarks>
+    /// The daemon composes the same sentence for its own local notifier
+    /// (<c>daemon::notify::contribution_text</c>), the Linux shell in
+    /// <c>notify::contribution_body</c>, and macOS in
+    /// <c>DigestCopy.contributionLine</c>. All four follow the same rules and
+    /// are tested against them separately, because each platform words the
+    /// surrounding text differently.
+    /// </remarks>
+    public static string? ContributionLine(
+        int contributedCount,
+        IReadOnlyList<string> projectLabels,
+        double creditPending)
+    {
+        ArgumentNullException.ThrowIfNull(projectLabels);
+
+        if (contributedCount <= 0)
+        {
+            return null;
+        }
+
+        string noun = contributedCount == 1 ? "session" : "sessions";
+        string from = JoinProjects(projectLabels);
+        string line = $"{contributedCount} {noun} contributed{from}.";
+
+        // Only when there is some: "0 credit pending" reads as a failure
+        // rather than as a fresh start, and the first digest after arming a
+        // project is exactly when that would show. Always "pending", never
+        // "earned" -- settlement is off on every deployment shipped so far.
+        if (creditPending > 0)
+        {
+            line += string.Format(
+                CultureInfo.InvariantCulture,
+                " {0:0.0} credit pending.",
+                creditPending);
+        }
+
+        return line;
+    }
+
+    /// <summary>
     /// "a", "a and b", "a, b and c" -- the spec's own list form. An empty
     /// list yields an empty string, so the sentence degrades to "3 sessions
     /// ready." rather than trailing a dangling "from".

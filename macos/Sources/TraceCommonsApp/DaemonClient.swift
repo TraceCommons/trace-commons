@@ -498,6 +498,9 @@ enum DaemonEventParser {
         case "digest_due":
             return .digestDue(
                 pending: payload["pending"] as? Int ?? 0,
+                contributed: payload["contributed"] as? Int ?? 0,
+                contributedProjects: payload["contributed_projects"] as? [String] ?? [],
+                creditPending: payload["credit_pending"] as? Double ?? 0,
                 text: payload["text"] as? String ?? ""
             )
         case "resync_required":
