@@ -76,11 +76,27 @@ CREATE POLICY trace_community_drain_mark ON trace_community_withdrawal_evictions
 -- A tenant predicate has nothing to compare against.
 --
 -- `trace_leaderboard_snapshots` (V27) -- the published community leaderboard,
--- one row per (window, metric, computed_at) merging every configured tenant
--- into a single deployment-wide ranking. No tenant_id column and no per-row
--- tenant to derive. `contents_jsonb` DOES carry per-contributor
--- `display_handle` and `bio` values, so this is not an "no identity present"
--- exclusion: it is opt-in published data. Writes are gated on the
--- `public_attribution` consent scope, and the same bytes are served verbatim
--- to unauthenticated `GET /v1/community/*` readers. Withdrawal removes a
--- contributor from the next snapshot via the eviction receipts above.
+-- one row per (window, metric, computed_at) merging every tenant in
+-- `community_tenant_ids` into a single deployment-wide ranking. A tenant
+-- predicate is not merely unnecessary here, it is inexpressible: there is no
+-- tenant_id column and no per-row tenant to compare against.
+--
+-- This is NOT a "carries no identity" exclusion, and the distinction matters
+-- enough to spell out so the next reader can check it rather than trust it.
+-- `contents_jsonb` holds a serialized `CommunitySnapshotContents` whose
+-- `leaderboard` entries and `contributors` map both carry `display_handle`
+-- (and `bio`), copied verbatim from `trace_contributor_profiles` by
+-- `compute_leaderboard_inputs`. It is identity-bearing -- but as opt-in
+-- published data:
+--
+--   * writes reach it only behind the `public_attribution` consent scope,
+--     enforced by `enforce_public_attribution_scope` in
+--     `bin/trace-commons-ingest.rs`; and
+--   * the same bytes are served verbatim to the UNAUTHENTICATED
+--     `GET /v1/community/*` endpoints.
+--
+-- Withdrawal removes a contributor from the next snapshot via the eviction
+-- receipts above, and the already-published snapshot is not left exposed in
+-- the meantime: the read path refuses it with
+-- `snapshot_invalidated_by_withdrawal` (`community_snapshot_freshness_failure`)
+-- for as long as the pending watermark postdates `computed_at`.

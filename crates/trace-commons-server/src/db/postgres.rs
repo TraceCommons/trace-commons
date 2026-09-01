@@ -149,10 +149,11 @@ pub struct PgBackend {
 /// isolated by subject hash rather than by tenant, and
 /// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
 /// are deployment-wide aggregate bookkeeping with no tenant column to
-/// predicate on. See the exclusion notes at the bottom of
-/// `migrations/V55__community_withdrawal_eviction_rls.sql` for the last two,
-/// including why the leaderboard snapshot's published handles do not change
-/// that answer.
+/// predicate on -- inexpressible rather than merely unnecessary. The
+/// leaderboard snapshot's `contents_jsonb` DOES carry contributor handles;
+/// see the exclusion notes at the bottom of
+/// `migrations/V55__community_withdrawal_eviction_rls.sql` for why that is
+/// opt-in published data and does not change the answer.
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
