@@ -4378,6 +4378,11 @@ pub async fn rescrub_envelope_prose_pii_with(
     // consent must not survive into residual_risk / status decisions.
     reconcile_consent_declarations(envelope);
 
+    // Deterministic credential sweep applied to whatever the classifier
+    // returns. `bare()` reads no env and attaches no adapter: this pass is
+    // regex/entropy detection only, and must never recurse into a classifier.
+    let secret_sweeper = DeterministicTraceRedactor::bare();
+    let mut secret_state = RedactionState::default();
     let mut event_updates: Vec<(usize, String)> = Vec::new();
     let mut structured_updates: Vec<(usize, Value)> = Vec::new();
     let mut report = RedactionReport::default();
@@ -4398,7 +4403,20 @@ pub async fn rescrub_envelope_prose_pii_with(
         if let Some(redaction) = adapter.redact_text(content).await? {
             merge_privacy_filter_summary(&mut summary, &redaction.summary);
             report.merge(redaction.report);
-            event_updates.push((index, redaction.redacted_text));
+            // The classifier is trained on prose PII, not credential formats,
+            // so an AWS key, a bearer token or a PEM block produces no span
+            // and would be written straight back into the field. The residual
+            // scan then finds it and quarantines the trace -- for a secret
+            // this pipeline can see and had simply not been asked to remove.
+            // That is the whole of the pilot's quarantine backlog.
+            //
+            // The two detectors are complementary, not alternatives, so run
+            // the deterministic pass over the classifier's output. It can only
+            // remove more: it never restores text the classifier took out.
+            let (deterministic, secret_report) =
+                secret_sweeper.redact_text_with_state(&redaction.redacted_text, &mut secret_state);
+            report.merge(secret_report);
+            event_updates.push((index, deterministic));
         }
     }
 
@@ -8512,6 +8530,65 @@ mod tests {
             env.privacy.residual_pii_risk,
             ResidualPiiRisk::High,
             "a zero-span response must not, by itself, downgrade a HIGH prior risk"
+        );
+    }
+
+    #[cfg(feature = "near-ai-privacy-filter")]
+    /// A credential the CLASSIFIER does not span must still be removed by the
+    /// backstop, because the deterministic detector can see it.
+    ///
+    /// The backstop rewrites `redacted_content` from the classifier's spans
+    /// alone. The classifier is trained on prose PII, not credential formats,
+    /// so an AWS-key-shaped secret produces no span and the field is rewritten
+    /// with the secret intact. The residual scan then finds it -- correctly --
+    /// and quarantines the trace for a secret the pipeline had the means to
+    /// remove and did not. That is the whole of the pilot's 114-submission
+    /// quarantine backlog.
+    #[tokio::test]
+    async fn backstop_removes_a_credential_the_classifier_does_not_span() {
+        use crate::trace_contribution::*;
+
+        struct NoSpans;
+        #[async_trait::async_trait]
+        impl PrivacyFilterAdapter for NoSpans {
+            async fn redact_text(
+                &self,
+                text: &str,
+            ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+                // A real 200 that found nothing: text returned unchanged.
+                Ok(Some(SafePrivacyFilterRedaction {
+                    redacted_text: text.to_string(),
+                    summary: SafePrivacyFilterSummary {
+                        schema_version: 1,
+                        output_mode: "redacted_text_only".into(),
+                        span_count: 0,
+                        by_label: std::collections::BTreeMap::new(),
+                        decoded_mismatch: false,
+                        classify_policy: None,
+                        events_examined: 0,
+                        events_skipped_by_policy: 0,
+                    },
+                    report: RedactionReport::default(),
+                }))
+            }
+        }
+
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let mut env = sample_envelope_with_event_content(
+            "deploy failed, the key AKIAIOSFODNN7EXAMPLE was rejected",
+        );
+
+        super::rescrub_envelope_prose_pii_with(&NoSpans, &mut env, PiiClassifyPolicy::AllEvents)
+            .await
+            .expect("backstop pass succeeds");
+
+        let content = env.events[0]
+            .redacted_content
+            .as_deref()
+            .expect("event keeps its content");
+        assert!(
+            !content.contains(SECRET),
+            "a credential the classifier did not span must still be removed: {content}"
         );
     }
 
