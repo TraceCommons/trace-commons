@@ -752,6 +752,54 @@ fn stop_embedded(handle: &tc_handle) {
     .join();
 }
 
+/// The fixed label the handle entry points below report for a pointer
+/// that is not a live `tc_handle*`.
+const ERR_STALE_HANDLE: &str = "stale-handle";
+
+/// Validate a borrowed `tc_handle*` before any dereference, recording the
+/// fixed label itself.
+///
+/// Mirrors [`preview_pointer_is_live`] exactly, for the same reason and
+/// against the same threat. `tc_daemon_stop`, `tc_call`, `tc_subscribe`,
+/// `tc_unsubscribe`, `tc_preview_open`, and `tc_preview_turns_json` each
+/// null-checked `handle` and then dereferenced it, with nothing in
+/// between confirming it was ever a live `tc_handle*` at all -- a stale
+/// pointer (already freed by `tc_handle_free`) or a cross-type one (a
+/// `tc_preview*` passed here by mistake) was a use-after-free or a type
+/// confusion, not the fixed error the free functions and the preview
+/// accessors already promise. `registry_is`, not `registry_take`: every
+/// one of these six functions borrows the handle rather than consuming
+/// it, exactly like the preview accessors borrow the preview.
+///
+/// This runs *outside* [`guard`] where the existing null check already
+/// does (`tc_daemon_stop`, `tc_unsubscribe`), and immediately after the
+/// null check but still before the first dereference where the null
+/// check already lives inside a `guard`/`guard_forwarding` closure
+/// (`tc_call`, `tc_subscribe`, `tc_preview_open`,
+/// `tc_preview_turns_json`) -- in both places, strictly before any use of
+/// `handle` as a reference. The reason is the same one
+/// `preview_pointer_is_live` gives: `guard` discards the underlying error
+/// text and substitutes `"operation-failed"`, which would hide the one
+/// label a host needs to tell a stale or wrong-type handle from an
+/// ordinary failure. It performs no dereference and cannot panic (the
+/// registry mutex is poison-tolerant), so nothing is given up by running
+/// it before the panic guard.
+///
+/// Carries the same two caveats `registry_is`'s own doc states: it cannot
+/// make a concurrent free safe (this check and the dereference that
+/// follows are not atomic with a racing `tc_handle_free`), and a freed
+/// address can be reused by a later `tc_handle` allocation, in which case
+/// the check passes for a pointer whose original object is gone. The
+/// registry narrows accidental misuse to a clean error; it does not
+/// replace the caller's ownership discipline.
+fn handle_pointer_is_live(handle: *const tc_handle) -> bool {
+    if registry_is(handle as usize, AllocKind::Handle) {
+        return true;
+    }
+    set_last_error(ERR_STALE_HANDLE);
+    false
+}
+
 /// Stop the daemon loop. Idempotent, and safe to call from any thread --
 /// including from inside a `tc_subscribe` callback -- and safe to call
 /// concurrently with `tc_call`/`tc_preview_open`/`tc_subscribe` on other
@@ -761,6 +809,11 @@ fn stop_embedded(handle: &tc_handle) {
 /// memory, because this function does **not** free `handle`. Call
 /// `tc_handle_free` once nothing else will use `handle` again to reclaim
 /// it. Safe to call with NULL (no-op).
+///
+/// Detects and refuses a pointer that is not a live `tc_handle*` --
+/// already freed by `tc_handle_free`, or a `tc_preview*` passed here by
+/// mistake -- recording the fixed label `"stale-handle"` via
+/// `tc_last_error` and returning without dereferencing it.
 ///
 /// Idempotent, but **not a teardown barrier for a second concurrent
 /// caller**: if two threads call this at once, one performs the teardown
@@ -781,6 +834,9 @@ fn stop_embedded(handle: &tc_handle) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_daemon_stop(handle: *mut tc_handle) {
     if handle.is_null() {
+        return;
+    }
+    if !handle_pointer_is_live(handle) {
         return;
     }
     let _ = guard(|| {
@@ -842,6 +898,11 @@ pub unsafe extern "C" fn tc_handle_free(handle: *mut tc_handle) {
 /// NULL `handle`/`method`/`params_json`, is reported as a JSON error frame
 /// rather than a null pointer or a crash.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` -- already freed,
+/// or a `tc_preview*` passed here by mistake -- is refused the same way:
+/// a JSON error frame (`bad_params` / `"stale-handle"`) rather than a
+/// dereference of a pointer this crate cannot trust the type of.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start` (or NULL).
 /// `method` and `params_json`, if non-null, must be valid NUL-terminated C
@@ -856,6 +917,9 @@ pub unsafe extern "C" fn tc_call(
         let body: String = (|| {
             if handle.is_null() {
                 return error_frame(ERR_BAD_PARAMS, "null-handle");
+            }
+            if !handle_pointer_is_live(handle) {
+                return error_frame(ERR_BAD_PARAMS, "stale-handle");
             }
             let handle = unsafe { &*handle };
             let method = match unsafe { borrow_str(method) } {
@@ -944,9 +1008,10 @@ pub unsafe extern "C" fn tc_invite_issuer_host(invite: *const c_char) -> *mut c_
 /// synthetic `{"event":"lagged","data":{"skipped":N}}` frame rather than
 /// silently dropped with no signal.
 ///
-/// Returns 0 on failure (a NULL `handle`, a NULL `cb`, or a stopped
-/// daemon) -- 0 is never a valid subscription token. On success, returns a
-/// nonzero token identifying this subscription for `tc_unsubscribe`.
+/// Returns 0 on failure (a NULL `handle`, a `handle` that is not a live
+/// `tc_handle*`, a NULL `cb`, or a stopped daemon) -- 0 is never a valid
+/// subscription token. On success, returns a nonzero token identifying
+/// this subscription for `tc_unsubscribe`.
 ///
 /// The callback runs on a background thread and is not itself unwind-safe
 /// across languages: a callback that panics on the Swift/C# side is that
@@ -966,6 +1031,9 @@ pub unsafe extern "C" fn tc_subscribe(
 ) -> u64 {
     let outcome = guard(|| {
         if handle.is_null() {
+            return Ok(0u64);
+        }
+        if !handle_pointer_is_live(handle) {
             return Ok(0u64);
         }
         let handle_ref = unsafe { &*handle };
@@ -1046,6 +1114,11 @@ pub unsafe extern "C" fn tc_subscribe(
 /// A no-op if `token` is 0 or unknown (already unsubscribed, or never
 /// valid).
 ///
+/// Also a no-op, recording the fixed label `"stale-handle"` via
+/// `tc_last_error`, if `handle` is non-null but not a live `tc_handle*`
+/// -- refused before any dereference, the same as every other entry
+/// point in this file.
+///
 /// Must be called from a plain thread that is not inside any tokio runtime
 /// context -- in particular, never from inside a `tc_subscribe` callback,
 /// including that subscription's own callback unsubscribing itself. Doing
@@ -1069,6 +1142,9 @@ pub unsafe extern "C" fn tc_subscribe(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     if handle.is_null() || token == 0 {
+        return;
+    }
+    if !handle_pointer_is_live(handle) {
         return;
     }
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -1130,6 +1206,10 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
 /// than silently editing that content is the only option that keeps that
 /// promise.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused the
+/// same way, before any dereference: NULL plus `*err` set to the fixed
+/// label `"stale-handle"`.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` must
 /// be a valid NUL-terminated C string (or NULL). `err`, if non-null, must
@@ -1150,6 +1230,9 @@ pub unsafe extern "C" fn tc_preview_open(
     let outcome = guard_forwarding(|| {
         if handle.is_null() {
             anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("stale-handle");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;
@@ -1242,6 +1325,10 @@ pub unsafe extern "C" fn tc_preview_open(
 /// Carries no redacted trace text: event-type labels, tool names the
 /// envelope already records as metadata, and byte offsets.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused the
+/// same way, before any dereference: NULL plus `*err` set to the fixed
+/// label `"stale-handle"`.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
 /// `body_digest` must be valid NUL-terminated C strings (or NULL, which is
@@ -1261,6 +1348,9 @@ pub unsafe extern "C" fn tc_preview_turns_json(
     let outcome = guard_forwarding(|| {
         if handle.is_null() {
             anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("stale-handle");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;

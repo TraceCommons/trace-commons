@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
-    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_scrub_detector_names,
-    tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
+    tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -877,6 +877,177 @@ fn preview_search_refuses_a_pointer_that_is_not_a_preview() {
             .map(|e| e.contains("invalid-preview-pointer"))
             .unwrap_or(false)
     );
+    stop(h);
+}
+
+// --- Handle entry points must consult the registry before dereferencing -
+//
+// The registry detected invalid frees, and (see above) invalid preview-
+// accessor reads. It was not consulted by any of the six `tc_handle*`-
+// borrowing entry points below -- they null-checked and then dereferenced
+// directly. A stale (already freed by `tc_handle_free`) or cross-type (a
+// `tc_preview*`, or any other kind of pointer this crate allocated)
+// handle was therefore a use-after-free or a type confusion rather than
+// the fixed error the rest of this ABI promises. Each test below passes a
+// live pointer of the WRONG registry kind (a `tc_string*`, obtained from
+// an ordinary `tc_call` and deliberately not yet freed) where a
+// `tc_handle*` is expected -- the same shape of mistake
+// `preview_body_refuses_a_pointer_that_is_not_a_preview` and its siblings
+// already exercise for the preview accessors, mirrored onto the handle
+// entry points. None of these dereference the bad pointer if the fix
+// holds, so none of them may crash.
+
+#[test]
+fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // A live `tc_string*` deliberately passed where a `tc_handle*` is
+    // expected.
+    unsafe { tc_daemon_stop(out as *mut tc_handle) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false),
+        "{:?}",
+        last_error()
+    );
+    unsafe { tc_string_free(out) };
+    // The real handle is untouched by the refusal and still usable.
+    let status = call(h, "status", "{}");
+    assert!(status.contains("\"logged_in\""), "{status}");
+    stop(h);
+}
+
+#[test]
+fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // `tc_call` never returns NULL: a stale handle must still produce a
+    // JSON error frame, not a null pointer or a crash.
+    let bad = unsafe {
+        tc_call(
+            out as *mut tc_handle,
+            cstr_str("status").as_ptr(),
+            cstr_str("{}").as_ptr(),
+        )
+    };
+    assert!(!bad.is_null());
+    let s = unsafe { CStr::from_ptr(bad) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(bad) };
+    assert!(s.contains("stale-handle"), "{s}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let token = unsafe { tc_subscribe(out as *mut tc_handle, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "a stale handle must not yield a subscription token"
+    );
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // Any nonzero token: the pointer-liveness check runs before the token
+    // is ever looked up, so no real subscription is needed here.
+    unsafe { tc_unsubscribe(out as *mut tc_handle, 1) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_open(
+            out as *mut tc_handle,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("stale-handle"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_turns_json(
+            out as *mut tc_handle,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("stale-handle"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("stale-handle"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
     stop(h);
 }
 
