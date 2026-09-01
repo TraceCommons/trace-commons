@@ -4001,7 +4001,7 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
             output_object_ref: None,
             canonical_summary: None,
             canonical_summary_hash: Some("sha256:summary".to_string()),
-            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            summary_model: SUMMARY_MODEL.to_string(),
             task_success: None,
             privacy_risk: Some("low".to_string()),
             event_count: Some(1),
@@ -5769,6 +5769,45 @@ fn trace_vector_search_neighbors_validate_active_tenant_scoped_entries() {
         Some("sha256:compatible")
     );
     assert_eq!(neighbors[0].score, 0.91);
+}
+
+/// The precheck summary model is named ONCE, and `build_derived_record`
+/// writes that name.
+///
+/// It was three identical string literals across two functions, which is how
+/// a summary-model bump ships with two of the three moved: the derived record
+/// claims `-v2` while the embedding metadata beside it still claims `-v1`,
+/// and the branch-2 decision cache keys on a hash whose model nobody can name
+/// consistently. The value is unchanged here — this pins the indirection, so
+/// the bump in PR 2 of sub-project D is a one-line edit that cannot be
+/// partially applied.
+#[tokio::test]
+async fn build_derived_record_writes_the_named_summary_model() {
+    let envelope = sample_envelope().await;
+    let precheck = build_derived_precheck(&envelope, &[]);
+    let record = build_derived_record("tenant-a", TraceCorpusStatus::Accepted, &envelope, precheck);
+    assert_eq!(
+        record.summary_model, SUMMARY_MODEL,
+        "build_derived_record must write the named const, not a literal that \
+         can drift from the two in apply_embedding_precheck"
+    );
+    // Pinned separately from the const so a rename cannot silently rewrite
+    // what every historical row already claims: this migration's value is
+    // unchanged, and PR 2 moves both lines together on purpose.
+    assert_eq!(SUMMARY_MODEL, "redacted-summary-hash-precheck-v1");
+
+    // The same name reaches the envelope's embedding metadata, which is the
+    // half that used to be able to disagree.
+    let mut with_precheck = sample_envelope().await;
+    let precheck = build_derived_precheck(&with_precheck, &[]);
+    apply_embedding_precheck(&mut with_precheck, &precheck);
+    assert_eq!(
+        with_precheck
+            .embedding_analysis
+            .as_ref()
+            .and_then(|analysis| analysis.embedding_model.as_deref()),
+        Some(SUMMARY_MODEL)
+    );
 }
 
 async fn sample_envelope() -> TraceContributionEnvelope {

@@ -61483,6 +61483,20 @@ fn build_derived_precheck(
     }
 }
 
+/// Identifier for the derivation behind `trace_derived_records.summary_model`
+/// and `embedding_analysis.embedding_model`: the redacted-content summary
+/// hash the precheck computes, not a learned model. One name in one place
+/// because it is written from three call sites and read as a version by
+/// anything that decides whether a stored `canonical_summary_hash` is
+/// comparable to a freshly computed one; three copies of a literal are three
+/// chances to bump two of them.
+///
+/// Matches the V1 column default, which is deliberately NOT re-pointed at
+/// this const: every insert path sets the field explicitly through
+/// [`build_derived_record`], and changing a column default during a rolling
+/// deploy leaves two writers disagreeing about rows neither of them names.
+const SUMMARY_MODEL: &str = "redacted-summary-hash-precheck-v1";
+
 fn apply_embedding_precheck(
     envelope: &mut TraceContributionEnvelope,
     precheck: &TraceCommonsDerivedPrecheck,
@@ -61491,7 +61505,7 @@ fn apply_embedding_precheck(
         .embedding_analysis
         .take()
         .unwrap_or(EmbeddingAnalysisMetadata {
-            embedding_model: Some("redacted-summary-hash-precheck-v1".to_string()),
+            embedding_model: Some(SUMMARY_MODEL.to_string()),
             canonical_summary_hash: String::new(),
             trace_vector_id: None,
             nearest_trace_ids: Vec::new(),
@@ -61503,7 +61517,7 @@ fn apply_embedding_precheck(
         });
 
     if embedding.embedding_model.is_none() {
-        embedding.embedding_model = Some("redacted-summary-hash-precheck-v1".to_string());
+        embedding.embedding_model = Some(SUMMARY_MODEL.to_string());
     }
     embedding.canonical_summary_hash = precheck.canonical_summary_hash.clone();
     embedding.nearest_trace_ids = precheck.nearest_trace_ids.clone();
@@ -61534,7 +61548,7 @@ fn build_derived_record(
         task_success: format!("{:?}", envelope.outcome.task_success),
         canonical_summary: precheck.canonical_summary,
         canonical_summary_hash: precheck.canonical_summary_hash,
-        summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+        summary_model: SUMMARY_MODEL.to_string(),
         event_count: envelope.events.len(),
         tool_sequence: envelope.replay.required_tools.clone(),
         tool_categories: envelope
