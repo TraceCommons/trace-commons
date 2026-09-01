@@ -184,7 +184,7 @@ mod tests {
         // The mutated byte is inside report_data -- the field this whole
         // module exists to be able to trust -- and not, as the task brief
         // originally proposed, the quote's last byte. See
-        // trailing_padding_is_not_covered_by_the_signature for why that
+        // most_of_the_quote_is_not_covered_by_the_signature for why that
         // distinction is load-bearing.
         let mut q = fixture_quote();
         q[REPORT_DATA_OFFSET + 40] ^= 0xff;
