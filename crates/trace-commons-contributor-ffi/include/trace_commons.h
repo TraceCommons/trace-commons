@@ -436,24 +436,6 @@ char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
  * daemon state, and needs no handle. Returns an OWNED string; free it with
  * tc_string_free.
  */
-
-
-/* The instance an invite link names, as an owned UTF-8 string, or NULL if
- * the argument is not a usable invite.
- *
- * Exists so a shell can resolve and show the instance before a contributor
- * commits to an invite, WITHOUT being handed the invite's code. The parsed
- * invite carries that code; only the host crosses this boundary, and a shell
- * cannot leak what it was never given.
- *
- * NULL covers every rejection. A caller must not try to distinguish "not a
- * URL" from "no code in it" -- this interface deliberately does not tell the
- * two apart, matching the single failure sentence the invite path shows.
- *
- * Not a daemon method: it is a pure function of its argument, touches no
- * daemon state, and needs no handle. Returns an OWNED string; free it with
- * tc_string_free.
- */
 char*       tc_invite_issuer_host(const char* invite);
 
 /* Free a preview handle. Safe to call with NULL. Invalidates every
