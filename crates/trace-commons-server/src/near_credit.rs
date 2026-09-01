@@ -12,6 +12,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use trace_commons_protocol::canonical_json;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,6 +141,14 @@ impl NearCreditReceiptCall {
         let method_name = method_name.into().trim().to_string();
         ensure_non_transferable_method(&method_name)?;
         validate_method_args(&method_name, &args)?;
+        // The idempotency key is a hash of these bytes and backs a UNIQUE
+        // constraint on the outbox, so the key order the args serialize in
+        // decides whether a replay collapses or duplicates. `serde_json`
+        // gives key order only while its map is a `BTreeMap`; store the args
+        // already sorted so `validate` recomputes the same key from what it
+        // reads back. A no-op under today's feature set.
+        let mut args = args;
+        canonical_json::canonicalize(&mut args);
         let canonical_args =
             serde_json::to_string(&args).context("failed to serialize NEAR call args")?;
         let idempotency_key =
@@ -165,7 +174,7 @@ impl NearCreditReceiptCall {
             "NEAR credit call method name is not canonical"
         );
         validate_method_args(method_name, &self.args)?;
-        let canonical_args = serde_json::to_string(&self.args)
+        let canonical_args = canonical_json::to_canonical_string(&self.args)
             .context("failed to serialize NEAR call args for validation")?;
         let expected_idempotency_key = sha256_prefixed(
             format!(

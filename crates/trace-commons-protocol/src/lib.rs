@@ -1,3 +1,4 @@
+pub mod canonical_json;
 pub mod community_handle;
 pub mod llm;
 pub mod onboarding;
