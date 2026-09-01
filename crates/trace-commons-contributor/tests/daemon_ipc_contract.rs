@@ -523,20 +523,70 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
         None,
     )
     .unwrap();
-    let raw_contribution = trace_commons_contributor::envelope::build_raw_contribution(
-        &transcript,
-        &cfg,
-        chrono::Utc::now(),
-    );
+    // Pinned, not `Utc::now()`. See the comment below the rebuild for why the
+    // instant has to be one this test can name again afterwards.
+    let rebuild_now = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let raw_contribution =
+        trace_commons_contributor::envelope::build_raw_contribution(&transcript, &cfg, rebuild_now);
     let envelope =
         trace_commons_contributor::envelope::redact_to_envelope(&redactor, raw_contribution)
             .await
             .unwrap();
-    let expected_would_send =
-        trace_commons_contributor::envelope::envelope_size(&envelope).unwrap() as u64;
-    assert_eq!(
-        would_send, expected_would_send,
-        "would_send_bytes must equal the real redacted envelope's serialized size"
+
+    // The daemon stamped its own instant and does not report it, so the
+    // rebuild above cannot use the same one. That matters for a size
+    // comparison because chrono serializes `DateTime<Utc>` with as many
+    // fractional-second digits as the value needs -- none, 3, 6, or 9 --
+    // so one timestamp renders at four different lengths depending on which
+    // nanosecond it was built in:
+    //
+    //   2026-09-01T00:00:00Z            20 bytes
+    //   2026-09-01T00:00:00.123Z        24 bytes
+    //   2026-09-01T00:00:00.123456Z     27 bytes
+    //   2026-09-01T00:00:00.123456789Z  30 bytes
+    //
+    // Nothing else about the instant changes the length -- the date, the hour
+    // and the `Z` are fixed width -- so comparing one draw against another was
+    // a coin flip, and this test failed on the runs where the two instants
+    // happened to land on different precisions, always with an off-by-3-or-10
+    // byte count that read like a real accounting bug.
+    //
+    // Rather than loosen the assertion to a tolerance, enumerate the four
+    // whole-envelope renderings the daemon's instant could have produced and
+    // require the reported size to be exactly one of them. That still fails
+    // if `would_send_bytes` goes back to echoing the raw file size, which is
+    // the regression this test exists for and which differs by far more than
+    // ten bytes.
+    //
+    // The instant is pinned above so it can be recognized again here: it
+    // reaches `created_at` and also, via `raw_events_for`, the `timestamp` of
+    // every event the transcript did not date itself. Those all move
+    // together, exactly as they would have inside the daemon -- shifting only
+    // `created_at` would model a rebuild the daemon never performs.
+    let expected_sizes: Vec<u64> = [0, 123_000_000, 123_456_000, 123_456_789]
+        .into_iter()
+        .map(|nanos| {
+            use chrono::Timelike as _;
+            let shifted = rebuild_now.with_nanosecond(nanos).expect("nanos in range");
+            let mut candidate = envelope.clone();
+            if candidate.created_at == rebuild_now {
+                candidate.created_at = shifted;
+            }
+            for event in &mut candidate.events {
+                if event.timestamp == rebuild_now {
+                    event.timestamp = shifted;
+                }
+            }
+            trace_commons_contributor::envelope::envelope_size(&candidate).unwrap() as u64
+        })
+        .collect();
+    assert!(
+        expected_sizes.contains(&would_send),
+        "would_send_bytes must equal the real redacted envelope's serialized size; \
+         got {would_send}, expected one of {expected_sizes:?} (the same envelope \
+         at each fractional-second precision chrono can emit)"
     );
 
     let redactions = result["redactions"]
