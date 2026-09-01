@@ -818,6 +818,15 @@ const TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE: &str = "TRACE_COMMONS_PII_BACKSTOP_
 const TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS: &str = "TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS";
 const TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS: &str =
     "TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS";
+const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
+    "TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS";
+/// Wall-clock ceiling on re-redacting ONE submission.
+///
+/// Without it a single large trace monopolises the driver indefinitely: the
+/// pilot spent 50 hours and ~1,250 classify windows on one submission while
+/// 210 others were never touched, because the driver takes them oldest-first
+/// and nothing bounded the first one.
+const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1803,6 +1812,7 @@ struct PiiBackstopDriverConfig {
     batch_size: i64,
     max_attempts: i32,
     backoff_base_seconds: i64,
+    per_submission_timeout: StdDuration,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -6438,11 +6448,18 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
         0,
         86_400,
     )?;
+    let per_submission_timeout_seconds = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS,
+        TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS,
+        1,
+        86_400,
+    )?;
     Ok(Some(PiiBackstopDriverConfig {
         interval: StdDuration::from_secs(interval_seconds),
         batch_size,
         max_attempts: max_attempts as i32,
         backoff_base_seconds,
+        per_submission_timeout: StdDuration::from_secs(per_submission_timeout_seconds as u64),
     }))
 }
 
@@ -7578,6 +7595,14 @@ fn app(state: Arc<AppState>) -> Router {
             post(score_credit_quality_handler),
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
+        .route(
+            "/v1/admin/pii-backstop-requeue-quarantined",
+            post(pii_backstop_requeue_quarantined_handler),
+        )
+        .route(
+            "/v1/admin/pii-backstop-clear-stale-prior-risk",
+            post(pii_backstop_clear_stale_prior_risk_handler),
+        )
         .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
@@ -9411,7 +9436,32 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         move |state| {
             let config = tick_config.clone();
             async move {
-                let summary = run_pii_backstop_driver_tick(state, &config).await?;
+                // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
+                // than hardcoded to near-ai. Until #495 there was only one
+                // backend, so the hardcode was invisible; with a second one it
+                // meant the backend that boot logs, /health and the canary all
+                // report was NOT the one doing the work.
+                //
+                // Resolved here rather than inside the tick so the tick takes
+                // its adapter as an argument: it is the unit under test, and
+                // reading process env inside it made every test that sets the
+                // backend var visible to every other test running in parallel.
+                //
+                // An unset backend is refused rather than defaulted. This
+                // driver re-redacts traces being HELD pending a prose-PII
+                // check; running it with no filter would release them having
+                // checked nothing.
+                let adapter =
+                    trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
+                        .context("PII backstop adapter unavailable")?
+                        .map(|(adapter, _backend)| adapter)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "PII backstop requires a privacy filter backend (missing \
+                                 control: privacy_filter_backend)"
+                            )
+                        })?;
+                let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
                 tracing::info!(
                     done = summary.done,
                     failed = summary.failed,
@@ -40210,6 +40260,7 @@ fn is_transient_pii_backstop_failure(error: &anyhow::Error) -> bool {
 async fn run_pii_backstop_driver_tick(
     state: Arc<AppState>,
     config: &PiiBackstopDriverConfig,
+    adapter: Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter>,
 ) -> anyhow::Result<PiiBackstopDriverTickSummary> {
     let db = state
         .db_mirror
@@ -40217,16 +40268,6 @@ async fn run_pii_backstop_driver_tick(
         .ok_or(DriverTickError::MissingDbMirror {
             driver: PII_BACKSTOP_DRIVER_NAME,
         })?;
-
-    // Build the adapter ONCE per tick. A missing key fails the whole tick
-    // before any submission is loaded — nothing is processed, traces stay held.
-    //
-    // #438 fix round 1: `.context()` rather than `anyhow!("...: {err}")` --
-    // stringifying the error destroyed the `PrivacyFilterConfigError` the
-    // classifier reads to report `config_missing`. The string is only ever
-    // hashed, so changing it changes the hash and leaks nothing.
-    let adapter = trace_commons_protocol::privacy_filter_near_ai::build_from_env()
-        .context("PII backstop adapter unavailable")?;
 
     // Canary gates the WHOLE tick. Run the synthetic round-trip ONCE before
     // touching any real submission; abort without mutating anything when the
@@ -40258,7 +40299,33 @@ async fn run_pii_backstop_driver_tick(
     // `MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES`.
     let mut consecutive_failures = 0usize;
     for item in &items {
-        match process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()).await {
+        // Bound the work ONE submission may consume. A trace large enough to
+        // outrun this budget would otherwise hold the driver forever and
+        // starve every submission behind it -- observed on the pilot as 50
+        // hours and ~1,250 windows spent on a single submission while 210
+        // others were never enumerated.
+        //
+        // A timeout here is charged to the trace, not the upstream: being too
+        // large to process is a property of the submission, which is exactly
+        // the case the attempt counter and its backoff exist for. It spends
+        // the budget and is eventually quarantined for review rather than
+        // silently retried forever.
+        let attempt = tokio::time::timeout(
+            config.per_submission_timeout,
+            process_one_pii_backstop(state.as_ref(), db, item, adapter.as_ref()),
+        )
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(anyhow::Error::new(
+                trace_commons_protocol::trace_contribution::TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "PII backstop exceeded the per-submission budget of {}s",
+                        config.per_submission_timeout.as_secs()
+                    ),
+                },
+            ))
+        });
+        match attempt {
             Ok(()) => {
                 summary.done += 1;
                 consecutive_failures = 0;
@@ -51005,6 +51072,222 @@ async fn run_recluster_dedup_pass(
 /// other `/v1/admin/*` maintenance routes; no new gate is introduced. Spawns
 /// a background task and returns a hash-only ack immediately. An optional
 /// `?limit=N` bounds the run.
+#[derive(Debug, Deserialize)]
+struct ClearStalePriorRiskQuery {
+    /// Bounded on purpose; an omitted limit is a sample, never everything.
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Counts only. No submission ids, no tenant content, no risk values.
+#[derive(Debug, Serialize)]
+struct ClearStalePriorRiskAck {
+    cleared: u64,
+    failed: u64,
+}
+
+/// Clear a stale prior risk so the backstop can re-decide from scratch.
+///
+/// Residual risk is a ratchet: `max(prior, derived)` unless `can_downgrade`,
+/// which requires the classifier to have FOUND something. A trace whose
+/// credential PR #506 already removed therefore cannot clear itself -- the
+/// re-run finds nothing, so the stale High survives every pass.
+///
+/// Relaxing the ratchet was attempted and rejected. Redefining
+/// `useful_classifier_result` as "a classifier examined this" reinstates a
+/// bypass this repository already removed: a classifier can pass the canary and
+/// still silently fail on real content, which is what the
+/// `CanaryHealthyButFindsNoRealPii` fixture exists to demonstrate. So the
+/// ratchet is untouched here, and the escape hatch is this: an operator
+/// asserting that the cause was fixed, which is a claim a person is accountable
+/// for rather than an inference from silence.
+///
+/// Prior risk lives in the envelope artifact, not a column, so clearing it
+/// rewrites the envelope and re-holds the submission on `AwaitingPiiBackstop`.
+/// The trace is HELD throughout, never released: this buys it a fair
+/// re-assessment, not a pass. A cause that is still present re-derives and
+/// re-quarantines.
+async fn pii_backstop_clear_stale_prior_risk_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ClearStalePriorRiskQuery>,
+) -> ApiResult<Json<ClearStalePriorRiskAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clearing stale prior risk requires a configured DB mirror",
+        )
+    })?;
+
+    let limit = query.limit.unwrap_or(10).clamp(1, 1_000);
+    let targets = db
+        .list_quarantined_with_only_residual_survivor(&tenant.tenant_id, limit)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
+                "Trace Commons stale-prior-risk enumeration failed"
+            );
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stale prior risk enumeration failed",
+            )
+        })?;
+
+    let mut cleared = 0u64;
+    let mut failed = 0u64;
+    for (target_tenant, submission_id) in targets {
+        match clear_one_stale_prior_risk(state.as_ref(), db, &target_tenant, submission_id).await {
+            Ok(()) => cleared += 1,
+            Err(error) => {
+                failed += 1;
+                // Hash-only: one submission failing must not abort the batch,
+                // and must not put anything identifying in the log.
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons stale prior risk clear failed for one submission"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        cleared,
+        failed,
+        limit,
+        "Trace Commons stale prior risk cleared"
+    );
+    Ok(Json(ClearStalePriorRiskAck { cleared, failed }))
+}
+
+/// Rewrite one envelope's prior risk to `Low` and re-hold the submission.
+///
+/// Mirrors the ordering `process_one_pii_backstop` uses when it stores a
+/// rescrubbed artifact, with one simplification: the target status here is
+/// `AwaitingPiiBackstop`, which is MORE restrictive than the current
+/// `Quarantined`. The concurrent-read hazard that ordering guards against is a
+/// status becoming consumer-visible as released before the new artifact is
+/// active; moving to a held status cannot do that.
+async fn clear_one_stale_prior_risk(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) -> anyhow::Result<()> {
+    let mut record = read_submission_record(&state.root, tenant_id, submission_id)?
+        .ok_or_else(|| anyhow::anyhow!("submission record not found"))?;
+    let mut envelope = read_envelope_by_record(state, &record)?;
+
+    // The ONLY mutation. Redaction state, findings, and the recorded
+    // `residual_risk_basis` are all left exactly as they are: the basis is the
+    // evidence for whether this action was justified, and blanking it would
+    // destroy the ability to tell later.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+
+    let stored = store_envelope(
+        state,
+        tenant_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        PII_BACKSTOP_REDACTION_LABEL,
+        &envelope,
+    )?;
+    record.object_key = stored.object_key;
+    record.artifact_receipt = stored.artifact_receipt;
+    record.artifact_object_store = stored.artifact_object_store;
+    record.status = TraceCorpusStatus::AwaitingPiiBackstop;
+    write_submission_record(&state.root, &record)?;
+
+    db.upsert_trace_submission(storage_submission_write_from_record(
+        &record, &envelope, None,
+    )?)
+    .await?;
+    db.update_trace_submission_status(
+        tenant_id,
+        submission_id,
+        storage_corpus_status(TraceCorpusStatus::AwaitingPiiBackstop),
+        PII_BACKSTOP_DRIVER_ACTOR_REF,
+        Some(PII_BACKSTOP_REDACTION_LABEL),
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RequeueQuarantinedQuery {
+    /// Bounded on purpose. The first use of this route is a SAMPLE: re-run a
+    /// handful of quarantined submissions and compare the new verdict against
+    /// the recorded one before requeueing the rest.
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Count-only acknowledgement. No submission ids, no tenant, no reasons.
+#[derive(Debug, Serialize)]
+struct RequeueQuarantinedAck {
+    requeued: u64,
+}
+
+/// Move quarantined submissions back to `AwaitingPiiBackstop` for re-assessment.
+///
+/// Quarantine is not always a verdict about the trace. A submission is
+/// quarantined when its POST-backstop residual risk is Medium or High, and that
+/// assessment is only as good as the classifier that produced it -- the pilot's
+/// 114 quarantined submissions were all assessed between 2026-08-25 and 08-27,
+/// inside the window when the hosted classifier's token ceiling was collapsing.
+/// A window that failed leaves its PII unredacted, which then presents as a
+/// `residual_survivor` and reads exactly like a genuine finding.
+///
+/// So this exists to let a better classifier re-decide. It does not clear
+/// quarantine and it does not change any risk verdict: it puts submissions back
+/// in the queue and lets the backstop reach its own conclusion, which may well
+/// be quarantine again.
+///
+/// Bounded by `limit` so the first run can be a sample rather than all of them.
+async fn pii_backstop_requeue_quarantined_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RequeueQuarantinedQuery>,
+) -> ApiResult<Json<RequeueQuarantinedAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+
+    // Bounded, and never unbounded by omission: a missing limit is a small
+    // sample, not "every quarantined submission".
+    let limit = query.limit.unwrap_or(10).clamp(1, 1_000);
+
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "quarantined requeue requires a configured DB mirror",
+        )
+    })?;
+
+    let requeued = db
+        .requeue_quarantined_for_pii_backstop(&tenant.tenant_id, limit)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
+                "Trace Commons quarantined requeue failed"
+            );
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "quarantined requeue failed",
+            )
+        })?;
+
+    // Hash-only: a count and nothing identifying.
+    tracing::info!(
+        requeued,
+        limit,
+        "Trace Commons quarantined submissions requeued for PII backstop"
+    );
+    Ok(Json(RequeueQuarantinedAck { requeued }))
+}
+
 async fn recluster_dedup_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

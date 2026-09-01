@@ -31,3 +31,6 @@ wiremock = "0.6"
 
 [features]
 near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing", "dep:tiktoken-rs"]
+# Loopback classifier backend. No tokenizer and no concurrent streams: the
+# local model has a real 128k context, so a field goes up in one request.
+self-hosted-privacy-filter = ["dep:reqwest", "dep:tracing", "dep:tiktoken-rs", "dep:futures"]

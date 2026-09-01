@@ -63,6 +63,22 @@ fn device_grant_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
 
 #[async_trait::async_trait]
 impl TraceCorpusStore for InMemoryEnrollDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, uuid::Uuid)>, DatabaseError> {
+        todo!("stub")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<u64, DatabaseError> {
+        todo!("stub")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _submission: TraceSubmissionWrite,

@@ -2176,6 +2176,62 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
 
+    /// Move quarantined submissions back to `AwaitingPiiBackstop` so the
+    /// backstop driver re-assesses them, oldest-received first, capped at
+    /// `limit`. Returns how many rows moved.
+    ///
+    /// Only submissions holding an ACTIVE `rescrubbed_envelope` ref are
+    /// eligible, for two reasons. It is what the driver will actually read --
+    /// `process_one_pii_backstop` goes through the record's own object
+    /// pointers, which address the rescrubbed artifact once a backstop pass has
+    /// run -- and it is what makes them enumerable again, since their
+    /// `submitted_envelope` ref was invalidated on release and must STAY
+    /// invalidated: an active pre-scrub ref is the concurrent-read hazard
+    /// documented on `process_one_pii_backstop`.
+    ///
+    /// Re-scrubbing already-scrubbed content is safe in the only direction that
+    /// matters: a second pass can remove more, never restore what was removed.
+    ///
+    /// Deliberately does NOT clear the attempt counter. A submission
+    /// quarantined by a risk verdict rather than by exhaustion already has
+    /// `attempts = 0`, and silently resetting a counter that DID exhaust would
+    /// hide a trace that repeatedly fails to process.
+    /// Quarantined submissions whose ONLY High-forcing cause was a residual
+    /// survivor, oldest-received first, capped at `limit`.
+    ///
+    /// This is the population PR #506 fixed: a credential the classifier could
+    /// not span, left in place because the backstop never ran the deterministic
+    /// sweep. They cannot clear themselves. `can_downgrade` requires the
+    /// classifier to have FOUND something, and on a re-run of a trace whose
+    /// credential is already gone it finds nothing, so `max_residual_risk`
+    /// preserves the stale verdict forever.
+    ///
+    /// Eligibility is deliberately narrow:
+    ///
+    /// - `residual_survivor` present -- scopes this to what #506 fixed.
+    /// - `key_finding` absent -- keys are never rewritten, so it re-derives
+    ///   identically and resetting achieves nothing.
+    /// - `coverage_incomplete` absent -- forces High before `can_downgrade` is
+    ///   consulted, so likewise.
+    /// - an ACTIVE `rescrubbed_envelope` -- what the driver reads, and what
+    ///   makes the row enumerable at all.
+    ///
+    /// Returns `(tenant_id, submission_id)` so the caller can rewrite each
+    /// envelope. Prior risk lives in the envelope artifact
+    /// (`envelope.privacy.residual_pii_risk`), not in a column, so clearing it
+    /// is an artifact rewrite rather than an UPDATE.
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError>;
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<u64, DatabaseError>;
+
     async fn update_trace_submission_status(
         &self,
         tenant_id: &str,

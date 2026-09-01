@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
-    RedactionReport, SafePrivacyFilterRedaction, SafePrivacyFilterSummary, TraceContributionError,
-    safe_privacy_filter_label,
+    SafePrivacyFilterRedaction, TraceContributionError,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
@@ -44,15 +44,33 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 ///
 /// Sized against measurement, not the advertised context. The served model
 /// reports `context_length: 512` and the cloud-api wrapper splits internally,
-/// so requests spanning several context windows are normal and fine: 2,609
-/// tokens (5.1 windows) classified 6/6. Failures begin around 3,000 (1/3) and
-/// are total by 6,000 (0/3). This budget leaves ~1.5x margin under the point
-/// where failures start.
-pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 2_000;
+/// so requests spanning several context windows are normal.
+///
+/// **This ceiling moves, and it has moved down.** Re-measured 2026-08-31
+/// against the live endpoint, three trials per size:
+///
+/// | tokens | result |
+/// |--------|--------|
+/// | 50 - 1,000 | 3/3 HTTP 200, span counts scaling 6 -> 94 |
+/// | 1,500 | 0/3, HTTP 502 |
+/// | 2,000 - 24,000 | 0/3, HTTP 502 |
+///
+/// The previous budget of 2,000 was set on 2026-08-27, when failures began
+/// around 3,000. It is now ABOVE the ceiling, so every window sent to that
+/// backend fails -- which is what the "upstream unavailable" holds on
+/// 2026-08-28 were, and why this backend cannot currently serve as the
+/// fallback it is documented to be.
+///
+/// Re-measure before trusting this number. The failure is still reported as a
+/// generic 502, so an over-budget request is indistinguishable from an outage
+/// by status code alone.
+pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 1_000;
 
-/// Token count at which classification begins failing, measured 2026-08-27:
-/// 3,000 tokens classified 1-of-3, 6,000 classified 0-of-3.
-pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 3_000;
+/// Token count at which classification begins failing, measured 2026-08-31:
+/// 1,000 tokens classified 3-of-3, 1,500 classified 0-of-3.
+///
+/// Was 3,000 as measured on 2026-08-27. The endpoint regressed.
+pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 1_500;
 
 // Keep real margin under the measured failure point. The budget is not a
 // guess: exceeding it is what produced the intermittent 502s.
@@ -74,7 +92,7 @@ const _: () = assert!(
 /// what makes a failure attributable to specific content.
 pub const MAX_CONCURRENT_CLASSIFY_WINDOWS: usize = 1;
 
-/// How many times a single `privacy/classify` request is attempted before/// How many times a single `privacy/classify` request is attempted before
+/// How many times a single `privacy/classify` request is attempted before
 /// giving up. The hosted endpoint returns transient 502s, so retry a few
 /// times with exponential backoff before failing the window closed.
 pub const MAX_CLASSIFY_ATTEMPTS: usize = 4;
@@ -283,15 +301,6 @@ struct ClassifyEntry {
     spans: Vec<ClassifySpan>,
 }
 
-#[derive(Deserialize, Clone)]
-struct ClassifySpan {
-    category: String,
-    start: usize,
-    end: usize,
-    #[serde(default)]
-    score: f64,
-}
-
 #[async_trait]
 impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
     async fn redact_text(
@@ -370,7 +379,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             .try_collect()
             .await?;
 
-        apply_windowed_spans(text, &windows)
+        apply_windowed_spans("near-ai", text, &windows)
     }
 }
 
@@ -597,270 +606,23 @@ async fn backoff(failed_attempt: usize) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
-/// The tokenizer the hosted classifier actually uses.
-///
-/// Identified by measurement rather than assumption: `o200k_base` reproduced
-/// the endpoint's own `usage.input_tokens` exactly on 17 of 17 samples --
-/// prose, source code, identifier-dense text, hex digests, long words and
-/// repeated characters, from 5 bytes to 8 KB. `cl100k_base` matched only 6 of
-/// 9 on the same short set, so the choice is not arbitrary and should not be
-/// changed without re-running that comparison.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn classifier_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
-    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
-}
-
-/// Count the tokens the classifier will charge for `text`.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn classifier_token_count(text: &str) -> Option<usize> {
-    classifier_bpe().map(|bpe| bpe.encode_ordinary(text).len())
-}
-
-/// Split `text` into contiguous byte ranges, each within `max_tokens` of the
-/// classifier's budget, covering the whole input on char boundaries.
-///
-/// Segments are cut at newlines where possible -- PII rarely spans lines, and
-/// a window that ends mid-entity risks splitting one across two requests. A
-/// single line that alone exceeds the budget (a long log line, a base64 blob)
-/// is bisected until its pieces fit.
-///
-/// Falls back to a conservative byte split if the tokenizer is unavailable:
-/// under-filling requests costs throughput, over-filling costs 502s, so the
-/// safe direction is down.
-#[cfg(feature = "near-ai-privacy-filter")]
-fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops::Range<usize>> {
-    if classifier_bpe().is_none() {
-        // No tokenizer: fall back to the dense-content byte equivalent, which
-        // is the smallest realistic window for this budget.
-        return chunk_byte_ranges(text, max_tokens.saturating_mul(3).max(1));
-    }
-    let max_tokens = max_tokens.max(1);
-
-    // Line-ish segments, each carrying its own token cost.
-    let mut segments: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut seg_start = 0usize;
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            segments.push(seg_start..index + 1);
-            seg_start = index + 1;
-        }
-    }
-    if seg_start < text.len() {
-        segments.push(seg_start..text.len());
-    }
-
-    // Any segment too big on its own is bisected until each piece fits.
-    let mut sized: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
-    let mut pending: Vec<std::ops::Range<usize>> = segments;
-    pending.reverse();
-    while let Some(range) = pending.pop() {
-        let tokens = classifier_token_count(&text[range.clone()]).unwrap_or(usize::MAX);
-        if tokens <= max_tokens || range.len() <= 1 {
-            sized.push((range, tokens));
-            continue;
-        }
-        // Bisect on a char boundary and re-measure both halves.
-        let mut mid = range.start + range.len() / 2;
-        while mid > range.start && !text.is_char_boundary(mid) {
-            mid -= 1;
-        }
-        if mid == range.start {
-            sized.push((range, tokens));
-            continue;
-        }
-        pending.push(mid..range.end);
-        pending.push(range.start..mid);
-    }
-
-    // Greedily pack segments up to the budget. Per-segment counts can differ
-    // slightly from the count of the joined text, because BPE merges across a
-    // boundary; the budget's margin under the measured limit absorbs that.
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut current: Option<std::ops::Range<usize>> = None;
-    let mut running = 0usize;
-    for (range, tokens) in sized {
-        match current {
-            Some(ref mut open) if running + tokens <= max_tokens => {
-                open.end = range.end;
-                running += tokens;
-            }
-            Some(open) => {
-                ranges.push(open);
-                running = tokens;
-                current = Some(range);
-            }
-            None => {
-                running = tokens;
-                current = Some(range);
-            }
-        }
-    }
-    if let Some(open) = current {
-        ranges.push(open);
-    }
-    if ranges.is_empty() {
-        ranges.push(0..text.len());
-    }
-    ranges
-}
-
-/// Split `text` into contiguous byte ranges each no larger than `max_bytes`,
-/// always on char boundaries and covering the whole input. Windows prefer to
-/// end at a newline within the limit (PII rarely spans lines); a run with no
-/// newline under the limit is hard-split at the nearest lower char boundary.
-fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
-    let max_bytes = max_bytes.max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        if text.len() - start <= max_bytes {
-            ranges.push(start..text.len());
-            break;
-        }
-        // Provisional hard cap, walked back to a char boundary.
-        let mut end = start + max_bytes;
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        // Prefer to break just after the last newline inside the window.
-        if let Some(nl) = text[start..end].rfind('\n') {
-            end = start + nl + 1;
-        }
-        // Guard against no progress (e.g. a single multibyte char wider
-        // than the char-boundary walk left us): force at least one char.
-        if end <= start {
-            end = start + max_bytes;
-            while end < text.len() && !text.is_char_boundary(end) {
-                end += 1;
-            }
-        }
-        ranges.push(start..end);
-        start = end;
-    }
-    if ranges.is_empty() {
-        ranges.push(0..text.len());
-    }
-    ranges
-}
-
-/// Merge per-window spans into a single redaction over `text`. Each window
-/// carries its starting codepoint index; its spans are reported relative to
-/// that window, so shift them into full-text codepoint coordinates before
-/// the shared `apply_spans` validation/redaction pass.
-fn apply_windowed_spans(
-    text: &str,
-    windows: &[(usize, Vec<ClassifySpan>)],
-) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-    let mut all_spans = Vec::new();
-    for (codepoint_start, spans) in windows {
-        for span in spans {
-            all_spans.push(ClassifySpan {
-                category: span.category.clone(),
-                start: codepoint_start + span.start,
-                end: codepoint_start + span.end,
-                score: span.score,
-            });
-        }
-    }
-    apply_spans(text, &all_spans)
-}
-
-fn apply_spans(
-    text: &str,
-    spans: &[ClassifySpan],
-) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
-    let mut report = RedactionReport::default();
-    let mut by_label = std::collections::BTreeMap::new();
-    let span_count = spans.len() as u32;
-
-    // NEAR AI reports span offsets as Unicode codepoint indices, not byte
-    // offsets. Build a codepoint -> byte-offset table once so we can both
-    // validate the offsets and translate them before any byte slicing.
-    // `boundaries[i]` is the byte offset of codepoint `i`; the final entry
-    // is `text.len()`, so a valid end index is `<= boundaries.len() - 1`.
-    let mut boundaries: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-    boundaries.push(text.len());
-
-    // Validate offsets and labels; populate summary book-keeping per raw
-    // span (matches sidecar accounting). Offsets are converted from
-    // codepoint indices to byte offsets here.
-    let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
-    for span in spans {
-        if span.start > span.end || span.end >= boundaries.len() {
-            return Err(TraceContributionError::RedactionFailed {
-                reason: "near-ai privacy classifier returned out-of-range span".to_string(),
-            });
-        }
-        byte_spans.push(ClassifySpan {
-            category: span.category.clone(),
-            start: boundaries[span.start],
-            end: boundaries[span.end],
-            score: span.score,
-        });
-        let label = safe_privacy_filter_label(Some(&span.category), &mut report);
-        *by_label.entry(label.clone()).or_insert(0u32) += 1;
-        report.increment(format!("privacy_filter:{label}"));
-        if label.eq_ignore_ascii_case("secret") {
-            report.blocked_secret_detected = true;
-        }
-        if !report.pii_labels_present.contains(&label) {
-            report.pii_labels_present.push(label);
-        }
-    }
-
-    // Build redacted text. Collapse overlapping spans: sort by start,
-    // pick widest end; on overlap pick the highest-score category. Offsets
-    // below are byte offsets (already translated from codepoint indices).
-    let mut sorted: Vec<ClassifySpan> = byte_spans;
-    sorted.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
-
-    let mut collapsed: Vec<ClassifySpan> = Vec::new();
-    for span in sorted {
-        match collapsed.last_mut() {
-            Some(prev) if span.start < prev.end => {
-                if span.end > prev.end {
-                    prev.end = span.end;
-                }
-                if span.score > prev.score {
-                    prev.category = span.category;
-                    prev.score = span.score;
-                }
-            }
-            _ => collapsed.push(span),
-        }
-    }
-
-    let mut redacted_text = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    let mut dummy_report = RedactionReport::default();
-    for span in &collapsed {
-        redacted_text.push_str(&text[cursor..span.start]);
-        let label = safe_privacy_filter_label(Some(&span.category), &mut dummy_report);
-        redacted_text.push_str(&format!("[REDACTED:{label}]"));
-        cursor = span.end;
-    }
-    redacted_text.push_str(&text[cursor..]);
-
-    Ok(Some(SafePrivacyFilterRedaction {
-        redacted_text,
-        summary: SafePrivacyFilterSummary {
-            schema_version: 1,
-            output_mode: "redacted_text_only".to_string(),
-            span_count,
-            by_label,
-            decoded_mismatch: false,
-            classify_policy: None,
-            events_examined: 0,
-            events_skipped_by_policy: 0,
-        },
-        report,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These exercise the windowing helpers, which now live in the shared
+    // module because both backends window. The tests stayed here rather than
+    // moving with them: they are written against this backend's token budget
+    // and its measured endpoint behaviour.
+    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
+
+    fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
+        ClassifySpan {
+            category: category.to_string(),
+            start,
+            end,
+            score,
+        }
+    }
 
     /// The classify call sends the API key as a bearer token, so a plaintext
     /// non-loopback endpoint would put it on the wire. Loopback stays
@@ -895,15 +657,6 @@ mod tests {
                 build(allowed).is_ok(),
                 "tls or loopback base URL must be accepted: {allowed}"
             );
-        }
-    }
-
-    fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
-        ClassifySpan {
-            category: category.into(),
-            start,
-            end,
-            score,
         }
     }
 
@@ -1113,19 +866,6 @@ mod tests {
     }
 
     #[test]
-    fn replaces_single_span() {
-        let text = "email me at alice@example.com please";
-        let spans = vec![span("private_email", 12, 29, 0.99)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(
-            result.redacted_text,
-            "email me at [REDACTED:private_email] please"
-        );
-        assert_eq!(result.summary.span_count, 1);
-        assert_eq!(result.summary.by_label.get("private_email"), Some(&1));
-    }
-
-    #[test]
     fn chunk_byte_ranges_cover_text_and_respect_limit() {
         let text = "line one\nline two\nline three\n";
         let ranges = chunk_byte_ranges(text, 12);
@@ -1171,101 +911,11 @@ mod tests {
             (0usize, vec![]),
             (4usize, vec![span("private_email", 1, 16, 0.99)]),
         ];
-        let result = apply_windowed_spans(text, &windows).unwrap().unwrap();
+        let result = apply_windowed_spans("near-ai", text, &windows)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.redacted_text, "café [REDACTED:private_email]!");
         assert_eq!(result.summary.span_count, 1);
-    }
-
-    #[test]
-    fn maps_codepoint_offsets_over_multibyte_text() {
-        // NEAR AI returns Unicode codepoint offsets, not byte offsets. When
-        // multibyte characters precede the span, treating the offsets as
-        // byte indices slices the wrong region. Offsets below are codepoint
-        // indices exactly as the API emits them ('cafe' with an accented e
-        // plus an emoji before the email).
-        let text = "café 😀 reach me jane@example.com now";
-        let spans = vec![span("private_email", 15, 32, 0.99)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(
-            result.redacted_text,
-            "café 😀 reach me[REDACTED:private_email] now"
-        );
-    }
-
-    #[test]
-    fn collapses_overlapping_spans_keeps_highest_score() {
-        let text = "abcdefghij";
-        let spans = vec![
-            span("private_email", 1, 5, 0.4),
-            span("private_phone", 3, 7, 0.9),
-        ];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
-        // span_count is raw, even though only one collapsed redaction.
-        assert_eq!(result.summary.span_count, 2);
-    }
-
-    #[test]
-    fn redacts_multibyte_codepoint_span_without_splitting() {
-        // Codepoint indices always land on character boundaries, so a span
-        // over a multibyte character redacts the whole character. 'héllo':
-        // 'é' is codepoint index 1.
-        let text = "héllo";
-        let spans = vec![span("private_name", 1, 2, 0.9)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(result.redacted_text, "h[REDACTED:private_name]llo");
-    }
-
-    #[test]
-    fn rejects_out_of_range_span() {
-        // Codepoint index 9999 is far beyond the 5-codepoint string.
-        let text = "short";
-        let spans = vec![span("private_name", 0, 9999, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
-        assert!(err.to_string().contains("out-of-range"));
-    }
-
-    #[test]
-    fn rejects_out_of_range_span_over_multibyte_text() {
-        // 'café' is 4 codepoints; index 5 is out of range even though the
-        // byte length is 5 (the trailing accented byte must not be treated
-        // as a valid codepoint index).
-        let text = "café";
-        let spans = vec![span("private_name", 0, 5, 0.9)];
-        let err = apply_spans(text, &spans).unwrap_err();
-        assert!(err.to_string().contains("out-of-range"));
-    }
-
-    #[test]
-    fn unknown_category_maps_to_unknown_with_warning() {
-        let text = "secret-text";
-        let spans = vec![span("brand_new_category", 0, 6, 0.5)];
-        let result = apply_spans(text, &spans).unwrap().unwrap();
-        assert_eq!(result.redacted_text, "[REDACTED:unknown]-text");
-        assert!(
-            result
-                .report
-                .warnings
-                .iter()
-                .any(|w| w.to_lowercase().contains("unsupported"))
-        );
-    }
-
-    #[test]
-    fn known_categories_land_in_allowlist() {
-        let table = [
-            "private_email",
-            "private_phone",
-            "account_number",
-            "private_address",
-            "private_name",
-            "secret",
-        ];
-        for raw in table {
-            let mut r = RedactionReport::default();
-            let label = safe_privacy_filter_label(Some(raw), &mut r);
-            assert_eq!(label, raw, "{raw} should pass through allow-list");
-        }
     }
 
     #[test]

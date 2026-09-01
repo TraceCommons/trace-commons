@@ -5464,6 +5464,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::trace_corpus_storage::TraceCorpusStore for StubDeviceKeyDb {
+        async fn list_quarantined_with_only_residual_survivor(
+            &self,
+            _tenant_id: &str,
+            _limit: i64,
+        ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+            unimplemented!("test double does not enumerate stale prior risk")
+        }
+
+        async fn requeue_quarantined_for_pii_backstop(
+            &self,
+            _: &str,
+            _: i64,
+        ) -> Result<u64, DatabaseError> {
+            unimplemented!("device-key stub does not serve the PII backstop")
+        }
+
         async fn upsert_trace_submission(
             &self,
             _: TraceSubmissionWrite,
