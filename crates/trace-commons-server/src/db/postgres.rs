@@ -2595,6 +2595,24 @@ impl Database for PgBackend {
         configured_tenant_ids: &[String],
     ) -> Result<crate::db::RegisterStatsTotals, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
+
+        // Can this role see through RLS at all? An empty enumeration means
+        // something different depending on the answer -- see
+        // refuse_if_enumeration_is_ambiguous.
+        let visibility = client
+            .query_one(
+                "SELECT current_setting('is_superuser') = 'on' AS is_superuser,
+                        COALESCE(
+                            (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user),
+                            false
+                        ) AS bypasses_rls",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let role_sees_through_rls =
+            visibility.get::<_, bool>("is_superuser") || visibility.get::<_, bool>("bypasses_rls");
+
         let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
             client
                 .query("SELECT tenant_id FROM trace_tenants", &[])
@@ -2606,10 +2624,16 @@ impl Database for PgBackend {
         } else {
             configured_tenant_ids.to_vec()
         };
-        refuse_if_no_tenants_enumerated(&tenant_ids)?;
+        refuse_if_enumeration_is_ambiguous(&tenant_ids, role_sees_through_rls)?;
 
         let mut traces_accepted = 0_i64;
-        let mut points_issued = 0_i64;
+        // Accumulated as f64 and rounded once at the end (the same
+        // `(x).round() as i64` idiom `credit_delta_micros` uses elsewhere in
+        // this codebase to cross from a float points figure to an integer),
+        // rather than casting each tenant's SUM to bigint before adding it
+        // to the running total -- which would round per tenant and let the
+        // published total drift from the true global sum.
+        let mut points_issued: f64 = 0.0;
         let mut contributors: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
 
@@ -2626,14 +2650,14 @@ impl Database for PgBackend {
 
             let issued = tx
                 .query_one(
-                    "SELECT COALESCE(SUM(points_delta::numeric), 0)::bigint AS issued
+                    "SELECT COALESCE(SUM(points_delta::numeric), 0)::double precision AS issued
                      FROM trace_credit_ledger
                      WHERE points_delta::numeric > 0",
                     &[],
                 )
                 .await
                 .map_err(DatabaseError::Postgres)?;
-            points_issued += issued.get::<_, i64>("issued");
+            points_issued += issued.get::<_, f64>("issued");
 
             let accounts = tx
                 .query(
@@ -2651,7 +2675,8 @@ impl Database for PgBackend {
         Ok(crate::db::RegisterStatsTotals {
             traces_accepted,
             contributors: contributors.len() as i64,
-            points_issued,
+            // Rounded once here, at the global sum -- not per tenant.
+            points_issued: points_issued.round() as i64,
         })
     }
 
@@ -5556,22 +5581,41 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-/// Guard for `PgBackend::compute_register_stats_totals`: an empty resolved
-/// tenant enumeration must never proceed to compute (and a
-/// caller must never write) a "zero" register-stats total, because an empty
-/// enumeration is indistinguishable from RLS silently discarding every row
-/// of `SELECT tenant_id FROM trace_tenants` when no tenant GUC is set --
-/// which is exactly what happens to a NOBYPASSRLS runtime role. Extracted as
-/// a pure function so this exact guard is unit-testable without a database:
-/// the live masking scenario it protects against cannot be reproduced
-/// against a superuser-connected local test database (the connecting role
-/// bypasses RLS entirely), so the only thing that can be verified in CI is
-/// that this guard actually refuses on empty input.
-fn refuse_if_no_tenants_enumerated(tenant_ids: &[String]) -> Result<(), DatabaseError> {
-    if tenant_ids.is_empty() {
+/// Guard for `PgBackend::compute_register_stats_totals`.
+///
+/// An empty resolved tenant enumeration is genuinely ambiguous: it is the
+/// correct, honest answer on a fresh deployment before any tenant exists,
+/// but it is *also* exactly what `SELECT tenant_id FROM trace_tenants`
+/// silently returns under a NOBYPASSRLS role with no tenant GUC set, since
+/// `trace_tenants` is itself FORCE RLS on `tenant_id = trace_current_tenant_id()`.
+/// The query cannot tell those two cases apart from inside itself, so this
+/// asks a different question instead: can the connecting role see through
+/// RLS at all (`is_superuser`, or `rolbypassrls`)? If it can, an empty
+/// result is a true statement about the register and is safe to publish. If
+/// it cannot, forced RLS with no GUC set MUST hide every row, so an empty
+/// result is uninformative and the refresh must refuse rather than stamp a
+/// zero it cannot vouch for.
+///
+/// This does not wedge anything: on refusal `refreshed_at` stays whatever it
+/// already was (unstamped on a fresh table), the endpoint keeps publishing
+/// nothing, and the very next run after the first tenant exists succeeds --
+/// which is the right posture for a register with no contributors anyway.
+///
+/// Extracted as a pure function so this exact branch is unit-testable
+/// without a database: the live masking scenario it protects against cannot
+/// be reproduced against a superuser-connected local test database (the
+/// connecting role bypasses RLS entirely, which is itself the `true` branch
+/// here), so the only thing CI can verify is that the guard's logic is
+/// correct for both roles.
+fn refuse_if_enumeration_is_ambiguous(
+    tenant_ids: &[String],
+    role_sees_through_rls: bool,
+) -> Result<(), DatabaseError> {
+    if tenant_ids.is_empty() && !role_sees_through_rls {
         Err(DatabaseError::Pool(
-            "compute_register_stats_totals enumerated no tenants; refusing to \
-             publish a zero the register never earned"
+            "compute_register_stats_totals enumerated no tenants under a role that \
+             cannot see through RLS; refusing to publish a zero it cannot distinguish \
+             from RLS hiding every row"
                 .to_string(),
         ))
     } else {
@@ -6018,9 +6062,21 @@ mod tests {
                 && V55.contains("FOR SELECT"),
             "V55 must scope the read policy to the public-read role, not PUBLIC"
         );
+        // SQL comment lines stripped first, so this checks actual statements
+        // rather than tripping on the prose ("... NOT `BYPASSRLS` ...") that
+        // explains why. Every remaining NOBYPASSRLS occurrence is then
+        // stripped too, so what's left can only be a stray BYPASSRLS grant.
+        let sql_only_v55 = V55
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !V55.to_uppercase().contains("BYPASSRLS") || V55.contains("NOBYPASSRLS"),
-            "V55 must never grant BYPASSRLS"
+            !sql_only_v55
+                .to_uppercase()
+                .replace("NOBYPASSRLS", "")
+                .contains("BYPASSRLS"),
+            "V55 must never grant BYPASSRLS to any role"
         );
         assert!(
             V55.contains("FORCE ROW LEVEL SECURITY"),
@@ -6046,9 +6102,18 @@ mod tests {
             V55.contains("CREATE POLICY trace_register_stats_runtime_read"),
             "V55 must let the runtime role read the row it just wrote"
         );
+        // Whitespace-normalized rather than matching the file's exact
+        // indentation/newlines: an exact-whitespace match here would go
+        // silently vacuous (always pass) the moment someone reflows this
+        // SQL without changing its meaning, which defeats the point of a
+        // negative assertion.
+        let normalized_v55 = V55.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            !V55.contains("trace_register_stats_runtime_write\n    ON trace_register_stats\n    FOR UPDATE\n    TO ")
-                && !V55.contains("trace_register_stats_runtime_read\n    ON trace_register_stats\n    FOR SELECT\n    TO "),
+            !normalized_v55.contains(
+                "trace_register_stats_runtime_write ON trace_register_stats FOR UPDATE TO "
+            ) && !normalized_v55.contains(
+                "trace_register_stats_runtime_read ON trace_register_stats FOR SELECT TO "
+            ),
             "V55's runtime policies must stay unscoped by role (no `TO`), \
              not widened to name trace_commons_public_read"
         );
@@ -6082,13 +6147,27 @@ mod tests {
     }
 
     #[test]
-    fn refuse_if_no_tenants_enumerated_refuses_on_empty() {
-        assert!(refuse_if_no_tenants_enumerated(&[]).is_err());
+    fn refuses_an_empty_enumeration_under_a_role_that_cannot_see_through_rls() {
+        // The masking case: forced RLS with no GUC set MUST hide every row,
+        // so an empty result under a role that cannot see through RLS is
+        // uninformative -- indistinguishable from "RLS ate it".
+        assert!(refuse_if_enumeration_is_ambiguous(&[], false).is_err());
     }
 
     #[test]
-    fn refuse_if_no_tenants_enumerated_proceeds_on_nonempty() {
-        assert!(refuse_if_no_tenants_enumerated(&["some-tenant".to_string()]).is_ok());
+    fn accepts_an_empty_enumeration_under_a_role_that_sees_through_rls() {
+        // The fresh-deployment case: a role that can see through RLS
+        // (superuser or BYPASSRLS) genuinely saw every trace_tenants row,
+        // so an empty result means the register really has no tenants yet
+        // -- a true, publishable zero.
+        assert!(refuse_if_enumeration_is_ambiguous(&[], true).is_ok());
+    }
+
+    #[test]
+    fn a_nonempty_enumeration_never_refuses_regardless_of_role() {
+        let tenants = ["some-tenant".to_string()];
+        assert!(refuse_if_enumeration_is_ambiguous(&tenants, false).is_ok());
+        assert!(refuse_if_enumeration_is_ambiguous(&tenants, true).is_ok());
     }
 
     /// Same hand-rolled-`run_migrations` trap as V47, V53, and V54: wiring,

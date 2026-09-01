@@ -159,16 +159,34 @@ async fn the_public_role_does_not_bypass_rls() {
 async fn a_refresh_stamps_the_row_that_was_never_computed() {
     let backend = test_pool().await;
 
+    // Deterministic setup rather than an `if before.refreshed_at.is_none()`
+    // guard: on a shared test database a prior run of this same test
+    // already refreshed the row, so that guard would silently stop
+    // asserting anything on every run after the first. Reset the singleton
+    // row to the never-computed state ourselves so the "before" half is
+    // load-bearing every time, not just on a freshly migrated database.
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("connection");
+    client
+        .execute(
+            "UPDATE trace_register_stats
+             SET traces_accepted = 0, contributors = 0, points_issued = 0,
+                 withheld = TRUE, refreshed_at = NULL
+             WHERE singleton = TRUE",
+            &[],
+        )
+        .await
+        .expect("reset the row to never-computed");
+    drop(client);
+
     let before = fetch_register_stats_row(&backend)
         .await
         .expect("fetch before refresh");
-    // Only meaningful against a freshly migrated database. On a shared test
-    // database this row may already have been refreshed by a prior run of
-    // this same test; the assertion below (refreshed_at present after a
-    // refresh) is what actually carries the weight either way.
-    if before.refreshed_at.is_none() {
-        assert!(before.withheld, "an uncomputed row must stay withheld");
-    }
+    assert!(before.refreshed_at.is_none(), "reset to never-computed");
+    assert!(before.withheld, "an uncomputed row must stay withheld");
 
     let after = run_register_stats_refresh(&backend, &[])
         .await

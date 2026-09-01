@@ -52,13 +52,21 @@ Two properties are load-bearing:
   set role"** and the endpoint 500s on every request — the DO block above
   creates a role nobody can ever assume.
 
-Because the `GRANT ... TO CURRENT_USER` runs automatically as part of the
-migration, **no separate provisioning step is required for the common case**
-where migrations are applied by the same role the ingest binary connects as.
-Provisioning is only needed if your deployment applies migrations as a
-*different* role than the runtime connection uses (e.g. a separate
-migration-runner credential) — in that case, grant membership explicitly
-after migrating:
+**Requirement this leaves on the deployment: the role that actually serves
+requests must be a member of `trace_commons_public_read`.** Because the
+`GRANT ... TO CURRENT_USER` runs automatically as part of the migration,
+**no separate provisioning step is required for the common case** where
+migrations are applied by the same role the ingest binary connects as — the
+applier and the server are the same role, so the grant already covers it.
+
+This is *not* automatic when your deployment applies migrations as a
+*different* role than the one serving requests (e.g. a separate
+migration-runner credential on managed Postgres). In that shape, the
+mismatch does not surface at migration time — it surfaces at the first
+request, as `SET ROLE trace_commons_public_read` failing with "permission
+denied to set role". Check which role your ingest binary actually connects
+as, and if it differs from whoever ran the migration, grant membership to
+it explicitly after migrating:
 
 ```sql
 GRANT trace_commons_public_read TO <runtime_role>;

@@ -46,7 +46,18 @@ GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, ref
 -- could ever assume. GRANT ... TO CURRENT_USER makes whoever applies this
 -- migration (the app's own runtime role, in every deployment) a member, and
 -- is deployment-agnostic: it does not bake in a runtime-role name that
--- would vary per environment.
+-- would vary per environment. It widens nothing: CURRENT_USER already owns
+-- trace_register_stats, and the role it is joining holds only the
+-- six-column SELECT above.
+--
+-- REQUIREMENT this leaves on the deployment: the role that actually SERVES
+-- requests (runs register_stats_refresh_handler / the public read) must be
+-- a member of trace_commons_public_read. On a simple deployment that is
+-- automatic, because the serving role is also whatever applied this
+-- migration. On managed Postgres where a separate migration-runner
+-- credential applies schema changes, it is NOT automatic -- the applier and
+-- the server are different roles, and `SET ROLE` fails at the first
+-- request, not at migration time. See docs/operator/register-stats-role.md.
 GRANT trace_commons_public_read TO CURRENT_USER;
 
 -- Role-scoped rather than blanket: this row carries no tenant, so there is no
