@@ -48,7 +48,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::client::{AttestationClient, AttestationClientError, AttestationStep};
+use super::client::{AttestationClient, AttestationClientError};
 use super::measurements::{
     ExpectedMeasurements, MeasurementField, MeasurementVerdict, check_measurements_opt,
     json_claim_anomalies,
@@ -374,7 +374,6 @@ pub async fn run_near_attestation_drill(
             report
         }
         Err(error) => {
-            debug_assert_eq!(error.step(), AttestationStep::Report);
             log.fail_client(NearAttestationDrillStep::ReportFetched, &error);
             return finish(outcome, log);
         }
@@ -430,29 +429,36 @@ pub async fn run_near_attestation_drill(
 
     // 4. Our nonce, inside the signed quote.
     //
-    // The authoritative check is the *offset*: NEAR AI writes the requested
-    // nonce at report_data[32..64]. `quote_binds_nonce` searches the whole
-    // quote for the bytes, which is weaker -- three quarters of a quote is
-    // not covered by its signature, so a match anywhere else would prove
-    // nothing. Both are required, so a future change that verifies a
-    // different quote than the one parsed shows up here.
-    if verified.report_data.len() < 64 {
-        log.fail(
-            NearAttestationDrillStep::NonceBoundInQuote,
-            "report_data_too_short",
-        );
-    } else if hex::encode(&verified.report_data[32..64]) != nonce.to_ascii_lowercase() {
+    // The check is on the *offset*: NEAR AI writes the requested nonce at
+    // report_data[32..64]. Indexing rather than `get` is deliberate --
+    // `VerifiedQuote::report_data` is built from TDReport10's `[u8; 64]`, so
+    // it is always exactly 64 bytes, and a length branch here would be a
+    // named failure mode no operator could ever see. (The same guard on
+    // `attested_signer_address` stays, because that one is `pub` over
+    // `&[u8]` and a future caller really can pass a short slice.)
+    //
+    // [`super::AttestationReport::quote_binds_nonce`] searches the whole
+    // quote for the nonce bytes and is deliberately not used here. It is the
+    // weaker check -- roughly three quarters of a quote is not covered by its
+    // signature, so a match outside report_data would prove nothing -- and
+    // running it as a second condition looked like insurance against the
+    // drill verifying a different quote than it parsed. It was not. The
+    // types do permit that divergence (`verify_quote` takes `&[u8]` and
+    // `VerifiedQuote` carries no link back to the report it came from), but
+    // this function's control flow forbids it: one report, one
+    // `quote_bytes()`, both consumers fed from those locals. So no test could
+    // reach the branch without editing this function, which makes it
+    // unfalsifiable rather than tested. If that insurance is ever worth
+    // having, the honest form is a type change -- have `verify_quote` return
+    // something the nonce check must consume -- not a branch nothing can
+    // reach.
+    if hex::encode(&verified.report_data[32..64]) == nonce.to_ascii_lowercase() {
+        log.pass(NearAttestationDrillStep::NonceBoundInQuote);
+    } else {
         log.fail(
             NearAttestationDrillStep::NonceBoundInQuote,
             "nonce_not_in_report_data",
         );
-    } else if !report.quote_binds_nonce(nonce).unwrap_or(false) {
-        log.fail(
-            NearAttestationDrillStep::NonceBoundInQuote,
-            "nonce_not_in_quote_bytes",
-        );
-    } else {
-        log.pass(NearAttestationDrillStep::NonceBoundInQuote);
     }
 
     // 5. The signer-binding mode.
@@ -487,7 +493,7 @@ pub async fn run_near_attestation_drill(
     outcome.measurements = Some(measurement_evidence(&verdict));
     match &verdict {
         MeasurementVerdict::Pinned { .. } => log.pass(NearAttestationDrillStep::MeasurementsPinned),
-        MeasurementVerdict::Mismatch { mismatches } => {
+        MeasurementVerdict::Mismatch { mismatches, .. } => {
             let fields: Vec<&str> = mismatches.iter().map(|m| m.field.as_str()).collect();
             log.fail(
                 NearAttestationDrillStep::MeasurementsPinned,
@@ -600,13 +606,15 @@ fn measurement_evidence(verdict: &MeasurementVerdict) -> NearAttestationMeasurem
             mismatched_fields: Vec::new(),
             missing_control: None,
         },
-        MeasurementVerdict::Mismatch { mismatches } => NearAttestationMeasurementEvidence {
+        // `checked_fields` is the whole pinned set on both arms. Deriving it
+        // from `mismatches` here made a five-register pin with one drifting
+        // register read exactly like a one-register pin -- the field would
+        // have changed meaning between verdicts, at the moment an operator is
+        // judging how strong the check was.
+        MeasurementVerdict::Mismatch { fields, mismatches } => NearAttestationMeasurementEvidence {
             verdict: "mismatch".to_string(),
-            checked_fields: mismatches
-                .iter()
-                .map(|m| m.field.as_str().to_string())
-                .collect(),
-            mismatched_fields: names(&verdict.mismatched_fields()),
+            checked_fields: names(fields),
+            mismatched_fields: names(&mismatches.iter().map(|m| m.field).collect::<Vec<_>>()),
             missing_control: None,
         },
         MeasurementVerdict::Refused { control } => NearAttestationMeasurementEvidence {
@@ -734,7 +742,7 @@ mod tests {
 
     use super::*;
     use crate::near_attestation::AttestationReport;
-    use crate::near_attestation::client::CompletionOutcome;
+    use crate::near_attestation::client::{AttestationStep, CompletionOutcome};
     use crate::near_attestation::quote::{Collateral, parse_collateral};
     use crate::near_attestation::receipt::ReceiptPayload;
 
@@ -1125,9 +1133,16 @@ mod tests {
         let measurements = step(&outcome, NearAttestationDrillStep::MeasurementsPinned);
         assert_eq!(measurements.status, NearAttestationStepStatus::Failed);
         assert_eq!(measurements.reason.as_deref(), Some("mismatch:rtmr2"));
+        let evidence = outcome.measurements.as_ref().unwrap();
+        assert_eq!(evidence.mismatched_fields, vec!["rtmr2".to_string()]);
+        // The whole pinned set, not just the register that drifted. Deriving
+        // `checked_fields` from the mismatches made this run -- which pinned
+        // mrtd *and* rtmr2 -- read identically to one that only ever pinned
+        // rtmr2, understating the strength of the check in the evidence an
+        // operator judges it by.
         assert_eq!(
-            outcome.measurements.as_ref().unwrap().mismatched_fields,
-            vec!["rtmr2".to_string()]
+            evidence.checked_fields,
+            vec!["mrtd".to_string(), "rtmr2".to_string()]
         );
         assert_eq!(endpoint.completions_attempted(), 0);
     }

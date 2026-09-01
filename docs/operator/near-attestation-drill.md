@@ -2,11 +2,17 @@
 
 `POST /v1/admin/near-attestation-drill`
 
-## What it proves
+## What a passing run establishes
 
-That the endpoint answering our inference requests is an Intel TDX enclave,
-running an image we reviewed and pinned, and that the key signing our
-inference receipts is the key that enclave's hardware attests.
+That at the moment the drill ran, the endpoint answering our inference
+requests was an Intel TDX enclave, running an image whose measurements match
+what we pinned, and the key that signed the drill's own inference receipt was
+the key that enclave's hardware attests.
+
+Everything in that sentence is scoped to one run and one request. It is not a
+standing property of the endpoint, and a pass an hour ago says nothing about
+the next request. Read the section below on what it does not cover before
+relying on it for anything wider.
 
 Nine steps, in order. Every one must pass; a step that did not run is
 reported as `not_run` and is not a pass.
@@ -29,7 +35,7 @@ attestation report and sign its own receipts with its own key, and every
 individual check still comes back green. `receipt_signer_is_attested_key` is
 what closes that.
 
-## What it does not prove
+## What it does not establish
 
 - Nothing about any *contributor's* inference. The report is a public,
   unauthenticated document and the receipt covers only the request this drill
@@ -142,9 +148,15 @@ quietly checking an address against the first twenty bytes of a hash.
 | `receipt_signer_is_attested_key:receipt_signer_is_not_the_attested_key` | The signing key is not the attested one. | **Stop.** This is the substitution the drill exists to catch. Do not route inference through this endpoint until it is explained. |
 
 There is deliberately **no configurable allow-list** for the TCB status, and
-no switch that turns any step into a warning. A knob like that is the lever
-someone pulls at 2am to make a red drill green, and the entire value of this
-drill is that it cannot be made green except by fixing what it found.
+no switch that turns any step into a warning. A knob like that is the one
+someone reaches for at 2am to make a red drill green, and the value of this
+drill rests on there being no such shortcut in it.
+
+That is a claim about this code, not about your deployment. Someone with
+commit access can of course change any of it, and someone with the env can
+unset the measurement pins — the point is that both are visible changes
+somebody has to make and defend, rather than a supported setting. If you find
+yourself wanting one, the thing to change is the endpoint, not the drill.
 
 ## After a NEAR AI image upgrade
 
@@ -188,9 +200,9 @@ AI. A required check nobody can ever turn green teaches operators to ignore
 red checks, which is the opposite of what this surface is for.
 
 That condition keys on **whether the surface is in use at all — never on the
-drill's outcome.** Once an endpoint is configured there is no allow-list, no
-severity dial and no acknowledgement flag: a red drill blocks promotion, and
-the only way to clear it is to fix what it found.
+drill's outcome.** Once an endpoint is configured, the code offers no
+allow-list, no severity dial and no acknowledgement flag: a red drill blocks
+promotion, and the supported way to clear it is to fix what it found.
 
 Rollout-smoke evidence goes stale after 24 hours, so a deployment in the
 required case is paying for roughly one minimal completion a day.

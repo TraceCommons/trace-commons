@@ -310,8 +310,12 @@ mod tests {
     /// Render every event in the envelope and concatenate — the same text
     /// both the perplexity scorer and the novelty/dedup signal consume.
     fn render_all_events(plaintext: &[u8]) -> String {
+        // `expect`, not `unwrap_or_default`: a parse failure here would make
+        // every caller compare "" with "", which passes while proving
+        // nothing. The one guard standing between attestation material and
+        // the scored text must not be able to degrade into a tautology.
         parse_envelope_rendered_events(plaintext)
-            .unwrap_or_default()
+            .expect("the fixture envelope must parse")
             .concat()
     }
 
@@ -327,8 +331,15 @@ mod tests {
             &[("attestation_receipt", "0xdeadbeef...")],
             &[("intel_quote", "aabbcc...")],
         );
+        let rendered = render_all_events(&plain);
+        // Belt to the `expect` above's braces: an envelope that parses but
+        // renders nothing would also make the comparison vacuous.
+        assert!(
+            !rendered.is_empty(),
+            "the fixture must render some scored text, or this asserts nothing"
+        );
         assert_eq!(
-            render_all_events(&plain),
+            rendered,
             render_all_events(&with_extra),
             "a non-content field changed the scored text; attestation data would be scored"
         );

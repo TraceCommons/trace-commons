@@ -281,7 +281,16 @@ pub enum MeasurementVerdict {
     /// At least one pinned register differs. Every differing register is
     /// listed: "attestation failed" sends an operator to the wrong place,
     /// "rtmr2 differs" sends them to the image.
+    ///
+    /// `fields` is the whole pinned set, exactly as on
+    /// [`MeasurementVerdict::Pinned`], and it is here so that the answer to
+    /// "how strong was this check" does not change meaning between the two
+    /// verdicts. Derive it from `mismatches` and a run that pinned all five
+    /// registers and saw `rtmr2` drift becomes indistinguishable from one
+    /// that only ever pinned `rtmr2` -- reported at exactly the moment an
+    /// operator is judging how much the check was worth.
     Mismatch {
+        fields: Vec<MeasurementField>,
         mismatches: Vec<MeasurementMismatch>,
     },
     /// Nothing was pinned, so nothing was checked. This is a refusal, not a
@@ -299,7 +308,7 @@ impl MeasurementVerdict {
     /// is a mismatch.
     pub fn mismatched_fields(&self) -> Vec<MeasurementField> {
         match self {
-            MeasurementVerdict::Mismatch { mismatches } => {
+            MeasurementVerdict::Mismatch { mismatches, .. } => {
                 mismatches.iter().map(|m| m.field).collect()
             }
             _ => Vec::new(),
@@ -314,7 +323,7 @@ impl fmt::Display for MeasurementVerdict {
                 let names: Vec<&str> = fields.iter().map(|x| x.as_str()).collect();
                 write!(f, "measurements match pinned set ({})", names.join(", "))
             }
-            MeasurementVerdict::Mismatch { mismatches } => {
+            MeasurementVerdict::Mismatch { mismatches, .. } => {
                 let rendered: Vec<String> = mismatches.iter().map(|m| m.to_string()).collect();
                 write!(f, "measurements do not match: {}", rendered.join("; "))
             }
@@ -353,7 +362,10 @@ pub fn check_measurements(
             fields: expected.pinned_fields(),
         }
     } else {
-        MeasurementVerdict::Mismatch { mismatches }
+        MeasurementVerdict::Mismatch {
+            fields: expected.pinned_fields(),
+            mismatches,
+        }
     }
 }
 
@@ -499,9 +511,14 @@ mod tests {
         let verdict = check_measurements(&expected, &v);
 
         assert_eq!(verdict.mismatched_fields(), vec![MeasurementField::Rtmr2]);
-        let MeasurementVerdict::Mismatch { mismatches } = &verdict else {
+        let MeasurementVerdict::Mismatch { fields, mismatches } = &verdict else {
             panic!("expected a mismatch, got {verdict}");
         };
+        // The whole pinned set, not just the register that drifted. A
+        // mismatch that reported only `rtmr2` here would be
+        // indistinguishable from a deployment that only ever pinned `rtmr2`.
+        assert_eq!(fields, &expected.pinned_fields());
+        assert!(fields.len() > 1, "this fixture pins more than one register");
         assert_eq!(mismatches.len(), 1);
         assert_eq!(mismatches[0].field.as_str(), "rtmr2");
         assert_eq!(mismatches[0].expected, tampered);
