@@ -5606,21 +5606,26 @@ fn sha256_prefixed(input: &str) -> String {
 /// so a seventh column added to one copy would fail at request time under
 /// that role only.
 ///
-/// NO `WHERE singleton = TRUE`, deliberately. PostgreSQL column privileges
-/// cover every column a query REFERENCES, `WHERE` included, and `singleton`
-/// is not in V55's grant list -- so filtering on it denies the whole table
-/// under `trace_commons_public_read` ("permission denied for table
-/// trace_register_stats") even though every projected column is granted. The
-/// filter buys nothing anyway: `singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
-/// CHECK (singleton)` admits at most one row, and `query_one` enforces that
-/// exactly one came back.
+/// `WHERE singleton = TRUE` is a correctness guard, not decoration, and stays.
+/// `query_one` errors on anything but exactly one row, so a bare
+/// `SELECT ... FROM trace_register_stats` is correct only for as long as
+/// `singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton)` holds. That
+/// constraint is one migration away from being relaxed, and the failure mode
+/// then is a 500 or a silently wrong row, not a compile error.
+///
+/// `singleton` must therefore appear in V55's column grant, and does.
+/// PostgreSQL column privileges cover every column a query REFERENCES, not
+/// just the ones it projects, so filtering on an ungranted column denies the
+/// whole table under `trace_commons_public_read` ("permission denied for
+/// table trace_register_stats") even when every projected column is granted.
+/// That shipped once as a 500 on every request.
 ///
 /// Public so `tests/register_stats_rls.rs` proves the role against the
 /// statement the server actually issues. That test previously ran a
-/// hand-copied projection with no `WHERE`, and so passed while the shipped
-/// query was denied on every request.
+/// hand-copied, shortened projection with no `WHERE`, and so passed while the
+/// shipped query was denied on every request.
 pub const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
-     withheld, as_of, refreshed_at FROM trace_register_stats";
+     withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
 
 fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStatsRow {
     crate::db::RegisterStatsRow {
@@ -6103,10 +6108,12 @@ mod tests {
         );
         assert!(
             V55.contains(
-                "GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
+                "GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
             ),
             "V55 must grant the public-read role SELECT on exactly the named \
-             aggregate columns and nothing else"
+             columns and nothing else -- `singleton` included, because the \
+             public read filters on it and column privileges cover every \
+             column a query references"
         );
         assert!(
             V55.contains("CREATE POLICY trace_register_stats_public_read")
@@ -6199,22 +6206,22 @@ mod tests {
     }
 
     #[test]
-    fn the_public_read_statement_references_only_granted_columns() {
+    fn every_column_the_public_read_references_is_granted() {
         // PostgreSQL column privileges cover every column a query REFERENCES,
-        // not just the ones it projects. `singleton` is deliberately absent
-        // from V55's column-scoped GRANT, so any mention of it here -- a
-        // WHERE, an ORDER BY, anything -- denies the whole table under
-        // trace_commons_public_read. This shipped once as a 500 on every
-        // request.
+        // not just the ones it projects -- a WHERE, an ORDER BY, a function
+        // argument all count. A column in the statement but not in V55's
+        // GRANT denies the WHOLE TABLE under trace_commons_public_read, with
+        // an error that names no column. That shipped once as a 500 on every
+        // request, from a `WHERE singleton = TRUE` against a grant that
+        // omitted `singleton`.
+        //
+        // This compares the statement against the grant PARSED OUT of V55
+        // rather than a restated list, so the two cannot drift: add a column
+        // to the query without granting it and this fails, on a machine with
+        // no PostgreSQL.
         const V55: &str =
             include_str!("../../../../migrations/V55__register_stats_public_read.sql");
-        assert!(
-            !REGISTER_STATS_SELECT_SQL.contains("singleton"),
-            "the public read statement must not reference `singleton`: it is \
-             not in V55's column grant, and referencing it denies the table"
-        );
-        // And the columns it does project must all be granted.
-        let grant = V55
+        let granted = V55
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -6222,8 +6229,14 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split(')').next())
             .expect("V55 carries a column-scoped GRANT SELECT")
-            .to_string();
+            .split(',')
+            .map(|column| column.trim().to_string())
+            .collect::<Vec<_>>();
+
+        // Every column of the table, so a new one cannot be referenced
+        // without this test having an opinion about it.
         for column in [
+            "singleton",
             "traces_accepted",
             "contributors",
             "points_issued",
@@ -6231,15 +6244,23 @@ mod tests {
             "as_of",
             "refreshed_at",
         ] {
-            assert!(
-                REGISTER_STATS_SELECT_SQL.contains(column),
-                "the public read statement must project {column}"
-            );
-            assert!(
-                grant.contains(column),
-                "V55 must grant {column} to trace_commons_public_read"
-            );
+            if REGISTER_STATS_SELECT_SQL.contains(column) {
+                assert!(
+                    granted.iter().any(|g| g == column),
+                    "the public read references {column}, so V55 must grant \
+                     it -- an ungranted reference denies the whole table"
+                );
+            }
         }
+
+        // And the filter specifically, since dropping it is the tempting
+        // wrong fix: `query_one` demands exactly one row, which a bare
+        // SELECT delivers only while the CHECK constraint holds.
+        assert!(
+            REGISTER_STATS_SELECT_SQL.contains("WHERE singleton = TRUE"),
+            "the public read must keep its singleton filter: it is what \
+             keeps the read correct if the CHECK is ever relaxed"
+        );
     }
 
     #[test]
@@ -6254,10 +6275,15 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
+        // Terminated with `;`, so a runbook carrying a LONGER statement does
+        // not satisfy this by containing the shorter one as a prefix. That
+        // asymmetry is how a recipe that quietly drops a trailing clause --
+        // exactly the defect this guards -- would otherwise still pass.
         assert!(
-            normalized.contains(&statement),
+            normalized.contains(&format!("{statement};")),
             "docs/operator/register-stats-role.md must contain the exact \
-             statement the public read issues, not a shortened one"
+             statement the public read issues, terminated, not a shortened \
+             or extended one"
         );
     }
 

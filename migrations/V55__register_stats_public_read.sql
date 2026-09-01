@@ -37,7 +37,17 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
+-- `singleton` is in this list because PostgreSQL column privileges cover every
+-- column a query REFERENCES, not just the ones it projects, and the public
+-- read filters on `WHERE singleton = TRUE`. Omitting it denied the whole
+-- table ("permission denied for table trace_register_stats") even though
+-- every projected column was granted. Granting it widens nothing: it is a
+-- constant TRUE on a one-row table by its own PRIMARY KEY and CHECK, and
+-- carries no information a role that can read the row does not already have.
+-- The alternative -- dropping the filter -- would have bought the privilege
+-- at the cost of the query's correctness guard, which is the wrong trade: the
+-- filter is what keeps the read right if the CHECK is ever relaxed.
+GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
     ON trace_register_stats TO trace_commons_public_read;
 
 -- Nothing else grants membership in this role, so without this, Task 4's

@@ -29,7 +29,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
+GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
     ON trace_register_stats TO trace_commons_public_read;
 
 GRANT trace_commons_public_read TO CURRENT_USER;
@@ -86,7 +86,7 @@ query's filter once passed here while every live request was denied:
 ```sql
 -- as the runtime role, after migrating:
 SET ROLE trace_commons_public_read;  -- must succeed
-SELECT traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at FROM trace_register_stats;  -- must succeed
+SELECT traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE;  -- must succeed
 UPDATE trace_register_stats SET traces_accepted = 0;  -- must be refused
                                                        -- ("permission denied
                                                        -- for table ...")
@@ -96,12 +96,22 @@ That SELECT is `REGISTER_STATS_SELECT_SQL`
 (`crates/trace-commons-server/src/db/postgres.rs`), and a unit test fails if
 this file and that constant ever disagree.
 
-**Do not add a `WHERE singleton = TRUE` to it.** PostgreSQL column privileges
-cover every column a query *references*, `WHERE` included, and `singleton` is
-not in the grant above — filtering on it denies the whole table under this
-role even though every projected column is granted. The filter buys nothing:
-`singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton)` admits at most
-one row.
+**Note the `WHERE singleton = TRUE`, and note that `singleton` is in the grant
+above.** PostgreSQL column privileges cover every column a query *references*,
+`WHERE` included — not just the ones it projects — so filtering on a column
+that is not granted denies the **whole table** under this role, with an error
+that names no column:
+
+```
+ERROR:  permission denied for table trace_register_stats
+```
+
+That was a real defect: the grant omitted `singleton` while the query filtered
+on it, and every request 500'd. If you ever add a column to that statement, add
+it to the grant in the same change. Do not "fix" such a denial by dropping the
+filter — the filter is what keeps the read correct if the table's
+`CHECK (singleton)` constraint is ever relaxed, since `query_one` demands
+exactly one row.
 
 ## The contributor floor
 

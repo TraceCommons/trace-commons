@@ -59,10 +59,11 @@ async fn the_public_role_can_read_the_aggregate() {
 
     // The statement the server actually issues, not a hand-copied projection.
     // The hand-copied one used to pass here while the shipped query was denied
-    // on every request: it omitted a `WHERE singleton = TRUE` the real query
-    // carried, and PostgreSQL column privileges cover every column a query
-    // references, `WHERE` included. Referencing the constant is what stops
-    // this test and the server drifting apart again.
+    // on every request: it dropped the real query's `WHERE singleton = TRUE`,
+    // and PostgreSQL column privileges cover every column a query references,
+    // `WHERE` included -- so it exercised a privilege the endpoint never
+    // needed and skipped the one it did. Referencing the constant is what
+    // stops this test and the server drifting apart again.
     let row = client
         .query_one(REGISTER_STATS_SELECT_SQL, &[])
         .await
