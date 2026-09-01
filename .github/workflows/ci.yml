@@ -50,70 +50,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # deny.toml has carried the AGPL-combinability licence allow list and the
-  # RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
-  # / AGENTS.md both instruct contributors to run `cargo deny check licenses`
-  # by hand under all three feature sets before pushing -- but no job in this
-  # workflow ever ran cargo-deny, so the config was enforced by convention
-  # only. This job wires it in.
-  #
-  # `check bans` is deliberately not run here: [bans] in deny.toml sets only
-  # `multiple-versions = "allow"`, which opts OUT of the one thing that
-  # section polices and configures no deny/skip/wildcards list, so the check
-  # is a standing no-op -- confirmed empty output (`bans ok`, zero findings)
-  # under the default features, both individual feature sets, and
-  # --all-features together. `check sources` IS run: `unknown-registry =
-  # "deny"` is a real, currently-enforced policy against dependency-confusion
-  # style registries, worth locking in even though nothing in today's graph
-  # trips it (also confirmed clean under every feature combination, so one
-  # feature-independent run is enough).
-  #
-  # The cargo-deny-action v2 tag pins cargo-deny 0.20.2 in its own
-  # Dockerfile -- the same version this job's commands were verified with
-  # locally.
-  cargo-deny:
-    name: cargo deny
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      # `arguments: ''` overrides the action's own `--all-features` default.
-      # Leaving that default in place would check every feature unioned
-      # together instead of each set in isolation, defeating the reason
-      # AGENTS.md has three separate invocations: "the feature sets pull in
-      # different trees." deny.toml's own `[graph] all-features = false`
-      # exists for the same reason.
-      - name: cargo deny check licenses (default features)
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: ''
-          command-arguments: licenses
-      - name: cargo deny check licenses (near-ai-scorer)
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: --features near-ai-scorer
-          command-arguments: licenses
-      - name: cargo deny check licenses (local-gpu-models)
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: --features local-gpu-models
-          command-arguments: licenses
-      - name: cargo deny check advisories
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: ''
-          command-arguments: advisories
-      - name: cargo deny check sources
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: ''
-          command-arguments: sources
-
   mark-assets-drift:
     name: mark assets match the generator
     runs-on: ubuntu-latest
@@ -313,6 +249,87 @@ jobs:
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-attestation-collateral
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
       - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
+
+  # deny.toml has carried the AGPL-combinability licence allow list and the
+  # RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
+  # / AGENTS.md both instruct contributors to run `cargo deny check licenses`
+  # by hand under all three feature sets before pushing -- but no job in this
+  # workflow ever ran cargo-deny, so the config was enforced by convention
+  # only. The three jobs below wire it in, mirroring the cargo-check-*
+  # family above: one job per feature set, each reporting its own pass/fail
+  # in parallel, rather than steps in one job where a failure hides the rest.
+  #
+  # `arguments: ''` on the default job overrides cargo-deny-action's own
+  # `--all-features` default. Leaving that default in place would check
+  # every feature unioned together instead of each set in isolation,
+  # defeating the reason AGENTS.md has three separate invocations: "the
+  # feature sets pull in different trees." deny.toml's own
+  # `[graph] all-features = false` exists for the same reason. This is the
+  # property most likely to be silently dropped later --
+  # cargo_deny_job_isolates_feature_sets_and_omits_bans in
+  # crates/trace-commons-contributor/tests/release_pipeline.rs pins it.
+  #
+  # `check bans` is deliberately not run anywhere below: [bans] in deny.toml
+  # sets only `multiple-versions = "allow"`, which opts OUT of the one thing
+  # that section polices and configures no deny/skip/wildcards list, so the
+  # check is a standing no-op -- confirmed empty output (`bans ok`, zero
+  # findings) under the default features, both individual feature sets, and
+  # --all-features together. `check sources` IS run, bundled into the
+  # default job: `unknown-registry = "deny"` is a real, currently-enforced
+  # policy against dependency-confusion style registries, worth locking in
+  # even though nothing in today's graph trips it (also confirmed clean
+  # under every feature combination, so one feature-independent run is
+  # enough). `check advisories` is bundled into the default job too, loading
+  # the dependency graph once for all three checks instead of three times.
+  #
+  # An `--all-features check advisories` job -- which would see an advisory
+  # in a crate that only near-ai-scorer or local-gpu-models pulls in -- was
+  # evaluated and is deliberately NOT added here: it currently fails with
+  # seven RUSTSEC findings rooted in the mistralrs/candle/fastembed and
+  # google-cloud-kms trees (crossbeam-epoch, fxhash, hickory-proto x2, lru,
+  # paste, rustls-pemfile), none of them cleared or triaged. A red,
+  # permanently-failing job is worse than the coverage gap it would close;
+  # clearing or ignoring those seven is its own pass, not a side effect of
+  # wiring cargo-deny into CI.
+  #
+  # The cargo-deny-action v2 tag pins cargo-deny 0.20.2 in its own
+  # Dockerfile -- the same version these jobs' commands were verified with
+  # locally.
+  cargo-deny-default:
+    name: cargo deny (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: ''
+          command-arguments: licenses advisories sources
+
+  cargo-deny-near-ai-scorer:
+    name: cargo deny (near-ai-scorer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features near-ai-scorer
+          command-arguments: licenses
+
+  cargo-deny-local-gpu-models:
+    name: cargo deny (local-gpu-models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features local-gpu-models
+          command-arguments: licenses
 
   cargo-test-default:
     name: cargo test (default features)

@@ -2043,3 +2043,75 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
             .join("\n  ")
     );
 }
+
+/// `cargo-deny-action` defaults `arguments` to `--all-features`, so the
+/// property that keeps `cargo-deny-default` checking ONLY the default
+/// feature graph -- `arguments: ''` -- is an override of that default, not
+/// a value whose absence would be obvious. A future edit that "cleans up"
+/// the empty string, or that copies this job as a template for a new one,
+/// silently reunites every feature set into one union graph and defeats the
+/// reason AGENTS.md keeps three separate invocations: "the feature sets
+/// pull in different trees." This pins the three cargo-deny jobs' shape in
+/// ci.yml so that regression fails here instead of shipping quietly green.
+#[test]
+fn cargo_deny_job_isolates_feature_sets_and_omits_bans() {
+    let workflow = read(".github/workflows/ci.yml");
+
+    let default_job = extract_job(&workflow, "cargo-deny-default");
+    assert!(
+        default_job.contains("arguments: ''"),
+        "cargo-deny-default must override cargo-deny-action's own \
+         `--all-features` default with `arguments: ''`, or it silently \
+         checks the union of every feature instead of the default graph \
+         alone"
+    );
+    assert!(
+        default_job.contains("command-arguments: licenses advisories sources"),
+        "cargo-deny-default must run licenses, advisories, and sources \
+         together, loading the dependency graph once for all three rather \
+         than three times"
+    );
+
+    let near_ai_scorer_job = extract_job(&workflow, "cargo-deny-near-ai-scorer");
+    assert!(
+        near_ai_scorer_job.contains("arguments: --features near-ai-scorer"),
+        "cargo-deny-near-ai-scorer must check the near-ai-scorer feature \
+         set in isolation, not the default graph"
+    );
+    assert!(
+        near_ai_scorer_job.contains("command-arguments: licenses"),
+        "cargo-deny-near-ai-scorer must run the licenses check"
+    );
+
+    let local_gpu_models_job = extract_job(&workflow, "cargo-deny-local-gpu-models");
+    assert!(
+        local_gpu_models_job.contains("arguments: --features local-gpu-models"),
+        "cargo-deny-local-gpu-models must check the local-gpu-models \
+         feature set in isolation, not the default graph"
+    );
+    assert!(
+        local_gpu_models_job.contains("command-arguments: licenses"),
+        "cargo-deny-local-gpu-models must run the licenses check"
+    );
+
+    // `check bans` must not run anywhere: deny.toml's [bans] section sets
+    // only `multiple-versions = "allow"` and configures no deny/skip list,
+    // so the check is a standing no-op today -- a job for it would be
+    // ceremony, not a gate. If deny.toml ever grows a real ban list, this
+    // assertion is the reminder to add the job back.
+    for (name, job) in [
+        ("cargo-deny-default", default_job),
+        ("cargo-deny-near-ai-scorer", near_ai_scorer_job),
+        ("cargo-deny-local-gpu-models", local_gpu_models_job),
+    ] {
+        assert!(
+            !job.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("command-arguments:") && line.contains("bans")
+            }),
+            "{name} must not name `bans` in a command-arguments line -- \
+             deny.toml's [bans] section enforces nothing today, so running \
+             the check would only be ceremony"
+        );
+    }
+}

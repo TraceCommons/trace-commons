@@ -121,7 +121,9 @@ cargo deny --features near-ai-scorer check licenses
 cargo deny --features local-gpu-models check licenses
 ```
 
-Run all three: the feature sets pull in different trees. Note this is separate
+Run all three: the feature sets pull in different trees. CI now runs all
+three plus `check advisories` and `check sources` on every push, so this is
+a pre-flight rather than the only enforcement. Note this is separate
 from — and does not replace — the repo's standing rule that new dependencies
 need explicit human approval before you add them.
 
@@ -132,7 +134,8 @@ need explicit human approval before you add them.
 - `cargo test -p trace-commons-server --test license_boundary` passes, without
   editing the test's expected sets.
 - `cargo deny check licenses` passes under all three feature sets, if you
-  touched dependencies.
+  touched dependencies (CI now runs the same check, plus advisories and
+  sources, on every push).
 
 ## Everything else
 

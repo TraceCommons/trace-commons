@@ -105,7 +105,10 @@ CI catches.
 
 New dependencies need explicit approval before you add them, and must be
 combinable into an AGPL-3.0 work (`cargo deny check licenses`, run under the
-default, `near-ai-scorer`, and `local-gpu-models` feature sets).
+default, `near-ai-scorer`, and `local-gpu-models` feature sets). CI now runs
+that check under all three feature sets, plus `check advisories` and
+`check sources`, on every push and pull request, so this local run is a
+pre-flight rather than the only enforcement.
 
 Commit style: short imperative subjects, no `feat:` / `fix:` prefixes, no
 emojis.
