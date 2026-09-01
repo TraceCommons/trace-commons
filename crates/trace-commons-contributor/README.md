@@ -240,13 +240,39 @@ remove that too if you are uninstalling.
 - **Trajectory** — a [Letta Trajectory](https://github.com/letta-ai/trajectory)
   v1 file or directory of them, named explicitly with `--trajectory`. Covers
   any harness Letta adapts (Hermes, Letta Code, OpenClaw, OpenHands, Pi, Deep
-  Agents). Never discovered implicitly: without `--trajectory` these files are
-  invisible to `list` and `submit`, and a path that does not exist is an error
-  rather than an empty result.
+  Agents). A path that does not exist is an error rather than an empty
+  result. Without `--trajectory`, discovery is limited to two places: files
+  named `*.trajectory.json`/`*.trajectory.jsonl` in the working directory,
+  and any `.json`/`.jsonl` in the trajectory staging folder inside the
+  contributor state directory — where `import-antigravity` writes. Anything
+  else is invisible to `list` and `submit` until `--trajectory` names it.
+- **Antigravity** — imported with `trace-commons-contributor import-antigravity`,
+  not watched like the sources above. The Antigravity IDE must be running:
+  its conversations are only readable through the local API it serves, not
+  by reading its on-disk store directly. Only conversations the running
+  instance has actually loaded are reachable this way, so open the relevant
+  project in Antigravity before importing. `--project <path>` scopes the
+  import to that project (default: the current directory); `--all` takes
+  every conversation the running instance exposes. Only Antigravity's
+  current conversation format is in scope: conversations created before its
+  storage-format change are not listed by the API and are not imported,
+  which is a deliberate limit rather than a gap awaiting a fix.
+  Imported conversations are staged, not submitted — run `submit`
+  afterwards to redact and upload them. Staged files are discovered without
+  `--trajectory`, so a later bare `submit` offers them: an import is not
+  inert, and a run that fails partway still reports what it staged.
 
-All three readers capture model reasoning (`thinking` blocks, codex
-`reasoning` items, trajectory `reasoning` records) as a distinct event type,
-redacted through the same client-side pipeline as every other event. Pass
+`trace-commons-contributor daemon` — the CLI's watcher — watches Claude Code,
+Codex and Gemini CLI's conventional stores by default, with no declaration
+step: it asks for `SourceRoots::conventional()` explicitly on startup. This
+is different from the desktop shells (macOS, Windows, Linux), which watch
+nothing for a source until the contributor has declared it on the roots
+screen.
+
+All readers capture model reasoning (Claude Code `thinking` blocks, Codex
+`reasoning` items, Gemini CLI `thought` records, Letta Trajectory
+`reasoning` records) as a distinct event type, redacted through the same
+client-side pipeline as every other event. Pass
 `--no-reasoning` to exclude it from a submission. Reasoning is the least
 sanitized part of a transcript — it routinely quotes file contents verbatim
 and restates values the model just read — so review what you are contributing
@@ -261,8 +287,9 @@ the redactor and mapper produce from message content.
 | Command | What it does |
 |---|---|
 | `login [--grant <b64>] [--allowed-hosts <csv>]` | Without `--grant`, prints this device's key id to hand to an instance operator. With `--grant`, redeems an enrollment grant and saves local config. |
-| `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear only when `--trajectory` names a file or directory. |
+| `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear when `--trajectory` names a file or directory, and — without it — from the working directory's `*.trajectory.json(l)` files and the trajectory staging folder that `import-antigravity` writes to. |
 | `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--yes` skips the interactive picker confirmation. |
+| `import-antigravity [--project <path>\|--all]` | Imports conversations from a running Antigravity IDE instance and stages them for `submit`. Requires Antigravity to be running, since its conversations are only readable through the local API it serves. `--project` scopes to one workspace (default: the current directory); `--all` takes every conversation the running instance exposes. |
 | `status` | Shows server-side status of previously submitted sessions from the local receipts log. |
 | `whoami` | Prints local identity (instance id, tenant id, device key id, hashed user subject, config dir). No network call; never prints the raw subject. |
 | `logout` | Stops a running daemon, then deletes local config, device key, receipts, daemon state (settings, queue, projects, history, audit), the account session, and orphaned temp files. Leaves the state directory itself. |

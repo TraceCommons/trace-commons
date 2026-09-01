@@ -53,6 +53,23 @@ pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 #[derive(Debug, Clone)]
 pub struct SessionRef {
     pub source: &'static str,
+    /// What the transcript says it came from, when discovery already knows
+    /// it. Display only.
+    ///
+    /// `source` above is the ADAPTER, and has to stay that way: it is how a
+    /// ref is paired back to something that can load it (`source_for`), so
+    /// a ref claiming `antigravity` there would name an adapter that does
+    /// not exist. But the adapter is not always what a contributor is
+    /// looking at. An imported Antigravity conversation is staged as a
+    /// trajectory file and read by the `trajectory` adapter, so `list` and
+    /// the picker called it `trajectory` -- a word for how it is stored,
+    /// not for where it came from, and not the word the contributor typed
+    /// to collect it.
+    ///
+    /// `None` means discovery has no cheap answer, not that there is none:
+    /// an explicitly named `--trajectory` path is offered without a parse.
+    /// Every display falls back to `source` in that case.
+    pub declared_source: Option<String>,
     pub path: PathBuf,
     pub project: Option<String>, // basename only, never a full path
     pub cwd: Option<String>, // true working dir if cheaply known at discovery; used for --project matching, NEVER serialized

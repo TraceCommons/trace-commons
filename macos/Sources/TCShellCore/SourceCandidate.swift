@@ -6,7 +6,7 @@ import Foundation
 /// is dropped rather than surfaced: a build that has never heard of a future
 /// adapter should show the contributor one fewer row, not fail to render the
 /// screen that starts the daemon.
-public enum SourceKind: String, Equatable, Sendable {
+public enum SourceKind: String, CaseIterable, Equatable, Sendable {
     case claudeCode = "claude-code"
     case codex
     case geminiCli = "gemini-cli"
