@@ -59,11 +59,19 @@ pub struct TcbInfo {
     pub rtmr3: String,
 }
 
-/// The measurement set pinned to a specific enclave image and boot state,
-/// pulled out of an [`AttestationReport`] for comparison against a known-good
-/// baseline (Task 3).
+/// The measurement set as the report *claims* it in unsigned JSON.
+///
+/// The name carries the warning because a doc comment is not a guard: these
+/// values are the server's own assertion about itself, copied out of
+/// `info.tcb_info`, and nothing has checked them against the signed quote.
+/// Pinning against them would verify nothing at all. Measurement pinning must
+/// consume [`quote::VerifiedQuote`], whose registers are read out of the
+/// verified quote structure.
+///
+/// This exists so that the JSON claim can be *compared* with the verified
+/// values -- a mismatch is worth reporting -- and for nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Measurements {
+pub struct UnverifiedJsonMeasurements {
     pub mrtd: String,
     pub rtmr0: String,
     pub rtmr1: String,
@@ -85,9 +93,11 @@ impl AttestationReport {
         hex::decode(&self.intel_quote).context("decoding intel_quote as hex")
     }
 
-    /// The measurement set from this report.
-    pub fn measurements(&self) -> Measurements {
-        Measurements {
+    /// The measurement set this report claims for itself, unverified.
+    ///
+    /// See [`UnverifiedJsonMeasurements`] before using this for anything.
+    pub fn unverified_json_measurements(&self) -> UnverifiedJsonMeasurements {
+        UnverifiedJsonMeasurements {
             mrtd: self.info.tcb_info.mrtd.clone(),
             rtmr0: self.info.tcb_info.rtmr0.clone(),
             rtmr1: self.info.tcb_info.rtmr1.clone(),

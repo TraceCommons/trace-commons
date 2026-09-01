@@ -18,7 +18,7 @@
 //! `info.tcb_info` JSON, which is unsigned and is the server's own claim
 //! about itself; pinning against that would verify nothing. Measurement
 //! pinning (Task 3) must consume [`VerifiedQuote`], never
-//! [`super::Measurements`].
+//! [`super::UnverifiedJsonMeasurements`].
 //!
 //! `compose_hash`, `os_image_hash` and `mr_aggregated` are deliberately
 //! absent here. They exist only in the unsigned JSON and are not recoverable
@@ -143,6 +143,9 @@ mod tests {
     /// _clock` below is what keeps that claim honest.
     const FIXTURE_CAPTURED_AT: u64 = 1_788_264_000;
 
+    /// MRTD as read out of the verified fixture quote.
+    const VERIFIED_MRTD: &str = "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217";
+
     /// Byte offset of `report_data` inside a v4 TDX quote: 48-byte quote
     /// header, then TDReport10's 520 bytes of SVNs and measurements.
     const REPORT_DATA_OFFSET: usize = 568;
@@ -200,21 +203,60 @@ mod tests {
     }
 
     #[test]
-    fn trailing_padding_is_not_covered_by_the_signature() {
-        // Documents a real and slightly alarming property, so that nobody
-        // later "simplifies" the tamper test above into flipping the last
-        // byte and gets a green suite that proves nothing. A v4 quote ends
-        // in zero padding that no signature covers: flipping it changes
-        // nothing the verifier examines, and the quote still verifies.
-        let mut q = fixture_quote();
-        let last = q.len() - 1;
-        assert_eq!(q[last], 0, "fixture quote ends in padding");
-        q[last] ^= 0xff;
-        let v = verify_quote(&q, &fixture_collateral(), FIXTURE_CAPTURED_AT)
-            .expect("a flipped trailing padding byte is not a detectable tamper");
-        // The values that matter are unchanged, which is why this is
-        // tolerable rather than a finding.
-        assert_eq!(hex::encode(&v.report_data[32..64]), fixture_nonce());
+    fn most_of_the_quote_is_not_covered_by_the_signature() {
+        // Locks a surprising and much larger property than "there is some
+        // padding at the end". An exhaustive per-byte scan of this 5006-byte
+        // fixture -- flip one bit, re-verify, record -- finds that 3753 of
+        // those bytes (75%) can be mutated and the quote still verifies with
+        // identical mrtd, rtmr and report_data:
+        //
+        //   byte  632          low byte of the signature-data length
+        //   bytes 764..=765    qe_cert_data_type
+        //   bytes 1252..=1253  low bytes of the certification-data length
+        //   bytes 1258..=5005  the embedded PCK certificate chain (PEM)
+        //
+        // and arbitrary trailing bytes can be appended without bound.
+        //
+        // The cause is by design rather than a defect: dcap_qvl verifies the
+        // PCK chain from the *collateral* we supply and ignores the copy the
+        // quote carries, so that copy is decoration. The consequence is
+        // sharp, and is why this test is written down instead of being left
+        // as folklore: "these quote bytes are unmodified" is very nearly a
+        // meaningless statement. Nothing downstream may hash raw quote bytes
+        // as an identity, dedup or evidence key -- such a hash is trivially
+        // malleable. Hash the VerifiedQuote fields instead.
+        let base = fixture_quote();
+        let collateral = fixture_collateral();
+        let expect_nonce = fixture_nonce();
+
+        let mut mutations: Vec<(&str, Vec<u8>)> = Vec::new();
+        for (label, offset) in [
+            ("signature-data length", 632usize),
+            ("qe_cert_data_type", 764),
+            ("certification-data length", 1252),
+            ("PCK chain, first PEM byte", 1258),
+            ("PCK chain, inside the Intel root CA", 4900),
+        ] {
+            let mut q = base.clone();
+            q[offset] ^= 0x01;
+            mutations.push((label, q));
+        }
+        let mut appended = base.clone();
+        appended.extend(std::iter::repeat_n(0xab, 4096));
+        mutations.push(("4096 appended bytes", appended));
+
+        for (label, q) in mutations {
+            assert_ne!(
+                q, base,
+                "{label}: the mutation must actually change the bytes"
+            );
+            let v = verify_quote(&q, &collateral, FIXTURE_CAPTURED_AT)
+                .unwrap_or_else(|e| panic!("{label}: expected this NOT to be detectable, got {e}"));
+            // The values that matter are untouched, which is what makes this
+            // tolerable rather than a finding.
+            assert_eq!(hex::encode(&v.report_data[32..64]), expect_nonce, "{label}");
+            assert_eq!(v.mrtd, VERIFIED_MRTD, "{label}");
+        }
     }
 
     #[test]
@@ -238,10 +280,7 @@ mod tests {
         // unsigned info.tcb_info JSON -- shows up as a test failure rather
         // than as silently unverified pinning.
         let v = verify_quote(&fixture_quote(), &fixture_collateral(), FIXTURE_CAPTURED_AT).unwrap();
-        assert_eq!(
-            v.mrtd,
-            "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217"
-        );
+        assert_eq!(v.mrtd, VERIFIED_MRTD);
         assert_eq!(
             v.rtmr[0],
             "bc122d143ab768565ba5c3774ff5f03a63c89a4df7c1f5ea38d3bd173409d14f8cbdcc36d40e703cccb996a9d9687590"
@@ -260,9 +299,9 @@ mod tests {
         // are reachable from a test on any future date.
         let q = fixture_quote();
         let c = fixture_collateral();
-        // A day before the collateral was issued.
+        // 2026-08-01, a month before the collateral was issued.
         assert!(verify_quote(&q, &c, 1_785_542_400).is_err());
-        // A day after it expired.
+        // 2026-10-02, a day after it expired.
         assert!(verify_quote(&q, &c, 1_790_899_200).is_err());
         // And the pinned time in between still works, so the two failures
         // above are about the clock and not about the fixture being broken.
