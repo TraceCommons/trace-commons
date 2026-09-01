@@ -15,3 +15,4 @@
 
 pub mod certificate;
 pub mod correspondence;
+pub mod verification;
