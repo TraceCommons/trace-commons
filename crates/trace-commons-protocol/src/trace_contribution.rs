@@ -15,7 +15,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use rust_decimal::Decimal;
+/// Re-exported so a consumer can build a `cost_usd` without taking its own
+/// dependency on `rust_decimal`. The permissive client crates ship inside
+/// third-party harnesses, and every direct dependency they gain is one their
+/// vendor inherits.
+pub use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -213,6 +217,20 @@ pub struct ConsentMetadata {
     /// guess.
     #[serde(default)]
     pub correction_included: bool,
+    /// Whether the envelope carries routing and cost metadata about the
+    /// inference hops that produced the session.
+    ///
+    /// A fourth content class. Unlike `correction_included` it does NOT enrol
+    /// the trace in the PII backstop hold and does not floor residual risk:
+    /// the class is numbers and labels -- a backend id, a rung, a token count,
+    /// a price -- and carries no prose from the session.
+    ///
+    /// `#[serde(default)]` because every envelope submitted before this field
+    /// existed omits it, and those envelopes carry no routing metadata:
+    /// nothing could set one. `false` is the correct reading of their silence,
+    /// not a guess.
+    #[serde(default)]
+    pub routing_metadata_included: bool,
     pub revocable: bool,
 }
 
@@ -1840,6 +1858,7 @@ impl RawTraceContribution {
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -2086,6 +2105,7 @@ impl RawTraceContribution {
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -5255,6 +5275,16 @@ pub struct EnvelopeContentPresence {
     /// A contributor-authored correction. Its own class rather than part of
     /// `message_text`: see [`ConsentMetadata::correction_included`].
     pub correction: bool,
+    /// Routing and cost metadata about the inference hops that produced the
+    /// session -- which backend served a turn, what it cost, how long it took.
+    ///
+    /// Its own class because it is neither prose nor a tool payload. Folding it
+    /// into `tool_payloads` would floor every enriched envelope at Medium
+    /// residual risk and quarantine it on a default deployment for payloads it
+    /// does not carry, and `tool_payloads_included` has never been true
+    /// anywhere in this project -- so the fold would also silently change what
+    /// consent an envelope declares.
+    pub routing_metadata: bool,
 }
 
 /// Inspect an envelope for content that must be declared in consent flags.
@@ -5308,7 +5338,14 @@ pub fn derive_envelope_content_presence(
         // existed upstream and carries none of it. See
         // `payload_carries_readable_content`.
         if payload_carries_readable_content(&event.structured_payload) {
-            presence.tool_payloads = true;
+            match event.event_type {
+                // A routing overlay's payload is the backend, the rung and the
+                // model pair -- labels about the hop, never content from it.
+                TraceContributionEventType::RoutingDecision => {
+                    presence.routing_metadata = true;
+                }
+                _ => presence.tool_payloads = true,
+            }
         }
     }
 
@@ -7119,6 +7156,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         }
     }
@@ -7523,6 +7561,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
         assert_eq!(
@@ -8245,6 +8284,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -8296,6 +8336,67 @@ mod tests {
             training_dynamics: None,
             process_evaluation: None,
         }
+    }
+
+    #[test]
+    fn routing_metadata_is_not_declared_as_a_tool_payload() {
+        // A routing overlay is numbers and labels about an inference hop. It is
+        // not a tool payload, and declaring it as one floors the envelope at
+        // Medium residual risk and quarantines it on a default deployment for
+        // content it does not carry.
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        envelope.events = vec![TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::RoutingDecision,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"backend": "nearai", "rung": "same_model"}),
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: Some(1200),
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }];
+
+        let presence = derive_envelope_content_presence(&envelope);
+        assert!(presence.routing_metadata, "declared as routing metadata");
+        assert!(!presence.tool_payloads, "NOT declared as a tool payload");
+        assert!(!presence.message_text);
+    }
+
+    #[test]
+    fn a_tool_result_payload_is_still_a_tool_payload() {
+        // The regression guard for the change above: routing must be carved out
+        // without loosening the rule for everything else.
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        envelope.events = vec![TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"stdout": "hello"}),
+            tool_name: Some("Bash".to_string()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }];
+
+        let presence = derive_envelope_content_presence(&envelope);
+        assert!(presence.tool_payloads);
+        assert!(!presence.routing_metadata);
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]
@@ -8989,6 +9090,7 @@ mod tests {
                 message_text_included: false,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -9257,6 +9359,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: true,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -9279,6 +9382,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10221,6 +10325,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10246,6 +10351,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10307,6 +10413,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10336,6 +10443,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
         let report = RedactionReport {
@@ -10626,6 +10734,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -10794,6 +10903,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {

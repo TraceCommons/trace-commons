@@ -541,7 +541,7 @@ fn build_raw_contribution_with_id(
     let replayable = !events.is_empty();
     // The declaration describes the payload above, rather than asserting a
     // constant. See `declared_content_presence`.
-    let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
+    let presence = declared_content_presence(&events);
     // Built before the consent block so the declaration can describe it. A
     // correction is its own content class, not message text: see
     // `ConsentMetadata::correction_included`. `false` unless the caller
@@ -584,9 +584,10 @@ fn build_raw_contribution_with_id(
                     parsed
                 }
             },
-            message_text_included,
-            tool_payloads_included,
+            message_text_included: presence.message_text,
+            tool_payloads_included: presence.tool_payloads,
             correction_included,
+            routing_metadata_included: presence.routing_metadata,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -704,9 +705,19 @@ pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: Contribu
 ///
 /// Derived from the events as built, after any content gating, so the
 /// declaration and the payload cannot disagree.
-fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, bool) {
-    let mut message_text = false;
-    let mut tool_payloads = false;
+///
+/// A struct rather than a tuple of three bools: the call site at the envelope
+/// builder reads them apart, and three positional bools is exactly the shape
+/// that silently swaps two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeclaredPresence {
+    message_text: bool,
+    tool_payloads: bool,
+    routing_metadata: bool,
+}
+
+fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
+    let mut presence = DeclaredPresence::default();
 
     for event in events {
         let has_content = event
@@ -719,10 +730,10 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
                 | TraceContributionEventType::AssistantMessage
                 | TraceContributionEventType::Reasoning
                 | TraceContributionEventType::RoutingDecision
-                | TraceContributionEventType::Feedback => message_text = true,
+                | TraceContributionEventType::Feedback => presence.message_text = true,
                 TraceContributionEventType::ToolCall
                 | TraceContributionEventType::ToolResult
-                | TraceContributionEventType::HttpExchange => tool_payloads = true,
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
             }
         }
         // A structured payload is tool-call content regardless of event kind.
@@ -734,14 +745,22 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
         // free-form as the string beside it. All of that is the same rule the
         // server half applies, from the same function, because the two
         // derivations are required to agree.
+        //
+        // Must agree with `derive_envelope_content_presence` in the protocol
+        // crate. If the client declares honestly and the server then corrects
+        // that declaration upward, the contributor is penalised for telling
+        // the truth. `the_two_content_derivations_agree` pins this.
         if trace_commons_protocol::trace_contribution::payload_carries_readable_content(
             &event.structured_payload,
         ) {
-            tool_payloads = true;
+            match event.event_type {
+                TraceContributionEventType::RoutingDecision => presence.routing_metadata = true,
+                _ => presence.tool_payloads = true,
+            }
         }
     }
 
-    (message_text, tool_payloads)
+    presence
 }
 
 /// Map a whole transcript, so a result can name the call it answers.

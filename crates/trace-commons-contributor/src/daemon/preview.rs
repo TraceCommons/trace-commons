@@ -1259,9 +1259,13 @@ mod tests {
         // still passes, which is what says this was a wording change and not
         // a redaction or classification change. That ordering is the point of
         // asserting the tier before the digest.
+        //
+        // Moved again by `routing_metadata_included`: a new consent field
+        // serializes into the envelope, so the digest changes while the
+        // classification does not.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:ce2d6dadbfcabd7594475d5f43a70afbd1fec35a8bc2524c6e1dcd71bdec74af",
+            "sha256:8d9b9d0b2f1c78be8875d79435cc21397da4a1366139df38d59dff046930d27c",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"
