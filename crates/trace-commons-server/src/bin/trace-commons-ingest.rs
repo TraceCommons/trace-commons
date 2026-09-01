@@ -1146,6 +1146,11 @@ SUBCOMMANDS:
     --generate-attestation-keypair    Print a fresh Ed25519 keypair and kid for
                                       score attestations, as env-var
                                       assignments. Requires no configuration.
+    --tls-selfcheck                   Confirm a rustls crypto provider is
+                                      installed, so TLS cannot panic at the
+                                      first handshake. Requires no
+                                      configuration. Run it against a build
+                                      before deploying.
     -V, --version                     Print the version, the commit this binary
                                       was built from, and the build time. The
                                       same identity is on GET /health.
@@ -1178,6 +1183,37 @@ async fn main() -> anyhow::Result<()> {
     match args.next().as_deref() {
         None => {}
         Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
+        // Assert that a rustls crypto provider is installed.
+        //
+        // On 2026-09-01 the pilot crash-looped on
+        // "Could not automatically determine the process-level CryptoProvider":
+        // with `near-attestation-collateral`, both `ring` (via reqwest's
+        // rustls-tls-native-roots) and `aws-lc-rs` (via dcap-qvl/report's
+        // reqwest) are linked, Cargo unifies features additively, and rustls
+        // refuses to choose. It is a RUNTIME panic, so every `cargo check` job
+        // in this repo passed and the binary died on boot.
+        //
+        // This asserts the property that prevents it -- a default provider is
+        // installed, so rustls never reaches the auto-selection that panics.
+        //
+        // Two weaker checks were tried first and BOTH passed with the fix
+        // removed, which is why this one asserts the invariant instead of
+        // trying to reproduce the failure:
+        //   - `Client::builder().build()` alone: the provider is resolved
+        //     lazily, not at builder time.
+        //   - a request to a closed loopback port: fails at TCP connect,
+        //     before any handshake.
+        Some("--tls-selfcheck") => {
+            if rustls::crypto::CryptoProvider::get_default().is_none() {
+                anyhow::bail!(
+                    "no rustls CryptoProvider installed; rustls will panic at the \
+                     first TLS handshake. main() must install one before any \
+                     TLS use -- see the install_default call at the top."
+                );
+            }
+            println!("tls-selfcheck: ok");
+            return Ok(());
+        }
         Some("-h") | Some("--help") => {
             print!("{INGEST_HELP_TEXT}");
             return Ok(());
