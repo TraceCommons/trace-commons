@@ -13,10 +13,11 @@
 //! data), so [`AttestationReport::quote_binds_nonce`] is what this module
 //! exists to check.
 //!
-//! This module only parses the report and checks nonce binding. It does not
-//! verify the quote's signature chain (Task 2) or pin expected measurements
-//! (Task 3).
+//! This module only parses the report and checks nonce binding. Verifying the
+//! quote's signature chain against Intel collateral lives in [`quote`], and
+//! pinning the image measurements it carries lives in [`measurements`].
 
+pub mod measurements;
 pub mod quote;
 
 use anyhow::{Context, Result, anyhow, bail};
