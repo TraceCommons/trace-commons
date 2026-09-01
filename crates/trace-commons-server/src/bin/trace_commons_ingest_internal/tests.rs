@@ -2926,6 +2926,264 @@ async fn insert_account_test_submission_with_status(
     submission_id
 }
 
+/// Insert a credit-ledger row directly via the DB mirror, mirroring
+/// `insert_account_test_submission`'s direct-write shape but for
+/// `trace_credit_ledger`. Bypasses the reviewer-gated
+/// `append_credit_event_handler` HTTP surface (ABAC tenant policy, reviewer
+/// role, `db_reviewer_reads` wiring) -- none of which the credit-summary read
+/// path cares about; only the stored `submission_id`/`points_delta` matter to
+/// it.
+async fn insert_account_test_credit_event(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    credit_account_ref: &str,
+    points_delta: f32,
+) {
+    backend
+        .append_trace_credit_event(StorageTraceCreditEventWrite {
+            credit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            credit_account_ref: credit_account_ref.to_string(),
+            event_type: StorageTraceCreditEventType::TrainingUtility,
+            points_delta: format!("{points_delta}"),
+            reason: "test fixture credit".to_string(),
+            external_ref: Some(format!("test-fixture:{submission_id}")),
+            actor_principal_ref: "review-token-a".to_string(),
+            actor_role: "reviewer".to_string(),
+            settlement_state: StorageTraceCreditSettlementState::Pending,
+        })
+        .await
+        .expect("insert credit event");
+}
+
+/// The account's own figures, summed over its whole principal set: a
+/// contributor with a device key AND a passkey is one contributor, not one
+/// per credential -- and never anything belonging to another account.
+///
+/// Seeds the three-way shape `account_traces_list_returns_only_owned_submissions`
+/// below uses (owned / foreign-same-tenant / other-tenant), but with a credit
+/// ledger row on each submission rather than just the submission itself, since
+/// this handler sums ledger rows, not submission-level `credit_points_pending`.
+#[tokio::test]
+async fn credit_summary_scopes_to_the_calling_accounts_principal_set() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link token-a's device principal to a durable account under tenant-a via
+    // the real mint+redeem ceremony, and keep the resulting session cookie: a
+    // device bearer alone no longer resolves to an `AccountCtx` (#262), so
+    // `account_ctx_ext` needs the cookie the redeemed session issues, not
+    // `auth_headers` directly.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+
+    // Owned: a submission + credit event for the account's own principal.
+    let owned_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        owned_submission,
+        &device_principal,
+        7.0,
+    )
+    .await;
+
+    // Foreign, same tenant: a principal that is NOT linked to this account.
+    let foreign_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else")
+            .await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        foreign_submission,
+        "principal_someone_else",
+        1000.0,
+    )
+    .await;
+
+    // A different tenant entirely, same device principal -- must not leak
+    // across tenants even though the principal ref string matches.
+    let other_tenant_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-b",
+        other_tenant_submission,
+        &device_principal,
+        2000.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+
+    assert_eq!(
+        summary.points.earned_this_period, 7,
+        "only the account's own credit event counts, not the foreign or other-tenant ones"
+    );
+    assert_eq!(summary.points.lifetime_earned, 7);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+/// A deployment with no configured rate has made no claim about what a point
+/// is worth. Asserted over the SERIALIZED value, not the struct field: a
+/// struct assertion passes even when the `#[serde(skip_serializing_if)]`
+/// attribute is wrong, and that attribute is the mechanism actually carrying
+/// the property.
+#[tokio::test]
+async fn credit_summary_omits_currency_when_no_rate_is_configured() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        3.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    assert!(
+        value.get("currency").is_none(),
+        "no rate is configured in this test environment, so the currency key \
+         must be absent entirely, not present and zero: got {value}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The server sees submissions, not anyone's inference bill, and must never
+/// imply otherwise. Scans the whole serialized response -- keys and string
+/// values -- for anything naming or containing "spent" or "spend", rather
+/// than checking one specific path, so a spend figure added anywhere in the
+/// shape trips this test.
+#[tokio::test]
+async fn credit_summary_never_reports_a_spend_figure() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        5.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    fn assert_no_spend_mentions(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let lower = key.to_ascii_lowercase();
+                    assert!(
+                        !lower.contains("spent") && !lower.contains("spend"),
+                        "response key names spend at {path}.{key}"
+                    );
+                    assert_no_spend_mentions(child, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    assert_no_spend_mentions(item, &format!("{path}[{i}]"));
+                }
+            }
+            serde_json::Value::String(s) => {
+                let lower = s.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("spent") && !lower.contains("spend"),
+                    "response value names spend at {path}: {s}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_no_spend_mentions(&value, "$");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn account_traces_list_returns_only_owned_submissions() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {

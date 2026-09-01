@@ -3207,6 +3207,15 @@ impl TokenRole {
 }
 
 impl AppState {
+    /// The configured settlement mode's label (`"disabled"` / `"dry_run"` /
+    /// `"http"`), for surfaces that render posture text through
+    /// `trace_commons_server::credit_numbers`. Reads the value `AppState`
+    /// resolved once at startup (`NearSettlementMode::from_env`) rather than
+    /// re-reading the environment on every request.
+    fn near_settlement_mode_label(&self) -> &'static str {
+        self.near_settlement_mode.as_label()
+    }
+
     fn db_contributor_reads_for_tenant(&self, tenant_id: &str) -> bool {
         self.tenant_rollout_gates.enabled_for(
             TraceTenantRolloutFeature::DbContributorReads,
@@ -7173,6 +7182,10 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/account/traces", get(account_traces_list_handler))
+        .route(
+            "/v1/account/credit-summary",
+            get(account_credit_summary_handler),
+        )
         .route(
             "/v1/account/traces/{submission_id}",
             get(account_trace_detail_handler),
@@ -15004,6 +15017,40 @@ struct AccountTracesPage {
     next_cursor: Option<String>,
 }
 
+/// One contributor's own credit figures.
+///
+/// Deliberately small. It carries what this account earned and nothing that
+/// could address another account: no principal refs, no hashes, no ids.
+///
+/// It also carries NO spend figure. The server sees submissions, not anyone's
+/// inference bill, so a client that wants "credit covered N% of my spend"
+/// composes it from its own local ledger. An API that reported your spend back
+/// to you would have to be told it first.
+#[derive(Debug, Serialize)]
+struct AccountCreditSummary {
+    points: AccountCreditPoints,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    currency: Option<trace_commons_server::credit_numbers::CurrencyBlock>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+    period: AccountCreditPeriod,
+    /// Submissions held and not yet counted, so a contributor whose figure
+    /// looks low has somewhere to look rather than a mystery.
+    pending_review: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPoints {
+    earned_this_period: i64,
+    lifetime_earned: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPeriod {
+    /// Stated explicitly rather than implied by "this period".
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 /// Build a synthetic, low-privilege `TenantAuth` for the hash-only read audit.
 /// The audit path consumes only `tenant_id`, `principal_ref`, and `role`; this
 /// records the resolved actor (`account-actor:{id}` for the cookie path, the
@@ -15135,6 +15182,180 @@ async fn account_traces_list_handler(
     .map_err(internal_error)?;
 
     Ok(Json(AccountTracesPage { items, next_cursor }))
+}
+
+/// A contributor's own credit figures.
+///
+/// Scoped to `ctx.principal_set` — the account's active principals — because a
+/// contributor with several credentials is one contributor. Reuses the same
+/// SQL-scoped submission read `/v1/account/traces` already applies rather than
+/// a second notion of who an account is.
+async fn account_credit_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<Json<AccountCreditSummary>> {
+    let period_end = Utc::now();
+    let period_start = period_end - Duration::days(30);
+
+    let (earned_this_period, lifetime_earned, pending_review) = account_credit_totals(
+        state.as_ref(),
+        &ctx.tenant_id,
+        &ctx.principal_set,
+        period_start,
+        period_end,
+    )
+    .await?;
+
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &account_audit_tenant(&ctx),
+        "account_credit_summary",
+        1,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let rate = trace_commons_server::credit_numbers::rate_from_env();
+    let settlement_mode = state.near_settlement_mode_label();
+
+    Ok(Json(AccountCreditSummary {
+        points: AccountCreditPoints {
+            earned_this_period,
+            lifetime_earned,
+        },
+        currency: trace_commons_server::credit_numbers::currency_for(
+            earned_this_period,
+            rate.as_ref(),
+        ),
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+        period: AccountCreditPeriod {
+            start: period_start,
+            end: period_end,
+        },
+        pending_review,
+    }))
+}
+
+/// Earned in the period, earned lifetime, and submissions still held, for one
+/// account's principal set.
+///
+/// Follows `account_traces_list_handler`'s own SQL-scoped read
+/// (`list_account_trace_submissions_keyset`, walked across every page) to get
+/// this account's owned submissions — one answer to "which rows belong to this
+/// account," matching the account trace routes exactly rather than a raw query
+/// that goes around them. The credit ledger itself has no per-principal SQL
+/// filter (`list_trace_credit_events` returns every event for the tenant), so
+/// ledger rows are narrowed to this account in two steps: first to the events
+/// whose `submission_id` was just proven owned (the `owner_by_submission` map
+/// built from the SQL-scoped read), then through
+/// `visible_credit_events_for_account` — the pure `&AccountPrincipalSet`
+/// predicate beside `visible_submission_records_for_account` — as a second,
+/// independent check rather than trusting the first alone.
+///
+/// Points are summed as `f32` (matching how `TraceCommonsTenantCreditResponse`
+/// accumulates `credit_points_delta`) and rounded to whole points only once,
+/// at this boundary — the same `(x).round() as i64` idiom `credit_delta_micros`
+/// uses to cross from a float points figure to an integer.
+async fn account_credit_totals(
+    state: &AppState,
+    tenant_id: &str,
+    principals: &AccountPrincipalSet,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> ApiResult<(i64, i64, usize)> {
+    if principals.is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    let db = account_db(state)?;
+    let principal_refs = principals.to_vec();
+
+    // Walk every page of this account's owned submissions via the same
+    // keyset-paginated, SQL-scoped query `/v1/account/traces` uses.
+    let mut records = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = db
+            .list_account_trace_submissions_keyset(
+                tenant_id,
+                &principal_refs,
+                cursor,
+                ACCOUNT_TRACES_MAX_LIMIT as i64,
+            )
+            .await
+            .map_err(internal_error)?;
+        let page_len = page.len();
+        let next_cursor = page.last().map(|record| TraceSubmissionKeysetCursor {
+            received_at: record.received_at,
+            submission_id: record.submission_id,
+        });
+        records.extend(
+            page.into_iter()
+                .filter_map(trace_commons_record_from_storage_submission)
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(internal_error)?,
+        );
+        if page_len < ACCOUNT_TRACES_MAX_LIMIT {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    let pending_review = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop
+            )
+        })
+        .count();
+
+    if records.is_empty() {
+        return Ok((0, 0, pending_review));
+    }
+
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events(tenant_id)
+        .await
+        .map_err(internal_error)?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())
+                .map_err(internal_error)?
+        {
+            credit_events.push(event);
+        }
+    }
+    let credit_events = visible_credit_events_for_account(principals, credit_events);
+
+    let lifetime_earned: f32 = credit_events
+        .iter()
+        .map(|event| event.credit_points_delta)
+        .sum();
+    let earned_this_period: f32 = credit_events
+        .iter()
+        .filter(|event| event.created_at >= period_start && event.created_at <= period_end)
+        .map(|event| event.credit_points_delta)
+        .sum();
+
+    Ok((
+        earned_this_period.round() as i64,
+        lifetime_earned.round() as i64,
+        pending_review,
+    ))
 }
 
 /// `GET /v1/account/traces/{submission_id}` — dual-auth, account-scoped single
@@ -54592,6 +54813,40 @@ fn visible_submission_records_for_account(
     records
         .into_iter()
         .filter(|r| set.contains(&r.auth_principal_ref))
+        .collect()
+}
+
+/// Account-only visibility predicate for credit-ledger events, paired with
+/// `visible_submission_records_for_account` immediately above. Pure
+/// `&AccountPrincipalSet` set-membership, same as its sibling: NO
+/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard
+/// (unlike `visible_credit_events`/`can_access_credit_event_scoped`, which
+/// serve the reviewer/contributor surface and must keep both).
+///
+/// Unlike its submission sibling, this one IS on the request path
+/// (`GET /v1/account/credit-summary`): the credit ledger has no per-principal
+/// SQL filter to enforce membership at the query layer the way
+/// `list_account_trace_submissions_keyset` does for submissions --
+/// `list_trace_credit_events` returns every event for a tenant -- so this
+/// predicate is where "which ledger rows belong to this account" is actually
+/// decided, after the caller has already scoped `records`/`owner_by_submission`
+/// to the account via the SQL-scoped submission read.
+///
+/// MUST NOT COMPILE (Hardening C, same guarantee as `visible_submission_records_for_account`):
+/// ```compile_fail
+/// # // A `&TenantAuth` cannot be laundered into the account surface, which
+/// # // wants `&AccountPrincipalSet`:
+/// let auth: TenantAuth = unimplemented!();
+/// let events: Vec<TraceCommonsCreditLedgerRecord> = vec![];
+/// let _ = visible_credit_events_for_account(&auth, events); // E0308: expected &AccountPrincipalSet
+/// ```
+fn visible_credit_events_for_account(
+    set: &AccountPrincipalSet,
+    events: Vec<TraceCommonsCreditLedgerRecord>,
+) -> Vec<TraceCommonsCreditLedgerRecord> {
+    events
+        .into_iter()
+        .filter(|event| set.contains(&event.auth_principal_ref))
         .collect()
 }
 
