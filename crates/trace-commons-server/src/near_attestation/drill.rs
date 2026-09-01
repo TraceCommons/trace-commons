@@ -554,7 +554,14 @@ pub async fn run_near_attestation_drill(
             return finish(outcome, log);
         }
     };
-    let verdict = match verify_receipt(&receipt, &request_body, &completion.response_text) {
+    // The whole response body, and the model we asked for: the receipt binds
+    // both, and a receipt naming a different model is a substitution.
+    let verdict = match verify_receipt(
+        &receipt,
+        &request_body,
+        completion.response_body.as_bytes(),
+        client.model(),
+    ) {
         Ok(verdict) => {
             log.pass(NearAttestationDrillStep::ReceiptVerified);
             verdict
@@ -728,6 +735,7 @@ fn receipt_error_label(error: &ReceiptError) -> &'static str {
         ReceiptError::SignerMismatch => "signer_mismatch",
         ReceiptError::RequestHashMismatch => "request_hash_mismatch",
         ReceiptError::ResponseHashMismatch => "response_hash_mismatch",
+        ReceiptError::ModelMismatch => "model_mismatch",
     }
 }
 
@@ -802,6 +810,9 @@ mod tests {
         /// Sign over different request bytes: the mistake a caller makes by
         /// re-serializing a parsed request instead of keeping what it sent.
         SignOverOtherRequestBytes(Vec<u8>),
+        /// Bind the right bytes to a different model than the one asked for:
+        /// a receipt for a completion some other model served.
+        SignForOtherModel(String),
         /// Fail the fetch.
         Fail(AttestationClientError),
     }
@@ -810,7 +821,7 @@ mod tests {
         model: String,
         report: Result<String, AttestationClientError>,
         collateral: String,
-        response_text: String,
+        response_body: String,
         receipt_key: SigningKey,
         receipt: ReceiptBehaviour,
         completion: Option<AttestationClientError>,
@@ -826,7 +837,7 @@ mod tests {
                 model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
                 report: Ok(REPORT.to_string()),
                 collateral: COLLATERAL.to_string(),
-                response_text: "pong".to_string(),
+                response_body: r#"{"choices":[{"message":{"content":"pong"}}]}"#.to_string(),
                 receipt_key: SigningKey::from_slice(&hex::decode(IMPOSTOR_KEY_HEX).unwrap())
                     .unwrap(),
                 receipt: ReceiptBehaviour::SignWhatWasSent,
@@ -898,7 +909,7 @@ mod tests {
             *self.sent_request.lock().unwrap() = Some(request_body.to_vec());
             Ok(CompletionOutcome {
                 chat_id: "chatcmpl-drill-fixture".to_string(),
-                response_text: self.response_text.clone(),
+                response_body: self.response_body.clone(),
             })
         }
 
@@ -912,15 +923,21 @@ mod tests {
                 .unwrap()
                 .clone()
                 .expect("a receipt is only ever fetched after a completion");
-            let signed_over = match &self.receipt {
+            let (signed_over, model) = match &self.receipt {
                 ReceiptBehaviour::Fail(error) => return Err(error.clone()),
-                ReceiptBehaviour::SignWhatWasSent => sent,
-                ReceiptBehaviour::SignOverOtherRequestBytes(other) => other.clone(),
+                ReceiptBehaviour::SignWhatWasSent => (sent, self.model.clone()),
+                ReceiptBehaviour::SignOverOtherRequestBytes(other) => {
+                    (other.clone(), self.model.clone())
+                }
+                ReceiptBehaviour::SignForOtherModel(other) => (sent, other.clone()),
             };
+            // The three-part form the live service returns: model, request
+            // hash, response hash. Both hashes are over raw bytes.
             let text = format!(
-                "{}:{}",
+                "{}:{}:{}",
+                model,
                 sha256_hex(&signed_over),
-                sha256_hex(self.response_text.as_bytes())
+                sha256_hex(self.response_body.as_bytes())
             );
             Ok(ReceiptPayload {
                 signature: personal_sign(&self.receipt_key, &text),
@@ -1069,7 +1086,7 @@ mod tests {
         assert!(!text.contains(&ATTESTED_ADDRESS[2..]));
         assert!(!text.contains(&eth_address(&endpoint.receipt_key)[2..]));
         assert!(!text.contains("chatcmpl-drill-fixture"));
-        assert!(!text.contains(&endpoint.response_text));
+        assert!(!text.contains(&endpoint.response_body));
         // What it does carry: the nonce we chose, the tcb status, and the
         // public measurement registers.
         assert!(text.contains(&fixture_nonce()));
@@ -1173,6 +1190,23 @@ mod tests {
             .status,
             NearAttestationStepStatus::NotRun
         );
+    }
+
+    #[tokio::test]
+    async fn a_receipt_bound_to_a_different_model_is_a_named_failure() {
+        // The receipt's leading part is the model name. A receipt that is
+        // validly signed over the right bytes but names another model is a
+        // completion some other model served, and it must not be allowed to
+        // stand in for this one. NEAR AI's own reference verifier discards
+        // that part, so nothing else would catch this.
+        let mut endpoint = StubEndpoint::honest();
+        endpoint.receipt = ReceiptBehaviour::SignForOtherModel("some/other-model".to_string());
+        assert_ne!(endpoint.model, "some/other-model");
+        let outcome = run(&endpoint, Some(&all_pins()), &fixture_nonce()).await;
+
+        let receipt_step = step(&outcome, NearAttestationDrillStep::ReceiptVerified);
+        assert_eq!(receipt_step.status, NearAttestationStepStatus::Failed);
+        assert_eq!(receipt_step.reason.as_deref(), Some("model_mismatch"));
     }
 
     #[tokio::test]

@@ -120,9 +120,15 @@ probe, not an absent one.
    `Authorization: Bearer {api_key}`, returns
    `{text, signature, signing_address}`.
 3. `text` is colon-separated, two or three parts. With three, the leading part
-   is discarded and the hashes are `parts[1]`, `parts[2]`; with two they are
-   `parts[0]`, `parts[1]`. **Both are lowercase SHA-256 hex** — of the request
-   body as sent, and of the response text.
+   is the **model name** and the hashes are `parts[1]`, `parts[2]`; with two
+   they are `parts[0]`, `parts[1]`. **Both are lowercase SHA-256 hex** — of the
+   request body as sent, and of the **entire raw response body** as received.
+
+   Corrected 2026-09-01 against a captured live triple. Two things this
+   section originally got wrong: the second hash is over the whole response
+   body, not `choices[0].message.content` (against a thinking model that field
+   is `null`), and the reference verifier's discarded leading part is the
+   model, not an opaque request identifier.
 4. `signature` is an Ethereum `personal_sign` (`encode_defunct`) over `text`.
    Recover the address and compare to `signing_address`.
 5. Bind that key to hardware:
@@ -187,7 +193,7 @@ exists, not a specification to build:
 |---|---|---|
 | stable per-account pseudonym | Binds sybils to one cap. Was framed as "account subject"; a salted opaque value is sufficient and is all we store anyway. | **No** |
 | request hash, response hash | Binds the receipt to specific content, so it cannot be moved to a trace it did not cover. | **Yes**, SHA-256 of both |
-| model | Provenance, and lets a coverage claim name what served it. | Query parameter, not signed |
+| model | Provenance, and lets a coverage claim name what served it. | **Yes**, corrected 2026-09-01: it is the leading part of the signed `text`, so it is signed after all. NEAR AI's reference verifier discards that part; ours checks it against the model requested. Measured from a captured live triple (`crates/trace-commons-server/tests/fixtures/near_ai_live_triple.json`). |
 | timestamp | Freshness, and ordering against the transcript. | **No** |
 | response id or nonce | Replay defence, and the join key onto our events. | `chat_id` addresses the receipt; not inside the signed text |
 | key id | Rotation, resolved against a published keyset. | `signing_address`, resolved against the attestation rather than a keyset |
@@ -316,7 +322,8 @@ that plan, this spec inherits the same silent quarantine regression.
 
 **This is the hardest problem in the design and it has no cheap answer.**
 
-Object B binds `SHA256(request_body_as_sent)` and `SHA256(response_text)`. NEAR
+Object B binds `SHA256(request_body_as_sent)` and
+`SHA256(response_body_as_received)`. NEAR
 AI hashes the bytes it received. But redaction is **client-side and
 pre-upload** -- `DeterministicTraceRedactor` in
 `crates/trace-commons-contributor/src/envelope.rs`, and the wire field is
