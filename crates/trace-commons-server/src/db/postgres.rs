@@ -6475,12 +6475,19 @@ mod tests {
     #[test]
     fn v52_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V52__trace_submission_residual_risk_basis.sql"),
-            "V52 must be wired into run_migrations with an include_str!"
+        let file_marker = format!(
+            "migrations/V{}__trace_submission_residual_risk_basis.sql",
+            52
         );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V52 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 52);
         assert!(
-            THIS_FILE.contains("&52_i32"),
+            THIS_FILE.contains(&version_marker),
             "V52 must record itself in _trace_commons_migrations"
         );
     }
@@ -6489,12 +6496,16 @@ mod tests {
     #[test]
     fn v51_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V51__privacy_classify_window_cache.sql"),
-            "V51 must be wired into run_migrations with an include_str!"
+        let file_marker = format!("migrations/V{}__privacy_classify_window_cache.sql", 51);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V51 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
         );
+        let version_marker = format!("&{}_i32", 51);
         assert!(
-            THIS_FILE.contains("&51_i32"),
+            THIS_FILE.contains(&version_marker),
             "V51 must record itself in _trace_commons_migrations"
         );
     }
@@ -6503,12 +6514,19 @@ mod tests {
     #[test]
     fn v49_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V49__trace_submission_last_status_reason.sql"),
-            "V49 must be wired into run_migrations with an include_str!"
+        let file_marker = format!(
+            "migrations/V{}__trace_submission_last_status_reason.sql",
+            49
         );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V49 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 49);
         assert!(
-            THIS_FILE.contains("&49_i32"),
+            THIS_FILE.contains(&version_marker),
             "V49 must record itself in _trace_commons_migrations"
         );
     }
@@ -6517,9 +6535,17 @@ mod tests {
     #[test]
     fn v48_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__trace_correction_value.sql", 48);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V48 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 48);
         assert!(
-            THIS_FILE.contains("migrations/V48__trace_correction_value.sql"),
-            "V48 must be wired into run_migrations with an include_str!"
+            THIS_FILE.contains(&version_marker),
+            "V48 must record itself in _trace_commons_migrations"
         );
     }
 
@@ -6528,12 +6554,19 @@ mod tests {
     #[test]
     fn v47_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V47__trace_gate_decision_total_chunk_count.sql"),
-            "V47 must be wired into run_migrations with an include_str!"
+        let file_marker = format!(
+            "migrations/V{}__trace_gate_decision_total_chunk_count.sql",
+            47
         );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V47 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 47);
         assert!(
-            THIS_FILE.contains("&47_i32"),
+            THIS_FILE.contains(&version_marker),
             "V47 must record itself in _trace_commons_migrations"
         );
     }
