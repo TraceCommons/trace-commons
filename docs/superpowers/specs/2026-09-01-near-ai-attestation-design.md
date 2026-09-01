@@ -301,6 +301,47 @@ structured data on an event, so it lands under the same
 must not flip `tool_payloads`. If the routing_metadata category is dropped from
 that plan, this spec inherits the same silent quarantine regression.
 
+## Attestation material is never scored and never scrubbed
+
+Receipts, quotes, signatures and signing addresses must never enter an event's
+`redacted_content`, and must never reach the perplexity scorer, the
+novelty/dedup path, or the privacy filter. They ride as typed sibling fields.
+
+This is a hard invariant, not a preference, and the reason is mechanical.
+`crates/trace-commons-gate-enclave/src/chunker.rs:85-98` iterates **every**
+event, reads `event_type` and `redacted_content`, and renders
+`"{event_type}: {content}\n"` into the text that both the perplexity scorer and
+the dedup signal consume. **There is no filter by event type.** Whatever lands
+in that field is scored.
+
+Three things break, and none of them look like a bug:
+
+- **Perplexity.** A TDX quote is kilobytes of high-entropy hex with no
+  linguistic structure. It scores as maximally surprising, moving a trace's
+  perplexity for a reason unrelated to the contributor's work.
+- **Novelty and dedup.** Every trace from one enclave carries near-identical
+  attestation bytes — a large block of *identical* text across unrelated
+  traces, which is precisely the shape the duplicate penalty exists to punish.
+  Contributors would be penalised for carrying the evidence that their work was
+  real.
+- **The privacy filter.** There is no PII in a quote, so scrubbing it is waste
+  in the scarcest place: the classify budget is per-request tokens signalled as
+  a generic 502, and multi-kilobyte opaque blobs are the failure mode that
+  already wedges the backstop queue.
+
+Note the related trap this repo has already hit once. Routing events reached
+scoring not through their text but through **cardinality** —
+`compute_value_scorecard` counted `envelope.events.len()`, so adding
+contentless events halved contributor quality. Attestation must be checked
+against both paths: it must contribute no scored text *and* no scored count.
+
+`policy_examines_event` already returns `false` for `RoutingDecision`
+(`trace_contribution.rs:2748`), which is the right direction. But
+`derive_envelope_content_presence` maps `RoutingDecision` to
+`presence.message_text = true` (`:5300`) — receipts must land under the
+enrichment spec's `routing_metadata` category instead, or they will be declared
+as message text.
+
 ## Verification at ingest
 
 > **Object B — buildable, and this is the security-critical path.** Distinct from
