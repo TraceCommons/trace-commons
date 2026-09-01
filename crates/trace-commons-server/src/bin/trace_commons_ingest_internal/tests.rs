@@ -88033,12 +88033,20 @@ fn register_stats_withholds_an_unrefreshed_row_even_with_a_floor_of_zero() {
 
 #[test]
 fn a_misconfigured_floor_falls_back_to_the_high_default_not_to_zero() {
+    // The literal, not the constant. Comparing against the constant would
+    // pass just as happily if someone set it to 0 and deleted the privacy
+    // floor along with it, which is the whole thing this guards.
+    assert_eq!(
+        REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR, 25,
+        "lowering the default floor publishes smaller cohorts; change it \
+         deliberately, against a real contributor count, not incidentally"
+    );
     // Every one of these is a misconfiguration, and the safe reading of a
     // misconfigured floor is the high one: a zero would suppress nothing.
     for raw in [None, Some(""), Some("   "), Some("many"), Some("-5")] {
         assert_eq!(
             register_stats_floor_from(raw),
-            REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR,
+            25,
             "raw {raw:?} must fall back to the default floor"
         );
     }

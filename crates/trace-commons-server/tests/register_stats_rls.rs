@@ -9,6 +9,7 @@
 
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
+use trace_commons_server::db::postgres::REGISTER_STATS_SELECT_SQL;
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::register_stats::{fetch_register_stats_row, run_register_stats_refresh};
 
@@ -56,14 +57,19 @@ async fn the_public_role_can_read_the_aggregate() {
         .await
         .expect("set role");
 
+    // The statement the server actually issues, not a hand-copied projection.
+    // The hand-copied one used to pass here while the shipped query was denied
+    // on every request: it omitted a `WHERE singleton = TRUE` the real query
+    // carried, and PostgreSQL column privileges cover every column a query
+    // references, `WHERE` included. Referencing the constant is what stops
+    // this test and the server drifting apart again.
     let row = client
-        .query_one(
-            "SELECT traces_accepted, contributors FROM trace_register_stats",
-            &[],
-        )
+        .query_one(REGISTER_STATS_SELECT_SQL, &[])
         .await
         .expect("the public role reads the aggregate");
     let _: i64 = row.get("traces_accepted");
+    let _: i64 = row.get("contributors");
+    let _: i64 = row.get("points_issued");
 }
 
 #[tokio::test]

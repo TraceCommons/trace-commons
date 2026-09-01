@@ -79,14 +79,29 @@ membership, so testing against a local superuser-owned database does not
 prove the grant is doing anything. To verify for real, connect as a
 non-superuser role with no other membership and confirm both directions:
 
+Run **the statement the server actually issues**, character for character —
+a shortened projection is not a check. A recipe that dropped the real
+query's filter once passed here while every live request was denied:
+
 ```sql
 -- as the runtime role, after migrating:
 SET ROLE trace_commons_public_read;  -- must succeed
-SELECT traces_accepted, contributors FROM trace_register_stats;  -- must succeed
+SELECT traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at FROM trace_register_stats;  -- must succeed
 UPDATE trace_register_stats SET traces_accepted = 0;  -- must be refused
                                                        -- ("permission denied
                                                        -- for table ...")
 ```
+
+That SELECT is `REGISTER_STATS_SELECT_SQL`
+(`crates/trace-commons-server/src/db/postgres.rs`), and a unit test fails if
+this file and that constant ever disagree.
+
+**Do not add a `WHERE singleton = TRUE` to it.** PostgreSQL column privileges
+cover every column a query *references*, `WHERE` included, and `singleton` is
+not in the grant above — filtering on it denies the whole table under this
+role even though every projected column is granted. The filter buys nothing:
+`singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton)` admits at most
+one row.
 
 ## The contributor floor
 

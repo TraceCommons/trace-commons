@@ -5605,8 +5605,22 @@ fn sha256_prefixed(input: &str) -> String {
 /// must return the same shape, and the public role's GRANT is column-scoped,
 /// so a seventh column added to one copy would fail at request time under
 /// that role only.
-const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
-     withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
+///
+/// NO `WHERE singleton = TRUE`, deliberately. PostgreSQL column privileges
+/// cover every column a query REFERENCES, `WHERE` included, and `singleton`
+/// is not in V55's grant list -- so filtering on it denies the whole table
+/// under `trace_commons_public_read` ("permission denied for table
+/// trace_register_stats") even though every projected column is granted. The
+/// filter buys nothing anyway: `singleton BOOLEAN PRIMARY KEY DEFAULT TRUE
+/// CHECK (singleton)` admits at most one row, and `query_one` enforces that
+/// exactly one came back.
+///
+/// Public so `tests/register_stats_rls.rs` proves the role against the
+/// statement the server actually issues. That test previously ran a
+/// hand-copied projection with no `WHERE`, and so passed while the shipped
+/// query was denied on every request.
+pub const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
+     withheld, as_of, refreshed_at FROM trace_register_stats";
 
 fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStatsRow {
     crate::db::RegisterStatsRow {
@@ -6185,6 +6199,69 @@ mod tests {
     }
 
     #[test]
+    fn the_public_read_statement_references_only_granted_columns() {
+        // PostgreSQL column privileges cover every column a query REFERENCES,
+        // not just the ones it projects. `singleton` is deliberately absent
+        // from V55's column-scoped GRANT, so any mention of it here -- a
+        // WHERE, an ORDER BY, anything -- denies the whole table under
+        // trace_commons_public_read. This shipped once as a 500 on every
+        // request.
+        const V55: &str =
+            include_str!("../../../../migrations/V55__register_stats_public_read.sql");
+        assert!(
+            !REGISTER_STATS_SELECT_SQL.contains("singleton"),
+            "the public read statement must not reference `singleton`: it is \
+             not in V55's column grant, and referencing it denies the table"
+        );
+        // And the columns it does project must all be granted.
+        let grant = V55
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split("GRANT SELECT (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("V55 carries a column-scoped GRANT SELECT")
+            .to_string();
+        for column in [
+            "traces_accepted",
+            "contributors",
+            "points_issued",
+            "withheld",
+            "as_of",
+            "refreshed_at",
+        ] {
+            assert!(
+                REGISTER_STATS_SELECT_SQL.contains(column),
+                "the public read statement must project {column}"
+            );
+            assert!(
+                grant.contains(column),
+                "V55 must grant {column} to trace_commons_public_read"
+            );
+        }
+    }
+
+    #[test]
+    fn the_operator_verification_recipe_runs_the_real_statement() {
+        // The recipe in that runbook is what an operator actually types to
+        // prove the role works. It carried a shortened projection while the
+        // shipped query was denied on every request, so it would have said
+        // "verified" about a statement the server never issues.
+        const RUNBOOK: &str = include_str!("../../../../docs/operator/register-stats-role.md");
+        let normalized = RUNBOOK.split_whitespace().collect::<Vec<_>>().join(" ");
+        let statement = REGISTER_STATS_SELECT_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            normalized.contains(&statement),
+            "docs/operator/register-stats-role.md must contain the exact \
+             statement the public read issues, not a shortened one"
+        );
+    }
+
+    #[test]
     fn refuses_an_empty_enumeration_under_a_role_that_cannot_see_through_rls() {
         // The masking case: forced RLS with no GUC set MUST hide every row,
         // so an empty result under a role that cannot see through RLS is
@@ -6217,9 +6294,11 @@ mod tests {
         let file_marker = format!("migrations/V{}__register_stats_public_read.sql", 55);
         assert_eq!(
             THIS_FILE.matches(&file_marker).count(),
-            2,
-            "V55 must be named exactly twice: once by run_migrations' include_str! \
-             and once by the migration-content test above"
+            3,
+            "V55 must be named exactly three times: once by run_migrations' \
+             include_str!, once by the migration-content test above, and once \
+             by the_public_read_statement_references_only_granted_columns, \
+             which reads V55's column grant rather than restating it"
         );
         let version_marker = format!("&{}_i32", 55);
         assert!(
