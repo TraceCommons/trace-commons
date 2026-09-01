@@ -56,21 +56,42 @@ impl CreditPosture {
     }
 }
 
-/// One sentence describing the deployment's posture.
+/// The settlement-mode sentence, independent of grading status.
 ///
-/// Deliberately mirrors `settlement_posture_explanation` in the ingest binary,
-/// which puts the same fact on a submission receipt. If you change the wording
-/// in one place, change it in the other: a receipt and an API that disagree
-/// about whether credit settles is the exact defect #445 was filed for.
-fn settlement_posture_sentence(settlement_mode: &str, graded: bool) -> String {
-    let settlement = match settlement_mode {
+/// This is the single source for wording that `settlement_posture_explanation`
+/// in the ingest binary and `CreditPosture` here both need to agree about:
+/// #445 was a pilot that ran three months with 307 credit events stuck
+/// `pending` because nothing told a contributor that `Disabled` settlement
+/// makes the worker a no-op. Ingest maps its `NearSettlementMode` variant to
+/// the labels below (`"http"`, `"dry_run"`, or anything else for the
+/// fail-safe disabled case) and delegates here rather than holding its own
+/// copy of this text -- two copies is how the wording drifted the first time.
+#[must_use]
+pub fn settlement_status_sentence(mode_label: &str) -> &'static str {
+    match mode_label {
         "http" => "Credit is queued for on-chain settlement.",
-        "dry_run" => "Settlement is running in dry-run: no on-chain credit is issued.",
+        // The outbox advances with synthetic transaction hashes and no funds.
+        // A settled-looking row here is not an on-chain credit.
+        "dry_run" => {
+            "Settlement is running in dry-run: the credit ledger advances with \
+             synthetic transaction hashes and no on-chain credit is issued."
+        }
+        // Deliberate and fail-safe, not a fault. Say both halves: the credit
+        // is real and recorded, and nothing is going to settle it here.
         _ => {
             "Credit is recorded but not settled: on-chain settlement is not \
              enabled on this deployment, so this figure stays pending."
         }
-    };
+    }
+}
+
+/// One sentence describing the deployment's posture, for `CreditPosture`.
+///
+/// Composes `settlement_status_sentence` with the grading caveat: while the
+/// quality/dedup/cap pipeline is shadow-mode, a figure may still be revised,
+/// and this is the only place that says so.
+fn settlement_posture_sentence(settlement_mode: &str, graded: bool) -> String {
+    let settlement = settlement_status_sentence(settlement_mode);
     if graded {
         settlement.to_string()
     } else {
@@ -180,6 +201,34 @@ mod tests {
         assert!(
             !posture.explanation.is_empty(),
             "a posture always states itself in words"
+        );
+    }
+
+    // #445: this text is the single copy the submission receipt
+    // (`settlement_posture_explanation` in the ingest binary) delegates to
+    // rather than holding its own. Pinning the dry-run sentence's full
+    // wording here catches an edit to this copy; the ingest binary's own
+    // `a_dry_run_receipt_does_not_imply_an_on_chain_credit` test catches a
+    // wiring break on the delegating side, so the two together stand in for
+    // an "agree" test that would otherwise be tautological now that there is
+    // only one copy to compare against itself.
+    #[test]
+    fn dry_run_sentence_names_both_the_fake_hash_and_the_missing_credit() {
+        let sentence = settlement_status_sentence("dry_run");
+        assert_eq!(
+            sentence,
+            "Settlement is running in dry-run: the credit ledger advances with \
+             synthetic transaction hashes and no on-chain credit is issued."
+        );
+    }
+
+    #[test]
+    fn unrecognized_labels_fail_safe_to_the_disabled_sentence() {
+        // Mirrors NearSettlementMode::from_env(): unset, blank, or garbled
+        // resolves to disabled, never to a settled-sounding default.
+        assert_eq!(
+            settlement_status_sentence("anything else"),
+            settlement_status_sentence("disabled")
         );
     }
 }

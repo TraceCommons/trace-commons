@@ -56015,22 +56015,18 @@ fn corpus_status_with_pii_backstop_hold(
 /// figure, and a blank `FINAL` column, and could not tell "switched off" from
 /// "still working on it". Whichever posture is configured, the receipt says
 /// it, so the two can never drift apart again.
+///
+/// The wording itself lives once, in
+/// `trace_commons_server::credit_numbers::settlement_status_sentence`, which
+/// the credit-numbers API also renders through -- this function only maps the
+/// enum to that function's string labels. Do not put the sentences back here.
 fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
-    match mode {
-        // Deliberate and fail-safe, not a fault. Say both halves: the credit
-        // is real and recorded, and nothing is going to settle it here.
-        NearSettlementMode::Disabled => {
-            "Credit is recorded but not settled: on-chain settlement is not \
-             enabled on this deployment, so this figure stays pending."
-        }
-        // The outbox advances with synthetic transaction hashes and no funds.
-        // A settled-looking row here is not an on-chain credit.
-        NearSettlementMode::DryRun => {
-            "Settlement is running in dry-run: the credit ledger advances with \
-             synthetic transaction hashes and no on-chain credit is issued."
-        }
-        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
-    }
+    let label = match mode {
+        NearSettlementMode::Disabled => "disabled",
+        NearSettlementMode::DryRun => "dry_run",
+        NearSettlementMode::Http => "http",
+    };
+    trace_commons_server::credit_numbers::settlement_status_sentence(label)
 }
 
 fn receipt_from_record(
