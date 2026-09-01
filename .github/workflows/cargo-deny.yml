@@ -1,0 +1,73 @@
+# deny.toml has carried the AGPL-combinability licence allow list and the
+# RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
+# / AGENTS.md instruct contributors to run `cargo deny check licenses` by
+# hand under all three feature sets before pushing -- but nothing enforced
+# it. This workflow does.
+#
+# Licences run under all three feature sets because the feature sets pull
+# in different trees (AGENTS.md); `arguments: ''` on cargo-deny-default
+# overrides cargo-deny-action's own `--all-features` default for the same
+# reason -- deny.toml's `[graph] all-features = false` exists to match.
+# Advisories run on the default graph only: an `--all-features` version
+# currently fails with seven findings in the near-ai-scorer/local-gpu-models
+# trees, none triaged yet -- see
+# docs/superpowers/reports/2026-09-01-cargo-deny-all-features-advisories.md.
+#
+# `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
+# and configures no deny/skip list, so the check is a standing no-op today.
+#
+# cargo-deny-action's v2 tag pins cargo-deny 0.20.2 in its own Dockerfile,
+# the version these jobs were verified with locally.
+
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  # Deliberately unfiltered by base branch. This repository uses stacked
+  # PRs, and a `branches: [main]` filter here means a PR targeting another
+  # branch gets no CI at all -- the work is only ever tested once it reaches
+  # main, which is exactly when a failure is most expensive to unwind. A PR
+  # should be tested against the branch it will actually merge into.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny-default:
+    name: cargo deny (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: ''
+          command-arguments: licenses advisories sources
+
+  cargo-deny-near-ai-scorer:
+    name: cargo deny (near-ai-scorer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features near-ai-scorer
+          command-arguments: licenses
+
+  cargo-deny-local-gpu-models:
+    name: cargo deny (local-gpu-models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --features local-gpu-models
+          command-arguments: licenses

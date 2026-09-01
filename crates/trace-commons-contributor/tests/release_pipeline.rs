@@ -2052,10 +2052,11 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
 /// silently reunites every feature set into one union graph and defeats the
 /// reason AGENTS.md keeps three separate invocations: "the feature sets
 /// pull in different trees." This pins the three cargo-deny jobs' shape in
-/// ci.yml so that regression fails here instead of shipping quietly green.
+/// cargo-deny.yml so that regression fails here instead of shipping
+/// quietly green.
 #[test]
 fn cargo_deny_job_isolates_feature_sets_and_omits_bans() {
-    let workflow = read(".github/workflows/ci.yml");
+    let workflow = read(".github/workflows/cargo-deny.yml");
 
     let default_job = extract_job(&workflow, "cargo-deny-default");
     assert!(
@@ -2065,12 +2066,17 @@ fn cargo_deny_job_isolates_feature_sets_and_omits_bans() {
          checks the union of every feature instead of the default graph \
          alone"
     );
-    assert!(
-        default_job.contains("command-arguments: licenses advisories sources"),
-        "cargo-deny-default must run licenses, advisories, and sources \
-         together, loading the dependency graph once for all three rather \
-         than three times"
-    );
+    // Three separate checks, not one joined-string match: the invariant is
+    // that all three checks run in this one job (loading the dependency
+    // graph once), not that they appear in this exact order.
+    for check in ["licenses", "advisories", "sources"] {
+        assert!(
+            default_job.contains(check),
+            "cargo-deny-default must run `{check}` alongside the other two \
+             checks, loading the dependency graph once for all three \
+             rather than three times"
+        );
+    }
 
     let near_ai_scorer_job = extract_job(&workflow, "cargo-deny-near-ai-scorer");
     assert!(

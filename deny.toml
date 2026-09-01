@@ -49,20 +49,9 @@ multiple-versions = "allow"
 
 [advisories]
 version = 2
-# number_prefix 0.4.0 is unmaintained (RUSTSEC-2025-0119). It is pulled in via
-# indicatif via hf-hub: hf-hub is a direct, unconditional dependency of
-# trace-commons-server (crates/trace-commons-server/Cargo.toml -- not gated by
-# any feature, so it is in the graph under default, near-ai-scorer, and
-# local-gpu-models alike), and indicatif 0.17 -- the version hf-hub 0.4.3
-# pins -- depends on number_prefix for its human-readable byte-rate display.
-# No fixed number_prefix release exists; the advisory's own solution field
-# says "No safe upgrade is available!". indicatif only drops number_prefix in
-# 0.18 (confirmed with `cargo tree` against a scratch crate pinned to each
-# version), and reaching that needs hf-hub 1.0, which has no indicatif
-# dependency at all -- but 0.4 to 1.0 is a breaking rewrite of the hf-hub API,
-# not a lockfile bump, so it is out of scope for a dependency-update PR.
-# Revisit when hf-hub is upgraded past the 0.4.x line, or if number_prefix
-# ever ships a fix for RUSTSEC-2025-0119.
+# hf-hub is not feature-gated, so this reaches every cargo-deny job
+# (default, near-ai-scorer, local-gpu-models) alike. Also revisit if
+# number_prefix itself ships a fix for RUSTSEC-2025-0119.
 ignore = [
     { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained with no fixed release, pulled in via indicatif via hf-hub, a direct unconditional dependency of trace-commons-server. Revisit when hf-hub is upgraded past 0.4.x -- hf-hub 1.0 has no indicatif/number_prefix dependency at all (verified via `cargo tree`) -- but that is a breaking rewrite, not a lockfile bump, so it is out of scope here." },
 ]
