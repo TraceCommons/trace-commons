@@ -137,7 +137,21 @@ public sealed class NativeRoundTripTests : IDisposable
             project_label = "windows-preview",
             path = sessionPath,
             size_bytes = new FileInfo(sessionPath).Length,
-            discovered_at = "2026-08-18T10:01:00Z",
+            // Relative to now, never a fixed calendar date.
+            //
+            // This was "2026-08-18T10:01:00Z". The daemon expires a Pending
+            // entry once `discovered_at < now - queue_ttl_days`, and that
+            // default is 14 days, so the fixture worked for exactly a
+            // fortnight and then began expiring before the test could
+            // approve it. It went off at 10:01 UTC on 2026-09-01: CI runs
+            // that morning at 09:08 and 09:54 passed, and every run after
+            // 10:01 failed, on three unrelated PRs at once.
+            //
+            // The symptom gave none of that away. `approve` reported
+            // `not-pending`, the assertion that failed was about an approval
+            // deadline, and the failure looked like a flake because it was
+            // intermittent for one morning while runs straddled the cutoff.
+            discovered_at = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("o"),
             state = "pending",
             reason_label = (string?)null,
             attempts = 0,
