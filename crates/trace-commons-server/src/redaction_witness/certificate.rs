@@ -45,9 +45,9 @@
 //!
 //! # Logging
 //!
-//! Nothing here logs. A certificate carries `chat_id` and `account_pseudonym`,
-//! which are per-session and per-account identifiers, so `Debug` is
-//! hand-written to withhold them; only the two digests render.
+//! Nothing here logs. A certificate carries `chat_id`, which identifies an
+//! upstream conversation, so `Debug` is hand-written to withhold it; only the
+//! two digests render.
 
 use crate::near_attestation::receipt::{ReceiptError, decode_address, recover_eip191_signer};
 
@@ -72,10 +72,6 @@ pub struct WitnessCertificate {
     pub redacted_sha256: String,
     /// The upstream inference conversation this trace came from.
     pub chat_id: String,
-    /// Stable, opaque per-account identifier. This is the field that makes a
-    /// per-contributor cap bind. It must never be a name, an email, or
-    /// anything resolvable to a person.
-    pub account_pseudonym: String,
     /// Tokens the upstream inference billed.
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -95,10 +91,10 @@ pub struct WitnessCertificate {
 
 impl std::fmt::Debug for WitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Only the two digests. `chat_id` and `account_pseudonym` are
-        // identifiers for a session and a contributor, `model` and the token
-        // counts describe one contributor's usage, and a derived `Debug`
-        // would put all of them into any `tracing` call that used `?cert`.
+        // Only the two digests. `chat_id` identifies an upstream
+        // conversation, and `model` and the token counts describe one
+        // contributor's usage; a derived `Debug` would put all of them into
+        // any `tracing` call that used `?cert`.
         formatter
             .debug_struct("WitnessCertificate")
             .field("redacted_sha256", &self.redacted_sha256)
@@ -165,7 +161,6 @@ impl WitnessCertificate {
         for field in [
             self.redacted_sha256.as_str(),
             self.chat_id.as_str(),
-            self.account_pseudonym.as_str(),
             self.model.as_str(),
             self.redaction_policy_version.as_str(),
             self.witness_measurement.as_str(),
@@ -229,7 +224,6 @@ mod tests {
         WitnessCertificate {
             redacted_sha256: "a".repeat(64),
             chat_id: "chatcmpl-7f3a".to_string(),
-            account_pseudonym: "acct-9c11e0".to_string(),
             prompt_tokens: 1_204,
             completion_tokens: 337,
             model: "qwen3.6-27b-fp8".to_string(),
@@ -239,14 +233,13 @@ mod tests {
         }
     }
 
-    /// The six string fields, in signing order, as a mutable view. Used by
+    /// The five string fields, in signing order, as a mutable view. Used by
     /// the collision test so it covers every adjacent pair rather than the
     /// one pair someone happened to pick.
-    fn string_fields(cert: &mut WitnessCertificate) -> [&mut String; 6] {
+    fn string_fields(cert: &mut WitnessCertificate) -> [&mut String; 5] {
         [
             &mut cert.redacted_sha256,
             &mut cert.chat_id,
-            &mut cert.account_pseudonym,
             &mut cert.model,
             &mut cert.redaction_policy_version,
             &mut cert.witness_measurement,
@@ -287,9 +280,9 @@ mod tests {
         // sign identically, and nothing else in this suite would notice --
         // every round-trip and every signature test passes either way.
         //
-        // Six string fields, so five adjacent pairs. Checking one pair would
-        // test that pair; checking all five tests the encoder.
-        for pair in 0..5 {
+        // Five string fields, so four adjacent pairs. Checking one pair would
+        // test that pair; checking all four tests the encoder.
+        for pair in 0..4 {
             let mut left = certificate();
             {
                 let fields = string_fields(&mut left);
@@ -326,7 +319,7 @@ mod tests {
         // content sits in the *other* field of the pair encodes identically.
         // The adjacent-shift loop above never exercises an empty field, so
         // this case is only covered here.
-        for pair in 0..5 {
+        for pair in 0..4 {
             let mut left = certificate();
             {
                 let fields = string_fields(&mut left);
@@ -413,12 +406,6 @@ mod tests {
             (
                 "chat_id",
                 Box::new(|c: &mut WitnessCertificate| c.chat_id = "chatcmpl-other".to_string()),
-            ),
-            (
-                "account_pseudonym",
-                Box::new(|c: &mut WitnessCertificate| {
-                    c.account_pseudonym = "acct-other".to_string()
-                }),
             ),
             (
                 "prompt_tokens",
@@ -527,11 +514,7 @@ mod tests {
         // every field, and `?` is how a value ordinarily reaches a log here.
         let cert = certificate();
         let rendered = format!("{cert:?}");
-        for secret in [
-            cert.chat_id.as_str(),
-            cert.account_pseudonym.as_str(),
-            cert.model.as_str(),
-        ] {
+        for secret in [cert.chat_id.as_str(), cert.model.as_str()] {
             assert!(
                 !rendered.contains(secret),
                 "Debug rendered {secret}: {rendered}"
