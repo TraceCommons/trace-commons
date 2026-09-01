@@ -273,46 +273,41 @@ jobs:
           key: ${{ runner.os }}-cargo-preserve-order-guard-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-preserve-order-guard-
-      # The end-to-end proof for crates/trace-commons-protocol/src/canonical_json.rs.
+      # The end-to-end proof for crates/trace-commons-protocol/src/canonical_json.rs,
+      # narrowed to the one build graph that still needs it.
       #
-      # Sorting a `serde_json::Map` is unobservable under the default feature
-      # set -- the map is a `BTreeMap`, so it hands back sorted keys whether or
-      # not `canonicalize` does anything. That makes an omitted call, as
-      # opposed to a deleted comparison, invisible to the ordinary suite. This
-      # job forces the `preserve_order` feature on, which is the condition
-      # `canonical_json` exists to survive, and requires that the ONLY failing
-      # test is the guard that is meant to fail there. Every hashing path --
-      # the pinned envelope digest, the redaction hashes, the NEAR outbox
-      # idempotency key, the dedup payload summary -- must still produce the
-      # bytes it produces today.
+      # `dcap-qvl`'s mandatory `std` feature depends on
+      # `serde_json/preserve_order`, so every graph containing it -- the whole
+      # workspace, and anything reaching trace-commons-server, which includes
+      # trace-commons-contributor through its cfg(not(windows)) dev-dependency
+      # -- already resolves `serde_json::Map` to an insertion-ordered IndexMap.
+      # In those graphs the ordinary `cargo test --workspace` is the proof:
+      # measured by deleting the sort from `canonicalize`, that run goes red on
+      # four canonical_json tests, the NEAR settle idempotency key and the
+      # pinned envelope digest. Forcing the feature on there would be a no-op,
+      # and the job's old expectation -- that exactly the guard test fails --
+      # is now inverted, since the guard no longer fails under preserve_order.
       #
-      # A green run here is the statement "a dependency may turn preserve_order
-      # on and no digest moves". Do not weaken it to compiling the module.
+      # `cargo test -p trace-commons-protocol` is the exception: nothing in
+      # that graph pulls dcap-qvl, so its map is a BTreeMap and sorting it is
+      # unobservable. Measured the same way, the mutation above leaves that
+      # run entirely green. That is also the graph a third-party harness gets,
+      # since the protocol crate ships inside permissive clients without the
+      # server. So this job forces the feature on and requires the protocol
+      # crate's suite to pass unchanged.
+      #
+      # A green run here is the statement "a consumer of trace-commons-protocol
+      # may turn preserve_order on and no digest moves". Do not weaken it to
+      # compiling the module, and do not re-broaden it to the workspace: the
+      # workspace already runs under preserve_order, so a second run proves
+      # nothing this does not.
       - name: Force serde_json/preserve_order on
         run: |
           sed -i 's|^serde_json = "1"$|serde_json = { version = "1", features = ["preserve_order"] }|' \
             crates/trace-commons-protocol/Cargo.toml
           grep -q 'preserve_order' crates/trace-commons-protocol/Cargo.toml
-      - name: Only the guard test may fail
-        run: |
-          set -o pipefail
-          cargo test --workspace --no-fail-fast 2>&1 | tee preserve-order.log || true
-          failed="$(sed -n '/^failures:$/,/^test result/p' preserve-order.log \
-            | grep -E '^    [a-z]' | sed 's/^ *//' | sort -u)"
-          expected='canonical_json::tests::key_order_is_sorted_not_insertion_order'
-          if [ "$failed" != "$expected" ]; then
-            echo "::error::Expected exactly the preserve_order guard to fail."
-            echo "Expected: $expected"
-            echo "Actual:"
-            echo "$failed"
-            echo
-            echo "If the guard did not fail, it has stopped detecting preserve_order."
-            echo "If anything else failed, canonical_json no longer holds a hashing"
-            echo "path stable under preserve_order -- that test's digest moves the"
-            echo "day a dependency enables the feature. Fix the path, not this job."
-            exit 1
-          fi
-          echo "Only the guard failed; every hashing path held its bytes."
+      - name: The protocol crate must hold its bytes under preserve_order
+        run: cargo test -p trace-commons-protocol
 
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke

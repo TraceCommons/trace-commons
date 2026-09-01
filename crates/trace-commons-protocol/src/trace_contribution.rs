@@ -6015,7 +6015,9 @@ fn safe_payload_summary(payload: &Value) -> String {
             // first eight of an insertion-ordered map are a different eight
             // keys, not the same eight in a different order. `Value`'s map
             // iterates in key order only while it is a `BTreeMap`; sorting
-            // is a no-op today and holds under `serde_json/preserve_order`.
+            // is a no-op there and does the real work under
+            // `serde_json/preserve_order`, which `dcap-qvl` enables in every
+            // build graph that contains it.
             let keys = canonical_json::sorted_entries(map)
                 .into_iter()
                 .take(8)
@@ -6052,11 +6054,12 @@ fn canonical_hash(content: &str) -> String {
 /// `structured_payload` is a `serde_json::Value`, and `redaction_hash` is
 /// taken over the serialized events -- so the order that map iterates in is
 /// part of the hash. It is key-ordered only while `serde_json::Map` is a
-/// `BTreeMap`; any dependency in the build enabling
-/// `serde_json/preserve_order` makes it insertion-ordered instead. Sorting
-/// here is a no-op under today's feature set, and pins the bytes under
-/// either. Call it immediately before recomputing the hash, after the last
-/// pass that may have rewritten a payload.
+/// `BTreeMap`; `serde_json/preserve_order` makes it insertion-ordered
+/// instead, and `dcap-qvl` enables that feature in every build graph that
+/// contains it -- including the whole workspace. Sorting here is a no-op
+/// under a `BTreeMap` and does the real work under an `IndexMap`, pinning
+/// the bytes under either. Call it immediately before recomputing the hash,
+/// after the last pass that may have rewritten a payload.
 fn canonicalize_event_payloads(events: &mut [TraceContributionEvent]) {
     for event in events {
         canonical_json::canonicalize(&mut event.structured_payload);
