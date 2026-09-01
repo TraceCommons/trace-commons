@@ -13,4 +13,5 @@
 //! contributor content -- and a span list's *shape* reveals what the detector
 //! found, so it is if anything more sensitive than the text it describes.
 
+pub mod certificate;
 pub mod correspondence;
