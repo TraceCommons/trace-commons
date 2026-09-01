@@ -1,11 +1,16 @@
 # Register-stats public-read role
 
 The public register-stats endpoint (`GET /v1/public/register-stats`) serves
-one aggregate row — `traces_accepted`, `contributors`,
-`points_issued`, `as_of`, `refreshed_at` — from `trace_register_stats` to an
-**unauthenticated** caller. An unauthenticated request has no tenant, so the
-ordinary RLS predicate (`tenant_id = trace_current_tenant_id()`) matches
-nothing. This is handled with a dedicated, least-privilege PostgreSQL role —
+one aggregate row from `trace_register_stats` to an **unauthenticated**
+caller. It *reads* the whole row — `singleton`, `traces_accepted`,
+`contributors`, `points_issued`, `withheld`, `suppressed`, `as_of`,
+`refreshed_at` — and *publishes* at most `traces_accepted`, `contributors`,
+`points_issued`, plus `withheld`, `scope`, `as_of` and `posture`. The three
+counts are withheld together; the rest of the row never reaches the wire.
+
+An unauthenticated request has no tenant, so the ordinary RLS predicate
+(`tenant_id = trace_current_tenant_id()`) matches nothing. This is handled
+with a dedicated, least-privilege PostgreSQL role —
 `trace_commons_public_read` — rather than any of the tempting broad fixes
 (`BYPASSRLS`, a superuser pool, or dropping `FORCE ROW LEVEL SECURITY`).
 
@@ -162,8 +167,11 @@ The refresh worker route (`POST /v1/workers/register-stats/refresh`,
 in this repo schedules it — wire it to a timer (cron, a scheduled Cloud Run
 job, systemd timer, etc.) as part of your deployment. Until it has run at
 least once, `refreshed_at` stays `NULL` and the public endpoint refuses to
-publish any figure at all -- not even `traces_accepted` -- because a zero
-would be a claim about the register that nobody made. The row's own
-`withheld` column has the same effect and doubles as an operator kill
-switch: set it `TRUE` and the endpoint publishes nothing until the next
-refresh clears it.
+publish any figure at all — not even `traces_accepted` — because a zero would
+be a claim about the register that nobody made.
+
+The row's own `withheld` column tracks exactly that state and has the same
+effect while it is set. **It is not the operator control**, and setting it by
+hand does not stop publication for long: the refresh owns that column and
+clears it on every run. To stop publication deliberately, use `suppressed` —
+see "Suppressing publication during an incident" above.
