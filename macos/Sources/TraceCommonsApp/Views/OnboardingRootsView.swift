@@ -220,7 +220,12 @@ struct OnboardingRootsView: View {
 
     private func start() {
         guard let settingsJSON = roots.settingsJSON() else {
-            failure = "Answer for both before continuing."
+            // Names the two rows that actually gate Continue. This merged
+            // badly: this branch had reworded it to "each" while main gained
+            // an optional Gemini row, and "each" would now promise that a
+            // blank Gemini row is what is blocking, which it never is --
+            // `isComplete` is claude && codex by design.
+            failure = "Answer for Claude Code and Codex before continuing."
             return
         }
         failure = nil
