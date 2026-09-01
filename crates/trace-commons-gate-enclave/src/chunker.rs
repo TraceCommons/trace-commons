@@ -285,6 +285,55 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({ "events": events })).unwrap()
     }
 
+    /// Same minimal single-event envelope as `envelope_json`, but with
+    /// caller-supplied sibling keys spliced onto the event and onto the
+    /// envelope itself. `event_type` and `redacted_content` are fixed so
+    /// two envelopes built from this helper differ ONLY in the extra keys.
+    fn envelope_json_with_extra_fields(
+        event_extra: &[(&str, &str)],
+        envelope_extra: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let mut event = serde_json::json!({
+            "event_type": "user_message",
+            "redacted_content": "hello",
+        });
+        for (k, v) in event_extra {
+            event[*k] = serde_json::json!(v);
+        }
+        let mut envelope = serde_json::json!({ "events": [event] });
+        for (k, v) in envelope_extra {
+            envelope[*k] = serde_json::json!(v);
+        }
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
+    /// Render every event in the envelope and concatenate — the same text
+    /// both the perplexity scorer and the novelty/dedup signal consume.
+    fn render_all_events(plaintext: &[u8]) -> String {
+        parse_envelope_rendered_events(plaintext)
+            .unwrap_or_default()
+            .concat()
+    }
+
+    #[test]
+    fn only_redacted_content_reaches_the_scored_text() {
+        // The chunker takes every event with no type filter, so the ONLY
+        // thing keeping non-content fields out of perplexity and dedup is
+        // that it reads `redacted_content` and nothing else. Attestation
+        // material will live in a sibling field; this asserts that adding
+        // one changes no scored byte.
+        let plain = envelope_json_with_extra_fields(&[], &[]);
+        let with_extra = envelope_json_with_extra_fields(
+            &[("attestation_receipt", "0xdeadbeef...")],
+            &[("intel_quote", "aabbcc...")],
+        );
+        assert_eq!(
+            render_all_events(&plain),
+            render_all_events(&with_extra),
+            "a non-content field changed the scored text; attestation data would be scored"
+        );
+    }
+
     #[test]
     fn render_event_text_is_role_plus_content_not_json() {
         let rendered = render_event_text("tool_call", Some("Bash"), "ls -la");
