@@ -324,15 +324,50 @@ Four resolutions, and only one keeps the property:
 | Trust a client-computed verdict | Rejected. Coverage gates admission, so it is authorization, and self-reported coverage from contributor-controlled software is what the enrichment spec's attribution-only rule exists to refuse. |
 | Drop content binding; require each `chat_id` to be used once | Keeps "one paid inference per submitted trace" but an attacker satisfies it with a one-token completion. The floor collapses from *inference over the whole trace* to *a trivial call per trace*, which is nearly free. |
 | Send raw bytes to the server | Rejected. Defeats the redaction design entirely. |
-| **Redact before inference** | The proxy scrubs outbound, so what NEAR AI hashes is what the trace stores. Hashes match and the binding survives. |
+| ~~Redact before inference~~ | Rejected. The agent reasons over scrubbed text, so the work degrades; and scrubbing into a TEE inverts the point of confidential inference. |
 
-Redacting before inference is the only option that preserves the security
-argument, and it carries an independent benefit: the contributor's unredacted
-text never leaves their machine at all. Its costs are real and should not be
-waved through -- the agent then reasons over redacted text, which changes the
-work and probably degrades it, and it only applies to the proxy-mediated path.
-It also sits oddly against NEAR AI being a TEE, where the premise is that
-sending sensitive data is safe.
+**Redacting before inference is also rejected** (Zaki, 2026-09-01). The agent
+would reason over scrubbed text, so the work degrades and a trace of degraded
+work is worth less -- the corpus exists to record real work. It is also
+backwards against a TEE: confidential inference exists so that real data *can*
+be sent, and scrubbing on the way in is strictly worse than scrubbing on the way
+out.
+
+### The requirement was never content identity
+
+All four options fail, which is the signal that the problem was framed wrongly.
+
+Re-read what the security argument actually asks for: *every submission requires
+a real, paid-for NEAR AI inference over the whole trace.* **The requirement is
+proportional cost.** Content binding was only ever a means of guaranteeing that
+the inference an attacker paid for was as large as the trace they submitted. If
+the receipt states *how much* inference was bought, that guarantee holds
+directly and the raw bytes stop mattering.
+
+So the resolution is an upstream field, not a client behaviour change. Ask NEAR
+AI to include in the **signed** text what the completion response already
+returns:
+
+- **token usage** (prompt and completion),
+- **model**,
+- **timestamp**.
+
+Then the rule becomes: each `chat_id` is accepted once, so one paid inference
+per submitted trace; the signed token counts must be commensurate with the
+trace's own size; and the signed timestamp must fall within the trace's window.
+
+An attacker must buy inference proportional to what they submit. They may buy
+*different* inference of the same size -- but it costs the same, and cost is the
+entire property. Content binding was a proxy for it, not the thing itself.
+
+This also keeps the ask acceptable to the counterparty: usage, model and
+timestamp reveal neither content nor identity, so nothing here asks a
+confidential-computing provider to undermine its own proposition.
+
+**Unresolved:** the receipt's `text` carries an optional third leading part that
+NEAR AI's reference verifier discards without naming. It may already carry some
+of this. Reading one requires an API key, which lives on `tc-pilot-host`.
+Check before asking for anything new.
 
 **Consequence for sequencing.** This must be settled before the contributor
 slice is planned, because it decides whether the proxy redacts outbound -- an
