@@ -21,7 +21,11 @@ rest stays encrypted.
 
 A **Trace Credit** is the signed, on-chain record that one of a contributor's
 submissions was accepted into the register. Credits are how recognition flows
-back when buyers later pay to query the evidence. They are non-transferable.
+back when buyers later pay to query the evidence. They are
+non-transferable: a credit cannot be sent to anyone else, and there is no
+secondary market and no price. Redemption is intended to be by the holder
+alone — burning their own credit against their own NEAR AI inference — and
+that path is not built yet.
 
 The contract is "local-first, opt-in, scrub before upload":
 
@@ -37,7 +41,9 @@ The contract is "local-first, opt-in, scrub before upload":
   operators of the server cannot read.
 - Accepted, settled records mint **Trace Credits** through a hash-only
   utility-attestation pipeline. Credits are non-transferable, bound to
-  reviewed evidence, and settle on-chain via NEAR; uploads alone don't pay.
+  reviewed evidence, and designed to settle on-chain via NEAR; uploads alone
+  don't pay. On-chain settlement is not enabled on any current deployment —
+  see `docs/operator/settlement-mode.md`.
 
 This repository — `trace-commons-server` — is the hosted control plane:
 ingest, review, retention, revocation, encrypted artifact storage,

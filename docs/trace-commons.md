@@ -70,8 +70,13 @@ server's operators cannot read.
 ## Trace Credit
 
 A **Trace Credit** is the signed, on-chain record that a contributor's envelope
-was accepted into the register. Credits are non-transferable, settle on NEAR,
-and are how recognition flows back when buyers later pay to query the evidence.
+was accepted into the register. Credits are non-transferable — no sending, no
+secondary market, no price — and are how recognition flows back when buyers
+later pay to query the evidence. Redemption is intended to be by the holder
+alone: burning their own credit against their own NEAR AI inference. Neither
+that redemption path nor on-chain settlement is enabled on any current
+deployment; see
+[`docs/operator/settlement-mode.md`](operator/settlement-mode.md).
 
 Credit is deliberately staged so that an accepted submission is not treated as
 "paid" until downstream value is proven:

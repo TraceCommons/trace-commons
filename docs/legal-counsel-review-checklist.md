@@ -17,7 +17,7 @@ should not have made it alone.
 | --- | --- | --- |
 | A.2 Eligibility | 18 or older | Chosen to avoid COPPA and GDPR child-consent machinery entirely. Lower floors are defensible and may matter for a student-heavy hackathon audience. Nothing in the codebase enforces any age check at all — the clause is currently a promise made by prose alone. |
 | A.5 Licence grant | Non-exclusive, scope-limited, revocable, no ownership transfer | Deliberately narrow. Confirm it is broad enough to cover what the corpus is actually for, including publishing derived datasets. |
-| A.6 Credits | No entitlement, no value, may be recomputed or discarded | Drafted to avoid any securities or stored-value reading. Confirm the language survives a regulator reading it after credits become transferable. |
+| A.6 Credits | Non-transferable and redeemable by the holder only, against that contributor's own NEAR AI inference; may be recomputed or discarded before redemption | The clause now describes a credit that carries value but cannot be sent, sold, or priced. Confirm that framing is right, and that the text is clear that redemption is intended design and not yet available on any deployment. |
 | A.8 Liability cap | US$100 aggregate | A conventional floor for a free pilot service. No basis beyond convention. |
 | A.10 Amendments | Prospective only, governed by the `policy_version` in the envelope | Unusual and strong: the software genuinely records which version each submission was made under. Confirm that binding ourselves this way is wanted, because it is harder to walk back than a standard "we may change these terms" clause. |
 | A.11 Governing law | California, Santa Clara County | Follows the entity's operating location. |
