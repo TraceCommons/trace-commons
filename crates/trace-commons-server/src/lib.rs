@@ -22,6 +22,7 @@ pub mod error;
 pub mod instance_enroll_guard;
 pub mod near_credit;
 pub mod near_legion_claim;
+pub mod register_stats;
 pub mod secrets;
 pub mod trace_artifact_gcs;
 pub mod trace_artifact_kek;

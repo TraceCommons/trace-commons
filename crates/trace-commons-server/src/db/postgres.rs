@@ -2004,6 +2004,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&55_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V55__register_stats_public_read.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&55_i32, &"register_stats_public_read"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2566,6 +2587,121 @@ impl Database for PgBackend {
             accept_rate,
             novelty_histogram,
             gate_outcomes,
+        })
+    }
+
+    async fn compute_register_stats_totals(
+        &self,
+    ) -> Result<crate::db::RegisterStatsTotals, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tenant_ids: Vec<String> = client
+            .query("SELECT tenant_id FROM trace_tenants", &[])
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .into_iter()
+            .map(|row| row.get::<_, String>("tenant_id"))
+            .collect();
+
+        let mut traces_accepted = 0_i64;
+        let mut points_issued = 0_i64;
+        let mut contributors: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        for tenant_id in &tenant_ids {
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+            let accepted = tx
+                .query_one(
+                    "SELECT COUNT(*) AS accepted FROM trace_submissions WHERE status = 'accepted'",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            traces_accepted += accepted.get::<_, i64>("accepted");
+
+            let issued = tx
+                .query_one(
+                    "SELECT COALESCE(SUM(points_delta::numeric), 0)::bigint AS issued
+                     FROM trace_credit_ledger
+                     WHERE points_delta::numeric > 0",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            points_issued += issued.get::<_, i64>("issued");
+
+            let accounts = tx
+                .query(
+                    "SELECT DISTINCT credit_account_ref FROM trace_credit_ledger",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in accounts {
+                contributors.insert(row.get::<_, String>("credit_account_ref"));
+            }
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+        }
+
+        Ok(crate::db::RegisterStatsTotals {
+            traces_accepted,
+            contributors: contributors.len() as i64,
+            points_issued,
+        })
+    }
+
+    async fn fetch_register_stats_row(&self) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "SELECT traces_accepted, contributors, points_issued, withheld, \
+                        as_of, refreshed_at \
+                 FROM trace_register_stats WHERE singleton = TRUE",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RegisterStatsRow {
+            traces_accepted: row.get("traces_accepted"),
+            contributors: row.get("contributors"),
+            points_issued: row.get("points_issued"),
+            withheld: row.get("withheld"),
+            as_of: row.get("as_of"),
+            refreshed_at: row.get("refreshed_at"),
+        })
+    }
+
+    async fn write_register_stats_row(
+        &self,
+        totals: crate::db::RegisterStatsTotals,
+    ) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "UPDATE trace_register_stats
+                 SET traces_accepted = $1,
+                     contributors = $2,
+                     points_issued = $3,
+                     withheld = FALSE,
+                     as_of = NOW(),
+                     refreshed_at = NOW()
+                 WHERE singleton = TRUE
+                 RETURNING traces_accepted, contributors, points_issued, withheld, \
+                           as_of, refreshed_at",
+                &[
+                    &totals.traces_accepted,
+                    &totals.contributors,
+                    &totals.points_issued,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(crate::db::RegisterStatsRow {
+            traces_accepted: row.get("traces_accepted"),
+            contributors: row.get("contributors"),
+            points_issued: row.get("points_issued"),
+            withheld: row.get("withheld"),
+            as_of: row.get("as_of"),
+            refreshed_at: row.get("refreshed_at"),
         })
     }
 
@@ -5823,6 +5959,89 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V54 must record itself in _trace_commons_migrations"
+        );
+    }
+
+    /// V55 gives the public register-stats endpoint (Task 4) a way to read
+    /// one aggregate row without a tenant. This test runs WITHOUT
+    /// PostgreSQL, so it is the only thing CI can ever check about the
+    /// role/policy shape below -- it has to carry real weight rather than
+    /// just check the file exists.
+    #[test]
+    fn v55_creates_a_nobypassrls_role_scoped_to_one_column_grant_and_policy() {
+        const V55: &str =
+            include_str!("../../../../migrations/V55__register_stats_public_read.sql");
+        assert!(
+            V55.contains("CREATE ROLE trace_commons_public_read NOLOGIN NOBYPASSRLS"),
+            "V55 must create the public-read role as NOLOGIN NOBYPASSRLS -- \
+             never a role that can bypass RLS"
+        );
+        assert!(
+            V55.contains(
+                "GRANT SELECT (traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
+            ),
+            "V55 must grant the public-read role SELECT on exactly the named \
+             aggregate columns and nothing else"
+        );
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_public_read")
+                && V55.contains("TO trace_commons_public_read")
+                && V55.contains("FOR SELECT"),
+            "V55 must scope the read policy to the public-read role, not PUBLIC"
+        );
+        assert!(
+            !V55.to_uppercase().contains("BYPASSRLS") || V55.contains("NOBYPASSRLS"),
+            "V55 must never grant BYPASSRLS"
+        );
+        assert!(
+            V55.contains("FORCE ROW LEVEL SECURITY"),
+            "V55 must force RLS on trace_register_stats"
+        );
+        assert!(
+            !V55.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V55 must not weaken forced RLS"
+        );
+        // FORCE ROW LEVEL SECURITY binds the table owner too, so the refresh
+        // worker (running as the ordinary runtime role, not
+        // trace_commons_public_read) needs its own read/write policies or it
+        // could never touch the row -- not even once. Both are scoped by
+        // predicate (no `TO` clause) rather than by role, so they add no
+        // privilege to trace_commons_public_read: that role's reach stays
+        // bounded by the column-scoped GRANT above, not by these policies.
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_runtime_write")
+                && V55.contains("FOR UPDATE"),
+            "V55 must let the runtime role write the row it refreshes"
+        );
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_runtime_read"),
+            "V55 must let the runtime role read the row it just wrote"
+        );
+        assert!(
+            !V55.contains("trace_register_stats_runtime_write\n    ON trace_register_stats\n    FOR UPDATE\n    TO ")
+                && !V55.contains("trace_register_stats_runtime_read\n    ON trace_register_stats\n    FOR SELECT\n    TO "),
+            "V55's runtime policies must stay unscoped by role (no `TO`), \
+             not widened to name trace_commons_public_read"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47, V53, and V54: wiring,
+    /// pinned. Counted rather than merely present, for the reason V53's test
+    /// records -- a literal in the assertion would otherwise satisfy itself.
+    #[test]
+    fn v55_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__register_stats_public_read.sql", 55);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V55 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 55);
+        assert!(
+            THIS_FILE.contains(&version_marker),
+            "V55 must record itself in _trace_commons_migrations"
         );
     }
 

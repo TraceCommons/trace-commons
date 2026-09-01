@@ -351,6 +351,36 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// All-time totals for the public register-stats aggregate. Crosses
+    /// tenants the same way `compute_leaderboard_inputs` and
+    /// `compute_corpus_analytics_summary` do: per-tenant transactions under
+    /// the RLS tenant GUC, never a raw cross-tenant query and never
+    /// `BYPASSRLS`.
+    async fn compute_register_stats_totals(&self) -> Result<RegisterStatsTotals, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "compute_register_stats_totals not implemented".to_string(),
+        ))
+    }
+
+    /// Read the `trace_register_stats` singleton row as it stands.
+    async fn fetch_register_stats_row(&self) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "fetch_register_stats_row not implemented".to_string(),
+        ))
+    }
+
+    /// Write freshly computed totals into the `trace_register_stats`
+    /// singleton row, stamping both `as_of` and `refreshed_at` to now, and
+    /// clearing `withheld`. Returns the row as written.
+    async fn write_register_stats_row(
+        &self,
+        _totals: RegisterStatsTotals,
+    ) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "write_register_stats_row not implemented".to_string(),
+        ))
+    }
+
     /// Insert a pre-rendered leaderboard snapshot. `contents_jsonb` is
     /// the wire-shape payload the read endpoints will serve verbatim.
     async fn insert_leaderboard_snapshot(
@@ -1519,6 +1549,37 @@ pub struct CorpusAnalyticsSummary {
     /// Labels: `both_passed`, `novelty_failed`, `perplexity_failed`,
     /// `both_failed`.
     pub gate_outcomes: Vec<(String, i64)>,
+}
+
+/// All-time, all-tenant totals for [`Database::compute_register_stats_totals`].
+/// Feeds the `trace_register_stats` singleton row that the public register
+/// endpoint reads; computed from the same tables the tenant-scoped admin
+/// summaries already read, crossed the same way `compute_corpus_analytics_summary`
+/// crosses tenants -- per-tenant transactions under the RLS tenant GUC,
+/// never `BYPASSRLS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterStatsTotals {
+    pub traces_accepted: i64,
+    /// Distinct `credit_account_ref` values across every tenant's credit
+    /// ledger.
+    pub contributors: i64,
+    /// Sum of positive `points_delta` across every tenant's credit ledger.
+    pub points_issued: i64,
+}
+
+/// The `trace_register_stats` singleton row, as read or as just written by
+/// [`Database::fetch_register_stats_row`] / [`Database::write_register_stats_row`].
+/// `refreshed_at` is `None` until a refresh has actually run; the public
+/// endpoint (a later slice) must refuse to publish while it is `None`,
+/// because a zero would be a claim about the register nobody made.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegisterStatsRow {
+    pub traces_accepted: i64,
+    pub contributors: i64,
+    pub points_issued: i64,
+    pub withheld: bool,
+    pub as_of: chrono::DateTime<chrono::Utc>,
+    pub refreshed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Write-shape for [`Database::insert_leaderboard_snapshot`]. The caller

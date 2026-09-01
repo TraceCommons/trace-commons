@@ -3148,6 +3148,7 @@ enum TokenRole {
     ProcessEvalWorker,
     RevocationWorker,
     CompetitionReadWorker,
+    RegisterStatsWorker,
 }
 
 impl TokenRole {
@@ -3169,6 +3170,7 @@ impl TokenRole {
             "competition_read_worker" | "competition-read-worker" => {
                 Ok(Self::CompetitionReadWorker)
             }
+            "register_stats_worker" | "register-stats-worker" => Ok(Self::RegisterStatsWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -3202,6 +3204,7 @@ impl TokenRole {
             Self::ProcessEvalWorker => "process_eval_worker",
             Self::RevocationWorker => "revocation_worker",
             Self::CompetitionReadWorker => "competition_read_worker",
+            Self::RegisterStatsWorker => "register_stats_worker",
         }
     }
 }
@@ -7758,6 +7761,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/revocation-propagation",
             post(revocation_propagation_worker_handler),
+        )
+        .route(
+            "/v1/workers/register-stats/refresh",
+            post(register_stats_refresh_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route(
@@ -15250,10 +15257,15 @@ async fn account_credit_summary_handler(
 /// filter (`list_trace_credit_events` returns every event for the tenant), so
 /// ledger rows are narrowed to this account in two steps: first to the events
 /// whose `submission_id` was just proven owned (the `owner_by_submission` map
-/// built from the SQL-scoped read), then through
+/// built from the SQL-scoped read). That ownership gate is what actually
+/// bounds this to the account: `trace_commons_credit_event_from_storage`
+/// stamps the owning submission's principal ref onto every event it builds,
+/// so anything that survives the first step already carries this account's
+/// principal by construction. The second pass through
 /// `visible_credit_events_for_account` — the pure `&AccountPrincipalSet`
-/// predicate beside `visible_submission_records_for_account` — as a second,
-/// independent check rather than trusting the first alone.
+/// predicate beside `visible_submission_records_for_account` — is this
+/// codebase's established belt-and-braces idiom, not an independent defence
+/// on this path.
 ///
 /// Points are summed as `f32` (matching how `TraceCommonsTenantCreditResponse`
 /// accumulates `credit_points_delta`) and rounded to whole points only once,
@@ -50119,6 +50131,50 @@ async fn revocation_propagation_worker_handler(
     Ok(Json(response))
 }
 
+#[derive(Debug, Serialize)]
+struct RegisterStatsRefreshResponse {
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed_at: DateTime<Utc>,
+}
+
+/// Recompute the public aggregate row.
+///
+/// Batch-only and idempotent. It writes the single `trace_register_stats`
+/// row and stamps `refreshed_at`; until it has run at least once the public
+/// endpoint publishes nothing, because zeros would be a claim nobody made.
+///
+/// Nothing schedules this yet -- an operator wires it to a timer. That is a
+/// decision left to whoever runs the deployment, not one made here.
+async fn register_stats_refresh_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<RegisterStatsRefreshResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_register_stats_operator(&tenant)?;
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats refresh requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::run_register_stats_refresh(db.as_ref())
+        .await
+        .map_err(internal_error)?;
+    let refreshed_at = row.refreshed_at.ok_or_else(|| {
+        internal_error(anyhow::anyhow!(
+            "register stats refresh did not stamp refreshed_at"
+        ))
+    })?;
+    Ok(Json(RegisterStatsRefreshResponse {
+        traces_accepted: row.traces_accepted,
+        contributors: row.contributors,
+        points_issued: row.points_issued,
+        refreshed_at,
+    }))
+}
+
 fn require_purge_purpose(
     dry_run: bool,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -53592,6 +53648,7 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::CompetitionReadWorker => {
             StorageTraceTenantAccessGrantRole::CompetitionReadWorker
         }
+        TokenRole::RegisterStatsWorker => StorageTraceTenantAccessGrantRole::RegisterStatsWorker,
     }
 }
 
@@ -54599,6 +54656,17 @@ fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "admin or utility worker token required",
+        ))
+    }
+}
+
+fn require_register_stats_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::RegisterStatsWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or register stats worker token required",
         ))
     }
 }
