@@ -143,6 +143,16 @@ pub struct PgBackend {
 /// Public so RLS tests assert against this list rather than a hand-maintained
 /// copy; the copy had drifted twelve tables out of date while the diagnostic
 /// that would have caught it was failing to parse.
+///
+/// Deliberate exclusions, so an absence is never mistaken for an oversight
+/// again: `trace_instance_enrollments` and `onboarding_invite_grants` are
+/// isolated by subject hash rather than by tenant, and
+/// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
+/// are deployment-wide aggregate bookkeeping with no tenant column to
+/// predicate on. See the exclusion notes at the bottom of
+/// `migrations/V55__community_withdrawal_eviction_rls.sql` for the last two,
+/// including why the leaderboard snapshot's published handles do not change
+/// that answer.
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
@@ -188,6 +198,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_webauthn_credentials",
     "trace_near_identities",
     "trace_account_merge_proposals",
+    "trace_community_withdrawal_evictions",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -2009,6 +2020,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&55_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V55__community_withdrawal_eviction_rls.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&55_i32, &"community_withdrawal_eviction_rls"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2339,6 +2371,18 @@ impl Database for PgBackend {
             .transaction()
             .await
             .map_err(DatabaseError::Postgres)?;
+        // The eviction UPDATE below is deliberately cross-tenant: one drain
+        // covers every pending withdrawal for this (window, metric). V55 gates
+        // that on this transaction-local GUC rather than on a tenant
+        // predicate. Without it the statement does not fail -- it silently
+        // marks zero rows, because the tenant policy hides every row from a
+        // connection with no tenant context.
+        tx.execute(
+            "SELECT set_config('trace_commons.community_drain', 'on', true)",
+            &[],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
         let drained = tx
             .execute(
                 "UPDATE trace_community_snapshot_invalidations
@@ -5911,6 +5955,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V55__community_withdrawal_eviction_rls.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -5927,6 +5972,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V55__community_withdrawal_eviction_rls.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

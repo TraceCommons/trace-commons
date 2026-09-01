@@ -1473,6 +1473,12 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
             .expect("read trace withdrawal production hardening migration"),
     );
+    sql.push_str(
+        &std::fs::read_to_string(
+            migrations_root.join("V55__community_withdrawal_eviction_rls.sql"),
+        )
+        .expect("read community withdrawal eviction production hardening migration"),
+    );
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1534,6 +1540,12 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(
         &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
             .expect("read trace withdrawal central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(
+            migrations_root.join("V55__community_withdrawal_eviction_rls.sql"),
+        )
+        .expect("read community withdrawal eviction central RLS policy migration"),
     );
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
@@ -5775,4 +5787,349 @@ async fn list_submissions_needing_gate_decision_fails_closed_without_gate_driver
         result.is_err(),
         "enumeration must fail closed when the gate-driver pool is not configured"
     );
+}
+
+/// Name of the NOBYPASSRLS role these tests run their assertions under.
+///
+/// A superuser connection bypasses RLS entirely, so asserting isolation as one
+/// proves nothing: a count over a protected table with no tenant context still
+/// returns every row. Every assertion below therefore runs after `SET ROLE` to
+/// this role, and the test refuses to assert -- rather than quietly passing --
+/// if it cannot get there.
+const RLS_TEST_ACTOR_ROLE: &str = "trace_rls_test_actor";
+
+/// Connect, apply migrations, and put the session on a role that cannot bypass
+/// RLS. Returns `None` (with a printed reason) when there is no database, and
+/// panics when there is a database but the session cannot be de-privileged --
+/// silently skipping that case is how an unexercised policy ships.
+async fn rls_actor_client() -> Option<tokio_postgres::Client> {
+    let database_url = match std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+    {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured"
+            );
+            return None;
+        }
+    };
+
+    let backend = postgres_backend().await?;
+    backend
+        .run_migrations()
+        .await
+        .expect("run migrations for community withdrawal eviction RLS test");
+
+    let (mut client, connection) = match tokio_postgres::connect(&database_url, NoTls).await {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!(
+                "skipping community withdrawal eviction RLS test: database unavailable ({e})"
+            );
+            return None;
+        }
+    };
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    if current_role_bypasses_trace_rls(&mut client)
+        .await
+        .expect("inspect current role")
+    {
+        // Provision the de-privileged role. Requires CREATEROLE, which the
+        // bypassing role we are on necessarily has.
+        client
+            .batch_execute(&format!(
+                "DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RLS_TEST_ACTOR_ROLE}')
+                    THEN CREATE ROLE {RLS_TEST_ACTOR_ROLE} NOLOGIN NOBYPASSRLS;
+                    END IF;
+                 END $$;
+                 GRANT SELECT, INSERT, UPDATE, DELETE
+                    ON trace_community_withdrawal_evictions TO {RLS_TEST_ACTOR_ROLE};
+                 SET ROLE {RLS_TEST_ACTOR_ROLE};"
+            ))
+            .await
+            .expect("provision and assume the NOBYPASSRLS test role");
+    }
+
+    assert!(
+        !current_role_bypasses_trace_rls(&mut client)
+            .await
+            .expect("re-inspect current role"),
+        "community withdrawal eviction RLS assertions must not run under a role that \
+         bypasses RLS; a superuser sees every row regardless of policy"
+    );
+    Some(client)
+}
+
+async fn insert_eviction_under_tenant(
+    client: &mut tokio_postgres::Client,
+    tenant_id: &str,
+    eviction_id: Uuid,
+) {
+    let tx = client
+        .transaction()
+        .await
+        .expect("start eviction insert transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context for eviction insert");
+    tx.execute(
+        "INSERT INTO trace_community_withdrawal_evictions (
+            eviction_id, tenant_id, principal_ref, display_handle, handle_normalized,
+            withdrawn_at, invalidation_requested_at, window_label, metric
+         ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 'rolling_7d', 'credit')",
+        &[
+            &eviction_id,
+            &tenant_id,
+            &format!("principal:{tenant_id}"),
+            &format!("handle-{tenant_id}"),
+            &format!("handle-{tenant_id}"),
+        ],
+    )
+    .await
+    .expect("insert eviction receipt under tenant context");
+    tx.commit().await.expect("commit eviction insert");
+}
+
+async fn delete_eviction_under_tenant(
+    client: &mut tokio_postgres::Client,
+    tenant_id: &str,
+    eviction_id: Uuid,
+) {
+    let tx = client
+        .transaction()
+        .await
+        .expect("start eviction cleanup transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context for eviction cleanup");
+    let _ = tx
+        .execute(
+            "DELETE FROM trace_community_withdrawal_evictions WHERE eviction_id = $1",
+            &[&eviction_id],
+        )
+        .await;
+    tx.commit().await.expect("commit eviction cleanup");
+}
+
+/// V46 shipped this table with no RLS at all while it carries `tenant_id`,
+/// `principal_ref` and the withdrawn contributor's handle. V55 gives it the
+/// central tenant predicate; this asserts the predicate actually isolates.
+#[tokio::test]
+async fn community_withdrawal_evictions_are_tenant_isolated() {
+    let Some(mut client) = rls_actor_client().await else {
+        return;
+    };
+
+    let tenant_a = format!("tenant-evict-a-{}", Uuid::new_v4().simple());
+    let tenant_b = format!("tenant-evict-b-{}", Uuid::new_v4().simple());
+    let eviction_a = Uuid::new_v4();
+    let eviction_b = Uuid::new_v4();
+
+    insert_eviction_under_tenant(&mut client, &tenant_a, eviction_a).await;
+    insert_eviction_under_tenant(&mut client, &tenant_b, eviction_b).await;
+
+    // Tenant A sees its own row.
+    let tx = client.transaction().await.expect("start tenant A read");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .expect("set tenant A context");
+    let own: Vec<Uuid> = tx
+        .query(
+            "SELECT eviction_id FROM trace_community_withdrawal_evictions
+              WHERE eviction_id = ANY($1)",
+            &[&vec![eviction_a, eviction_b]],
+        )
+        .await
+        .expect("read evictions under tenant A context")
+        .iter()
+        .map(|row| row.get("eviction_id"))
+        .collect();
+    assert_eq!(
+        own,
+        vec![eviction_a],
+        "tenant A must see exactly its own eviction receipt"
+    );
+    tx.commit().await.expect("commit tenant A read");
+
+    // With no tenant context at all, nothing is visible.
+    let tx = client.transaction().await.expect("start no-context read");
+    let rows = tx
+        .query(
+            "SELECT eviction_id FROM trace_community_withdrawal_evictions
+              WHERE eviction_id = ANY($1)",
+            &[&vec![eviction_a, eviction_b]],
+        )
+        .await
+        .expect("read evictions without tenant context");
+    assert!(
+        rows.is_empty(),
+        "a connection with no tenant context must see no eviction receipts; got {}",
+        rows.len()
+    );
+    tx.commit().await.expect("commit no-context read");
+
+    // Tenant B cannot write into tenant A's scope either.
+    let tx = client.transaction().await.expect("start tenant B write");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .expect("set tenant B context");
+    let cross_tenant_insert = tx
+        .execute(
+            "INSERT INTO trace_community_withdrawal_evictions (
+                eviction_id, tenant_id, principal_ref, withdrawn_at,
+                invalidation_requested_at, window_label, metric
+             ) VALUES ($1, $2, 'principal:forged', NOW(), NOW(), 'rolling_7d', 'credit')",
+            &[&Uuid::new_v4(), &tenant_a],
+        )
+        .await;
+    assert!(
+        cross_tenant_insert.is_err(),
+        "tenant B must not be able to insert a receipt attributed to tenant A"
+    );
+    tx.rollback().await.expect("roll back tenant B write");
+
+    delete_eviction_under_tenant(&mut client, &tenant_a, eviction_a).await;
+    delete_eviction_under_tenant(&mut client, &tenant_b, eviction_b).await;
+}
+
+/// The drain is deliberately cross-tenant: one statement marks every pending
+/// eviction for a (window, metric). V55 gates it on a transaction-local GUC
+/// instead of a tenant predicate. This asserts the drain still drains across
+/// tenants, and that the allowance is no wider than that.
+#[tokio::test]
+async fn community_withdrawal_eviction_drain_crosses_tenants_within_drain_scope() {
+    let Some(mut client) = rls_actor_client().await else {
+        return;
+    };
+
+    let tenant_a = format!("tenant-drain-a-{}", Uuid::new_v4().simple());
+    let tenant_b = format!("tenant-drain-b-{}", Uuid::new_v4().simple());
+    let eviction_a = Uuid::new_v4();
+    let eviction_b = Uuid::new_v4();
+    let ids = vec![eviction_a, eviction_b];
+
+    insert_eviction_under_tenant(&mut client, &tenant_a, eviction_a).await;
+    insert_eviction_under_tenant(&mut client, &tenant_b, eviction_b).await;
+
+    // Without the drain GUC the same statement silently marks nothing -- it
+    // does not error, which is precisely why this needs asserting.
+    let tx = client.transaction().await.expect("start undrained attempt");
+    let undrained = tx
+        .execute(
+            "UPDATE trace_community_withdrawal_evictions
+                SET drained_at = NOW(), drained_snapshot_id = $2
+              WHERE window_label = 'rolling_7d' AND metric = 'credit'
+                AND drained_at IS NULL AND eviction_id = ANY($1)",
+            &[&ids, &Uuid::new_v4()],
+        )
+        .await
+        .expect("run drain statement without drain scope");
+    assert_eq!(
+        undrained, 0,
+        "outside drain scope the drain statement must mark no rows"
+    );
+    tx.commit().await.expect("commit undrained attempt");
+
+    // Inside drain scope it marks both tenants' rows in one statement.
+    let snapshot_id = Uuid::new_v4();
+    let tx = client.transaction().await.expect("start drain");
+    tx.execute(
+        "SELECT set_config('trace_commons.community_drain', 'on', true)",
+        &[],
+    )
+    .await
+    .expect("enter drain scope");
+    let drained = tx
+        .execute(
+            "UPDATE trace_community_withdrawal_evictions
+                SET drained_at = NOW(), drained_snapshot_id = $2
+              WHERE window_label = 'rolling_7d' AND metric = 'credit'
+                AND drained_at IS NULL AND eviction_id = ANY($1)",
+            &[&ids, &snapshot_id],
+        )
+        .await
+        .expect("run drain statement in drain scope");
+    assert_eq!(
+        drained, 2,
+        "the drain must mark both tenants' receipts in one statement"
+    );
+
+    // The allowance is UPDATE-only and one-way: drain scope cannot delete a
+    // receipt, and cannot un-drain one.
+    let deleted = tx
+        .execute(
+            "DELETE FROM trace_community_withdrawal_evictions WHERE eviction_id = ANY($1)",
+            &[&ids],
+        )
+        .await
+        .expect("attempt delete in drain scope");
+    assert_eq!(
+        deleted, 0,
+        "drain scope must not be able to delete eviction receipts"
+    );
+    let undone = tx
+        .execute(
+            "UPDATE trace_community_withdrawal_evictions
+                SET drained_at = NULL WHERE eviction_id = ANY($1)",
+            &[&ids],
+        )
+        .await
+        .expect("attempt un-drain in drain scope");
+    assert_eq!(
+        undone, 0,
+        "drain scope must not be able to clear drained_at"
+    );
+    tx.commit().await.expect("commit drain");
+
+    // Each tenant sees its own receipt drained, and still only its own.
+    for (tenant_id, eviction_id) in [(&tenant_a, eviction_a), (&tenant_b, eviction_b)] {
+        let tx = client.transaction().await.expect("start post-drain read");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await
+        .expect("set tenant context for post-drain read");
+        let rows = tx
+            .query(
+                "SELECT eviction_id, drained_snapshot_id
+                   FROM trace_community_withdrawal_evictions
+                  WHERE drained_at IS NOT NULL AND eviction_id = ANY($1)",
+                &[&ids],
+            )
+            .await
+            .expect("read drained receipts under tenant context");
+        assert_eq!(
+            rows.len(),
+            1,
+            "{tenant_id} must see exactly its own receipt"
+        );
+        assert_eq!(rows[0].get::<_, Uuid>("eviction_id"), eviction_id);
+        assert_eq!(
+            rows[0].get::<_, Option<Uuid>>("drained_snapshot_id"),
+            Some(snapshot_id),
+            "the drain must have stamped the snapshot id"
+        );
+        tx.commit().await.expect("commit post-drain read");
+    }
+
+    delete_eviction_under_tenant(&mut client, &tenant_a, eviction_a).await;
+    delete_eviction_under_tenant(&mut client, &tenant_b, eviction_b).await;
 }
