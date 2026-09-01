@@ -535,6 +535,13 @@ pub fn apply_settings_object(
             "gemini_source" => {
                 settings.gemini_source = parse_source_declaration(value)?;
             }
+            // Unlike the source roots above, `null` here means **off**, not
+            // "never asked" -- see `IronWireDeclaration`'s doc comment for
+            // why the tri-state does not apply to a local service with no
+            // conventional fallback location.
+            "ironwire" => {
+                settings.ironwire = parse_ironwire_declaration(value)?;
+            }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
         changed = true;
@@ -573,6 +580,22 @@ fn parse_optional_root(
         serde_json::Value::String(s) => Ok(Some(SourceDeclaration::Watch {
             path: PathBuf::from(s),
         })),
+        _ => Err(ERR_SETTINGS_INVALID_VALUE),
+    }
+}
+
+/// `{"mode":"watch","port":8463}` or null to turn it off. `{"mode":"off"}`
+/// is also accepted since it round-trips `IronWireDeclaration::Off`, but null
+/// is the documented way to reach the same state over IPC. Never formats
+/// `value` into the error -- see `apply_settings_object`'s doc.
+fn parse_ironwire_declaration(
+    value: &serde_json::Value,
+) -> std::result::Result<Option<IronWireDeclaration>, &'static str> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(_) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
 }

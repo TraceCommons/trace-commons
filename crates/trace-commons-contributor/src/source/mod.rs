@@ -112,6 +112,12 @@ pub struct SessionEvent {
     pub success: Option<bool>,
 }
 
+/// `Default` exists for tests that only care about one or two fields and
+/// want to fill the rest with something rather than hand-write every field
+/// every time -- see the `..Default::default()` construction pattern used
+/// throughout this crate's test modules. A defaulted transcript (empty
+/// events, no source, no session hash) is not a real session and must never
+/// be treated as one in production code.
 #[derive(Debug, Clone, Default)]
 pub struct SessionTranscript {
     /// Provenance: the harness that produced this session. For the native
@@ -680,14 +686,102 @@ mod tests {
         );
     }
 
+    /// A minimal, real Claude Code session file: one line, one project dir.
+    /// Mirrors the record shape `claude_code.rs`'s own fixtures use, so this
+    /// is a real adapter round trip (discover + load), not a stub.
+    fn claude_code_fixture(session: &str) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let file = project_dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"sessionId\":\"{session}\",\
+                 \"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        (root, file)
+    }
+
     #[test]
     fn without_a_declared_proxy_the_adapters_are_returned_bare() {
-        let sources = all_sources(
+        // "Bare" has to be observed, not assumed from an empty source list --
+        // the old version of this test declared both sources Off and checked
+        // `is_empty()`, which passes whether or not the decoration branch
+        // exists and never actually looks at a returned source.
+        //
+        // Declare one real source and load a real session through it twice:
+        // once with no proxy declared, once with a proxy declared whose
+        // ledger holds an exchange for exactly that session. `load` is the
+        // only place a `RoutingEnrichedSource` differs observably from its
+        // inner adapter -- it overwrites `transcript.routing` from the
+        // ledger. So the routing-declared case must come back non-empty
+        // (proving the wrapper ran and can see this session) while the
+        // no-proxy case must come back empty -- proving the returned source
+        // in that case is not a `RoutingEnrichedSource` at all, not just one
+        // wrapping an empty ledger.
+        let session = "33333333-3333-3333-3333-333333333333";
+        let (root, _file) = claude_code_fixture(session);
+        let root_path = root.path().to_str().unwrap();
+
+        let bare_sources = all_sources(
             &SourceRoots::new()
-                .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                .declare(SOURCE_CLAUDE_CODE, watch(root_path))
                 .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
         );
-        assert!(sources.is_empty());
+        assert_eq!(bare_sources.len(), 1);
+        let bare_refs = bare_sources[0].discover().expect("discover succeeds");
+        assert_eq!(
+            bare_refs.len(),
+            1,
+            "fixture must produce exactly one session"
+        );
+        let bare_transcript = bare_sources[0].load(&bare_refs[0]).expect("load succeeds");
+        assert!(
+            bare_transcript.routing.is_empty(),
+            "without a declared proxy the returned source must not attach \
+             any routing overlay"
+        );
+
+        let ledger: Arc<dyn crate::routing::RoutingLedger> =
+            Arc::new(crate::routing::FixedLedger::new(vec![
+                crate::routing::RoutedExchange {
+                    started_at: chrono::Utc::now(),
+                    client_session_id: Some(session.to_string()),
+                    total_ms: Some(1200),
+                    facade: "anthropic".to_string(),
+                    backend: "claude-sub".to_string(),
+                    requested_model: None,
+                    served_model: None,
+                    rung: "same_model".to_string(),
+                    attempts: 1,
+                    input_tokens: Some(1000),
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tokens: Some(200),
+                    cost_usd: Some(0.02),
+                    status: 200,
+                },
+            ]));
+        let wrapped_sources = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch(root_path))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off))
+                .with_routing(Some(ledger)),
+        );
+        assert_eq!(wrapped_sources.len(), 1);
+        let wrapped_refs = wrapped_sources[0].discover().expect("discover succeeds");
+        let wrapped_transcript = wrapped_sources[0]
+            .load(&wrapped_refs[0])
+            .expect("load succeeds");
+        assert_eq!(
+            wrapped_transcript.routing.len(),
+            1,
+            "with a declared proxy the same session must come back enriched"
+        );
     }
 
     #[test]

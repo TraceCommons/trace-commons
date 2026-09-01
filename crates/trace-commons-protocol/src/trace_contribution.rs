@@ -1360,7 +1360,18 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     };
     let privacy_risk = privacy_risk_score(envelope.privacy.residual_pii_risk);
     let gate = privacy_gate(envelope.privacy.residual_pii_risk);
-    let event_count = envelope.events.len() as f32;
+    // Routing rows are attribution metadata about which backend served a
+    // request, not conversation content -- they carry `content: None` and a
+    // payload shape (`backend`, `rung`, `attempts`, ...) that never overlaps
+    // `REPLAY_ARGUMENT_KEYS` or `REPLAY_RESULT_KEYS`. Counting them here would
+    // inflate the denominator without ever being able to satisfy the
+    // numerator, so a routing-heavy trace would score as if it were mostly
+    // padding even when every non-routing event is substantive.
+    let event_count = envelope
+        .events
+        .iter()
+        .filter(|event| event.event_type != TraceContributionEventType::RoutingDecision)
+        .count() as f32;
     // Length alone used to be the whole of `quality`, which meant redaction
     // raised a trace's score: stripping content leaves the event count
     // untouched. Weight length by the share of events that actually carry
@@ -1368,6 +1379,7 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     let substantive_events = envelope
         .events
         .iter()
+        .filter(|event| event.event_type != TraceContributionEventType::RoutingDecision)
         .filter(|event| event_carries_content(event))
         .count() as f32;
     let content_share = if event_count == 0.0 {
@@ -5284,6 +5296,13 @@ pub struct EnvelopeContentPresence {
     /// does not carry, and `tool_payloads_included` has never been true
     /// anywhere in this project -- so the fold would also silently change what
     /// consent an envelope declares.
+    ///
+    /// `reconcile_consent_declarations` deliberately does not correct this
+    /// flag upward: see its doc comment. Nothing in this crate or the ingest
+    /// binary reads `consent.routing_metadata_included` to decide anything --
+    /// not `residual_risk`, not the PII-backstop hold -- so there is no
+    /// protective gate an under-reported flag could be silently bypassing,
+    /// unlike the other three.
     pub routing_metadata: bool,
 }
 
@@ -5366,6 +5385,23 @@ pub fn derive_envelope_content_presence(
 /// Only moves flags from `false` → `true`. Over-reporting (true flags on an
 /// empty payload) is left alone: that is a stricter declaration and does not
 /// open an acceptance path the payload did not earn.
+///
+/// # `routing_metadata` is deliberately never corrected here
+///
+/// This function upgrades `message_text_included`, `tool_payloads_included`,
+/// and `correction_included`, but has no arm for
+/// `consent.routing_metadata_included`, and that is intentional, not an
+/// omission. The upward correction exists to protect a downstream gate from
+/// an under-reported flag -- see the asymmetry argument below -- and no gate
+/// reads `routing_metadata_included`: `residual_risk` and the ingest
+/// PII-backstop hold both key on `message_text_included`,
+/// `tool_payloads_included`, and `correction_included` only (see
+/// `EnvelopeContentPresence::routing_metadata`'s doc comment). Adding a
+/// correction arm for a flag nothing consumes would only produce a
+/// "Server corrected under-reported consent declarations" warning with no
+/// protective effect behind it, which misrepresents what happened. If a
+/// consumer of `routing_metadata_included` is ever added, this exclusion and
+/// that doc comment both need revisiting together.
 ///
 /// # Why not a downward correction
 ///

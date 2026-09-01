@@ -39,6 +39,11 @@ pub struct IronWireLedger {
     port: u16,
     token: String,
     snapshot: Arc<RwLock<Vec<RoutedExchange>>>,
+    /// Built once at construction, not per `refresh()` call. A fresh
+    /// `reqwest::Client` builds its own TLS config and connection pool, which
+    /// is wasted work on every poll tick for a client that only ever talks to
+    /// one loopback host with `Connection: keep-alive` semantics anyway.
+    client: reqwest::Client,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -58,14 +63,26 @@ impl IronWireLedger {
             port,
             token,
             snapshot: Arc::new(RwLock::new(Vec::new())),
+            client: reqwest::Client::new(),
         }
     }
 
     /// Replace the snapshot from a response body, if it parses.
     ///
-    /// A body we cannot read leaves the previous snapshot in place. Enrichment
-    /// that is one refresh stale is better than enrichment that vanishes
-    /// because a proxy served an error page once.
+    /// Only a body that is not readable JSON at all leaves the previous
+    /// snapshot in place -- an error page, truncated output, a byte stream
+    /// that is not JSON. Enrichment that is one refresh stale is better than
+    /// enrichment that vanishes because a proxy served an error page once.
+    ///
+    /// Any body that DOES parse replaces the snapshot, even down to empty,
+    /// including one that carries no `exchanges` key at all (`#[serde(default)]`
+    /// makes that an empty `Vec`, not a parse failure) -- e.g. a proxy
+    /// answering `{"enabled":false}`. That is intentional, not a gap: `refresh`
+    /// always asks for the current [`REFRESH_WINDOW_HOURS`] window, and the
+    /// snapshot is supposed to reflect only what that window currently holds,
+    /// not accumulate rows the proxy itself no longer reports. If the last
+    /// good window had rows and this one legitimately does not, an empty
+    /// snapshot is the honest answer, not a fault to guard against.
     pub(crate) fn absorb(&self, body: &[u8]) {
         let Ok(view) = serde_json::from_slice::<LogView>(body) else {
             return;
@@ -90,11 +107,10 @@ impl IronWireLedger {
             self.port,
             since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         );
-        let Ok(client) = reqwest::Client::builder().timeout(REFRESH_TIMEOUT).build() else {
-            return;
-        };
-        let Ok(response) = client
+        let Ok(response) = self
+            .client
             .get(&url)
+            .timeout(REFRESH_TIMEOUT)
             .header("authorization", format!("Bearer {}", self.token))
             .send()
             .await
@@ -154,8 +170,17 @@ mod tests {
         assert!(ledger.exchanges_since(chrono::Utc::now()).is_empty());
     }
 
+    /// `has_rows()` reports false on a freshly declared ledger that has not
+    /// refreshed yet, which is what the daemon layer needs from it: the
+    /// real "declared, reading nothing" vs. "not declared at all" distinction
+    /// is `Option<Arc<IronWireLedger>>` -- `Some` with `has_rows() == false`
+    /// vs. `None` -- and that Option lives on the daemon's shared state, not
+    /// on `IronWireLedger` itself. See `daemon::ipc::tests::routing_transition`
+    /// (searches `s.routing_transition`) for the test that actually exercises
+    /// both sides of that distinction. This test only pins the half that
+    /// lives in this module: an unrefreshed, declared ledger has no rows.
     #[test]
-    fn a_declared_proxy_that_returns_nothing_is_distinguishable_from_no_proxy() {
+    fn has_rows_is_false_before_any_refresh() {
         let ledger = IronWireLedger::new(8463, "t".to_string());
         assert!(!ledger.has_rows(), "declared but empty");
     }
@@ -175,6 +200,34 @@ mod tests {
             ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH).len(),
             1,
             "the last good snapshot survives a bad response"
+        );
+    }
+
+    /// Pins the decision recorded in `absorb`'s doc comment: valid JSON that
+    /// happens to carry no `exchanges` key -- e.g. a proxy answering
+    /// `{"enabled":false}` -- is not treated as a parse failure. It replaces
+    /// the snapshot with empty, same as an explicit `{"exchanges":[]}` would.
+    /// This is deliberately different from
+    /// `a_body_we_cannot_parse_leaves_the_snapshot_untouched` above: that one
+    /// is not valid JSON at all, and the snapshot survives it; this one IS
+    /// valid JSON, and the snapshot does not survive it.
+    #[test]
+    fn a_valid_body_with_no_exchanges_key_replaces_the_snapshot_with_empty() {
+        let ledger = IronWireLedger::new(8463, "t".to_string());
+        ledger.absorb(br#"{"enabled":true,"exchanges":[{"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200,"client_session_id":"s-1"}]}"#);
+        assert_eq!(
+            ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH).len(),
+            1,
+            "fixture sanity check: the snapshot must start non-empty"
+        );
+
+        ledger.absorb(br#"{"enabled":false}"#);
+        assert!(
+            ledger
+                .exchanges_since(chrono::DateTime::UNIX_EPOCH)
+                .is_empty(),
+            "a valid JSON body with no exchanges key must replace the \
+             snapshot with empty, not preserve the old rows"
         );
     }
 }

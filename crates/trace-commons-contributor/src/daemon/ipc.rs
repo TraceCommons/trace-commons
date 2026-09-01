@@ -4840,6 +4840,41 @@ mod tests {
     }
 
     #[test]
+    fn set_settings_accepts_ironwire_and_persists_it() {
+        // Before this, `ironwire` was not in `apply_settings_object`'s
+        // whitelist, so the only way to turn the proxy overlay on was
+        // hand-editing settings.json and restarting the daemon.
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"ironwire": {"mode": "watch", "port": 8463}}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.settings.lock().unwrap().ironwire,
+            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+        );
+
+        // Persisted: a restart must see the same declaration.
+        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
+        assert_eq!(
+            reloaded.ironwire,
+            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+        );
+
+        // null turns it back off.
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"ironwire": null})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.settings.lock().unwrap().ironwire, None);
+    }
+
+    #[test]
     fn set_settings_rejects_a_daily_cap_above_the_ceiling() {
         let s = shared();
         let r = handle_request(

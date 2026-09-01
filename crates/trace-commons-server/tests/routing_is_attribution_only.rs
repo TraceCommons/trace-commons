@@ -51,7 +51,8 @@ use trace_commons_protocol::trace_contribution::{
     IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata, ResidualPiiRisk,
     SideEffectLevel, TRACE_CONTRIBUTION_POLICY_VERSION, TRACE_CONTRIBUTION_SCHEMA_VERSION,
     TraceCard, TraceChannel, TraceContributionEnvelope, TraceContributionEvent,
-    TraceContributionEventType, TraceValueCard, ValueMetadata, derive_envelope_content_presence,
+    TraceContributionEventType, TraceValueCard, ValueMetadata, compute_value_scorecard,
+    derive_envelope_content_presence,
 };
 use uuid::Uuid;
 
@@ -319,5 +320,64 @@ fn known_gap_the_empty_events_fallback_chunks_raw_envelope_json() {
         !chunked.contains(SENTINEL_COST_TEXT),
         "the routing cost specifically must still be absent even on the \
          fallback path, since it was removed along with events:\n{chunked}"
+    );
+}
+
+/// A substantive event -- a user message with real text -- distinct from a
+/// routing row. Used to build envelopes that are identical except for the
+/// presence of routing rows, so `compute_value_scorecard` can be compared
+/// between them.
+fn user_message_event(text: &str) -> TraceContributionEvent {
+    TraceContributionEvent {
+        event_id: Uuid::new_v4(),
+        parent_event_id: None,
+        event_type: TraceContributionEventType::UserMessage,
+        timestamp: Utc::now(),
+        redacted_content: Some(text.to_string()),
+        structured_payload: Value::Null,
+        tool_name: None,
+        tool_category: None,
+        tool_call_id: None,
+        latency_ms: None,
+        token_counts: None,
+        cost_usd: None,
+        success: None,
+        failure_modes: Vec::new(),
+        side_effect: SideEffectLevel::None,
+    }
+}
+
+/// `compute_value_scorecard` must not be moved by routing rows: they are
+/// attribution metadata about which backend served a request, not
+/// conversation content, and must not affect `quality`, `novelty`, or
+/// anything derived from `event_count`. Before the fix this test pins,
+/// `event_count` and `substantive_events` in `compute_value_scorecard`
+/// counted every event including `RoutingDecision` rows, which inflated the
+/// denominator of `quality` without ever being able to satisfy the
+/// numerator -- enabling ironwire enrichment roughly halved a contributor's
+/// own quality score purely by adding routing rows to an otherwise-identical
+/// trace.
+#[test]
+fn routing_rows_do_not_move_the_value_scorecard() {
+    let substantive_events: Vec<TraceContributionEvent> = (0..8)
+        .map(|i| user_message_event(&format!("substantive message {i}")))
+        .collect();
+
+    let without_routing = envelope_with_events(substantive_events.clone());
+
+    let mut with_routing_events = substantive_events;
+    for _ in 0..8 {
+        with_routing_events.push(routing_event_with_sentinel_cost());
+    }
+    let with_routing = envelope_with_events(with_routing_events);
+
+    let scorecard_without_routing = compute_value_scorecard(&without_routing);
+    let scorecard_with_routing = compute_value_scorecard(&with_routing);
+
+    assert_eq!(
+        scorecard_without_routing, scorecard_with_routing,
+        "adding routing rows to an otherwise-identical envelope must not \
+         change the value scorecard:\nwithout routing: {scorecard_without_routing:#?}\n\
+         with routing: {scorecard_with_routing:#?}"
     );
 }

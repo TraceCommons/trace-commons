@@ -539,7 +539,13 @@ fn build_raw_contribution_with_id(
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
-    let replayable = !events.is_empty();
+    // Routing rows are attribution metadata, not mappable conversation
+    // content -- a session with zero real events but one routing row is not
+    // replayable just because `events` is non-empty. See
+    // `compute_value_scorecard`'s matching guard in the protocol crate.
+    let replayable = events
+        .iter()
+        .any(|event| event.event_type != TraceContributionEventType::RoutingDecision);
     // The declaration describes the payload above, rather than asserting a
     // constant. See `declared_content_presence`.
     let presence = declared_content_presence(&events);
@@ -751,6 +757,15 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPr
         // crate. If the client declares honestly and the server then corrects
         // that declaration upward, the contributor is penalised for telling
         // the truth. `the_two_content_derivations_agree` pins this.
+        //
+        // That upward-correction mechanism does not exist for
+        // `routing_metadata`: `reconcile_consent_declarations` has no arm for
+        // it, deliberately, because nothing consumes
+        // `consent.routing_metadata_included` as a protective gate the way it
+        // consumes the other two flags. Concordance is still worth keeping
+        // here (a client and server that disagree about what an envelope
+        // contains is a bug either way), it just is not backstopped by a
+        // server-side correction the way the other two flags are.
         if trace_commons_protocol::trace_contribution::payload_carries_readable_content(
             &event.structured_payload,
         ) {
@@ -2016,6 +2031,26 @@ mod tests {
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         let declared = declared_content_presence(&raw.events);
 
+        // The comparison above is worth nothing if `build_raw_contribution`
+        // never actually writes the derived presence into the consent block
+        // it returns -- a hardcoded `false` there would leave `declared`
+        // alone and this test would stay green. Assert the builder's output
+        // matches what it should have derived.
+        assert_eq!(
+            (
+                raw.consent.message_text_included,
+                raw.consent.tool_payloads_included,
+                raw.consent.routing_metadata_included,
+            ),
+            (
+                declared.message_text,
+                declared.tool_payloads,
+                declared.routing_metadata,
+            ),
+            "build_raw_contribution must write the derived presence into the \
+             consent block, not a hardcoded value"
+        );
+
         let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
         let envelope = redact_to_envelope(&redactor, raw)
             .await
@@ -2059,8 +2094,9 @@ mod tests {
         assert!(e.cost_usd.is_some());
         assert_eq!(e.token_counts.as_ref().map(|t| t.input_tokens), Some(1000));
         assert!(
-            e.content.as_deref().unwrap_or("").is_empty(),
-            "the overlay is numbers and labels, never text"
+            e.content.is_none(),
+            "the overlay is numbers and labels, never text -- Some(\"\") would \
+             also satisfy the old is_empty() check and is not the same claim"
         );
         assert_eq!(e.structured_payload["backend"], "claude-sub");
     }
@@ -2076,11 +2112,74 @@ mod tests {
         assert!(!presence.tool_payloads);
     }
 
+    /// A comparable projection of a mapped event: everything but `event_id`,
+    /// with `parent_event_id` rewritten as the parent's position in the
+    /// vector instead of its (randomly generated) uuid. `event_id` is
+    /// `Uuid::new_v4()` at every call, so two otherwise-identical runs of
+    /// `raw_events_for`/`raw_events_for_with_routing` can never compare equal
+    /// on the raw structs -- this is what lets the comparison look at
+    /// everything that actually describes the event.
+    fn normalize_for_comparison(
+        events: &[RawTraceContributionEvent],
+    ) -> Vec<(
+        Option<usize>,
+        TraceContributionEventType,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
+        serde_json::Value,
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<trace_commons_protocol::trace_contribution::TokenCounts>,
+        Option<trace_commons_protocol::trace_contribution::Decimal>,
+        Option<bool>,
+        Vec<trace_commons_protocol::trace_contribution::TraceFailureMode>,
+    )> {
+        let index_of: std::collections::HashMap<uuid::Uuid, usize> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.event_id, i))
+            .collect();
+        events
+            .iter()
+            .map(|e| {
+                (
+                    e.parent_event_id.and_then(|id| index_of.get(&id).copied()),
+                    e.event_type,
+                    e.timestamp,
+                    e.content.clone(),
+                    e.structured_payload.clone(),
+                    e.tool_name.clone(),
+                    e.tool_call_id.clone(),
+                    e.latency_ms,
+                    e.token_counts.clone(),
+                    e.cost_usd,
+                    e.success,
+                    e.failure_modes.clone(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn a_session_with_no_routing_rows_produces_exactly_what_it_did_before() {
-        let before = raw_events_for(&[], chrono::Utc::now());
-        let after = raw_events_for_with_routing(&[], &[], chrono::Utc::now());
-        assert_eq!(before.len(), after.len());
+        // A real fixture's events, not `&[]` -- an empty slice in, an empty
+        // slice out proves nothing about whether routing rows change
+        // anything, since there is nothing there for them to change.
+        let events = fixture_transcript().events;
+        assert!(
+            !events.is_empty(),
+            "fixture sanity check: the comparison below needs real events"
+        );
+        let now = chrono::Utc::now();
+        let before = raw_events_for(&events, now);
+        let after = raw_events_for_with_routing(&events, &[], now);
+        assert_eq!(
+            normalize_for_comparison(&before),
+            normalize_for_comparison(&after),
+            "an empty routing slice must produce exactly what raw_events_for \
+             produced on its own"
+        );
     }
 
     /// A result that names its call should also name its tool.
