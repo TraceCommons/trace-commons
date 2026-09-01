@@ -561,14 +561,57 @@ public sealed class NativeRoundTripTests : IDisposable
         }
 
         string entryParams = JsonSerializer.Serialize(new { entry_id = entryId });
+        DateTimeOffset beforeApprove = DateTimeOffset.UtcNow;
         DaemonResponse approved = DaemonResponse.Parse(
             daemon.Call(DaemonProtocol.Methods.Approve, entryParams));
+        DateTimeOffset afterApprove = DateTimeOffset.UtcNow;
         Assert.False(approved.IsError);
 
         ApprovalHold? hold = ApprovalHold.Parse(approved);
         Assert.NotNull(hold);
         Assert.True(hold!.HoldSecs >= 5);
-        Assert.True(hold.Deadline > DateTimeOffset.UtcNow);
+
+        // Check that something was actually approved BEFORE reading the
+        // deadline, because `hold_until` is legitimately null when nothing
+        // was -- "no undo may be offered" is a real answer, not a fault.
+        //
+        // This ordering is the point of the rework. The single assertion
+        // that used to stand here, `hold.Deadline > DateTimeOffset.UtcNow`,
+        // was false in two completely different worlds: a deadline that had
+        // already passed, and no deadline at all because the entry was
+        // skipped. It carried no message, so Windows CI reported only
+        // "Expected: True / Actual: False" and could not distinguish a
+        // stalled runner from an entry the daemon declined to approve.
+        // Running it here shows the second world is reachable: on this macOS
+        // checkout the entry comes back skipped, approved=0, hold_until
+        // null, and the old assertion fails exactly as it did on CI for what
+        // may be an entirely different reason.
+        //
+        // So name the precondition and report the daemon's own reason when
+        // it does not hold.
+        Assert.True(
+            hold.Skipped.Count == 0,
+            "the daemon skipped the entry instead of approving it: "
+                + string.Join(
+                    ", ",
+                    hold.Skipped.ConvertAll(skip => skip.ReasonLabel)));
+        Assert.Equal(1UL, hold.Approved);
+
+        // Now the deadline, bracketed rather than raced. The daemon stamps
+        // hold_until as its own clock plus hold_secs while handling the call
+        // above, so it must land between "the call had started" and "the
+        // call had returned", each plus hold_secs. That holds no matter how
+        // long this test then takes to reach this line, which the old form
+        // did not: it required the test to get here within hold_secs of the
+        // stamp, so a runner that stalled failed a daemon that had behaved.
+        //
+        // The one-second slack absorbs RFC 3339 formatting, which does not
+        // necessarily preserve sub-second precision.
+        Assert.NotNull(hold.Deadline);
+        Assert.InRange(
+            hold.Deadline!.Value,
+            beforeApprove.AddSeconds(hold.HoldSecs - 1),
+            afterApprove.AddSeconds(hold.HoldSecs + 1));
 
         PendingList? whileApproved = DaemonResponse
             .Parse(daemon.Call(DaemonProtocol.Methods.ListPending))
