@@ -38,10 +38,17 @@ pub struct RedactionSpan {
 
 /// Why a span list could not be applied.
 ///
-/// `Display` deliberately carries no offsets and no text: these errors reach
+/// Neither formatter carries offsets, lengths or text: these errors reach
 /// operational surfaces, and offsets describe where a detector fired. The
-/// fields are for tests and for the caller's own control flow.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// fields are for tests and for the caller's own control flow, reachable by
+/// matching on the variant -- never by formatting it.
+///
+/// `Debug` is hand-written to delegate to `Display` for that reason. A derived
+/// `Debug` prints every field, and `tracing::warn!(?err)` is how an error
+/// ordinarily reaches a log in this repo, so guarding `Display` alone would
+/// leave the discipline true on the path nobody uses and false on the path
+/// everybody uses.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CorrespondenceError {
     /// `start > end`.
     #[error("redaction span {index} is inverted")]
@@ -78,6 +85,14 @@ pub enum CorrespondenceError {
         "redaction spans {first} and {second} overlap; the witness consumes the post-collapse span list, not a raw classifier list"
     )]
     OverlappingSpans { first: usize, second: usize },
+}
+
+impl std::fmt::Debug for CorrespondenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Same discipline as Display, and the same text, so that `?err` in a
+        // log macro cannot render what `%err` is guarded against.
+        std::fmt::Display::fmt(self, formatter)
+    }
 }
 
 /// The longest label this accepts. Real labels are a closed allowlist of short
@@ -468,15 +483,60 @@ mod tests {
     // --- hash-only discipline ---
 
     #[test]
-    fn the_error_display_carries_no_offsets_or_text() {
-        let rendered = CorrespondenceError::SpanOutOfRange {
-            index: 0,
-            end: 99,
-            len: 5,
+    fn neither_formatter_renders_offsets_or_lengths() {
+        // `Display` is the guarded path; `Debug` is the path a caller actually
+        // takes, because `tracing::warn!(?err)` is how an error reaches a log
+        // here. Both must be safe, so both are asserted, for every variant
+        // that carries an offset. The values are distinctive so a substring
+        // match cannot pass by coincidence.
+        for err in [
+            CorrespondenceError::InvertedSpan {
+                index: 0,
+                start: 4242,
+                end: 9931,
+            },
+            CorrespondenceError::SpanOutOfRange {
+                index: 0,
+                end: 9931,
+                len: 5150,
+            },
+        ] {
+            for rendered in [err.to_string(), format!("{err:?}")] {
+                for leaked in ["4242", "9931", "5150"] {
+                    assert!(
+                        !rendered.contains(leaked),
+                        "offset {leaked} reached a formatter: {rendered}"
+                    );
+                }
+            }
         }
-        .to_string();
-        assert!(!rendered.contains("99"), "offsets must not reach Display");
-        assert!(!rendered.contains('5'), "lengths must not reach Display");
+    }
+
+    #[test]
+    fn debug_renders_exactly_what_display_renders() {
+        // Pins the delegation rather than the absence of particular digits:
+        // a future variant that gains a field cannot leak it through Debug
+        // without also leaking it through Display, where it would be caught.
+        for err in [
+            CorrespondenceError::InvertedSpan {
+                index: 0,
+                start: 4242,
+                end: 9931,
+            },
+            CorrespondenceError::EmptySpan { index: 1 },
+            CorrespondenceError::MalformedReplacement { index: 2 },
+            CorrespondenceError::SpanOutOfRange {
+                index: 3,
+                end: 9931,
+                len: 5150,
+            },
+            CorrespondenceError::OverlappingSpans {
+                first: 4,
+                second: 5,
+            },
+        ] {
+            assert_eq!(format!("{err:?}"), err.to_string());
+        }
     }
 
     #[test]
