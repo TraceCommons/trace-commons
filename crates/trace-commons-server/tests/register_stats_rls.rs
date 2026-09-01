@@ -89,13 +89,20 @@ async fn the_public_role_can_read_nothing_else() {
         .await
         .expect("set role");
 
+    // `is_err()`, with no `is_none()` escape. Every table here is FORCE-RLS'd
+    // on a tenant predicate, so under this role -- which sets no tenant GUC --
+    // they return zero rows WHETHER OR NOT the role holds SELECT on them. An
+    // `|| is_none()` arm therefore passed for the wrong reason: it asserted
+    // "RLS hid the rows", which is true even of a role that has been granted
+    // the table. The property that actually bounds this role is that
+    // permission is denied BEFORE RLS is ever consulted.
     for table in ["trace_submissions", "trace_credit_ledger", "trace_accounts"] {
         let result = client
             .query_opt(&format!("SELECT * FROM {table} LIMIT 1"), &[])
             .await;
         assert!(
-            result.is_err() || result.unwrap().is_none(),
-            "the public role reached {table}"
+            result.is_err(),
+            "the public role must be DENIED {table}, not merely find it empty"
         );
     }
 }

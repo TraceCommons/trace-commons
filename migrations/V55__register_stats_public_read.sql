@@ -12,6 +12,13 @@ CREATE TABLE trace_register_stats (
     contributors       BIGINT      NOT NULL DEFAULT 0,
     points_issued      BIGINT      NOT NULL DEFAULT 0,
     withheld           BOOLEAN     NOT NULL DEFAULT TRUE,
+    -- The OPERATOR's lever, distinct from `withheld` above. `withheld` is the
+    -- computed/never-computed marker and every refresh clears it, so it can
+    -- not double as an off switch: an operator who set it during an incident
+    -- would have it silently cleared by the next scheduled refresh. The
+    -- refresh NEVER writes this column. Set it TRUE and the public endpoint
+    -- publishes no figure until a human sets it back.
+    suppressed         BOOLEAN     NOT NULL DEFAULT FALSE,
     as_of              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- NULL until a refresh has actually computed this row. The endpoint
     -- publishes nothing while it is NULL: zeros would be a claim about the
@@ -47,7 +54,7 @@ END $$;
 -- The alternative -- dropping the filter -- would have bought the privilege
 -- at the cost of the query's correctness guard, which is the wrong trade: the
 -- filter is what keeps the read right if the CHECK is ever relaxed.
-GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
+GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, suppressed, as_of, refreshed_at)
     ON trace_register_stats TO trace_commons_public_read;
 
 -- Nothing else grants membership in this role, so without this, Task 4's

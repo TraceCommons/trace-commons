@@ -1614,7 +1614,12 @@ pub struct RegisterStatsRow {
     pub traces_accepted: i64,
     pub contributors: i64,
     pub points_issued: i64,
+    /// The computed/never-computed marker: TRUE until a refresh has run, and
+    /// cleared by every refresh. Not an operator control -- see `suppressed`.
     pub withheld: bool,
+    /// The operator's lever. No refresh ever writes it, so suppression set
+    /// during an incident survives the next scheduled run.
+    pub suppressed: bool,
     pub as_of: chrono::DateTime<chrono::Utc>,
     pub refreshed_at: Option<chrono::DateTime<chrono::Utc>>,
 }

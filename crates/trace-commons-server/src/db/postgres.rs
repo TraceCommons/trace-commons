@@ -2726,16 +2726,7 @@ impl Database for PgBackend {
         let client = self.trace_pool().get().await?;
         let row = client
             .query_one(
-                "UPDATE trace_register_stats
-                 SET traces_accepted = $1,
-                     contributors = $2,
-                     points_issued = $3,
-                     withheld = FALSE,
-                     as_of = NOW(),
-                     refreshed_at = NOW()
-                 WHERE singleton = TRUE
-                 RETURNING traces_accepted, contributors, points_issued, withheld, \
-                           as_of, refreshed_at",
+                REGISTER_STATS_REFRESH_SQL,
                 &[
                     &totals.traces_accepted,
                     &totals.contributors,
@@ -2744,14 +2735,7 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        Ok(crate::db::RegisterStatsRow {
-            traces_accepted: row.get("traces_accepted"),
-            contributors: row.get("contributors"),
-            points_issued: row.get("points_issued"),
-            withheld: row.get("withheld"),
-            as_of: row.get("as_of"),
-            refreshed_at: row.get("refreshed_at"),
-        })
+        Ok(register_stats_row_from(&row))
     }
 
     async fn insert_leaderboard_snapshot(
@@ -5626,7 +5610,28 @@ fn sha256_prefixed(input: &str) -> String {
 /// hand-copied, shortened projection with no `WHERE`, and so passed while the
 /// shipped query was denied on every request.
 pub const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
-     withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
+     withheld, suppressed, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
+
+/// The refresh write. Note what is NOT in the `SET` list: `suppressed`.
+///
+/// That column is the operator's lever, and a refresh that cleared it would
+/// make it useless -- an operator suppressing publication during an incident
+/// would have it silently undone by the next scheduled run, with no error and
+/// no log. `withheld` is the computed/never-computed marker and is cleared
+/// here, which is exactly why it cannot double as the lever.
+///
+/// One constant so `the_refresh_never_clears_the_operator_suppression` can
+/// assert that property without a database.
+const REGISTER_STATS_REFRESH_SQL: &str = "UPDATE trace_register_stats
+                 SET traces_accepted = $1,
+                     contributors = $2,
+                     points_issued = $3,
+                     withheld = FALSE,
+                     as_of = NOW(),
+                     refreshed_at = NOW()
+                 WHERE singleton = TRUE
+                 RETURNING traces_accepted, contributors, points_issued, withheld, \
+                           suppressed, as_of, refreshed_at";
 
 fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStatsRow {
     crate::db::RegisterStatsRow {
@@ -5634,6 +5639,7 @@ fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStat
         contributors: row.get("contributors"),
         points_issued: row.get("points_issued"),
         withheld: row.get("withheld"),
+        suppressed: row.get("suppressed"),
         as_of: row.get("as_of"),
         refreshed_at: row.get("refreshed_at"),
     }
@@ -6109,7 +6115,7 @@ mod tests {
         );
         assert!(
             V55.contains(
-                "GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
+                "GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, suppressed, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
             ),
             "V55 must grant the public-read role SELECT on exactly the named \
              columns and nothing else -- `singleton` included, because the \
@@ -6288,6 +6294,35 @@ mod tests {
             REGISTER_STATS_SELECT_SQL.contains("WHERE singleton = TRUE"),
             "the public read must keep its singleton filter: it is what \
              keeps the read correct if the CHECK is ever relaxed"
+        );
+    }
+
+    #[test]
+    fn the_refresh_never_clears_the_operator_suppression() {
+        // `suppressed` is the operator's lever and the refresh must not touch
+        // it: a cron-driven refresh that cleared it would silently undo an
+        // incident-time suppression, with no error and no log. Split at
+        // RETURNING first, because `suppressed` legitimately appears there.
+        let set_clause = REGISTER_STATS_REFRESH_SQL
+            .split("RETURNING")
+            .next()
+            .expect("the refresh has a SET clause before RETURNING");
+        assert!(
+            !set_clause.contains("suppressed"),
+            "the refresh must never write `suppressed` -- it is the \
+             operator's lever, not a computed field"
+        );
+        // And it must still clear the computed marker, which is what makes
+        // the two columns different things rather than duplicates.
+        assert!(
+            set_clause.contains("withheld = FALSE"),
+            "the refresh must clear `withheld`, the computed marker"
+        );
+        // The read must actually carry the lever, or the endpoint cannot
+        // honour it however faithfully the refresh leaves it alone.
+        assert!(
+            REGISTER_STATS_SELECT_SQL.contains("suppressed"),
+            "the public read must select `suppressed`"
         );
     }
 

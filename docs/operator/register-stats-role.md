@@ -29,7 +29,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at)
+GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, suppressed, as_of, refreshed_at)
     ON trace_register_stats TO trace_commons_public_read;
 
 GRANT trace_commons_public_read TO CURRENT_USER;
@@ -86,7 +86,7 @@ query's filter once passed here while every live request was denied:
 ```sql
 -- as the runtime role, after migrating:
 SET ROLE trace_commons_public_read;  -- must succeed
-SELECT traces_accepted, contributors, points_issued, withheld, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE;  -- must succeed
+SELECT traces_accepted, contributors, points_issued, withheld, suppressed, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE;  -- must succeed
 UPDATE trace_register_stats SET traces_accepted = 0;  -- must be refused
                                                        -- ("permission denied
                                                        -- for table ...")
@@ -121,15 +121,39 @@ the configured communities must hold before the endpoint publishes
 unset, blank, malformed or negative value resolves to that default rather
 than to a floor that suppresses nothing.
 
-Below the floor those two counts are **absent from the response**, not zero,
-and `withheld` is `true`. `traces_accepted` is published either way once the
-row has been refreshed: it counts submissions, not people. The endpoint also
-reports `scope: "configured_communities"`, because the refresh aggregates the
-tenants this deployment configured as communities, not every tenant the
-server holds.
+Below the floor **every figure is absent from the response**, not zero, and
+`withheld` is `true`. That includes `traces_accepted`: it counts submissions
+rather than people, but below the floor the people are few by construction and
+`withheld: true` tells the caller so, which makes that field one person's trace
+count and its delta between refreshes that person's submission rate. The
+response then carries only `withheld`, `scope`, `as_of` and `posture`.
+
+The endpoint also reports `scope: "configured_communities"`, because the
+refresh aggregates the tenants this deployment configured as communities, not
+every tenant the server holds.
 
 Set it lower only against a real contributor count. With few contributors a
 known cohort plus a published total is one person's earnings.
+
+## Suppressing publication during an incident
+
+`trace_register_stats.suppressed` is **the operator's off switch**, and the
+only one. Set it and the endpoint publishes no figure until you clear it:
+
+```sql
+UPDATE trace_register_stats SET suppressed = TRUE WHERE singleton = TRUE;
+-- and to resume:
+UPDATE trace_register_stats SET suppressed = FALSE WHERE singleton = TRUE;
+```
+
+**The refresh never writes this column**, so a scheduled refresh running on a
+timer will not lift your suppression. That is the whole reason it exists as a
+separate column.
+
+Do **not** use `withheld` for this. It is the computed/never-computed marker:
+it starts `TRUE`, and *every* refresh clears it. Setting it by hand during an
+incident would look like it worked and then be silently undone by the next
+scheduled tick, with no error and no log entry.
 
 ## Nothing schedules the refresh yet
 

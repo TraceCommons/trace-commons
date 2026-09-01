@@ -15204,6 +15204,22 @@ async fn account_credit_summary_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<Json<AccountCreditSummary>> {
+    // Per-account rate limit, keyed on the auth-derived account id (a uuid,
+    // not a secret), BEFORE the read. This handler is unpaginated and
+    // `account_credit_totals` reaches `list_trace_credit_events`, which
+    // returns the whole tenant's credit events and filters them in Rust -- on
+    // a shared tenant that is the entire tenant ledger per request. Reshaping
+    // that query is pre-existing work with six other callers; bounding how
+    // often this new route can trigger it is not. Collapses to a generic 429,
+    // like every other account surface: no enumeration, no size signal.
+    let account_key = ctx.account_id.as_uuid().to_string();
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("credit-summary-account:{account_key}"),
+        CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
     let period_end = Utc::now();
     let period_start = period_end - Duration::days(30);
 
@@ -16472,6 +16488,13 @@ const NEAR_LOGIN_PER_KEY_LIMIT: u32 = 5;
 const NEAR_LOGIN_PUBKEY_MAX_LEN: usize = 120;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
+
+/// Per-account cap on `GET /v1/account/credit-summary` per window.
+///
+/// Lower than most account surfaces because each call currently reads the
+/// whole tenant's credit ledger (see the handler). A contributor checking
+/// their figures needs a handful a minute; nothing legitimate needs thirty.
+const CREDIT_SUMMARY_PER_ACCOUNT_LIMIT: u32 = 30;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
@@ -50134,12 +50157,15 @@ async fn revocation_propagation_worker_handler(
     Ok(Json(response))
 }
 
-/// Per-IP cap on `GET /v1/public/register-stats` per window. Unauthenticated
-/// and cacheable for five minutes, so a well-behaved client needs a handful of
-/// requests a window and this is generous for anything that is not a flood.
+/// Per-IP cap on `GET /v1/public/register-stats` per window.
+///
+/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
+/// hop, which any caller can set, so this bucket is trivially escaped by
+/// anyone who wants to. It keeps one ordinary misbehaving client from being
+/// the whole load; the global cap below is what actually bounds the endpoint.
 const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
-/// Coarse global cap, so a distributed flood is bounded too. Per-IP alone
-/// bounds one caller; this bounds the endpoint.
+/// The real bound: a cap no per-request header can escape, so a distributed
+/// flood is limited too.
 const REGISTER_STATS_GLOBAL_LIMIT: u32 = 1200;
 /// Publicly cacheable: the figures move only when the refresh worker runs, and
 /// a cache in front of this is the cheapest defence it has.
@@ -50162,9 +50188,10 @@ const REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR: i64 = 25;
 /// otherwise reads as a claim about the whole register.
 #[derive(Debug, Serialize)]
 struct RegisterStats {
-    /// Absent until a refresh has run. Reported regardless of the contributor
-    /// floor once it has: it counts submissions, not people, and does not
-    /// difference back to an individual.
+    /// Absent whenever the counts below are, floor included. It counts
+    /// submissions rather than people, but below the floor the people are few
+    /// by construction, and one person's trace count -- and its delta between
+    /// refreshes, which is their submission rate -- is not an aggregate.
     #[serde(skip_serializing_if = "Option::is_none")]
     traces_accepted: Option<i64>,
     /// Absent below the contributor floor. Absent, not zero: a zero here would
@@ -50173,8 +50200,8 @@ struct RegisterStats {
     contributors: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     points_issued: Option<i64>,
-    /// True when the floor, the stored suppression flag, or an unrefreshed row
-    /// suppressed the counts above.
+    /// True when the operator's suppression flag, an uncomputed row, or the
+    /// contributor floor withheld every figure above.
     withheld: bool,
     /// What the figures cover. Constant, and not an identifier.
     scope: &'static str,
@@ -50226,20 +50253,32 @@ fn register_stats_floor_from(raw: Option<&str>) -> i64 {
 /// Pure: no state, no database, no clock. The handler is then only transport,
 /// and every suppression rule below is unit-tested without PostgreSQL.
 ///
-/// `row.withheld` is honoured as a blanket suppression: the column defaults to
-/// TRUE and every refresh clears it, so it is both the never-computed marker
-/// and an operator's kill switch, and either reading means publish nothing.
+/// Three independent reasons to say nothing, and any one of them suffices:
+///
+/// - `row.suppressed` -- the operator's lever. No refresh writes it, so
+///   suppression set during an incident survives the next scheduled run.
+/// - `row.refreshed_at.is_none()` (equivalently `row.withheld`, the computed
+///   marker every refresh clears) -- nobody has computed these figures, and
+///   schema defaults are not a claim about the register.
+/// - contributors below the floor -- see `register_stats_withheld`.
+///
+/// EVERY figure is gated, `traces_accepted` included. It counts submissions
+/// rather than people, but below the floor the people are few by construction
+/// and `withheld: true` tells the caller so: on a small cohort that field is
+/// one person's trace count, and its delta between refreshes is that person's
+/// submission rate.
 fn register_stats_response(
     row: &trace_commons_server::register_stats::RegisterStatsRow,
     floor: i64,
     settlement_mode: &str,
 ) -> RegisterStats {
-    let publishable = !row.withheld && row.refreshed_at.is_some();
-    let withheld = !publishable
+    let computed = row.refreshed_at.is_some() && !row.withheld;
+    let withheld = row.suppressed
+        || !computed
         || register_stats_withheld(row.contributors, floor, row.refreshed_at.is_some());
 
     RegisterStats {
-        traces_accepted: publishable.then_some(row.traces_accepted),
+        traces_accepted: (!withheld).then_some(row.traces_accepted),
         contributors: (!withheld).then_some(row.contributors),
         points_issued: (!withheld).then_some(row.points_issued),
         withheld,
@@ -56524,12 +56563,13 @@ fn corpus_status_with_pii_backstop_hold(
 /// the credit-numbers API also renders through -- this function only maps the
 /// enum to that function's string labels. Do not put the sentences back here.
 fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
-    let label = match mode {
-        NearSettlementMode::Disabled => "disabled",
-        NearSettlementMode::DryRun => "dry_run",
-        NearSettlementMode::Http => "http",
-    };
-    trace_commons_server::credit_numbers::settlement_status_sentence(label)
+    // `as_label`, not a second inline match. The credit endpoints reach the
+    // same sentence through that method, and two hand-maintained mappings with
+    // nothing asserting they agree drift silently: a label this copy got wrong
+    // would fall into `settlement_status_sentence`'s `_` arm, so the receipt
+    // would say "disabled" while the credit endpoints said "dry_run" about the
+    // same deployment.
+    trace_commons_server::credit_numbers::settlement_status_sentence(mode.as_label())
 }
 
 fn receipt_from_record(

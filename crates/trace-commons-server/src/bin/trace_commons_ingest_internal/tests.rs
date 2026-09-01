@@ -88001,6 +88001,8 @@ fn register_stats_row_fixture(
         // What a refresh leaves behind: the schema default is TRUE and every
         // successful refresh clears it.
         withheld: !refreshed,
+        // Not suppressed: the operator lever is off unless a test sets it.
+        suppressed: false,
         as_of: Utc::now(),
         refreshed_at: refreshed.then(Utc::now),
     }
@@ -88066,8 +88068,43 @@ fn register_stats_below_the_floor_omits_the_counts_rather_than_zeroing_them() {
     assert_eq!(body["withheld"], true);
     assert!(body.get("contributors").is_none());
     assert!(body.get("points_issued").is_none());
-    // Submissions, not people: reported either way once the row is real.
-    assert_eq!(body["traces_accepted"], 900);
+    // traces_accepted too. It counts submissions rather than people, but
+    // below the floor the people are few by construction and `withheld: true`
+    // says so, which makes this one person's trace count -- and its delta
+    // between refreshes is that person's submission rate.
+    assert!(body.get("traces_accepted").is_none());
+}
+
+#[test]
+fn the_operator_suppression_lever_withholds_a_perfectly_good_row() {
+    // Distinct from every other reason to withhold: the row is refreshed, the
+    // cohort is well above the floor, and the figures are real. An operator
+    // said not to publish, and that is sufficient on its own.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.suppressed = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn a_refresh_does_not_lift_the_operator_suppression() {
+    // The lever must survive the scheduled refresh, or it is not a lever. A
+    // refresh clears `withheld` and stamps `refreshed_at` -- exactly the row
+    // built here -- and `suppressed` still withholds. The other half of this
+    // property, that the refresh SQL never writes the column at all, is
+    // `the_refresh_never_clears_the_operator_suppression` in db::postgres.
+    let mut refreshed = register_stats_row_fixture(900, 50, 4_500, true);
+    refreshed.suppressed = true;
+    assert!(!refreshed.withheld, "a refresh clears the computed marker");
+    assert!(refreshed.refreshed_at.is_some(), "a refresh stamps the row");
+    let body = serde_json::to_value(register_stats_response(&refreshed, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
 }
 
 #[test]
@@ -88095,10 +88132,11 @@ fn an_unrefreshed_register_publishes_no_figure_at_all() {
 }
 
 #[test]
-fn the_stored_suppression_flag_stops_publication_on_its_own() {
-    // `withheld` on the row is an operator kill switch as well as the
-    // never-computed marker: a refreshed row still carrying it publishes
-    // nothing, whatever the counts say.
+fn the_stored_computed_marker_stops_publication_on_its_own() {
+    // `withheld` on the row is the computed/never-computed marker, and a row
+    // still carrying it has not been computed whatever `refreshed_at` says.
+    // It is NOT the operator lever -- every refresh clears it, which is why
+    // `suppressed` exists separately.
     let mut row = register_stats_row_fixture(900, 50, 4_500, true);
     row.withheld = true;
     let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
