@@ -1154,6 +1154,24 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Choose the rustls crypto provider before anything can open a TLS
+    // connection.
+    //
+    // With `near-attestation-collateral` two providers are compiled in: ours
+    // through `reqwest`'s `rustls-tls-native-roots` (ring), and
+    // `dcap-qvl/report`'s through `reqwest`'s `rustls` (aws-lc-rs). Cargo
+    // unifies features additively, so neither can be dropped by de-selecting a
+    // feature. rustls will not guess between them -- it panics at the first TLS
+    // use with "Could not automatically determine the process-level
+    // CryptoProvider".
+    //
+    // That panic is not a compile error, so `cargo check` on the feature passes
+    // and the binary dies at startup. It took a production deploy to find.
+    // `ring` is chosen because it is already a direct dependency of this crate.
+    // An error here means a provider was already installed, which is not a
+    // failure worth aborting a boot for.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Argument handling precedes any env/config load so the keypair generator
     // works on an unconfigured host.
     let mut args = std::env::args().skip(1);
