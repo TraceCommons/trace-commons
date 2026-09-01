@@ -169,6 +169,18 @@ pub fn chunk_rendered_events(events: &[String], cfg: &ChunkerConfig) -> ChunkPla
 /// [`strided_selection_indices`].
 pub const CHUNK_SELECTION_ALGORITHM: &str = "stride_endpoint_inclusive.v1";
 
+/// Identifier for the canonical EVENT RENDERER — the text every downstream
+/// similarity signal is computed over (chunk text for perplexity/novelty and
+/// the vector index, and the cross-trace `dedup_simhash`). Distinct from
+/// [`CHUNK_SELECTION_ALGORITHM`], which names which chunks survive the cap:
+/// two decisions can select identical chunks and still be incomparable
+/// because the text inside them was rendered differently. Stamped into the
+/// gate version hash and, composed with the simhash algorithm, into
+/// `trace_gate_decisions.dedup_signal_version`. Bump this on any change to
+/// [`render_event_text`] or to which envelope fields
+/// [`parse_envelope_rendered_events`] reads.
+pub const CANONICAL_RENDER_VERSION: &str = "events.v1";
+
 /// Deterministically choose exactly `min(total, cap)` positions spread
 /// evenly across `0..total`, endpoint-inclusive.
 ///

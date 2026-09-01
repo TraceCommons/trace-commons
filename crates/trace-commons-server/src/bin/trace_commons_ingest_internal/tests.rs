@@ -4074,7 +4074,14 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
         .await
         .expect("gate decision writes");
     backend
-        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .update_trace_gate_decision_dedup(
+            "tenant-a",
+            decision_id,
+            42_i64,
+            Uuid::new_v4(),
+            3,
+            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        )
         .await
         .expect("dedup assignment writes");
 
@@ -65860,6 +65867,10 @@ struct DecisionRowWithDedup {
     dedup_simhash: Option<i64>,
     dedup_cluster_id: Option<Uuid>,
     dedup_cluster_size: Option<i32>,
+    /// Migration V56's stamp. The outer `Option` is "no dedup row at all";
+    /// the inner one is the column's own NULL, i.e. a row recorded before the
+    /// stamp existed.
+    dedup_signal_version: Option<Option<String>>,
 }
 
 /// Test-only combined view of a `trace_gate_decisions` row plus its
@@ -65921,7 +65932,10 @@ struct PerplexityDriverTestDb {
     /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
     /// isolation test can assert the base row is byte-identical before and
     /// after the dedup write.
-    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
+    #[allow(clippy::type_complexity)]
+    dedup: std::sync::RwLock<
+        std::collections::HashMap<(String, Uuid), (i64, Uuid, i32, Option<String>)>,
+    >,
     /// Shadow-mode correction values written by
     /// `update_trace_gate_decision_correction_value`, keyed by `(tenant_id,
     /// decision_id)`: (simhash, cluster_id, cluster_size, novelty_micros,
@@ -66084,13 +66098,36 @@ impl PerplexityDriverTestDb {
             .read()
             .unwrap()
             .get(&(tenant_id.to_string(), decision_id))
-            .copied();
+            .cloned();
         Some(DecisionRowWithDedup {
             row,
-            dedup_simhash: dedup.map(|(h, _, _)| h),
-            dedup_cluster_id: dedup.map(|(_, c, _)| c),
-            dedup_cluster_size: dedup.map(|(_, _, s)| s),
+            dedup_simhash: dedup.as_ref().map(|(h, _, _, _)| *h),
+            dedup_cluster_id: dedup.as_ref().map(|(_, c, _, _)| *c),
+            dedup_cluster_size: dedup.as_ref().map(|(_, _, s, _)| *s),
+            dedup_signal_version: dedup.map(|(_, _, _, v)| v),
         })
+    }
+
+    /// Overwrite ONLY the `dedup_signal_version` of a recorded dedup
+    /// assignment, leaving the simhash, cluster id and size exactly as they
+    /// are.
+    ///
+    /// No server code path can do this — the stamp is always written in the
+    /// same statement as the simhash it names — and that is precisely why the
+    /// helper exists: it manufactures the two row shapes a real corpus holds
+    /// but a test cannot otherwise produce, a pre-V56 row (`None`) and a row
+    /// derived under a renderer this build no longer has.
+    fn overwrite_dedup_signal_version_for_tests(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_signal_version: Option<&str>,
+    ) {
+        let mut dedup = self.dedup.write().unwrap();
+        let entry = dedup
+            .get_mut(&(tenant_id.to_string(), decision_id))
+            .expect("dedup assignment must exist before its stamp is overwritten");
+        entry.3 = dedup_signal_version.map(str::to_string);
     }
 
     /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
@@ -66952,10 +66989,11 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         Ok(())
     }
     /// In-memory analogue of the Postgres `update_trace_gate_decision_dedup`
-    /// impl: record the three dedup values in a side table keyed by
+    /// impl: record the four dedup values in a side table keyed by
     /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
     /// without touching the stored `StorageTraceGateDecisionRow` at all — so
-    /// isolation is structural, not just asserted.
+    /// isolation is structural, not just asserted. The version stamp lands in
+    /// the same write as the simhash it names, as the real UPDATE does.
     async fn update_trace_gate_decision_dedup(
         &self,
         tenant_id: &str,
@@ -66963,10 +67001,16 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         dedup_simhash: i64,
         dedup_cluster_id: Uuid,
         dedup_cluster_size: i32,
+        dedup_signal_version: &str,
     ) -> Result<(), DatabaseError> {
         self.dedup.write().unwrap().insert(
             (tenant_id.to_string(), decision_id),
-            (dedup_simhash, dedup_cluster_id, dedup_cluster_size),
+            (
+                dedup_simhash,
+                dedup_cluster_id,
+                dedup_cluster_size,
+                Some(dedup_signal_version.to_string()),
+            ),
         );
         Ok(())
     }
@@ -67168,8 +67212,12 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::DedupSignalRow {
                     tenant_id: tenant_id.clone(),
                     decision_id: row.decision_id,
-                    dedup_cluster_id: seen.map(|(_, c, _)| *c),
-                    dedup_simhash: seen.map(|(h, _, _)| *h),
+                    dedup_cluster_id: seen.map(|(_, c, _, _)| *c),
+                    dedup_simhash: seen.map(|(h, _, _, _)| *h),
+                    // Flattened exactly as the real SELECT flattens it: a row
+                    // that has never been through a dedup pass and a row
+                    // written before V56 both surface as `None`.
+                    dedup_signal_version: seen.and_then(|(_, _, _, v)| v.clone()),
                 }
             })
             .collect())
@@ -67240,7 +67288,7 @@ impl Database for PerplexityDriverTestDb {
                         .map(|(q, _, _)| *q);
                     let dedup_cluster_size = dedup
                         .get(&(tenant_id.clone(), row.decision_id))
-                        .map(|(_, _, s)| *s);
+                        .map(|(_, _, s, _)| *s);
                     Some(
                         trace_commons_server::trace_corpus_storage::ContributorCapSignalRow {
                             tenant_id: tenant_id.clone(),
@@ -68297,8 +68345,8 @@ async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns()
 }
 
 /// Unit test for the isolation invariant: `update_trace_gate_decision_dedup`
-/// sets ONLY the three cross-trace dedup values (migration V40) — the base
-/// decision row (perplexity, novelty, tail-fraction, status, credit) is
+/// sets ONLY the four cross-trace dedup values (migrations V40 and V56) — the
+/// base decision row (perplexity, novelty, tail-fraction, status, credit) is
 /// byte-identical before and after.
 #[tokio::test]
 async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
@@ -68309,18 +68357,33 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     db.seed_gate_decision("tenant-a", before_row.clone());
 
     let cluster = Uuid::from_u128(7);
-    db.update_trace_gate_decision_dedup("tenant-a", decision_id, 42i64, cluster, 3)
-        .await
-        .expect("dedup update succeeds");
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        decision_id,
+        42i64,
+        cluster,
+        3,
+        "events.v1+fnv1a-2shingle.v1",
+    )
+    .await
+    .expect("dedup update succeeds");
 
     let after = db
         .gate_decision_with_dedup_by_id("tenant-a", decision_id)
         .expect("row still present");
 
-    // The three dedup values changed to exactly what we passed.
+    // The four dedup values changed to exactly what we passed.
     assert_eq!(after.dedup_simhash, Some(42));
     assert_eq!(after.dedup_cluster_id, Some(cluster));
     assert_eq!(after.dedup_cluster_size, Some(3));
+    // The stamp lands in the same write as the simhash it names: a row that
+    // held one without the other would read as the legacy version to the
+    // recluster sweep for as long as the gap lasted.
+    assert_eq!(
+        after.dedup_signal_version,
+        Some(Some("events.v1+fnv1a-2shingle.v1".to_string())),
+        "dedup_signal_version was set in the same write as the simhash"
+    );
 
     // Every base-row column is byte-identical to before.
     assert_eq!(after.row.decision_id, before_row.decision_id);
@@ -68550,6 +68613,144 @@ async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
         third.dedup_cluster_size,
         Some(1),
         "the distinct trace is a singleton cluster"
+    );
+}
+
+/// Run one submission through `evaluate_and_record_gate` and return the
+/// decision id it recorded, panicking on any outcome but `Scored`. Shared by
+/// the dedup tests that need several sequential real gate evaluations and
+/// care about what each one clustered against.
+async fn score_submission_for_dedup_test(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Uuid {
+    let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds");
+    let GateOutcome::Scored { decision_id, .. } = outcome else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+    decision_id
+}
+
+/// The inline half of V56's version scoping, through three real
+/// `evaluate_and_record_gate` calls over BYTE-IDENTICAL text — so every
+/// simhash here is the same number and the stamp is the only variable.
+///
+/// Two claims, in order:
+///
+///  1. `NULL` maps to the legacy v1 stamp (D2). The first decision's stamp is
+///     dropped to `NULL` — the shape of every row recorded before the column
+///     existed — and the second decision, stamped v1 by the enclave path,
+///     must still join its cluster. If `NULL` were read as its own version,
+///     the entire pre-transition corpus would fall out of clustering the
+///     moment this column shipped: a worse split than the one it exists to
+///     prevent, and a silent one.
+///  2. Two named versions never join. Both earlier rows are then re-stamped
+///     to a v2, and the third decision — still v1 — must mint its own cluster
+///     at Hamming distance 0 from both.
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    const V2_STAMP: &str = "events.v2+fnv1a-2shingle.v1";
+
+    let shared_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_texts(
+        &artifact_store,
+        tenant_id,
+        &[shared_text, shared_text, shared_text],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    // --- 1. The enclave path stamps the composed v1 version. ---
+    let first_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[0]).await;
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, first_id)
+        .expect("first decision row present");
+    let v1_stamp = format!(
+        "{}+{}",
+        trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+        trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
+    );
+    assert_eq!(
+        first.dedup_signal_version,
+        Some(Some(v1_stamp.clone())),
+        "the enclave path names both halves of its derivation"
+    );
+    assert_eq!(
+        v1_stamp,
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        "PR 1 leaves behaviour byte-identical: what the code stamps today and \
+         what a pre-column row is read as are the same string"
+    );
+
+    // --- 2. A NULL stamp still clusters with a v1 one. ---
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, None);
+    let second_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[1]).await;
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, second_id)
+        .expect("second decision row present");
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_id, first.dedup_cluster_id,
+        "a NULL-stamped row reads as the legacy v1 stamp, so an incoming v1 \
+         decision joins its cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "the second decision observes cluster size 2"
+    );
+
+    // --- 3. A differently stamped cluster is not a candidate at all. ---
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, Some(V2_STAMP));
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, second_id, Some(V2_STAMP));
+    let third_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[2]).await;
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, third_id)
+        .expect("third decision row present");
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "identical canonical text must NOT join a cluster whose representative \
+         was rendered by a different version"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the version-isolated decision is a singleton despite Hamming 0"
+    );
+    assert_eq!(
+        third.dedup_signal_version,
+        Some(Some(v1_stamp)),
+        "and it stamps its own version, not the one it declined to join"
+    );
+    assert_eq!(
+        third.dedup_simhash, first.dedup_simhash,
+        "the split is the stamp's doing: the simhashes are identical"
     );
 }
 
@@ -68981,6 +69182,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
 
     let shared_simhash: i64 = 0x1234_5678_9abc_def0;
     let distinct_simhash: i64 = 0x0f0f_0f0f_0f0f_0f0f;
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
 
     let row_a = rescore_test_decision_row(Uuid::new_v4());
     let row_b = rescore_test_decision_row(Uuid::new_v4());
@@ -68999,6 +69201,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
         shared_simhash,
         Uuid::new_v4(),
         1,
+        V1_STAMP,
     )
     .await
     .expect("seed row_a dedup");
@@ -69008,6 +69211,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
         shared_simhash,
         Uuid::new_v4(),
         1,
+        V1_STAMP,
     )
     .await
     .expect("seed row_b dedup");
@@ -69017,6 +69221,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
         distinct_simhash,
         Uuid::new_v4(),
         1,
+        V1_STAMP,
     )
     .await
     .expect("seed row_c dedup");
@@ -69101,6 +69306,149 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
         credit_after.credit_quality_micros, None,
         "recluster pass must never touch the credit-quality side table"
     );
+}
+
+/// Sibling of the test above, for the property migration V56 exists to give
+/// the pass: `run_recluster_dedup_pass` never fuses rows whose
+/// `dedup_signal_version` differs, however close their simhashes are.
+///
+/// The pass reads stored simhashes and never re-renders, so once a renderer
+/// bump lands, a corpus holds two populations whose numbers are not measuring
+/// the same thing. Four rows carry the IDENTICAL simhash: two stamped v1, one
+/// stamped NULL (recorded before the column existed), and one stamped v2. The
+/// three v1-effective rows must form one cluster of three — NULL reads as the
+/// legacy v1 stamp (D2), not as its own version and not as "matches
+/// everything" — and the v2 row must sit alone at Hamming distance 0 from all
+/// three.
+#[tokio::test]
+async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    // One simhash for every row: the ONLY thing separating them is the stamp.
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    const V2_STAMP: &str = "events.v2+fnv1a-2shingle.v1";
+
+    let row_v1_a = rescore_test_decision_row(Uuid::new_v4());
+    let row_v1_b = rescore_test_decision_row(Uuid::new_v4());
+    let row_null = rescore_test_decision_row(Uuid::new_v4());
+    let row_v2 = rescore_test_decision_row(Uuid::new_v4());
+
+    // Insertion order is the sweep order (`list_dedup_signals` mirrors the
+    // real `decided_at ASC`), so the v1 rows form their cluster first and the
+    // v2 row meets an established, differently-stamped candidate.
+    db.seed_gate_decision("tenant-a", row_v1_a.clone());
+    db.seed_gate_decision("tenant-b", row_v1_b.clone());
+    db.seed_gate_decision("tenant-a", row_null.clone());
+    db.seed_gate_decision("tenant-a", row_v2.clone());
+
+    for (tenant, row, stamp) in [
+        ("tenant-a", &row_v1_a, V1_STAMP),
+        ("tenant-b", &row_v1_b, V1_STAMP),
+        ("tenant-a", &row_null, V1_STAMP),
+        ("tenant-a", &row_v2, V2_STAMP),
+    ] {
+        db.update_trace_gate_decision_dedup(
+            tenant,
+            row.decision_id,
+            shared_simhash,
+            Uuid::new_v4(),
+            1,
+            stamp,
+        )
+        .await
+        .expect("seed dedup");
+    }
+    // Drop the third row's stamp to NULL. Nothing in the server can write a
+    // simhash without a stamp; this is what a row recorded before V56 looks
+    // like, and the pass has to read it as v1 rather than as its own version.
+    db.overwrite_dedup_signal_version_for_tests("tenant-a", row_null.decision_id, None);
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(
+        summary.reclustered, 4,
+        "all 4 rows must be reclustered: {summary:?}"
+    );
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_v1_a = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_v1_a.decision_id)
+        .expect("row_v1_a present");
+    let after_v1_b = db
+        .gate_decision_with_dedup_by_id("tenant-b", row_v1_b.decision_id)
+        .expect("row_v1_b present");
+    let after_null = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_null.decision_id)
+        .expect("row_null present");
+    let after_v2 = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_v2.decision_id)
+        .expect("row_v2 present");
+
+    assert_eq!(
+        after_v1_a.dedup_cluster_id, after_v1_b.dedup_cluster_id,
+        "the same simhash under the same stamp still clusters cross-tenant"
+    );
+    assert_eq!(
+        after_null.dedup_cluster_id, after_v1_a.dedup_cluster_id,
+        "a NULL stamp reads as the legacy v1 stamp, so a pre-V56 row clusters \
+         with freshly stamped v1 rows"
+    );
+    assert_eq!(
+        after_v1_a.dedup_cluster_size,
+        Some(3),
+        "the v1-effective cluster holds all three v1-effective rows"
+    );
+    assert_ne!(
+        after_v2.dedup_cluster_id, after_v1_a.dedup_cluster_id,
+        "an identical simhash under a different stamp must NEVER join: the \
+         two numbers are not measuring the same thing"
+    );
+    assert_eq!(
+        after_v2.dedup_cluster_size,
+        Some(1),
+        "the v2 row is a singleton despite Hamming distance 0 from three peers"
+    );
+
+    // The pass re-stamps each row with its own version and invents none: it
+    // re-clusters stored simhashes and never re-renders, so it has no
+    // standing to claim a row was derived any other way than it already says.
+    assert_eq!(
+        after_v1_a.dedup_signal_version,
+        Some(Some(V1_STAMP.to_string()))
+    );
+    assert_eq!(
+        after_null.dedup_signal_version,
+        Some(Some(V1_STAMP.to_string())),
+        "a NULL row is stamped with the legacy version it was already read as"
+    );
+    assert_eq!(
+        after_v2.dedup_signal_version,
+        Some(Some(V2_STAMP.to_string())),
+        "the v2 row keeps its own stamp"
+    );
+
+    // The simhash itself is untouched: only the cluster columns move.
+    for after in [&after_v1_a, &after_v1_b, &after_null, &after_v2] {
+        assert_eq!(after.dedup_simhash, Some(shared_simhash));
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -69313,6 +69661,7 @@ async fn recompute_contributor_caps_touches_only_contributor_columns() {
         0x1111_2222_3333_4444,
         Uuid::new_v4(),
         2,
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
     )
     .await
     .expect("seed dedup");

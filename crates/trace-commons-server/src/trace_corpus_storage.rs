@@ -1992,6 +1992,13 @@ pub struct DedupSignalRow {
     pub decision_id: Uuid,
     pub dedup_cluster_id: Option<Uuid>,
     pub dedup_simhash: Option<i64>,
+    /// Which renderer and simhash algorithm produced `dedup_simhash`
+    /// (migration V56). `None` means the row was recorded before the stamp
+    /// existed and is read as
+    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`] -- never as
+    /// "unknown". Two rows whose effective versions differ are not
+    /// comparable, however close their simhashes are.
+    pub dedup_signal_version: Option<String>,
 }
 
 /// Correction-value signal for one decision row (migration V48), read
@@ -2571,9 +2578,9 @@ pub trait TraceCorpusStore: Send + Sync {
     }
 
     /// Drop this submission's gate decisions out of any dedup cluster
-    /// (migration V40 columns back to NULL). Peer rows keep their own cluster
-    /// assignment; their `dedup_cluster_size` snapshot is refreshed by the
-    /// existing recluster pass.
+    /// (migration V40 columns, and V56's version stamp, back to NULL). Peer
+    /// rows keep their own cluster assignment; their `dedup_cluster_size`
+    /// snapshot is refreshed by the existing recluster pass.
     async fn clear_trace_dedup_cluster_for_submission(
         &self,
         _tenant_id: &str,
@@ -2916,12 +2923,17 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
-    /// Update ONLY the dedup columns (migration V40) for the decision row
-    /// identified by `(tenant_id, decision_id)`. Perplexity, novelty,
-    /// tail-fraction, vector, gate status, and credit are left untouched.
-    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
-    /// log-once warning + no-op so a backend without a real impl cannot
-    /// silently drop the write.
+    /// Update ONLY the dedup columns (migrations V40 and V56) for the
+    /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
+    /// novelty, tail-fraction, vector, gate status, and credit are left
+    /// untouched. Implementations MUST scope by `tenant_id` (forced RLS).
+    /// Defaults to a log-once warning + no-op so a backend without a real
+    /// impl cannot silently drop the write.
+    ///
+    /// `dedup_signal_version` names the derivation behind `dedup_simhash` and
+    /// is written in the same statement, never separately: a simhash whose
+    /// stamp lands in a later write is a row that reads as the legacy version
+    /// in between, and the recluster sweep runs continuously.
     async fn update_trace_gate_decision_dedup(
         &self,
         _tenant_id: &str,
@@ -2929,6 +2941,7 @@ pub trait TraceCorpusStore: Send + Sync {
         _dedup_simhash: i64,
         _dedup_cluster_id: Uuid,
         _dedup_cluster_size: i32,
+        _dedup_signal_version: &str,
     ) -> Result<(), DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {

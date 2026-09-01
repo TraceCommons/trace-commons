@@ -5,6 +5,17 @@
 //! cross-trace duplicate clustering. Word-shingle features, FNV-1a hashed for
 //! build-stable reproducibility. Pure: no I/O.
 
+/// Identifier for the simhash ALGORITHM: the tokenizer in [`tokens`]
+/// (lowercase, split on non-alphanumeric, drop empties) over overlapping
+/// 2-token shingles, FNV-1a hashed into a 64-bit signature by
+/// [`trace_simhash`]. Composed with the enclave's canonical render version
+/// into `trace_gate_decisions.dedup_signal_version`, so a stored simhash can
+/// say which algorithm produced it rather than only which number it is —
+/// deterministic gate services stamp the same column with a digest window and
+/// must never be clustered against a real simhash. Bump this on any change to
+/// the tokenizer, the shingle width, or the hash.
+pub const DEDUP_SIMHASH_ALGORITHM: &str = "fnv1a-2shingle.v1";
+
 fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {

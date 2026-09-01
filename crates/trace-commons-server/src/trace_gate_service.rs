@@ -127,6 +127,18 @@ pub struct GateDecision {
     /// dedup clustering; computed inside the service so plaintext never
     /// crosses the boundary (only the hash does), like `nearest_neighbor_hash`.
     pub dedup_simhash: i64,
+    /// Which renderer and which simhash algorithm produced `dedup_simhash`,
+    /// in the form `"<render>+<simhash>"` (or a single name for a service
+    /// that derives the value some other way). Persisted beside the value it
+    /// describes so no consumer clusters, compares or caches across versions.
+    ///
+    /// `None` means no derivation was named. Every `TraceGateService` in this
+    /// crate names one; a synthetic copy built without a simhash has nothing
+    /// to name. A stored `NULL` means the row predates the stamp and is read
+    /// as the legacy v1 stamp
+    /// ([`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`]), never as
+    /// "unknown".
+    pub dedup_signal_version: Option<String>,
     /// 64-bit token simhash of `outcome.human_correction`, when the envelope
     /// carries one. `None` means "this service did not observe a correction" —
     /// either the envelope has none, or the service never sees plaintext (the
@@ -306,6 +318,16 @@ fn sha256_hex_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", h.finalize())
 }
 
+/// `dedup_signal_version` stamp for a deterministic gate service, whose
+/// `dedup_simhash` is an 8-byte window of the decision digest rather than a
+/// simhash of any text (see `build_deterministic_decision`). A single name,
+/// not a `<render>+<simhash>` pair, because neither a renderer nor the
+/// simhash tokenizer is involved. It exists so the cross-tenant dedup sweep
+/// can exclude these values from clustering against real simhashes — a
+/// version stamp has to be able to say "different algorithm", not only
+/// "different number".
+pub const DETERMINISTIC_DEDUP_SIGNAL_VERSION: &str = "digest-prefix.v1";
+
 fn u64_from_digest_prefix(digest: &[u8; 32], offset: usize) -> u64 {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&digest[offset..offset + 8]);
@@ -382,6 +404,9 @@ fn build_deterministic_decision(
         qualifying_token_fraction_micros: None,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
+        // Names the derivation above, so the value is never clustered against
+        // a real simhash from the enclave path.
+        dedup_signal_version: Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION.to_string()),
         // Deterministic services never see plaintext (see `dedup_simhash`
         // above), so they cannot know whether the envelope carries a
         // correction. `None` says exactly that; a digest-derived stand-in
@@ -748,6 +773,15 @@ where
                         .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
                 crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
             },
+            // Names both halves of the derivation immediately above: the
+            // enclave renderer that produced the text, and the simhash
+            // algorithm that reduced it. Composed rather than hard-coded so
+            // bumping either const moves the stamp without a second edit here.
+            dedup_signal_version: Some(format!(
+                "{}+{}",
+                trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+                crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
+            )),
             // Same trust boundary and the same `plaintext` in scope: the
             // correction's simhash is computed here so the correction text
             // itself never crosses back to the caller.

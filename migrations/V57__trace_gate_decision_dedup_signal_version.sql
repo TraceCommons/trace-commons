@@ -1,0 +1,58 @@
+-- Names the derivation behind dedup_simhash, so the column can say which
+-- algorithm produced a value rather than only which number it is (#211,
+-- #325; docs/superpowers/specs/2026-08-28-gate-validity-program.md,
+-- sub-project D).
+--
+-- trace_gate_decisions.dedup_simhash already mixes two derivations. The
+-- enclave path simhashes the canonically rendered event text; the
+-- deterministic services never see plaintext and stamp an eight-byte window
+-- of the decision digest instead. Both land in the same column and enter the
+-- same cross-tenant recluster sweep, which reads the stored value and never
+-- re-renders. Nothing beside the value records how it was made, so the sweep
+-- cannot tell "a different number" from "a different algorithm".
+--
+-- That matters now because changing what the canonical renderer emits moves
+-- every simhash at once. Measured on the pilot corpus, the same eight-event
+-- trace rendered before and after a candidate render change sits at Hamming
+-- 12 against a clustering threshold of 10 -- far enough to split every
+-- existing cluster, and close enough that the split is invisible in the data.
+-- dedup_cluster_size divides the duplicate penalty and increments the
+-- per-contributor cap, so a silent split changes money.
+--
+-- The stamp is TEXT, not the INTEGER of V39's credit_quality_calibration_version
+-- or V48's correction_value_version, because it carries two independently
+-- bumped names composed as "<render>+<simhash>" (today
+-- "events.v1+fnv1a-2shingle.v1") plus a third value, "digest-prefix.v1", that
+-- is neither. An integer cannot express the third, and the sweep has to
+-- exclude it.
+--
+-- NULLABLE, NO DEFAULT, NO BACKFILL. NULL means "recorded before the stamp
+-- existed" and is read in code as the legacy v1 stamp
+-- (dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION), never as "unknown": an unknown
+-- would have to cluster either with everything or with nothing, and both are
+-- wrong. A DEFAULT would assert that same reading in the schema, where a
+-- later re-derivation pass could not tell a defaulted row from a stamped one.
+--
+-- Behaviour is unchanged by this migration and by the code that lands with
+-- it: every new row stamps the v1 composition, every old row reads as it, and
+-- the version-scoped clustering filter is therefore a no-op until the
+-- renderer actually bumps.
+--
+-- Hash-only/label-only discipline is unaffected: the value is a fixed
+-- algorithm name chosen from a closed set in code. No trace content, no
+-- contributor identity, no operator-secret material.
+--
+-- No RLS change: a column on an already-RLS-forced table inherits the tenant
+-- predicate, and a column grant is not a policy.
+ALTER TABLE trace_gate_decisions
+    ADD COLUMN IF NOT EXISTS dedup_signal_version TEXT;
+
+-- Column-level grant for the gate-driver reader role, unlike V53/V54, which
+-- deliberately withheld one because nothing on that pool reads their columns.
+-- This one is read there: list_dedup_signals runs on the gate-driver pool and
+-- now selects dedup_signal_version. trace_gate_driver holds COLUMN-level
+-- SELECT grants (V45/V47/V48), and column privileges cover every column a
+-- query references, so without this line the dedup recluster pass fails at
+-- runtime -- on the first query, not at deploy. GRANT is idempotent and safe
+-- to re-run.
+GRANT SELECT (dedup_signal_version) ON trace_gate_decisions TO trace_gate_driver;

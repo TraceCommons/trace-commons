@@ -4011,10 +4011,10 @@ async fn pg_store_update_trace_gate_decision_credit_quality_touches_only_credit_
 #[tokio::test]
 async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     // `update_trace_gate_decision_dedup` targets the exact PK `(tenant_id,
-    // decision_id)` supplied by the caller and must set ONLY the three
-    // cross-trace dedup columns (migration V40) — every other column,
-    // including perplexity/novelty/status/credit_quality on the SAME row,
-    // must be byte-identical before and after.
+    // decision_id)` supplied by the caller and must set ONLY the four
+    // cross-trace dedup columns (migrations V40 and V56) — every other
+    // column, including perplexity/novelty/status/credit_quality on the SAME
+    // row, must be byte-identical before and after.
     let Some(backend) = postgres_backend().await else {
         return;
     };
@@ -4035,8 +4035,16 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
         .expect("insert gate decision");
 
     let cluster_id = Uuid::new_v4();
+    let signal_version = "events.v1+fnv1a-2shingle.v1";
     backend
-        .update_trace_gate_decision_dedup(&tenant_id, decision_id, 42i64, cluster_id, 3)
+        .update_trace_gate_decision_dedup(
+            &tenant_id,
+            decision_id,
+            42i64,
+            cluster_id,
+            3,
+            signal_version,
+        )
         .await
         .expect("dedup update succeeds");
 
@@ -4058,6 +4066,7 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
     let row = tx
         .query_one(
             "SELECT dedup_simhash, dedup_cluster_id, dedup_cluster_size, \
+                    dedup_signal_version, \
                     perplexity_micros, peak_perplexity_micros, perplexity_passed, \
                     novelty_score_micros, nearest_neighbor_hash, novelty_passed, \
                     gate_policy_version, gate_version_hash, credit_withheld_reason, \
@@ -4084,6 +4093,14 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
         row.get::<_, Option<i32>>("dedup_cluster_size"),
         Some(3),
         "dedup_cluster_size was set"
+    );
+    // Set in the SAME statement as the simhash it names (V56): a row holding
+    // one without the other reads as the legacy version to the recluster
+    // sweep for as long as the gap lasts.
+    assert_eq!(
+        row.get::<_, Option<String>>("dedup_signal_version"),
+        Some(signal_version.to_string()),
+        "dedup_signal_version was set"
     );
 
     // Every non-dedup column on the SAME row is byte-identical to the

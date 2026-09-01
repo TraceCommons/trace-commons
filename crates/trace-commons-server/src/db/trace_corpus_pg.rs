@@ -4033,10 +4033,14 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let updated = tx
             .execute(
+                // The version stamp goes with the value it names (V56): a
+                // row holding a stamp but no simhash would claim a
+                // derivation it no longer carries the output of.
                 "UPDATE trace_gate_decisions
                     SET dedup_simhash = NULL,
                         dedup_cluster_id = NULL,
-                        dedup_cluster_size = NULL
+                        dedup_cluster_size = NULL,
+                        dedup_signal_version = NULL
                   WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
@@ -6218,17 +6222,23 @@ impl TraceCorpusStore for PgBackend {
         dedup_simhash: i64,
         dedup_cluster_id: Uuid,
         dedup_cluster_size: i32,
+        dedup_signal_version: &str,
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        // Update ONLY the three dedup columns on exactly this decision row.
+        // Update ONLY the four dedup columns on exactly this decision row.
         // Perplexity, novelty, tail-fraction, vector-entry, gate status, and
         // credit are left exactly as-is.
+        //
+        // The version stamp is set in the SAME statement as the simhash it
+        // describes (migration V56): a row that carries one without the other,
+        // even briefly, reads as the legacy version to the recluster sweep.
         tx.execute(
             "UPDATE trace_gate_decisions
                 SET dedup_simhash = $3,
                     dedup_cluster_id = $4,
-                    dedup_cluster_size = $5
+                    dedup_cluster_size = $5,
+                    dedup_signal_version = $6
              WHERE tenant_id = $1 AND decision_id = $2",
             &[
                 &tenant_id,
@@ -6236,6 +6246,7 @@ impl TraceCorpusStore for PgBackend {
                 &dedup_simhash,
                 &dedup_cluster_id,
                 &dedup_cluster_size,
+                &dedup_signal_version,
             ],
         )
         .await

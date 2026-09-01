@@ -29,6 +29,34 @@ pub const DEDUP_CONSTANTS_V1: DedupConstants = DedupConstants {
     version: 1,
 };
 
+/// The `dedup_signal_version` a row recorded before the column existed is
+/// read as. Every pre-column row was written by the enclave path with the v1
+/// renderer and the v1 simhash, except deterministic-service rows, which come
+/// from development and test services; reading the whole NULL set as v1 for
+/// the transition window is the honest reading, and the re-derivation pass
+/// overwrites all of it.
+///
+/// FROZEN. It is deliberately a literal and not composed from
+/// `CANONICAL_RENDER_VERSION` + `DEDUP_SIMHASH_ALGORITHM`: those two name
+/// what the code renders TODAY, and recomposing this from them would silently
+/// re-label every historical row on the next bump — which is the exact defect
+/// the column exists to prevent.
+pub const LEGACY_DEDUP_SIGNAL_VERSION: &str = "events.v1+fnv1a-2shingle.v1";
+
+/// The version a stored `dedup_signal_version` means. `NULL` maps to
+/// [`LEGACY_DEDUP_SIGNAL_VERSION`], never to "unknown": an unknown would have
+/// to either cluster with everything or with nothing, and both are wrong.
+///
+/// Every consumer that compares, clusters or caches on `dedup_simhash` must
+/// route the row's stored value through this and require equality before the
+/// two values are treated as comparable.
+pub fn effective_dedup_signal_version(stored: Option<&str>) -> &str {
+    match stored {
+        Some(v) if !v.is_empty() => v,
+        _ => LEGACY_DEDUP_SIGNAL_VERSION,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterCandidate {
     pub cluster_id: Uuid,
@@ -122,6 +150,38 @@ mod tests {
         let id = Uuid::from_u128(2);
         let c = cand(id, 1, u64::MAX, Some(K.tau_e_micros + 1));
         assert_eq!(assign_cluster(0, &[c], &K), ClusterAssignment::New);
+    }
+
+    #[test]
+    fn null_dedup_signal_version_reads_as_the_legacy_v1_stamp() {
+        assert_eq!(
+            effective_dedup_signal_version(None),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+        // An empty string is a NULL that survived a round trip through a
+        // text column, not a version anyone named.
+        assert_eq!(
+            effective_dedup_signal_version(Some("")),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+    }
+
+    #[test]
+    fn a_named_dedup_signal_version_is_returned_verbatim() {
+        assert_eq!(
+            effective_dedup_signal_version(Some("events.v2+fnv1a-2shingle.v1")),
+            "events.v2+fnv1a-2shingle.v1"
+        );
+        // A deterministic service's stamp is its own version, not the legacy
+        // one: its value is a digest window, not a simhash of any text.
+        assert_eq!(
+            effective_dedup_signal_version(Some("digest-prefix.v1")),
+            "digest-prefix.v1"
+        );
+        assert_ne!(
+            effective_dedup_signal_version(Some("digest-prefix.v1")),
+            effective_dedup_signal_version(None)
+        );
     }
 
     #[test]
