@@ -77,8 +77,8 @@ struct OnboardingRootsView: View {
                 .font(.body)
 
             Text("""
-                Answer for both. Declining is an answer — leaving one blank is not, and \
-                the watcher would fall back to the standard location for it, which is \
+                Answer for each. Leaving one blank is not the same as skipping it — an \
+                unanswered folder falls back to the standard location, which is \
                 probably your real work.
                 """)
                 .font(.body)
@@ -189,7 +189,7 @@ struct OnboardingRootsView: View {
 
     private func start() {
         guard let settingsJSON = roots.settingsJSON() else {
-            failure = "Answer for both before continuing."
+            failure = "Answer for each before continuing."
             return
         }
         failure = nil
