@@ -24,7 +24,8 @@
 //!    that quote. See the note on the cargo feature below.
 //! 3. [`AttestationClient::complete`] -- one minimal chat completion. The
 //!    caller supplies the request bytes and this method must put **those
-//!    bytes** on the wire: the receipt binds `SHA256(request_body_as_sent)`,
+//!    bytes** on the wire: the receipt binds `SHA256(request_body_as_sent)`
+//!    and `SHA256(response_body_as_received)`,
 //!    so a re-serialization here surfaces later as
 //!    [`super::receipt::ReceiptError::RequestHashMismatch`], which reads as
 //!    tampering rather than as the caller bug it would be.
@@ -175,17 +176,21 @@ fn detail_hash(message: &str) -> String {
 
 /// What one minimal completion yielded.
 ///
-/// `response_text` is what the receipt's second hash covers. For a
-/// non-streaming completion that is the assistant message content; the drill
-/// never streams, because for a streaming response the hashed text is the SSE
-/// lines rather than the reassembled content and could not be reproduced from
-/// parsed deltas.
+/// `response_body` is what the receipt's second hash covers: the **entire raw
+/// response body**, byte for byte, not the assistant message content read out
+/// of it. That was settled against a captured live triple, not reasoned about
+/// -- see `crates/trace-commons-server/tests/near_ai_live_receipt.rs`. The
+/// drill never streams, because for a streaming response the body is a series
+/// of SSE frames that cannot be reproduced from parsed deltas.
+///
+/// Nothing may re-serialize this from a parsed form, for the same reason the
+/// request body is kept verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionOutcome {
     /// The completion's `id`, which addresses its receipt.
     pub chat_id: String,
-    /// The assistant's reply text, exactly as returned.
-    pub response_text: String,
+    /// The whole response body, exactly as received.
+    pub response_body: String,
 }
 
 /// The four calls the drill makes against a NEAR AI inference endpoint.
@@ -259,20 +264,15 @@ impl HttpAttestationClient {
 }
 
 /// The completion response, as much of it as the drill reads.
+///
+/// Only `id`, which addresses the receipt. Deliberately nothing else: the
+/// hashed material is the raw body, and modelling `choices[0].message.content`
+/// here previously made the drill depend on a shape the live service does not
+/// always produce -- a thinking model returns `content: null` with the text in
+/// `reasoning_content`, which would not even deserialize.
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     id: String,
-    choices: Vec<ChatCompletionChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionChoice {
-    message: ChatCompletionMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionMessage {
-    content: String,
 }
 
 /// The receipt response.
@@ -366,18 +366,11 @@ impl AttestationClient for HttpAttestationClient {
                 step,
                 detail_hash: detail_hash(&e.to_string()),
             })?;
-        let choice =
-            parsed
-                .choices
-                .into_iter()
-                .next()
-                .ok_or(AttestationClientError::MalformedResponse {
-                    step,
-                    detail_hash: detail_hash("completion carried no choices"),
-                })?;
+        // `body`, not a re-serialization of `parsed`: the receipt binds
+        // SHA-256 over the bytes the service sent.
         Ok(CompletionOutcome {
             chat_id: parsed.id,
-            response_text: choice.message.content,
+            response_body: body,
         })
     }
 

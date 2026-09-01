@@ -295,12 +295,12 @@ git commit -m "Pin the image measurements, and refuse when nothing is pinned"
 - Create: `crates/trace-commons-server/src/near_attestation/receipt.rs`
 
 **Interfaces:**
-- Produces: `verify_receipt(payload: &ReceiptPayload, request_body: &[u8], response_text: &str) -> Result<ReceiptVerdict>` where `ReceiptPayload { text: String, signature: String, signing_address: String }`
+- Produces: `verify_receipt(payload: &ReceiptPayload, request_body: &[u8], response_body: &[u8], expected_model: &str) -> Result<ReceiptVerdict>` where `ReceiptPayload { text: String, signature: String, signing_address: String }`
 
 The mechanism, from NEAR AI's reference verifier (`nearai/nearai-cloud-verifier`, `py/chat_verifier.py`):
 
 1. `text` splits on `:` into two or three parts. Three: hashes are `parts[1]`, `parts[2]`. Two: `parts[0]`, `parts[1]`. Any other count is an error.
-2. Both are lowercase SHA-256 hex — of the request body **as sent**, and of the response text.
+2. Both are lowercase SHA-256 hex — of the request body **as sent**, and of the **entire raw response body** as received. The three-part form's leading part is the model name, and is checked against the model requested.
 3. `signature` is an EIP-191 `personal_sign` over `text`: `keccak256("\x19Ethereum Signed Message:\n" + len(text) + text)`, then secp256k1 public-key recovery, then the Ethereum address is the last 20 bytes of `keccak256(pubkey[1..])`.
 4. Compare the recovered address to `signing_address`, case-insensitively.
 
@@ -364,7 +364,7 @@ The drill:
 2. Fetches `/v1/attestation/report?model=&nonce=&signing_algo=ecdsa`.
 3. Verifies the quote (Task 2) and that report data carries the nonce (Task 1).
 4. Checks measurements (Task 3), refusing if nothing is pinned.
-5. Performs one minimal completion, captures `chat_id` and the exact request bytes and response text.
+5. Performs one minimal completion, captures `chat_id` and the exact request bytes and response body.
 6. Fetches `/v1/signature/{chat_id}` and verifies the receipt (Task 4).
 7. Confirms the receipt's `signing_address` is the one in the verified attestation.
 
