@@ -95,6 +95,47 @@ async fn the_public_role_can_read_nothing_else() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
+async fn the_public_role_cannot_write_the_aggregate() {
+    // The runtime-write policy is deliberately unscoped by role (no `TO`
+    // clause), because RLS policies gate rows, not operations. What
+    // actually stops trace_commons_public_read writing this row is that it
+    // holds no UPDATE grant on the table -- one line in the migration
+    // (the GRANT SELECT is column-scoped and column-scoped to SELECT only).
+    // This test is what notices if that line is ever loosened to also grant
+    // UPDATE, or widened to GRANT UPDATE ... TO trace_commons_public_read.
+    let backend = test_pool().await;
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("connection");
+    client
+        .execute("SET ROLE trace_commons_public_read", &[])
+        .await
+        .expect("set role");
+
+    let result = client
+        .execute(
+            "UPDATE trace_register_stats SET traces_accepted = traces_accepted + 1",
+            &[],
+        )
+        .await;
+    match result {
+        Err(_) => {
+            // Expected: PostgreSQL refuses with a permission error before
+            // RLS is even consulted, because the role holds no UPDATE grant.
+        }
+        Ok(rows_affected) => {
+            assert_eq!(
+                rows_affected, 0,
+                "the public role must never modify the register stats row"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
 async fn the_public_role_does_not_bypass_rls() {
     let backend = test_pool().await;
     let client = backend
