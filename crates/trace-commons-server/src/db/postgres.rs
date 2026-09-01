@@ -143,6 +143,17 @@ pub struct PgBackend {
 /// Public so RLS tests assert against this list rather than a hand-maintained
 /// copy; the copy had drifted twelve tables out of date while the diagnostic
 /// that would have caught it was failing to parse.
+///
+/// Deliberate exclusions, so an absence is never mistaken for an oversight
+/// again: `trace_instance_enrollments` and `onboarding_invite_grants` are
+/// isolated by subject hash rather than by tenant, and
+/// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
+/// are deployment-wide aggregate bookkeeping with no tenant column to
+/// predicate on -- inexpressible rather than merely unnecessary. The
+/// leaderboard snapshot's `contents_jsonb` DOES carry contributor handles;
+/// see the exclusion notes at the bottom of
+/// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
+/// opt-in published data and does not change the answer.
 pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
@@ -188,6 +199,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_webauthn_credentials",
     "trace_near_identities",
     "trace_account_merge_proposals",
+    "trace_community_withdrawal_evictions",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -2030,6 +2042,27 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&56_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V56__community_withdrawal_eviction_rls.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&56_i32, &"community_withdrawal_eviction_rls"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2360,6 +2393,18 @@ impl Database for PgBackend {
             .transaction()
             .await
             .map_err(DatabaseError::Postgres)?;
+        // The eviction UPDATE below is deliberately cross-tenant: one drain
+        // covers every pending withdrawal for this (window, metric). V56 gates
+        // that on this transaction-local GUC rather than on a tenant
+        // predicate. Without it the statement does not fail -- it silently
+        // marks zero rows, because the tenant policy hides every row from a
+        // connection with no tenant context.
+        tx.execute(
+            "SELECT set_config('trace_commons.community_drain', 'on', true)",
+            &[],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
         let drained = tx
             .execute(
                 "UPDATE trace_community_snapshot_invalidations
@@ -6379,6 +6424,31 @@ mod tests {
         assert!(refuse_if_enumeration_is_ambiguous(&tenants, true).is_ok());
     }
 
+    /// Same trap again, for the migration that forces RLS on the withdrawal
+    /// eviction receipts. This one renumbered from V55 to V56 after #520
+    /// landed, and a renumber that silently stops applying looks exactly like
+    /// success, so count the references rather than merely finding one.
+    #[test]
+    fn v56_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__community_withdrawal_eviction_rls.sql", 56);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            4,
+            "V56 must be named exactly four times: once by run_migrations' \
+             include_str!, once in each of the central-policy and force-RLS \
+             arrays that \
+             trace_commons_rls_registry_matches_migration_policy_coverage \
+             reads, and once by the TRACE_COMMONS_RLS_TABLES doc comment, \
+             which points at V56's exclusion notes rather than restating them"
+        );
+        let version_marker = format!("&{}_i32", 56);
+        assert!(
+            THIS_FILE.contains(&version_marker),
+            "V56 must record itself in _trace_commons_migrations"
+        );
+    }
+
     /// Same hand-rolled-`run_migrations` trap as V47, V53, and V54: wiring,
     /// pinned. Counted rather than merely present, for the reason V53's test
     /// records -- a literal in the assertion would otherwise satisfy itself.
@@ -6481,6 +6551,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -6497,6 +6568,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
@@ -6538,6 +6610,39 @@ mod tests {
             central_policy_count,
             TRACE_COMMONS_RLS_TABLES.len(),
             "central RLS policy migration and diagnostics registry drifted"
+        );
+    }
+
+    /// The eviction drain is the one write path on
+    /// `trace_community_withdrawal_evictions` that carries no tenant id. V55
+    /// gates it on a transaction-local GUC; without that `set_config` the
+    /// statement does not fail, it silently marks zero rows. Guard the line
+    /// here, since a database is not available in CI to catch its removal.
+    #[test]
+    fn community_snapshot_drain_enters_drain_scope() {
+        let source = include_str!("postgres.rs");
+        let drain = source
+            .split("async fn drain_community_snapshot_invalidation")
+            .nth(1)
+            .expect("drain_community_snapshot_invalidation must exist");
+        let body = drain
+            .split("async fn ")
+            .next()
+            .expect("drain body must be delimited by the next fn");
+        let guc_marker = concat!(
+            "set_config('trace_commons.",
+            "community_drain', 'on', true)"
+        );
+        let update_marker = "UPDATE trace_community_withdrawal_evictions";
+        let guc_at = body
+            .find(guc_marker)
+            .expect("the drain must enter transaction-local drain scope");
+        let update_at = body
+            .find(update_marker)
+            .expect("the drain must mark eviction receipts");
+        assert!(
+            guc_at < update_at,
+            "drain scope must be entered before the cross-tenant eviction UPDATE"
         );
     }
 
