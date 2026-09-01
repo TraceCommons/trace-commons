@@ -622,6 +622,18 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
                 q.set_submission_id(entry.entry_id, submission_id);
                 uploaded_this_pass = true;
+                // Counted here, against the project KEY, because this is the
+                // last point that still holds one -- history is label-only by
+                // design and two projects can share a final path segment. The
+                // count is what backs the arming offer; see
+                // `ProjectPolicy::arming_suggestion`.
+                //
+                // A failed save is not worth failing an upload that already
+                // succeeded: the worst outcome is that an offer arrives one
+                // contribution later than it might have.
+                let mut policy = shared.policy.lock().expect("policy lock");
+                policy.record_contribution(&entry.project_key);
+                let _ = policy.save(&shared.store);
             }
             uploader::UploadDecision::Superseded { new_hash } => {
                 let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);

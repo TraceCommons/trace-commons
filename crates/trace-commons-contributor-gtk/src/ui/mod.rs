@@ -549,6 +549,16 @@ impl App {
                 *app.status.borrow_mut() = Some(status);
             }
         });
+        // Asked alongside the queue, not with `list_projects`, because this
+        // is drawn on the queue screen and the daemon's answer changes on
+        // exactly the events that change the queue -- an upload landing is
+        // what moves a project past the threshold.
+        self.call("arming_suggestion", serde_json::json!({}), |app, result| {
+            let offer = result
+                .ok()
+                .and_then(|v| serde_json::from_value::<crate::model::ArmingOffer>(v).ok());
+            queue::render_arming_offer(app, offer);
+        });
         self.call("list_pending", serde_json::json!({}), |app, result| {
             let Ok(value) = result else { return };
             let entries: Vec<QueueEntry> =

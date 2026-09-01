@@ -35,6 +35,18 @@ public static class DaemonProtocol
         public const string Hello = "hello";
         public const string Status = "status";
         public const string ListPending = "list_pending";
+
+        /// <summary>
+        /// The one project worth offering to arm right now, or an empty
+        /// object. A read: asking does not consume the offer.
+        /// </summary>
+        public const string ArmingSuggestion = "arming_suggestion";
+
+        /// <summary>
+        /// "Not now" against one project's arming offer. The daemon silences
+        /// it for thirty days; it does not forget it.
+        /// </summary>
+        public const string DeclineArming = "decline_arming";
         public const string Pause = "pause";
         public const string Resume = "resume";
         public const string Approve = "approve";

@@ -237,6 +237,8 @@ pub const METHODS: &[&str] = &[
     "clear_public_profile",
     "consent_options",
     "dismiss",
+    "arming_suggestion",
+    "decline_arming",
     "enroll",
     "get_public_profile",
     "get_settings",
@@ -787,6 +789,62 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // are supported, deliberately, rather than one replacing the other.
         //
         // `project_id` wins when both are sent.
+        // The one project worth offering to arm right now, or nothing.
+        //
+        // A read, with no side effect: asking does not consume the offer.
+        // The shell may draw it, redraw it after a refresh, and draw it
+        // again next launch until the contributor answers one way or the
+        // other -- which is what makes "Not now" a real answer rather than
+        // a dismissal that the next queue refresh undoes.
+        //
+        // Labels and a count only. The project is named by the same opaque
+        // id `list_projects` mints, because the key is a full local path
+        // the shell is never given.
+        "arming_suggestion" => {
+            let policy = shared.policy.lock().expect("policy lock");
+            match policy.arming_suggestion(Utc::now()) {
+                Some(s) => Response::ok(
+                    req.id,
+                    serde_json::json!({
+                        "project_id": s.project_id,
+                        "project_label": s.project_label,
+                        "contributed_count": s.contributed_count,
+                    }),
+                ),
+                // Absent rather than null-filled: a shell that receives no
+                // suggestion must draw no card, and a null-filled object is
+                // a claim about a project this daemon never made.
+                None => Response::ok(req.id, serde_json::json!({})),
+            }
+        }
+        // "Not now" against one project's arming offer.
+        //
+        // Silences it for `ARMING_DECLINE_COOLDOWN_DAYS` rather than
+        // forever: the button says "Not now", and a suppression that never
+        // lifted would make those words a lie. Settings still arms the
+        // project at any point in between, without being asked.
+        "decline_arming" => {
+            let Some(id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
+                return Response::err(req.id, ERR_BAD_PARAMS, "project_id-required");
+            };
+            // Lock order is policy before queue, as everywhere else.
+            let mut policy = shared.policy.lock().expect("policy lock");
+            let key = {
+                let queue = shared.queue.lock().expect("queue lock");
+                let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+                match project_key_for_id(id, &known) {
+                    Some(key) => key,
+                    None => {
+                        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
+                    }
+                }
+            };
+            policy.decline_arming(&key, Utc::now());
+            match policy.save(&shared.store) {
+                Ok(()) => Response::ok(req.id, serde_json::json!({ "declined": true })),
+                Err(e) => Response::err(req.id, ERR_UNAVAILABLE, &e.to_string()),
+            }
+        }
         "set_project_mode" => {
             let id_param = req.params.get("project_id").and_then(|v| v.as_str());
             let key_param = req.params.get("project_key").and_then(|v| v.as_str());
@@ -2946,6 +3004,116 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "armed-auto-upload");
         assert_eq!(entries[0].project_label.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn arming_suggestion_is_absent_until_a_project_has_contributed_enough() {
+        let s = shared();
+        let key = tmp_project("api");
+        handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": &key, "mode": "notify_only"}),
+            ),
+        );
+        let empty = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        assert!(
+            empty.result.unwrap().get("project_id").is_none(),
+            "no suggestion until the threshold is met"
+        );
+
+        {
+            let mut policy = s.policy.lock().unwrap();
+            for _ in 0..super::super::policy::ARMING_SUGGESTION_THRESHOLD {
+                policy.record_contribution(&key);
+            }
+        }
+        let offered = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        let body = offered.result.unwrap();
+        assert_eq!(body["project_label"], "api");
+        assert_eq!(
+            body["contributed_count"],
+            super::super::policy::ARMING_SUGGESTION_THRESHOLD
+        );
+        // The key is a full local path and must never cross the socket.
+        assert!(
+            !body.to_string().contains(&key),
+            "a project key must not appear in the answer: {body}"
+        );
+    }
+
+    /// Asking must not consume the offer: a shell redraws after every queue
+    /// refresh, and an offer that vanished on being read would be a
+    /// dismissal the contributor never made.
+    #[test]
+    fn asking_for_the_suggestion_twice_answers_twice() {
+        let s = shared();
+        let key = tmp_project("api");
+        {
+            let mut policy = s.policy.lock().unwrap();
+            for _ in 0..super::super::policy::ARMING_SUGGESTION_THRESHOLD {
+                policy.record_contribution(&key);
+            }
+        }
+        let first = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        let second = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        assert_eq!(first.result.unwrap(), second.result.unwrap());
+    }
+
+    #[test]
+    fn declining_arming_silences_the_suggestion_and_survives_a_reload() {
+        let s = shared();
+        let key = tmp_project("api");
+        {
+            let mut policy = s.policy.lock().unwrap();
+            for _ in 0..super::super::policy::ARMING_SUGGESTION_THRESHOLD {
+                policy.record_contribution(&key);
+            }
+            policy.save(&s.store).unwrap();
+        }
+        let offered = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        let project_id = offered.result.unwrap()["project_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let declined = handle_request(
+            &s,
+            &req(
+                "decline_arming",
+                serde_json::json!({"project_id": project_id}),
+            ),
+        );
+        assert_eq!(declined.result.unwrap()["declined"], true);
+
+        let after = handle_request(&s, &req("arming_suggestion", serde_json::json!({})));
+        assert!(after.result.unwrap().get("project_id").is_none());
+
+        // Persisted, not just held in memory: a restart must not resurrect a
+        // question the contributor has already answered.
+        let reloaded = super::super::policy::ProjectPolicy::load(&s.store).unwrap();
+        assert!(reloaded.arming_suggestion(Utc::now()).is_none());
+    }
+
+    #[test]
+    fn declining_arming_refuses_an_unrecognized_project_id() {
+        let s = shared();
+        let out = handle_request(
+            &s,
+            &req(
+                "decline_arming",
+                serde_json::json!({"project_id": "proj_deadbeef"}),
+            ),
+        );
+        assert_eq!(out.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
+    #[test]
+    fn declining_arming_requires_a_project_id() {
+        let s = shared();
+        let out = handle_request(&s, &req("decline_arming", serde_json::json!({})));
+        assert_eq!(out.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
     #[test]

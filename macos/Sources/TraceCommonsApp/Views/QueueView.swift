@@ -80,6 +80,14 @@ struct QueueContent: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let offer = model.armingOffer {
+                ArmingOfferCard(
+                    offer: offer,
+                    onArm: { model.acceptArmingOffer(offer) },
+                    onDecline: { model.declineArmingOffer(offer) }
+                )
+            }
+
             if model.awaitingDecision.isEmpty {
                 CenteredNotice(
                     title: "Nothing is waiting.",
@@ -890,5 +898,55 @@ private enum QueueGlyphs {
         path.addLine(to: CGPoint(x: 8, y: 2.6))
         path.addLine(to: CGPoint(x: 14, y: 6.8))
         path.closeSubpath()
+    }
+}
+
+
+/// The offer to stop being asked about one project.
+///
+/// It appears in the queue, above the cards it is about, once that project
+/// has been contributed from several times. The placement is the argument:
+/// the contributor is looking at the very thing the offer would remove, and
+/// has just done it several times over.
+///
+/// This asks; it does not act. The daemon decides whether there is anything
+/// to ask (`ProjectPolicy::arming_suggestion`) and both answers go back to
+/// it, so "Not now" is remembered across relaunches and across shells rather
+/// than being a dismissal this view forgets.
+///
+/// Nothing here is emphasised as a primary action. Arming is a real choice
+/// with a real cost -- previews from this project stop -- and a card that
+/// leads the eye to "yes" is not asking a question.
+struct ArmingOfferCard: View {
+    let offer: ArmingOffer
+    var onArm: () -> Void
+    var onDecline: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TC.Space.s) {
+            // Evidence first, question second. Someone who reads only the
+            // first line still learns why they are being asked.
+            Text(ArmingOfferCopy.evidence(
+                project: offer.projectLabel,
+                count: offer.contributedCount
+            ))
+            .font(TC.Font_.meta)
+            .foregroundStyle(.secondary)
+
+            Text(ArmingOfferCopy.question(project: offer.projectLabel))
+                .font(.callout.weight(.semibold))
+
+            HStack(spacing: TC.Space.m) {
+                // Untinted, and first: declining must not wear the accent
+                // that means "yes" everywhere else in this app.
+                Button(ArmingOfferCopy.decline, action: onDecline)
+                    .tint(.primary)
+                Button(ArmingOfferCopy.confirm, action: onArm)
+            }
+        }
+        .padding(TC.Space.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard()
+        .accessibilityElement(children: .contain)
     }
 }

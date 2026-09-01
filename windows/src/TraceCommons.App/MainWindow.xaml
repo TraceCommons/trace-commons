@@ -351,6 +351,50 @@
             </Border>
 
             <!--
+                The offer to stop being asked about one project.
+
+                Drawn above the cards it is about: the contributor is looking
+                at the very thing the offer would remove, and has just
+                approved several of them.
+
+                Not a warning, so no gold border and no triangle -- nothing is
+                wrong and nothing needs weighing up in the health sense. It is
+                a question, and it wears the plain card border every other
+                question in this window wears.
+
+                Neither button is TcPrimaryButtonStyle. Arming is a real
+                choice with a real cost -- previews from this project stop --
+                and a card that leads the eye to "yes" is not asking a
+                question. Decline comes first for the same reason.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasArmingOffer, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <StackPanel Spacing="8">
+                    <!-- Evidence first, question second: someone who reads
+                         only the first line still learns why they are being
+                         asked. -->
+                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="{x:Bind ViewModel.ArmingOfferDecline}"
+                                Click="OnDeclineArming" />
+                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="{x:Bind ViewModel.ArmingOfferConfirm}"
+                                Click="OnAcceptArming" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!--
                 The daily budget banner.
 
                 A second banner rather than another health label, because the

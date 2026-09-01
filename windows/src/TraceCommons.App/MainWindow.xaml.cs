@@ -651,6 +651,58 @@ public sealed partial class MainWindow : Window
     /// asked for the screen, and returning them silently to the queue would
     /// make it the dead button this banner must never have.
     /// </remarks>
+    /// <summary>
+    /// "Not now" against the arming offer.
+    /// </summary>
+    /// <remarks>
+    /// The daemon silences the offer for thirty days and remembers that
+    /// across relaunches and across shells; this is not a local dismissal.
+    /// The card is cleared here as well so it does not linger for a round
+    /// trip, and the daemon's next answer will agree.
+    /// </remarks>
+    private async void OnDeclineArming(object sender, RoutedEventArgs e)
+    {
+        string projectId = ViewModel.ArmingOfferProjectId;
+        if (projectId.Length == 0)
+        {
+            return;
+        }
+
+        ViewModel.SetArmingOffer(null);
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.DeclineArming,
+                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}}}""")
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Arms the offered project.
+    /// </summary>
+    /// <remarks>
+    /// No confirmation sheet: this card IS the confirmation. It names the
+    /// project, states the evidence, and asks the question outright, so a
+    /// second dialog saying the same thing would be a step rather than a
+    /// safeguard. Settings, where arming is picked from a list rather than
+    /// offered, does confirm.
+    /// </remarks>
+    private async void OnAcceptArming(object sender, RoutedEventArgs e)
+    {
+        string projectId = ViewModel.ArmingOfferProjectId;
+        if (projectId.Length == 0)
+        {
+            return;
+        }
+
+        ViewModel.SetArmingOffer(null);
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.SetProjectMode,
+                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}},"mode":"auto_upload"}""")
+            .ConfigureAwait(true);
+        await ViewModel.RefreshAsync().ConfigureAwait(true);
+    }
+
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var onboarding = new OnboardingWindow(_host, OnboardingState.Default());
