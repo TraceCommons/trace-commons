@@ -41,6 +41,10 @@ zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# keccak256, for recovering the EIP-191 signer of a NEAR AI inference receipt.
+# 0.10 deliberately, to share the digest 0.10 tree that sha2 above already
+# pulls in rather than adding a second one.
+sha3 = "0.10"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
