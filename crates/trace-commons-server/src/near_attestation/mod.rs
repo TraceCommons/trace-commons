@@ -19,6 +19,7 @@
 
 pub mod measurements;
 pub mod quote;
+pub mod receipt;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
