@@ -205,6 +205,15 @@ jobs:
       # cover of the transitive build the local-gpu-models job pulls in.
       - run: cargo check -p trace-commons-server --bins --features near-ai-scorer
       - run: cargo test -p trace-commons-gate-enclave --features near-ai-scorer --lib perplexity_near_ai
+      # Run it, do not merely check it.
+      #
+      # The rustls provider ambiguity that took the pilot down on 2026-09-01
+      # compiled cleanly under every job in this file and panicked at startup.
+      # A feature that changes what is LINKED rather than what COMPILES is
+      # invisible to `cargo check`. `--tls-selfcheck` constructs the HTTPS
+      # client, which is the exact call that panicked.
+      - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-ai-scorer
+      - run: ./target/debug/trace-commons-ingest --tls-selfcheck
 
   cargo-check-near-attestation-collateral:
     name: cargo check (near-attestation-collateral)
@@ -230,6 +239,15 @@ jobs:
       # host. It also pulls reqwest 0.13 into the tree, which nothing else in
       # this workspace builds.
       - run: cargo check -p trace-commons-server --bins --features near-attestation-collateral
+      # Run it, do not merely check it.
+      #
+      # The rustls provider ambiguity that took the pilot down on 2026-09-01
+      # compiled cleanly under every job in this file and panicked at startup.
+      # A feature that changes what is LINKED rather than what COMPILES is
+      # invisible to `cargo check`. `--tls-selfcheck` constructs the HTTPS
+      # client, which is the exact call that panicked.
+      - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-attestation-collateral
+      - run: ./target/debug/trace-commons-ingest --tls-selfcheck
       - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
 
   cargo-test-default:
