@@ -6017,6 +6017,39 @@ mod tests {
         );
     }
 
+    /// The eviction drain is the one write path on
+    /// `trace_community_withdrawal_evictions` that carries no tenant id. V55
+    /// gates it on a transaction-local GUC; without that `set_config` the
+    /// statement does not fail, it silently marks zero rows. Guard the line
+    /// here, since a database is not available in CI to catch its removal.
+    #[test]
+    fn community_snapshot_drain_enters_drain_scope() {
+        let source = include_str!("postgres.rs");
+        let drain = source
+            .split("async fn drain_community_snapshot_invalidation")
+            .nth(1)
+            .expect("drain_community_snapshot_invalidation must exist");
+        let body = drain
+            .split("async fn ")
+            .next()
+            .expect("drain body must be delimited by the next fn");
+        let guc_marker = concat!(
+            "set_config('trace_commons.",
+            "community_drain', 'on', true)"
+        );
+        let update_marker = "UPDATE trace_community_withdrawal_evictions";
+        let guc_at = body
+            .find(guc_marker)
+            .expect("the drain must enter transaction-local drain scope");
+        let update_at = body
+            .find(update_marker)
+            .expect("the drain must mark eviction receipts");
+        assert!(
+            guc_at < update_at,
+            "drain scope must be entered before the cross-tenant eviction UPDATE"
+        );
+    }
+
     #[test]
     fn trace_corpus_pg_client_access_enters_tenant_context_transactions() {
         let source = include_str!("trace_corpus_pg.rs");

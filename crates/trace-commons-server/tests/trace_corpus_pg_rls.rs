@@ -6133,3 +6133,134 @@ async fn community_withdrawal_eviction_drain_crosses_tenants_within_drain_scope(
     delete_eviction_under_tenant(&mut client, &tenant_a, eviction_a).await;
     delete_eviction_under_tenant(&mut client, &tenant_b, eviction_b).await;
 }
+
+/// The raw-SQL tests above pin the policy. This one pins the caller: the real
+/// `drain_community_snapshot_invalidation` must still drain across tenants
+/// once the table is protected. It is the statement that would have gone
+/// silently no-op had V55 shipped the tenant predicate alone.
+#[tokio::test]
+async fn store_facade_drains_withdrawal_evictions_across_tenants() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend
+        .run_migrations()
+        .await
+        .expect("run migrations for withdrawal eviction drain test");
+
+    let tenant_a = format!("tenant-drainfacade-a-{}", Uuid::new_v4().simple());
+    let tenant_b = format!("tenant-drainfacade-b-{}", Uuid::new_v4().simple());
+    let window_label = "rolling_7d";
+    let metric = "credit";
+
+    for tenant_id in [&tenant_a, &tenant_b] {
+        backend
+            .upsert_contributor_profile(
+                tenant_id,
+                &format!("principal:{tenant_id}"),
+                &format!("Handle {tenant_id}"),
+                &format!("handle-{tenant_id}"),
+                None,
+            )
+            .await
+            .expect("opt the contributor in");
+    }
+
+    let mut receipts = Vec::new();
+    for tenant_id in [&tenant_a, &tenant_b] {
+        let receipt = backend
+            .withdraw_contributor_profile(
+                tenant_id,
+                &format!("principal:{tenant_id}"),
+                window_label,
+                metric,
+            )
+            .await
+            .expect("withdraw the contributor")
+            .expect("an active profile must yield an eviction receipt");
+        assert_eq!(&receipt.tenant_id, tenant_id);
+        receipts.push(receipt);
+    }
+
+    let pending = backend
+        .pending_community_snapshot_invalidation(window_label, metric)
+        .await
+        .expect("read pending invalidation")
+        .expect("two withdrawals must leave a pending watermark");
+
+    let snapshot_id = Uuid::new_v4();
+    let drained = backend
+        .drain_community_snapshot_invalidation(
+            window_label,
+            metric,
+            snapshot_id,
+            pending + chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("drain the coalesced invalidation");
+    assert!(drained, "the pending invalidation must drain");
+
+    // Read the receipts back under each tenant's own context. Every one of
+    // this deployment's tenants withdrew into the same (window, metric), and
+    // one drain statement had to reach all of them.
+    let eviction_ids: Vec<Uuid> = receipts.iter().map(|r| r.eviction_id).collect();
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("get verification connection");
+    for receipt in &receipts {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start drain verification transaction");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&receipt.tenant_id],
+        )
+        .await
+        .expect("set tenant context for drain verification");
+        let rows = tx
+            .query(
+                "SELECT eviction_id, drained_snapshot_id
+                   FROM trace_community_withdrawal_evictions
+                  WHERE drained_at IS NOT NULL AND eviction_id = ANY($1)",
+                &[&eviction_ids],
+            )
+            .await
+            .expect("read drained receipts");
+        assert!(
+            rows.iter().any(
+                |row| row.get::<_, Uuid>("eviction_id") == receipt.eviction_id
+                    && row.get::<_, Option<Uuid>>("drained_snapshot_id") == Some(snapshot_id)
+            ),
+            "{}'s receipt must be marked drained by the cross-tenant drain",
+            receipt.tenant_id
+        );
+        tx.commit().await.expect("commit drain verification");
+    }
+    // The eviction table has no FK to trace_tenants, so tenant cleanup does not
+    // cascade to receipts; drop them explicitly.
+    for receipt in &receipts {
+        let tx = client
+            .transaction()
+            .await
+            .expect("start receipt cleanup transaction");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&receipt.tenant_id],
+        )
+        .await
+        .expect("set tenant context for receipt cleanup");
+        let _ = tx
+            .execute(
+                "DELETE FROM trace_community_withdrawal_evictions WHERE eviction_id = $1",
+                &[&receipt.eviction_id],
+            )
+            .await;
+        tx.commit().await.expect("commit receipt cleanup");
+    }
+    drop(client);
+
+    cleanup_trace_tenants(&backend, &[&tenant_a, &tenant_b]).await;
+}
