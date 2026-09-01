@@ -5599,7 +5599,8 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-/// The six columns `trace_commons_public_read` is granted, and no others.
+/// The seven columns `trace_commons_public_read` is granted, and no others --
+/// `singleton` among them, because the filter below references it.
 ///
 /// One constant rather than two copies: the runtime read and the public read
 /// must return the same shape, and the public role's GRANT is column-scoped,
@@ -6233,20 +6234,47 @@ mod tests {
             .map(|column| column.trim().to_string())
             .collect::<Vec<_>>();
 
-        // Every column of the table, so a new one cannot be referenced
-        // without this test having an opinion about it.
-        for column in [
-            "singleton",
-            "traces_accepted",
-            "contributors",
-            "points_issued",
-            "withheld",
-            "as_of",
-            "refreshed_at",
-        ] {
-            if REGISTER_STATS_SELECT_SQL.contains(column) {
+        // The table's columns, PARSED OUT of V55's CREATE TABLE rather than
+        // restated. A hardcoded list here would be a third hand-maintained
+        // copy of the schema: add an eighth column to the table, the query
+        // and the grant but not to the list, and this test would silently
+        // have no opinion about it while claiming to cover every column.
+        let table_columns = V55
+            .split("CREATE TABLE trace_register_stats (")
+            .nth(1)
+            .and_then(|rest| rest.split("\n);").next())
+            .expect("V55 creates trace_register_stats")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("--"))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(|name| name.trim_end_matches(',').to_string())
+            .collect::<Vec<_>>();
+
+        // Anti-vacuity: a parser that silently returned nothing would make
+        // every loop below run zero times and pass. Tie it to the grant,
+        // which is parsed independently -- every granted column must be a
+        // real column of the table, which also catches a typo in the grant.
+        assert!(
+            !table_columns.is_empty(),
+            "failed to parse any column out of V55's CREATE TABLE"
+        );
+        assert!(
+            !granted.is_empty(),
+            "failed to parse V55's GRANT SELECT list"
+        );
+        for column in &granted {
+            assert!(
+                table_columns.contains(column),
+                "V55 grants {column}, which is not a column of \
+                 trace_register_stats -- check the grant for a typo"
+            );
+        }
+
+        for column in &table_columns {
+            if REGISTER_STATS_SELECT_SQL.contains(column.as_str()) {
                 assert!(
-                    granted.iter().any(|g| g == column),
+                    granted.contains(column),
                     "the public read references {column}, so V55 must grant \
                      it -- an ungranted reference denies the whole table"
                 );
