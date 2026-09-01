@@ -6102,6 +6102,14 @@ mod tests {
             THIS_FILE.contains(&version_marker),
             "V53 must record itself in _trace_commons_migrations"
         );
+        let insert_marker = format!(
+            "&[&{}_i32, &\"{}\"]",
+            53, "trace_gate_decision_composite_score"
+        );
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V53 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
+        );
     }
 
     /// V54 records the composition statistic for large traces (#478). Shadow
@@ -6146,6 +6154,14 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V54 must record itself in _trace_commons_migrations"
+        );
+        let insert_marker = format!(
+            "&[&{}_i32, &\"{}\"]",
+            54, "trace_gate_decision_qualifying_mass"
+        );
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V54 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
         );
     }
 
@@ -6469,6 +6485,11 @@ mod tests {
             THIS_FILE.contains(&version_marker),
             "V55 must record itself in _trace_commons_migrations"
         );
+        let insert_marker = format!("&[&{}_i32, &\"{}\"]", 55, "register_stats_public_read");
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V55 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
+        );
     }
 
     /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
@@ -6490,6 +6511,14 @@ mod tests {
             THIS_FILE.contains(&version_marker),
             "V52 must record itself in _trace_commons_migrations"
         );
+        let insert_marker = format!(
+            "&[&{}_i32, &\"{}\"]",
+            52, "trace_submission_residual_risk_basis"
+        );
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V52 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
+        );
     }
 
     /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
@@ -6507,6 +6536,11 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V51 must record itself in _trace_commons_migrations"
+        );
+        let insert_marker = format!("&[&{}_i32, &\"{}\"]", 51, "privacy_classify_window_cache");
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V51 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
         );
     }
 
@@ -6529,6 +6563,14 @@ mod tests {
             THIS_FILE.contains(&version_marker),
             "V49 must record itself in _trace_commons_migrations"
         );
+        let insert_marker = format!(
+            "&[&{}_i32, &\"{}\"]",
+            49, "trace_submission_last_status_reason"
+        );
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V49 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
+        );
     }
 
     /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
@@ -6546,6 +6588,11 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V48 must record itself in _trace_commons_migrations"
+        );
+        let insert_marker = format!("&[&{}_i32, &\"{}\"]", 48, "trace_correction_value");
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V48 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
         );
     }
 
@@ -6568,6 +6615,14 @@ mod tests {
         assert!(
             THIS_FILE.contains(&version_marker),
             "V47 must record itself in _trace_commons_migrations"
+        );
+        let insert_marker = format!(
+            "&[&{}_i32, &\"{}\"]",
+            47, "trace_gate_decision_total_chunk_count"
+        );
+        assert!(
+            THIS_FILE.contains(&insert_marker),
+            "V47 must record itself in _trace_commons_migrations via the INSERT, not merely be gated by an already_applied check for the same version"
         );
     }
 
