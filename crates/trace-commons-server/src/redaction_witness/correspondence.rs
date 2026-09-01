@@ -24,6 +24,8 @@
 //! No function here logs, and callers must not log the values either: `raw`,
 //! the returned text, and the span list are all contributor content.
 
+use sha2::{Digest, Sha256};
+
 /// One redaction: the half-open codepoint range `[start, end)` of the raw text
 /// that the client removed, and the text it put in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +87,15 @@ pub enum CorrespondenceError {
         "redaction spans {first} and {second} overlap; the witness consumes the post-collapse span list, not a raw classifier list"
     )]
     OverlappingSpans { first: usize, second: usize },
+    /// The span list applied cleanly, but the result is not the submitted
+    /// artifact. The artifact was fabricated, padded, truncated, or taken
+    /// from another session.
+    ///
+    /// Carries nothing -- not the two lengths, not the first differing
+    /// offset. Either would describe contributor content, and neither would
+    /// change what the caller does, which is refuse.
+    #[error("the redacted artifact does not match the raw text with the redaction spans applied")]
+    RedactedMismatch,
 }
 
 impl std::fmt::Debug for CorrespondenceError {
@@ -203,6 +214,57 @@ pub fn apply_spans(raw: &str, spans: &[RedactionSpan]) -> Result<String, Corresp
     }
     out.push_str(&raw[cursor..]);
     Ok(out)
+}
+
+/// Evidence that a redacted artifact corresponds to the raw text.
+///
+/// Carries the artifact's SHA-256 and nothing else. It crosses into
+/// certificate construction, where everything it holds becomes a candidate
+/// for logging, so it holds only what the certificate binds. Adding the text,
+/// the span count or a label here would put contributor content on that path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrespondenceProof {
+    redacted_sha256: String,
+}
+
+impl CorrespondenceProof {
+    /// Lowercase hex SHA-256 of the redacted artifact's bytes.
+    pub fn redacted_sha256(&self) -> &str {
+        &self.redacted_sha256
+    }
+}
+
+/// Check that `redacted` is what applying `spans` to `raw` produces.
+///
+/// This proves **faithfulness**: the redacted artifact derives from the raw
+/// one by redaction alone, so it was not fabricated, padded, truncated, or
+/// swapped for another session's output. The placeholder grammar
+/// [`apply_spans`] enforces is what makes "by redaction alone" true rather
+/// than aspirational -- without it a span is an insertion channel and a
+/// matching artifact proves nothing.
+///
+/// It does **not** prove that enough was redacted. Sufficiency is the
+/// redaction policy's job and the PII backstop's; a submission that redacts
+/// nothing at all corresponds perfectly to its raw text.
+///
+/// The comparison is byte equality. Containment or a prefix match would let a
+/// contributor append arbitrary text to an otherwise faithful artifact and
+/// still pass, which is the whole attack this refuses.
+///
+/// Neither argument nor the span list may be logged by the caller: all three
+/// are contributor content.
+pub fn check_correspondence(
+    raw: &str,
+    redacted: &str,
+    spans: &[RedactionSpan],
+) -> Result<CorrespondenceProof, CorrespondenceError> {
+    let expected = apply_spans(raw, spans)?;
+    if expected != redacted {
+        return Err(CorrespondenceError::RedactedMismatch);
+    }
+    Ok(CorrespondenceProof {
+        redacted_sha256: hex::encode(Sha256::digest(redacted.as_bytes())),
+    })
 }
 
 #[cfg(test)]
@@ -534,6 +596,7 @@ mod tests {
                 first: 4,
                 second: 5,
             },
+            CorrespondenceError::RedactedMismatch,
         ] {
             assert_eq!(format!("{err:?}"), err.to_string());
         }
@@ -549,5 +612,133 @@ mod tests {
         assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
         assert!(!err.to_string().contains(secret));
         assert!(!format!("{err:?}").contains(secret));
+    }
+}
+
+#[cfg(test)]
+mod correspondence_tests {
+    use super::*;
+
+    const RAW: &str = "call alice at 555-0100 today";
+
+    fn spans() -> Vec<RedactionSpan> {
+        vec![
+            RedactionSpan {
+                start: 5,
+                end: 10,
+                replacement: "[REDACTED:private_name]".to_string(),
+            },
+            RedactionSpan {
+                start: 14,
+                end: 22,
+                replacement: "[REDACTED:private_phone]".to_string(),
+            },
+        ]
+    }
+
+    fn faithful() -> String {
+        apply_spans(RAW, &spans()).unwrap()
+    }
+
+    #[test]
+    fn a_faithful_redaction_is_proved() {
+        let proof = check_correspondence(RAW, &faithful(), &spans()).unwrap();
+        assert_eq!(
+            proof.redacted_sha256(),
+            hex::encode(Sha256::digest(faithful().as_bytes()))
+        );
+    }
+
+    #[test]
+    fn a_fabricated_redacted_artifact_is_refused() {
+        let err = check_correspondence(RAW, "entirely different text", &spans()).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn extra_text_appended_to_the_redacted_artifact_is_refused() {
+        let padded = format!("{} and a fabricated postscript", faithful());
+        let err = check_correspondence(RAW, &padded, &spans()).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn extra_text_prepended_to_the_redacted_artifact_is_refused() {
+        let padded = format!("a fabricated preamble {}", faithful());
+        let err = check_correspondence(RAW, &padded, &spans()).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn a_truncated_redacted_artifact_is_refused() {
+        let faithful = faithful();
+        let truncated = &faithful[..faithful.len() - 6];
+        let err = check_correspondence(RAW, truncated, &spans()).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn a_span_that_hides_nothing_still_has_to_match() {
+        // No spans: nothing was redacted, so the artifact must be the raw
+        // text itself. Anything else is a swap, and passes no more easily
+        // for having claimed no redactions.
+        let proof = check_correspondence(RAW, RAW, &[]).unwrap();
+        assert_eq!(
+            proof.redacted_sha256(),
+            hex::encode(Sha256::digest(RAW.as_bytes()))
+        );
+        let err = check_correspondence(RAW, "something else entirely", &[]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn a_whitespace_only_difference_is_refused() {
+        // Byte equality, not a normalizing comparison.
+        let err = check_correspondence(RAW, &format!("{} ", faithful()), &spans()).unwrap_err();
+        assert_eq!(err, CorrespondenceError::RedactedMismatch);
+    }
+
+    #[test]
+    fn a_span_list_fault_reports_the_span_fault_not_a_mismatch() {
+        // The span list never applies, so there is nothing to compare. The
+        // caller must see why the list was refused, not a mismatch that
+        // would send them looking at the artifact.
+        let err = check_correspondence(
+            RAW,
+            &faithful(),
+            &[RedactionSpan {
+                start: 0,
+                end: 1,
+                replacement: "a fabricated passage".to_string(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn a_proof_carries_the_hash_and_nothing_else() {
+        // Everything the proof carries becomes a candidate for logging when
+        // it crosses into certificate construction.
+        let proof = check_correspondence(RAW, &faithful(), &spans()).unwrap();
+        let rendered = format!("{proof:?}");
+        for leaked in ["alice", "555-0100", "private_name", "REDACTED", "call"] {
+            assert!(
+                !rendered.contains(leaked),
+                "proof rendered contributor content: {rendered}"
+            );
+        }
+        assert!(rendered.contains(proof.redacted_sha256()));
+    }
+
+    #[test]
+    fn neither_formatter_of_the_mismatch_carries_content_or_lengths() {
+        let err = CorrespondenceError::RedactedMismatch;
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            assert_eq!(
+                rendered,
+                "the redacted artifact does not match the raw text with the redaction spans applied"
+            );
+        }
     }
 }
