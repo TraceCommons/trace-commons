@@ -26,10 +26,14 @@ anything else.
 
 - **Nothing here runs in a TEE.** `trace-commons-gate-enclave` is aspirational
   naming: `docs/operator/architecture.md:78-80` describes components that "move
-  out-of-process into the enclave" as future work. The witness would be **the
-  project's first real trusted-execution deployment**, and the operational cost
-  of that — provisioning, measurement management, attestation serving, upgrade
-  discipline — belongs to this design and not to a later slice.
+  out-of-process into the enclave" as future work. That was originally the
+  heaviest cost in this design — a witness we hosted would have been the
+  project's first trusted-execution deployment, with all the provisioning,
+  measurement management, attestation serving and upgrade discipline that
+  implies. **The decision to have NEAR AI host it removes that cost entirely**,
+  which is most of why it is the right call. The fact remains true and is worth
+  keeping: it is why any future proposal to run our own enclave should be
+  costed carefully.
 - **The redactor is not fully deterministic.** `DeterministicTraceRedactor`
   (`trace_contribution.rs:3501`) holds
   `privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>`, the model-based
@@ -86,12 +90,18 @@ On success the witness signs:
 ```
 H(redacted_artifact)
 chat_id
+account_pseudonym          <- stable per-account, opaque; see Deployment
 prompt_tokens, completion_tokens
 model
 timestamp
 redaction_policy_version
 witness_enclave_measurement
 ```
+
+`account_pseudonym` is the field that makes the per-contributor cap bind. It is
+available only because NEAR AI hosts the witness and therefore already knows the
+account; it is opaque and must never be a name, an email, or anything resolvable
+to a person. We hash it on arrival regardless.
 
 The server verifies the signature against the witness's own attestation, then
 checks `H(redacted_artifact)` against the bytes it holds. Raw never reaches the
@@ -119,11 +129,15 @@ than reimplement it** — a second verifier drifts, and this one guards admissio
 
 ## Trust model
 
-The contributor trusts the witness with raw bytes. That trust is grounded the
-same way NEAR AI grounds ours: the witness publishes a nonce-bound attestation
-of its own, and the contributor's client verifies the measurement **before**
-sending anything. A client that cannot verify the measurement must refuse to
-send, not warn and proceed.
+The contributor sends raw bytes to **the party that already has them**. Under
+the hosted design this is the design's strongest property: NEAR AI served the
+inference, so it has already seen every one of those bytes. The witness adds no
+reader.
+
+Trust is still grounded the way NEAR AI grounds it today — a nonce-bound
+attestation the client verifies before sending, and a client that cannot verify
+the measurement must refuse rather than warn and proceed. The verification path
+is the one already built for the inference endpoint, not a second trust model.
 
 The server trusts the witness's signature, and transitively its measurement. The
 server never sees raw bytes, which is what keeps the existing "raw never reaches
@@ -132,11 +146,21 @@ the hosted service" property intact.
 Nobody trusts the client. That is the point: today's alternative is a
 client-computed verdict, which is authorization by self-report.
 
-**Residual exposure, stated plainly.** A compromised witness sees every raw
-trace passing through it. That is a larger blast radius than any component
-currently in this system, and it is the price of the property. Mitigations —
-short retention, no persistence of raw, memory-only processing, measurement
-pinning by clients — reduce it but do not remove it.
+**Residual exposure, stated plainly — and smaller than it first appears.** A
+compromised witness sees every raw trace passing through it. But under the
+hosted design that is **not a new reader**: NEAR AI served the inference, so it
+already saw those exact bytes. The witness widens what one already-trusted party
+does with data it already had, rather than adding a party.
+
+What it does add is *duration* and *aggregation* — bytes that were transient in
+an inference request now arrive again, deliberately, for a second purpose.
+Short retention, no persistence of raw, memory-only processing and
+client-side measurement pinning all still matter, and are worth asking them to
+attest to.
+
+Had we hosted it ourselves, this paragraph would read very differently: that
+version genuinely added a reader, and would have been the largest blast radius
+in the system.
 
 ## The pseudonym question, corrected
 
@@ -176,60 +200,141 @@ per-contributor cap, dedup — stays on the server, where it already lives.
 across replicas is a hard problem the server has already solved for other
 credentials.
 
-## Deployment
+## Deployment: NEAR AI hosts it
 
-Recommended: **we operate it**, on a TDX-capable host, publishing an attestation
-report the way NEAR AI does.
+**Decided 2026-09-01 (Zaki). This is no longer something we build.**
 
-Alternatives considered:
+NEAR AI already runs attested TDX + GPU, and already holds the raw bytes for
+every inference it serves. A witness there adds **no exposure that does not
+already exist** — the contributor has already sent that provider those exact
+bytes. Every other placement adds a party.
 
-- **Contributor-side.** Strongest privacy — raw never leaves the machine — but
-  consumer hardware largely lacks a usable general-compute TEE, and Apple
-  Silicon has no TDX/SGX equivalent for this. Not viable for the population we
-  are trying to admit.
-- **NEAR AI hosts it.** They already run attested TDX+GPU and already hold the
-  raw bytes, so it adds no exposure. Materially the best answer on privacy
-  grounds, and a much larger upstream ask than the pseudonym. Worth raising in
-  the same conversation.
+Alternatives, and why they lose:
 
-The pilot is `c3-standard-4`, an Intel Sapphire Rapids generation. **Verify TDX
-availability and the confidential-VM path on that machine type before committing
-to it** — this design's feasibility rests on it and nothing here has confirmed
-it.
+- **We operate it on GCP.** TDX is available as a confidential-compute type, so
+  the hardware is not the obstacle. Two things are. It would be the project's
+  first TEE deployment, carrying provisioning, measurement management,
+  attestation serving and upgrade discipline. And **GCP's attestation model
+  differs**: Confidential Space issues tokens from an attestation service rather
+  than serving a nonce-bound quote the way dstack does, so the contributor-side
+  verification would not resemble the NEAR AI verification we just built. We
+  would be adding a party *and* a second trust model.
+- **Contributor-side.** Strongest privacy in principle, but consumer hardware
+  largely lacks a usable general-compute TEE and Apple Silicon has no equivalent.
+  Not viable for the population this exists to admit.
+
+### What this changes about the work
+
+The witness stops being an implementation project and becomes a **specified
+ask**. Our side shrinks to two pieces:
+
+1. The client sends raw, redacted and the span list to NEAR AI's witness.
+2. The server verifies the returned certificate against the redacted artifact
+   it already holds.
+
+Both are small. The enclave, the correspondence check and the signing key are
+theirs.
+
+### And it subsumes the pseudonym ask
+
+This is the part that makes hosting worth asking for rather than merely
+convenient.
+
+The contributor authenticates to NEAR AI's witness with their **NEAR AI API
+key** — the same credential they already use for inference. So the witness
+*already knows the account*. It can put a stable per-account pseudonym in the
+certificate without anyone adding a field to the receipt format, and without us
+ever holding a credential.
+
+So the two asks collapse into one. Previously: "add a pseudonym to the signed
+receipt" **and** "consider hosting a witness". Now: **host a witness whose
+certificate carries a stable per-account pseudonym.** One conversation, one
+deliverable on their side, and it resolves content binding and sybil binding
+together.
+
+Note the granularity improves too. A pseudonym derived from the key would be
+per-key, so one payer with several keys gets several caps. A witness that knows
+the *account* can emit a per-account value, which is what the cap actually needs.
+
+## Key custody: the contributor supplies the receipt
+
+**Decided 2026-09-01 (Zaki).** The witness does not hold a contributor
+credential on our behalf.
+
+Under the hosted design this is not a limitation, because the contributor is
+authenticating to NEAR AI directly — the same party that issued the key and
+already accepts it for inference. No credential is surrendered to a third party,
+because there is no third party.
+
+The earlier concern in "The pseudonym question, corrected" — that deriving a
+pseudonym would require custody of a live paid credential — applied to a witness
+**we** hosted. It does not apply here, and that section should be read as
+history rather than as a live constraint.
 
 ## Open items
 
-- **Does the contributor hand over an API key, or supply the receipt?** Decides
-  whether the pseudonym is recoverable without NEAR AI. Assume "supplies the
-  receipt" until decided; that is the safe default.
+Two of the original items are now settled and struck; the rest changed shape
+because the witness is theirs to build, not ours.
+
+- ~~Does the contributor hand over an API key?~~ **Settled: no.** See "Key
+  custody".
+- ~~Confirm TDX availability on the intended host.~~ **Moot.** NEAR AI's
+  enclave is the host, and it is already attested and already verified by the
+  code we shipped.
 - **Whole-trace or per-turn witnessing.** Per-turn keeps payloads small and
   bounds exposure per call; whole-trace makes the correspondence check
-  single-shot. Payloads above 16 MB argue for per-turn, the byte-equality check
-  argues for whole-trace.
+  single-shot. Envelopes reach 16 MB and raw exceeds redacted, which argues for
+  per-turn; the byte-equality check argues for whole-trace. **This is now a
+  question for the ask**, since it shapes their API.
 - **Retention of nothing, provably.** "Memory only, no persistence" is easy to
-  claim and hard to demonstrate. What does the measurement actually pin, and
-  what would an auditor check?
+  claim and hard to demonstrate. Under the hosted design this becomes something
+  to *ask them to attest to* rather than something we implement — what does the
+  measurement pin, and what would an auditor check?
 - **Upgrade discipline.** A witness image upgrade changes its measurement, so
-  every pinning client breaks until it re-pins. That is the correct failure
-  direction, and it needs a rollout story that does not tempt anyone into
-  disabling verification.
+  every pinning client breaks until it re-pins. Correct failure direction, but
+  it needs a rollout story that does not tempt anyone into disabling
+  verification. Also theirs, and worth agreeing up front.
 - **Does the span list leak?** It carries offsets and replacement labels of
   redacted material. It goes to the witness only and must never reach the
   server, but the shape of a span list is itself information about what was
   found. Reason this through before shipping.
-- **Whether the witness is worth it at all**, versus accepting a per-trace cost
-  floor with no content binding. This is a substantial system — the first TEE
-  deployment in the project — to close a gap whose practical cost depends on a
-  pricing relationship that is currently favourable. Build the cheap verification
-  first and measure before committing.
+- **Whether this is worth asking for at all.** Still the real question, but the
+  calculus has changed: it is no longer "is it worth building the project's
+  first TEE deployment", it is "is it worth one upstream conversation". That is
+  a much lower bar, and the same conversation now carries the pseudonym.
+
+## The ask on NEAR AI, consolidated
+
+Everything this design needs from them, in one place. Each item is something
+they can already do or already know; none asks them to reveal content or
+identity.
+
+1. **Host a redaction witness** in the enclave that already serves inference.
+   It receives raw bytes, the redacted artifact, and a span list; applies the
+   spans to raw; requires byte equality; and verifies the inference receipt
+   against the raw bytes it was given.
+2. **Return a certificate over the redacted artifact**, with the fields in "The
+   certificate" above.
+3. **Include a stable per-account pseudonym** in that certificate. Opaque,
+   salted, not resolvable to a person. This is the field that makes the
+   per-contributor cap bind, and hosting is what makes it available.
+
+Notice what is *not* on this list any more: a change to the receipt format. That
+was the previous ask, and hosting subsumes it.
 
 ## Sequencing
 
-1. The attestation verification slice (already planned) builds and proves the
-   receipt and quote verification this design reuses.
-2. Settle the API-key custody question, since it decides the pseudonym.
-3. Confirm TDX availability on the intended host.
-4. Only then plan the witness.
+1. ~~The attestation verification slice.~~ **Done** — receipt and quote
+   verification are on `main`, and the live capture confirmed the receipt binds
+   the model as well as both hashes.
+2. ~~Settle API-key custody.~~ **Done.**
+3. ~~Confirm TDX availability.~~ **Moot** under the hosted design.
+4. **Run the drill once against the live service.** It has never executed end to
+   end; #527 fixed the bug that would have stopped it. This validates the
+   verification the witness certificate would reuse, and costs one completion.
+5. **Put the consolidated ask to NEAR AI.** Their answer determines whether
+   there is anything to plan.
+6. Only then plan our two pieces: the client's send, and the server's
+   certificate check.
 
-Nothing here blocks the current slice, and the current slice is a prerequisite
-for this one.
+Nothing here is blocked on us. The next move is a conversation, not a commit.
