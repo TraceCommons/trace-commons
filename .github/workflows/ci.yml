@@ -230,6 +230,64 @@ jobs:
       # workspace untested by default.
       - run: cargo test --workspace
 
+  preserve-order-guard:
+    name: serde_json preserve_order guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-preserve-order-guard-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-preserve-order-guard-
+      # The end-to-end proof for crates/trace-commons-protocol/src/canonical_json.rs.
+      #
+      # Sorting a `serde_json::Map` is unobservable under the default feature
+      # set -- the map is a `BTreeMap`, so it hands back sorted keys whether or
+      # not `canonicalize` does anything. That makes an omitted call, as
+      # opposed to a deleted comparison, invisible to the ordinary suite. This
+      # job forces the `preserve_order` feature on, which is the condition
+      # `canonical_json` exists to survive, and requires that the ONLY failing
+      # test is the guard that is meant to fail there. Every hashing path --
+      # the pinned envelope digest, the redaction hashes, the NEAR outbox
+      # idempotency key, the dedup payload summary -- must still produce the
+      # bytes it produces today.
+      #
+      # A green run here is the statement "a dependency may turn preserve_order
+      # on and no digest moves". Do not weaken it to compiling the module.
+      - name: Force serde_json/preserve_order on
+        run: |
+          sed -i 's|^serde_json = "1"$|serde_json = { version = "1", features = ["preserve_order"] }|' \
+            crates/trace-commons-protocol/Cargo.toml
+          grep -q 'preserve_order' crates/trace-commons-protocol/Cargo.toml
+      - name: Only the guard test may fail
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee preserve-order.log || true
+          failed="$(sed -n '/^failures:$/,/^test result/p' preserve-order.log \
+            | grep -E '^    [a-z]' | sed 's/^ *//' | sort -u)"
+          expected='canonical_json::tests::key_order_is_sorted_not_insertion_order'
+          if [ "$failed" != "$expected" ]; then
+            echo "::error::Expected exactly the preserve_order guard to fail."
+            echo "Expected: $expected"
+            echo "Actual:"
+            echo "$failed"
+            echo
+            echo "If the guard did not fail, it has stopped detecting preserve_order."
+            echo "If anything else failed, canonical_json no longer holds a hashing"
+            echo "path stable under preserve_order -- that test's digest moves the"
+            echo "day a dependency enables the feature. Fix the path, not this job."
+            exit 1
+          fi
+          echo "Only the guard failed; every hashing path held its bytes."
+
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke
     runs-on: ubuntu-latest

@@ -56308,6 +56308,23 @@ fn trace_record_artifact_object_store_for_ref(
         .to_string()
 }
 
+/// Exempt from the `canonical_json` treatment the other envelope-hashing
+/// paths got, deliberately.
+///
+/// This serializes a typed struct, so the serializer writes its fields in
+/// declaration order with no map involved -- `serde_json/preserve_order`
+/// cannot move them. The only ordering-sensitive part is the nested
+/// `structured_payload` values, and those arrive here already key-ordered:
+/// the envelope is read back from stored bytes, and the redaction pipeline
+/// canonicalizes every payload before it is stored
+/// (`canonicalize_event_payloads` in `trace-commons-protocol`).
+///
+/// Making it canonical anyway would mean either cloning the whole envelope
+/// to sort payloads in a copy, or routing it through `serde_json::to_value`
+/// -- and that second one would sort the *struct* fields too and move this
+/// hash today, which is exactly what the canonicalization work was required
+/// not to do. Nothing re-verifies a stored value of this hash against a
+/// rebuild in any case; the export verifier re-hashes raw file bytes.
 fn envelope_plaintext_hash(envelope: &TraceContributionEnvelope) -> anyhow::Result<String> {
     let envelope_json = serde_json::to_string_pretty(envelope)
         .context("failed to serialize trace envelope for hashing")?;

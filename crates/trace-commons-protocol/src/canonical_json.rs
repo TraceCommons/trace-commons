@@ -33,7 +33,7 @@ pub fn canonicalize(value: &mut Value) {
     match value {
         Value::Object(map) => {
             let mut entries = std::mem::take(map).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            sort_entries(&mut entries);
             let mut sorted = Map::new();
             for (key, mut entry) in entries {
                 canonicalize(&mut entry);
@@ -48,6 +48,25 @@ pub fn canonicalize(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// The ordering decision, on input a caller can hand over out of order.
+///
+/// Every public entry point in this module routes its comparison through
+/// here, and it exists as a separate function so that comparison is
+/// *testable*. Sorting is unobservable through a `serde_json::Map` under the
+/// default feature set -- the map is a `BTreeMap`, so anything a test puts in
+/// one is already sorted and sorting it again proves nothing. A `Vec` the
+/// test builds is not, so `sort_entries_orders_input_the_caller_built` below
+/// fails if this comparison is dropped or reversed.
+///
+/// What that still cannot catch is `canonicalize` failing to *call* this at
+/// all: an early return from it is likewise unobservable under a `BTreeMap`.
+/// The `serde_json preserve_order guard` CI job is what covers that case, by
+/// running the whole suite with the feature on and requiring that only the
+/// guard test fails.
+fn sort_entries<K: Ord, V>(entries: &mut [(K, V)]) {
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
 }
 
 /// [`canonicalize`] on a copy, for a value the caller only has by reference.
@@ -75,9 +94,10 @@ pub fn to_canonical_vec(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
 /// insertion-ordered map picks a different N, not merely a different order.
 /// Sort before truncating.
 pub fn sorted_keys(map: &Map<String, Value>) -> Vec<&str> {
-    let mut keys = map.keys().map(String::as_str).collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys
+    sorted_entries(map)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
 }
 
 /// An object's entries in sorted key order. See [`sorted_keys`].
@@ -86,7 +106,7 @@ pub fn sorted_entries(map: &Map<String, Value>) -> Vec<(&str, &Value)> {
         .iter()
         .map(|(key, value)| (key.as_str(), value))
         .collect::<Vec<_>>();
-    entries.sort_unstable_by_key(|(key, _)| *key);
+    sort_entries(&mut entries);
     entries
 }
 
@@ -162,6 +182,56 @@ mod tests {
             to_canonical_string(&unordered)
                 .expect("serialize")
                 .into_bytes()
+        );
+    }
+
+    /// The comparison itself, on input this test built out of order.
+    ///
+    /// This is the one assertion in the module that can fail if the sort is
+    /// deleted. Everything else routes through a `serde_json::Map`, which is
+    /// a `BTreeMap` under the default feature set and therefore hands back
+    /// sorted keys whether or not this module does any work.
+    #[test]
+    fn sort_entries_orders_input_the_caller_built() {
+        let mut entries = vec![("zulu", 1), ("alpha", 2), ("mike", 3)];
+        sort_entries(&mut entries);
+        assert_eq!(entries, vec![("alpha", 2), ("mike", 3), ("zulu", 1)]);
+
+        // The owned-key shape `canonicalize` uses, and a duplicate-free
+        // ordering over more than three elements so a partial sort shows up.
+        let mut owned = vec![
+            ("zulu".to_string(), json!(1)),
+            ("alpha".to_string(), json!(2)),
+            ("yankee".to_string(), json!(3)),
+            ("bravo".to_string(), json!(4)),
+            ("mike".to_string(), json!(5)),
+        ];
+        sort_entries(&mut owned);
+        assert_eq!(
+            owned
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo", "mike", "yankee", "zulu"]
+        );
+    }
+
+    /// Byte-for-byte over an object built out of order, without going
+    /// through a `Map` for the expectation. Under `preserve_order` the input
+    /// map holds insertion order and this is the assertion that catches a
+    /// `canonicalize` that has stopped sorting; under a `BTreeMap` it passes
+    /// either way, which is why `sort_entries_orders_input_the_caller_built`
+    /// exists as well.
+    #[test]
+    fn canonicalize_emits_sorted_bytes_for_an_out_of_order_object() {
+        let mut object = Map::new();
+        object.insert("zulu".to_string(), json!({"delta": 1, "bravo": 2}));
+        object.insert("alpha".to_string(), json!([{"yankee": 3, "xray": 4}]));
+        let mut value = Value::Object(object);
+        canonicalize(&mut value);
+        assert_eq!(
+            serde_json::to_string(&value).expect("serialize"),
+            r#"{"alpha":[{"xray":4,"yankee":3}],"zulu":{"bravo":2,"delta":1}}"#
         );
     }
 

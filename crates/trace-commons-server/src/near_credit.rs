@@ -319,3 +319,93 @@ fn sha256_prefixed(input: &[u8]) -> String {
     let digest = Sha256::digest(input);
     format!("sha256:{}", hex::encode(digest))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CREDIT_ACCOUNT_HASH: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const SOURCE_LIST_HASH: &str =
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const ATTESTATION_HASH: &str =
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    const ISSUER_SIGNATURE_HASH: &str =
+        "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+
+    fn fixture_receipt() -> NearCreditReceipt {
+        NearCreditReceipt {
+            settlement_batch_id: Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            credit_account_hash: CREDIT_ACCOUNT_HASH.to_string(),
+            policy_version: "credit-policy.v1".to_string(),
+            source_list_hash: SOURCE_LIST_HASH.to_string(),
+            attestation_hash: ATTESTATION_HASH.to_string(),
+            amount_micros: 1_500_000,
+            issuer_signature_hash: ISSUER_SIGNATURE_HASH.to_string(),
+        }
+    }
+
+    /// The idempotency key backs `UNIQUE (tenant_id, idempotency_key)` on the
+    /// settlement outbox, so a shift in it is a duplicate submission rather
+    /// than a failed one -- there is no error to notice.
+    ///
+    /// Pinned to a literal, over args whose `json!` declaration order is
+    /// deliberately not alphabetical. Today that passes either way, because
+    /// `serde_json::Map` is a `BTreeMap` and hands back sorted keys with or
+    /// without `canonicalize`. Under `serde_json/preserve_order` it does not:
+    /// drop the canonicalization in `raw` and the args serialize in
+    /// declaration order, the key moves off this literal, and this test
+    /// fails. That is what the `serde_json preserve_order guard` CI job
+    /// exercises.
+    #[test]
+    fn the_settle_idempotency_key_is_pinned_over_key_ordered_args() {
+        let call = NearCreditReceiptCall::settle("credit.tracecommons.near", fixture_receipt())
+            .expect("settle call");
+        assert_eq!(
+            call.idempotency_key,
+            "sha256:672567e8705fc1b61cff0a082b244b26c42563914744af32bd85e86f04702b23"
+        );
+    }
+
+    /// The args are stored already sorted, not merely hashed sorted, so
+    /// `validate` recomputes the same key from what it reads back out of the
+    /// outbox row.
+    #[test]
+    fn the_stored_args_are_themselves_key_ordered() {
+        let call = NearCreditReceiptCall::settle("credit.tracecommons.near", fixture_receipt())
+            .expect("settle call");
+        assert_eq!(
+            serde_json::to_string(&call.args).expect("serialize"),
+            canonical_json::to_canonical_string(&call.args).expect("serialize")
+        );
+        call.validate().expect("round trip");
+    }
+
+    #[test]
+    fn validate_rejects_a_key_that_does_not_match_the_payload() {
+        let mut call = NearCreditReceiptCall::settle("credit.tracecommons.near", fixture_receipt())
+            .expect("settle call");
+        call.idempotency_key = sha256_prefixed(b"not the payload");
+        let error = call.validate().expect_err("mismatched key must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("idempotency key does not match canonical payload"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn the_freeze_and_settle_keys_do_not_collide() {
+        let settle = NearCreditReceiptCall::settle("credit.tracecommons.near", fixture_receipt())
+            .expect("settle call");
+        let freeze = NearCreditReceiptCall::freeze_account(
+            "credit.tracecommons.near",
+            CREDIT_ACCOUNT_HASH,
+            SOURCE_LIST_HASH,
+        )
+        .expect("freeze call");
+        assert_ne!(settle.idempotency_key, freeze.idempotency_key);
+        freeze.validate().expect("round trip");
+    }
+}
