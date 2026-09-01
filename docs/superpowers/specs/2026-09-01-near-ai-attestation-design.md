@@ -206,8 +206,19 @@ not a weaker gate but an absent one.
 
 ### The ask on NEAR AI
 
-**One field.** A stable per-account pseudonym inside the signed text — the same
-value for every request from one payer, different across payers, and opaque.
+**Four fields, all inside the signed text, none revealing content or identity.**
+Every one is a value NEAR AI already computes; the ask is to sign it, not to
+produce it.
+
+| Field | Buys | They already have it as |
+|---|---|---|
+| stable per-account pseudonym | sybil binding for the per-contributor cap | the account behind the API key |
+| prompt + completion tokens | a cost floor proportional to the trace | `usage` in the completion response |
+| model | names what served the turn | a request parameter |
+| timestamp | binds the receipt to the trace's window | request time |
+
+The pseudonym: the same value for every request from one payer, different across
+payers, and opaque.
 Explicitly *not* an account name, email, or anything resolvable to a person: we
 hash it on arrival regardless (`user_subject_hash`), so a pre-hashed or salted
 value costs us nothing and costs them much less to agree to.

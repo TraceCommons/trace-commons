@@ -165,7 +165,11 @@ mod tests {
     #[test]
     fn a_nonce_we_did_not_send_is_not_bound() {
         let r = AttestationReport::from_json(FIXTURE).unwrap();
-        let other = "0".repeat(64);
+        // Not "0".repeat(64): a TDX quote is full of zero-padding, and 32
+        // consecutive zero bytes are trivially a byte-substring of this
+        // fixture's quote (offset 112), which would make this "negative"
+        // case pass for the wrong reason. "f".repeat(64) is verified absent.
+        let other = "f".repeat(64);
         assert!(!r.quote_binds_nonce(&other).unwrap());
     }
 
