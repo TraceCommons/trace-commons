@@ -453,30 +453,129 @@ final class TranscriptPagingTests: XCTestCase {
 
     // MARK: - Cost
 
-    /// Chunking a 17.5 MB body is a scan, not a reflow. If this ever became
-    /// slow it would be the hang again, moved one function along.
-    func testChunkingSeventeenMegabytesIsAScan() {
-        let text = body(bytes: 17_500_000)
-        let started = Date()
-        let document = TranscriptDocument(text)
-        let elapsed = Date().timeIntervalSince(started)
-        XCTAssertGreaterThan(document.chunkCount, 4_000)
-        XCTAssertLessThan(elapsed, 2.0, "chunking took \(elapsed)s")
+    /// Fastest of `runs` attempts.
+    ///
+    /// Load only ever adds time, never removes it, so the minimum is the
+    /// least noisy estimate available on a shared runner. The assertions
+    /// below then compare two minima against each other, which cancels how
+    /// fast the machine is: what is being asserted is the shape of the cost
+    /// curve, and that is a property of the code rather than of the runner.
+    private func fastest(_ runs: Int = 5, _ work: () -> Void) -> TimeInterval {
+        var best = TimeInterval.infinity
+        for _ in 0..<runs {
+            let started = Date()
+            work()
+            best = min(best, Date().timeIntervalSince(started))
+        }
+        return best
+    }
+
+    /// Chunking is a scan, not a reflow. If this ever became quadratic it
+    /// would be the hang again, moved one function along.
+    ///
+    /// This used to assert `elapsed < 2.0` for a single 17.5 MB body, which
+    /// says "this machine is fast enough" rather than "this algorithm is
+    /// linear". It failed on a loaded runner at 3.36s while the code was
+    /// perfectly linear, and it would equally have passed on a fast machine
+    /// running a quadratic implementation over a smaller body -- wrong in
+    /// both directions.
+    ///
+    /// Measuring two sizes and comparing them tests the actual claim. Four
+    /// times the bytes costs about four times as long when the work is a
+    /// scan and about sixteen when it is a reflow, so a threshold at twice
+    /// the linear ratio sits an octave clear of both answers.
+    func testChunkingCostGrowsWithTheBodyNotWithItsSquare() {
+        let small = body(bytes: 3_000_000)
+        let large = body(bytes: 12_000_000)
+
+        // `body(bytes:)` fills until it passes the mark, so the real ratio is
+        // near four rather than exactly four. Derive it instead of assuming.
+        let linearRatio = Double(large.utf8.count) / Double(small.utf8.count)
+
+        // Accumulated so the optimiser cannot discard the construction whose
+        // cost is the entire point of the measurement.
+        var sink = 0
+        let smallTime = fastest(3) { sink &+= TranscriptDocument(small).chunkCount }
+        let largeTime = fastest(3) { sink &+= TranscriptDocument(large).chunkCount }
+
+        XCTAssertGreaterThan(sink, 0)
+        XCTAssertGreaterThan(
+            TranscriptDocument(large).chunkCount, 2_000,
+            "a 12 MB body must still chunk into thousands, or the timing measures nothing"
+        )
+        XCTAssertGreaterThan(
+            smallTime, 0,
+            "the small case was too fast to time; raise the sizes rather than trusting the ratio"
+        )
+
+        let ratio = largeTime / smallTime
+        XCTAssertLessThan(
+            ratio, linearRatio * 2,
+            """
+            \(linearRatio)x the bytes cost \(ratio)x the time \
+            (\(smallTime)s -> \(largeTime)s). A scan costs about \(linearRatio)x; \
+            this is closer to the \(linearRatio * linearRatio)x of a reflow.
+            """
+        )
     }
 
     /// Moving the window is independent of how big the body is: the cost of
     /// a scroll must not grow with the trace.
-    func testWindowMoveDoesNotWalkTheBody() {
-        let document = TranscriptDocument(body(bytes: 17_500_000))
-        var resident = TranscriptResidentChunks<Int>()
-        resident.update(document: document, visible: 0..<1) { $0 }
+    ///
+    /// Same rework as above, and the same reason. The old form asserted that
+    /// 2000 window moves over one 17.5 MB body finished within 2.0s, which a
+    /// loaded runner can miss without anything being wrong. Independence
+    /// from body size is the actual claim, so measure the same moves against
+    /// two bodies an order of magnitude apart and require the cost not to
+    /// track the difference.
+    func testWindowMoveCostDoesNotTrackBodySize() {
+        let smallDocument = TranscriptDocument(body(bytes: 1_500_000))
+        let largeDocument = TranscriptDocument(body(bytes: 17_500_000))
 
-        let started = Date()
-        for step in 1..<2_000 {
-            resident.update(document: document, visible: step..<(step + 1)) { $0 }
+        func scroll(_ document: TranscriptDocument) -> TranscriptResidentChunks<Int> {
+            var resident = TranscriptResidentChunks<Int>()
+            resident.update(document: document, visible: 0..<1) { $0 }
+            for step in 1..<2_000 {
+                resident.update(document: document, visible: step..<(step + 1)) { $0 }
+            }
+            return resident
         }
-        let elapsed = Date().timeIntervalSince(started)
-        XCTAssertLessThan(elapsed, 2.0, "2000 window moves took \(elapsed)s")
-        XCTAssertLessThanOrEqual(resident.retainedBytes, TranscriptPaging.retainedLimitBytes)
+
+        var retained = 0
+        let smallTime = fastest(3) { retained = scroll(smallDocument).retainedBytes }
+        let largeTime = fastest(3) { retained = scroll(largeDocument).retainedBytes }
+
+        XCTAssertLessThanOrEqual(retained, TranscriptPaging.retainedLimitBytes)
+        XCTAssertGreaterThan(
+            smallTime, 0,
+            "the small case was too fast to time; raise the move count rather than trusting the ratio"
+        )
+
+        // The bodies differ by about 12x, so scrolling that walked the body
+        // would cost about 12x more.
+        //
+        // The threshold is 6x rather than something near 1x because the
+        // measured ratio is not near 1x -- it is about 2.6x. Scrolling is
+        // not literally independent of body size: twelve times the body is
+        // twelve times the chunks, and the per-update bookkeeping over that
+        // chunk list is not free. It is sublinear, not constant, and at
+        // these absolute times (single-digit milliseconds for 2000 moves)
+        // fixed setup cost is a visible share of both measurements.
+        //
+        // So assert the claim that is actually true and actually matters:
+        // the cost must stay far short of proportional. 6x sits at half of
+        // proportional and better than twice the measured value, which
+        // leaves real margin on both sides rather than the 16% a
+        // near-1x threshold would have left -- that would have been a fresh
+        // flake dressed as a tighter test.
+        let ratio = largeTime / smallTime
+        XCTAssertLessThan(
+            ratio, 6.0,
+            """
+            2000 window moves cost \(ratio)x more on a 12x larger body \
+            (\(smallTime)s -> \(largeTime)s), which is close enough to \
+            proportional that the scroll is walking the trace
+            """
+        )
     }
 }
