@@ -101,8 +101,17 @@ pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pendi
     }
     // One decimal place: credit is a score, not an amount, and trailing
     // precision invites the reader to treat it as a balance.
+    //
+    // Rounded explicitly, half away from zero, rather than left to each
+    // language's default: Rust's `{:.1}` rounds half to even and .NET's
+    // "0.0" rounds half away from zero, so 4.25 rendered as 4.2 here and
+    // 4.3 on Windows -- the same contribution, a different figure depending
+    // which machine the contributor read it on. `f32::round` is
+    // half-away-from-zero, and the other two shells now round the same way
+    // before formatting.
     if credit_pending > 0.0 {
-        line.push_str(&format!(". {credit_pending:.1} credit pending"));
+        let rounded = (credit_pending * 10.0).round() / 10.0;
+        line.push_str(&format!(". {rounded:.1} credit pending"));
     }
     line
 }
@@ -292,7 +301,7 @@ mod tests {
     #[test]
     fn contribution_text_states_credit_only_when_there_is_some() {
         let with = contribution_text(2, &labels(&["proj"]), 4.25);
-        assert!(with.contains("4.2 credit pending"), "{with}");
+        assert!(with.contains("4.3 credit pending"), "{with}");
         let without = contribution_text(2, &labels(&["proj"]), 0.0);
         assert!(!without.contains("credit"), "{without}");
     }

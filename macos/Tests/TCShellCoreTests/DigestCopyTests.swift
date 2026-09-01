@@ -56,7 +56,7 @@ final class DigestCopyTests: XCTestCase {
     /// arming a project is exactly when that would show.
     func testCreditIsStatedOnlyWhenThereIsSome() {
         let with = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 4.25)
-        XCTAssertEqual(with, "2 sessions contributed from api. 4.2 credit pending.")
+        XCTAssertEqual(with, "2 sessions contributed from api. 4.3 credit pending.")
         let without = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 0)
         XCTAssertFalse(without?.contains("credit") ?? true, without ?? "")
     }

@@ -72,7 +72,7 @@ public class DigestContributionTests
     public void CreditIsStatedOnlyWhenThereIsSome()
     {
         Assert.Equal(
-            "2 sessions contributed from api. 4.2 credit pending.",
+            "2 sessions contributed from api. 4.3 credit pending.",
             DigestText.ContributionLine(2, new[] { "api" }, 4.25));
         Assert.DoesNotContain(
             "credit",

@@ -39,7 +39,14 @@ public enum DigestCopy {
         // "pending", never "earned": settlement is off on every deployment
         // shipped so far, so a bare figure would be read as money.
         if creditPending > 0 {
-            line += String(format: " %.1f credit pending.", creditPending)
+            // Rounded half away from zero before formatting, matching the
+            // daemon and the other two shells. `%.1f` alone rounds half to
+            // even while .NET's "0.0" rounds half away from zero, so 4.25
+            // would read as 4.2 here and 4.3 on Windows -- the same
+            // contribution, a different figure depending which machine the
+            // contributor read it on.
+            let rounded = (creditPending * 10).rounded() / 10
+            line += String(format: " %.1f credit pending.", rounded)
         }
         return line
     }

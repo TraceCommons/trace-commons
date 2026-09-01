@@ -347,10 +347,16 @@ public static class DigestText
         // "earned" -- settlement is off on every deployment shipped so far.
         if (creditPending > 0)
         {
+            // Rounded half away from zero explicitly, matching the daemon and
+            // the other two shells. "0.0" already rounds that way here while
+            // Rust's {:.1} and Swift's %.1f round half to even, so 4.25 read
+            // as 4.3 here and 4.2 there -- the same contribution, a different
+            // figure depending which machine the contributor read it on.
+            // Stated rather than relied on, so the agreement is visible.
             line += string.Format(
                 CultureInfo.InvariantCulture,
                 " {0:0.0} credit pending.",
-                creditPending);
+                Math.Round(creditPending, 1, MidpointRounding.AwayFromZero));
         }
 
         return line;

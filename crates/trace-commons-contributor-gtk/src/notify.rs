@@ -137,7 +137,12 @@ pub fn contribution_body(
     // than as a fresh start. Always "pending", never "earned" -- settlement
     // is off on every deployment shipped so far.
     if credit_pending > 0.0 {
-        line.push_str(&format!(" {credit_pending:.1} credit pending."));
+        // Rounded half away from zero before formatting, matching the daemon
+        // and the other two shells. Left to `{:.1}` alone this rounds half to
+        // even and Windows rounds half away from zero, so 4.25 would read as
+        // 4.2 here and 4.3 there for the same contribution.
+        let rounded = (credit_pending * 10.0).round() / 10.0;
+        line.push_str(&format!(" {rounded:.1} credit pending."));
     }
     Some(line)
 }
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn credit_is_stated_only_when_there_is_some() {
         let with = contribution_body(2, &["a".to_string()], 4.25).unwrap();
-        assert!(with.ends_with("4.2 credit pending."), "{with}");
+        assert!(with.ends_with("4.3 credit pending."), "{with}");
         let without = contribution_body(2, &["a".to_string()], 0.0).unwrap();
         assert!(!without.contains("credit"), "{without}");
     }
