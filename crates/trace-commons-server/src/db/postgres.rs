@@ -138,7 +138,12 @@ pub struct PgBackend {
     invite_registry_pool: Option<Pool>,
 }
 
-const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
+/// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
+///
+/// Public so RLS tests assert against this list rather than a hand-maintained
+/// copy; the copy had drifted twelve tables out of date while the diagnostic
+/// that would have caught it was failing to parse.
+pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
     "trace_tenant_access_grants",
@@ -2050,16 +2055,16 @@ impl Database for PgBackend {
                     c.relname,
                     c.relrowsecurity,
                     c.relforcerowsecurity,
-                    p.has_policy,
+                    COALESCE(p.has_policy, false) AS has_policy,
                     COALESCE(p.expression_matches, false) AS expression_matches
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  LEFT JOIN LATERAL (
                     SELECT
                         true AS has_policy,
-                        pol.cmd = '*'
-                            AND pg_get_expr(pol.qual, pol.polrelid) = ANY($2)
-                            AND pg_get_expr(pol.with_check, pol.polrelid) = ANY($2)
+                        pol.polcmd = '*'
+                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
+                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
                             AS expression_matches
                         FROM pg_policies p
                         JOIN pg_policy pol

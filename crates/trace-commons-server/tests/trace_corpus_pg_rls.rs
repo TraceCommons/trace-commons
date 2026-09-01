@@ -8,7 +8,10 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::time::{Duration, sleep};
 use tokio_postgres::NoTls;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, TraceCorpusRlsDiagnostics, postgres::PgBackend};
+use trace_commons_server::db::{
+    Database, TraceCorpusRlsDiagnostics,
+    postgres::{PgBackend, TRACE_COMMONS_RLS_TABLES},
+};
 use trace_commons_server::trace_corpus_storage::{
     GateWorkItem, TenantScopedTraceObjectRef, TraceAuditAction, TraceAuditEventWrite,
     TraceAuditSafeMetadata, TraceBenchmarkRegistryOutboxItemWrite,
@@ -175,40 +178,7 @@ fn ready_rls_diagnostics() -> TraceCorpusRlsDiagnostics {
 }
 
 fn expected_trace_rls_tables() -> Vec<&'static str> {
-    vec![
-        "trace_tenants",
-        "trace_tenant_policies",
-        "trace_tenant_access_grants",
-        "trace_submissions",
-        "trace_object_refs",
-        "trace_derived_records",
-        "trace_audit_events",
-        "trace_credit_ledger",
-        "trace_tombstones",
-        "trace_vector_entries",
-        "trace_export_manifests",
-        "trace_export_manifest_items",
-        "trace_retention_jobs",
-        "trace_retention_job_items",
-        "trace_export_access_grants",
-        "trace_export_jobs",
-        "trace_revocation_propagation_items",
-        "trace_utility_attestations",
-        "trace_credit_settlement_batches",
-        "trace_credit_holds",
-        "trace_near_credit_outbox",
-        "trace_near_credit_account_outbox",
-        "trace_benchmark_registry_outbox",
-        "trace_ranking_model_versions",
-        "trace_ranking_calibration_datasets",
-        "trace_ranking_features",
-        "trace_ranking_predictions",
-        "trace_ranking_labels",
-        "trace_ranking_preference_labels",
-        "trace_ranking_calibration_runs",
-        "trace_ranking_worker_runs",
-        "trace_pii_backstop",
-    ]
+    TRACE_COMMONS_RLS_TABLES.to_vec()
 }
 
 fn sample_audit_event(
@@ -1471,7 +1441,45 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
             .expect("read PII backstop production hardening migration"),
     );
-    for table in expected_trace_rls_tables() {
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V26__trace_contributor_profiles.sql"))
+            .expect("read contributor profile production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V28__device_keys.sql"))
+            .expect("read device key production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V29__onboarding_invites.sql"))
+            .expect("read onboarding invite production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V30__trace_accounts.sql"))
+            .expect("read trace account production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V32__webauthn_credentials.sql"))
+            .expect("read WebAuthn credential production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V33__near_identities.sql"))
+            .expect("read NEAR identity production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V34__account_consolidation.sql"))
+            .expect("read account consolidation production hardening migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
+            .expect("read trace withdrawal production hardening migration"),
+    );
+    // `trace_pii_backstop` carries the same tenant-isolation policy but is not
+    // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
+    // coverage the hand-maintained table list used to provide.
+    for table in expected_trace_rls_tables()
+        .into_iter()
+        .chain(["trace_pii_backstop"])
+    {
         let statement = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
         assert!(
             sql.contains(&statement),
@@ -1495,11 +1503,46 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         &std::fs::read_to_string(migrations_root.join("V38__trace_pii_backstop.sql"))
             .expect("read PII backstop central RLS policy migration"),
     );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V26__trace_contributor_profiles.sql"))
+            .expect("read contributor profile central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V28__device_keys.sql"))
+            .expect("read device key central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V29__onboarding_invites.sql"))
+            .expect("read onboarding invite central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V30__trace_accounts.sql"))
+            .expect("read trace account central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V32__webauthn_credentials.sql"))
+            .expect("read WebAuthn credential central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V33__near_identities.sql"))
+            .expect("read NEAR identity central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V34__account_consolidation.sql"))
+            .expect("read account consolidation central RLS policy migration"),
+    );
+    sql.push_str(
+        &std::fs::read_to_string(migrations_root.join("V43__trace_withdrawal.sql"))
+            .expect("read trace withdrawal central RLS policy migration"),
+    );
 
     assert!(sql.contains("CREATE OR REPLACE FUNCTION trace_current_tenant_id()"));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
-    for table in expected_trace_rls_tables() {
+    for table in expected_trace_rls_tables()
+        .into_iter()
+        .chain(["trace_pii_backstop"])
+    {
         assert!(
             sql.contains(&format!(
                 "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"

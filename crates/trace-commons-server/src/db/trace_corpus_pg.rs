@@ -5391,8 +5391,11 @@ impl TraceCorpusStore for PgBackend {
         let row = tx
             .query_opt(
                 &format!(
+                    // `next_job` renames the claimed id so that the unqualified
+                    // `RETURNING {TRACE_EXPORT_JOB_COLUMNS}` list below stays
+                    // unambiguous across the `FROM next_job` join.
                     "WITH next_job AS (
-                        SELECT export_job_id
+                        SELECT export_job_id AS claimed_export_job_id
                           FROM trace_export_jobs
                          WHERE tenant_id = $1
                            AND status = $2
@@ -5411,7 +5414,7 @@ impl TraceCorpusStore for PgBackend {
                             updated_at = NOW()
                        FROM next_job
                       WHERE job.tenant_id = $1
-                        AND job.export_job_id = next_job.export_job_id
+                        AND job.export_job_id = next_job.claimed_export_job_id
                       RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
                 ),
                 &[
