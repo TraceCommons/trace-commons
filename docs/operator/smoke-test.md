@@ -17,6 +17,17 @@ calibration is complete and policy is approved for live cutover.
 - An **admin** bearer token with rights to call the `/v1/admin/*` drills.
 - A **worker** bearer token with `gate` scope for
   `POST /v1/workers/gate/evaluate`.
+- A seeded **canary** submission id, a tenant that must not be able to
+  see it, and a tenant with object-primary routing disabled.
+- A **revoked** canary submission id whose revocation has drained.
+- A settlement **policy version** from the server's
+  `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`.
+
+`smoke-gate.sh` takes these as `--canary-submission`,
+`--canary-isolation-tenant`, `--object-primary-fallback-tenant`,
+`--revoked-submission` and `--settlement-policy-version` (or the matching
+`TRACE_COMMONS_SMOKE_*` env vars) and refuses to start without them,
+because the four drills that need them can never report `ready` otherwise.
 
 ## Steps
 
@@ -43,8 +54,10 @@ for which fields should alarm.
 
 ### 3. Required drills
 
-Run each of these (POST, empty body). All must return HTTP 200 with
-`success: true`:
+Run each of these (POST, JSON body, `Content-Type: application/json`).
+All must return HTTP 200 with `ready: true`. Most take `{}`; the four
+marked below need fields the server cannot infer — see
+[`drills.md`](drills.md) for what each one means.
 
 | Drill | Endpoint |
 |---|---|
@@ -57,26 +70,50 @@ Run each of these (POST, empty body). All must return HTTP 200 with
 | Analytics release | `POST /v1/admin/analytics-release-drill` |
 | Benchmark readiness | `POST /v1/admin/benchmark-readiness-drill` |
 | Revocation propagation | `POST /v1/admin/revocation-propagation-drill` |
-| Revocation effects | `POST /v1/admin/revocation-effects-drill` |
-| Canary read | `POST /v1/admin/canary-read-drill` |
-| Object primary read | `POST /v1/admin/object-primary-read-drill` |
+| Revocation effects | `POST /v1/admin/revocation-effects-drill` (needs `submission_id` of a revoked canary) |
+| Canary read | `POST /v1/admin/canary-read-drill` (needs `submission_id` + `isolation_tenant_id`) |
+| Object primary read | `POST /v1/admin/object-primary-read-drill` (needs `submission_id` + `fallback_tenant_id`) |
 | Object store migration | `POST /v1/admin/object-store-migration-drill` |
 | Rollback | `POST /v1/admin/rollback-drill` |
-| Credit settlement | `POST /v1/admin/credit-settlement-drill` |
+| Credit settlement | `POST /v1/admin/credit-settlement-drill` (needs `policy_version`) |
 
 Example:
 
 ```sh
+# The eleven that take an empty JSON object.
 for D in key-rotation audit-chain db-reconciliation postgres-rls \
          retention-dry-run vector-index analytics-release \
-         benchmark-readiness revocation-propagation revocation-effects \
-         canary-read object-primary-read object-store-migration \
-         rollback credit-settlement; do
+         benchmark-readiness revocation-propagation \
+         object-store-migration rollback; do
   echo "=== $D ==="
-  curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  curl -s -X POST \
     -H "Authorization: Bearer $ADMIN" \
-    "$BASE/v1/admin/$D-drill"
+    -H "Content-Type: application/json" -d '{}' \
+    "$BASE/v1/admin/$D-drill" | jq '{ready, blocking_gaps}'
 done
+
+# The four that need input.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  -H "Content-Type: application/json" \
+  -d "{\"submission_id\":\"$REVOKED_SUBMISSION\"}" \
+  "$BASE/v1/admin/revocation-effects-drill" | jq '{ready, blocking_gaps}'
+
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  -H "Content-Type: application/json" \
+  -d "{\"submission_id\":\"$CANARY_SUBMISSION\",
+       \"isolation_tenant_id\":\"$ISOLATION_TENANT\"}" \
+  "$BASE/v1/admin/canary-read-drill" | jq '{ready, blocking_gaps}'
+
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  -H "Content-Type: application/json" \
+  -d "{\"submission_id\":\"$CANARY_SUBMISSION\",
+       \"fallback_tenant_id\":\"$FALLBACK_TENANT\"}" \
+  "$BASE/v1/admin/object-primary-read-drill" | jq '{ready, blocking_gaps}'
+
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  -H "Content-Type: application/json" \
+  -d "{\"policy_version\":\"$SETTLEMENT_POLICY_VERSION\"}" \
+  "$BASE/v1/admin/credit-settlement-drill" | jq '{ready, blocking_gaps}'
 ```
 
 ### 4. Record rollout-smoke evidence
