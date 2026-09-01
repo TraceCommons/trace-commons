@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use crate::daemon::settings::SourceDeclaration;
 
@@ -449,15 +450,48 @@ pub enum TrajectorySelection {
 ///   equal to watching the real `~/.codex`.
 /// - absent -- never asked. What happens then is the adapter's own
 ///   [`Undeclared`] policy, not one rule for everybody.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SourceRoots {
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
+    /// A routing overlay to attach to every adapter these roots build.
+    /// `None` -- the majority case -- leaves adapters bare. Not `Debug`: a
+    /// trait object can hold anything a proprietary ledger implementation
+    /// wants, so `SourceRoots` implements `Debug` by hand below rather than
+    /// deriving it and requiring `dyn RoutingLedger: Debug`.
+    routing: Option<Arc<dyn crate::routing::RoutingLedger>>,
+}
+
+impl std::fmt::Debug for SourceRoots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceRoots")
+            .field("declared", &self.declared)
+            .field("trajectory", &self.trajectory)
+            .field("routing", &self.routing.is_some())
+            .finish()
+    }
 }
 
 impl SourceRoots {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a routing ledger, so every source built from these roots
+    /// carries the routing overlay. `None` leaves sources bare -- the
+    /// majority case.
+    pub fn with_routing(mut self, ledger: Option<Arc<dyn crate::routing::RoutingLedger>>) -> Self {
+        self.routing = ledger;
+        self
+    }
+
+    /// Whether a routing ledger is attached. Test-only: production code has
+    /// no reason to branch on this, only to build sources from it, but a
+    /// test pinning "nothing attaches a ledger yet" needs to see the field
+    /// without constructing a session to prove it indirectly.
+    #[cfg(test)]
+    pub(crate) fn is_routed(&self) -> bool {
+        self.routing.is_some()
     }
 
     /// Record what the contributor said about one source. `None` leaves it
@@ -558,7 +592,22 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
             staging_dir.clone(),
         ))),
     }
+
+    // One insertion point for the whole overlay. Without a declared proxy the
+    // adapters are returned bare, which is the majority case and costs one
+    // branch.
+    let Some(routing) = roots.routing.clone() else {
+        return sources;
+    };
     sources
+        .into_iter()
+        .map(|source| {
+            Box::new(crate::routing::enriched::RoutingEnrichedSource::new(
+                source,
+                Arc::clone(&routing),
+            )) as Box<dyn TraceSource>
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -629,6 +678,32 @@ mod tests {
             "declaring every source off is a legitimate answer and must \
              watch nothing, not fall back to everything"
         );
+    }
+
+    #[test]
+    fn without_a_declared_proxy_the_adapters_are_returned_bare() {
+        let sources = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, Some(SourceDeclaration::Off))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
+        );
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn a_declared_proxy_decorates_every_adapter_without_adding_one() {
+        let ledger: Arc<dyn crate::routing::RoutingLedger> =
+            Arc::new(crate::routing::FixedLedger::new(Vec::new()));
+        let bare =
+            all_sources(&SourceRoots::new().declare(SOURCE_CLAUDE_CODE, watch("/declared/claude")))
+                .len();
+        let wrapped = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch("/declared/claude"))
+                .with_routing(Some(ledger)),
+        )
+        .len();
+        assert_eq!(bare, wrapped, "decorating must not add or drop a source");
     }
 
     #[test]

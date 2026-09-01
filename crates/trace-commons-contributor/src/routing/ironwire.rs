@@ -114,6 +114,17 @@ impl IronWireLedger {
         };
         self.absorb(&body);
     }
+
+    /// Whether the last refresh produced any rows.
+    ///
+    /// Distinguishes "declared, reading nothing" from "not declared" in the
+    /// daemon's health output. Not an error state -- a machine whose proxy was
+    /// installed today legitimately reports this -- but a user who declared a
+    /// proxy and sees no enrichment needs somewhere to look.
+    #[must_use]
+    pub fn has_rows(&self) -> bool {
+        self.snapshot.read().is_ok_and(|rows| !rows.is_empty())
+    }
 }
 
 impl RoutingLedger for IronWireLedger {
@@ -141,6 +152,12 @@ mod tests {
         // the first seconds on a machine with it. Neither is an error.
         let ledger = IronWireLedger::new(8463, "t".to_string());
         assert!(ledger.exchanges_since(chrono::Utc::now()).is_empty());
+    }
+
+    #[test]
+    fn a_declared_proxy_that_returns_nothing_is_distinguishable_from_no_proxy() {
+        let ledger = IronWireLedger::new(8463, "t".to_string());
+        assert!(!ledger.has_rows(), "declared but empty");
     }
 
     #[test]
