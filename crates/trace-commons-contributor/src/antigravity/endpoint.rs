@@ -492,51 +492,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_skips_a_port_with_nothing_listening_without_stalling() {
-        // Bind to grab a free port, then drop the listener so nothing is
-        // there to answer -- the connection is refused rather than hanging
-        // until PROBE_TIMEOUT. This matters because `discover` walks up to 64
-        // ports in sequence: if a closed port costs a full timeout instead of
-        // a refusal, discovery goes from near-instant to sixteen seconds.
+    async fn probe_port_answers_no_for_a_closed_port() {
+        // What this test used to assert, and why it no longer does.
+        //
+        // It required a connect to a closed port to fail by refusal rather
+        // than by running out `PROBE_TIMEOUT` -- standing in for "the sweep
+        // does not stall". Windows CI then failed it on `is_timeout()`,
+        // which established that Windows does not refuse a connect to a
+        // closed loopback port at all. That assertion was not flaky: it was
+        // asserting a platform behaviour that is genuinely false on one of
+        // the three platforms this ships to, and no amount of reworking the
+        // assertion could make it true.
+        //
+        // The guarantee it stood for has moved rather than gone. A closed
+        // port can no longer cost the sweep anything, because `open_ports`
+        // filters it out before `probe_port` is ever reached and does its
+        // connects concurrently. That property is pinned by
+        // `open_ports_reports_only_the_ports_with_a_listener` and
+        // `closed_ports_do_not_serialize_their_timeouts`, neither of which
+        // depends on how a platform reports a closed port.
+        //
+        // What remains here is the plain correctness question, which holds
+        // everywhere: a port with nothing on it is not the API. `probe_port`
+        // is still reachable with one, because nothing stops a port closing
+        // between the liveness pass and this one.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
         let client = probe_client();
-        assert!(!probe_port(&client, port, TEST_TOKEN).await);
-
-        // Assert the reason, not the clock.
-        //
-        // This was originally `elapsed < PROBE_TIMEOUT` around the call above,
-        // which is a measurement with no margin: the budget being checked is
-        // the very constant that bounds the operation, and the elapsed time
-        // also includes client setup and task scheduling. On a loaded Windows
-        // CI runner it came in at 252.8ms against a 250ms timeout and failed
-        // the branch. Widening it to a tolerance would have been worse than
-        // the flake -- a genuine stall lands at almost exactly PROBE_TIMEOUT,
-        // so any margin big enough to absorb the noise also swallows the
-        // defect the test exists to catch.
-        //
-        // The property is not "this was fast", it is "this failed by refusal
-        // rather than by running out the clock". reqwest distinguishes those
-        // two, so ask it directly: immune to load, and still red if a
-        // platform really does leave closed-port connects hanging.
-        let error = client
-            .post(format!("http://127.0.0.1:{port}{PROBE_PATH}"))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body("{}")
-            .send()
-            .await
-            .expect_err("nothing is listening, so this cannot succeed");
         assert!(
-            !error.is_timeout(),
-            "connecting to a closed port ran out the {PROBE_TIMEOUT:?} timeout \
-             instead of being refused -- probe stalls on closed ports, making \
-             a full sweep cost 64 timeouts: {error}"
-        );
-        assert!(
-            error.is_connect(),
-            "expected a connection error from a closed port, got: {error}"
+            !probe_port(&client, port, TEST_TOKEN).await,
+            "a port with nothing listening must never identify as the API"
         );
     }
 
