@@ -26,6 +26,16 @@ chrono = { version = "0.4", features = ["serde"] }
 cookie = "0.18"
 clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
+# Intel DCAP quote verification, for NEAR AI's TDX attestation reports.
+# Not the default feature set: `report` pulls a second async HTTP stack for
+# fetching collateral, and `rustcrypto` a second crypto backend, where `ring`
+# is already a dependency here. `danger-allow-tcb-override` must stay off --
+# it does exactly what its name says.
+dcap-qvl = { version = "0.6", default-features = false, features = [
+    "std",
+    "ring",
+    "default-x509",
+] }
 dotenvy = "0.15"
 dirs = "6"
 hex = "0.4"

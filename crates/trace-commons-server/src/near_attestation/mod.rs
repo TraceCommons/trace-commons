@@ -17,6 +17,8 @@
 //! verify the quote's signature chain (Task 2) or pin expected measurements
 //! (Task 3).
 
+pub mod quote;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
