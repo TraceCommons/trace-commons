@@ -240,10 +240,13 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
 ///
 /// This is what the borrowing accessors (`tc_preview_body`,
 /// `tc_preview_summary_json`, `tc_preview_search`) consult before they
-/// dereference. Without it they trusted the caller's pointer outright, so a
-/// stale (already-freed) or cross-type pointer was a use-after-free or a
-/// type confusion rather than the fixed error the rest of this ABI
-/// promises.
+/// dereference, and what `handle_pointer_is_live` consults on behalf of
+/// the six `tc_handle*` entry points that borrow rather than free a
+/// handle (`tc_daemon_stop`, `tc_call`, `tc_subscribe`, `tc_unsubscribe`,
+/// `tc_preview_open`, `tc_preview_turns_json`). Without it they trusted
+/// the caller's pointer outright, so a stale (already-freed) or
+/// cross-type pointer was a use-after-free or a type confusion rather
+/// than the fixed error the rest of this ABI promises.
 ///
 /// What this can and cannot guarantee, stated honestly:
 ///
@@ -754,7 +757,7 @@ fn stop_embedded(handle: &tc_handle) {
 
 /// The fixed label the handle entry points below report for a pointer
 /// that is not a live `tc_handle*`.
-const ERR_STALE_HANDLE: &str = "stale-handle";
+const ERR_INVALID_HANDLE_POINTER: &str = "invalid-handle-pointer";
 
 /// Validate a borrowed `tc_handle*` before any dereference, recording the
 /// fixed label itself.
@@ -796,7 +799,7 @@ fn handle_pointer_is_live(handle: *const tc_handle) -> bool {
     if registry_is(handle as usize, AllocKind::Handle) {
         return true;
     }
-    set_last_error(ERR_STALE_HANDLE);
+    set_last_error(ERR_INVALID_HANDLE_POINTER);
     false
 }
 
@@ -812,7 +815,7 @@ fn handle_pointer_is_live(handle: *const tc_handle) -> bool {
 ///
 /// Detects and refuses a pointer that is not a live `tc_handle*` --
 /// already freed by `tc_handle_free`, or a `tc_preview*` passed here by
-/// mistake -- recording the fixed label `"stale-handle"` via
+/// mistake -- recording the fixed label `"invalid-handle-pointer"` via
 /// `tc_last_error` and returning without dereferencing it.
 ///
 /// Idempotent, but **not a teardown barrier for a second concurrent
@@ -900,7 +903,7 @@ pub unsafe extern "C" fn tc_handle_free(handle: *mut tc_handle) {
 ///
 /// A non-NULL `handle` that is not a live `tc_handle*` -- already freed,
 /// or a `tc_preview*` passed here by mistake -- is refused the same way:
-/// a JSON error frame (`bad_params` / `"stale-handle"`) rather than a
+/// a JSON error frame (`bad_params` / `"invalid-handle-pointer"`) rather than a
 /// dereference of a pointer this crate cannot trust the type of.
 ///
 /// # Safety
@@ -919,7 +922,7 @@ pub unsafe extern "C" fn tc_call(
                 return error_frame(ERR_BAD_PARAMS, "null-handle");
             }
             if !handle_pointer_is_live(handle) {
-                return error_frame(ERR_BAD_PARAMS, "stale-handle");
+                return error_frame(ERR_BAD_PARAMS, "invalid-handle-pointer");
             }
             let handle = unsafe { &*handle };
             let method = match unsafe { borrow_str(method) } {
@@ -1114,7 +1117,7 @@ pub unsafe extern "C" fn tc_subscribe(
 /// A no-op if `token` is 0 or unknown (already unsubscribed, or never
 /// valid).
 ///
-/// Also a no-op, recording the fixed label `"stale-handle"` via
+/// Also a no-op, recording the fixed label `"invalid-handle-pointer"` via
 /// `tc_last_error`, if `handle` is non-null but not a live `tc_handle*`
 /// -- refused before any dereference, the same as every other entry
 /// point in this file.
@@ -1208,7 +1211,7 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
 ///
 /// A non-NULL `handle` that is not a live `tc_handle*` is refused the
 /// same way, before any dereference: NULL plus `*err` set to the fixed
-/// label `"stale-handle"`.
+/// label `"invalid-handle-pointer"`.
 ///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` must
@@ -1232,7 +1235,7 @@ pub unsafe extern "C" fn tc_preview_open(
             anyhow::bail!("null-handle");
         }
         if !handle_pointer_is_live(handle) {
-            anyhow::bail!("stale-handle");
+            anyhow::bail!("invalid-handle-pointer");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;
@@ -1327,7 +1330,7 @@ pub unsafe extern "C" fn tc_preview_open(
 ///
 /// A non-NULL `handle` that is not a live `tc_handle*` is refused the
 /// same way, before any dereference: NULL plus `*err` set to the fixed
-/// label `"stale-handle"`.
+/// label `"invalid-handle-pointer"`.
 ///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
@@ -1350,7 +1353,7 @@ pub unsafe extern "C" fn tc_preview_turns_json(
             anyhow::bail!("null-handle");
         }
         if !handle_pointer_is_live(handle) {
-            anyhow::bail!("stale-handle");
+            anyhow::bail!("invalid-handle-pointer");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;

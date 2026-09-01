@@ -908,7 +908,7 @@ fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
     unsafe { tc_daemon_stop(out as *mut tc_handle) };
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false),
         "{:?}",
         last_error()
@@ -940,10 +940,10 @@ fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
         .to_string_lossy()
         .into_owned();
     unsafe { tc_string_free(bad) };
-    assert!(s.contains("stale-handle"), "{s}");
+    assert!(s.contains("invalid-handle-pointer"), "{s}");
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
     unsafe { tc_string_free(out) };
@@ -965,7 +965,7 @@ fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
     );
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
     unsafe { tc_string_free(out) };
@@ -983,7 +983,7 @@ fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
     unsafe { tc_unsubscribe(out as *mut tc_handle, 1) };
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
     unsafe { tc_string_free(out) };
@@ -1010,10 +1010,10 @@ fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
         .to_string_lossy()
         .into_owned();
     unsafe { tc_string_free(err) };
-    assert!(msg.contains("stale-handle"), "{msg}");
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
     unsafe { tc_string_free(out) };
@@ -1041,14 +1041,160 @@ fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
         .to_string_lossy()
         .into_owned();
     unsafe { tc_string_free(err) };
-    assert!(msg.contains("stale-handle"), "{msg}");
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
     assert!(
         last_error()
-            .map(|e| e.contains("stale-handle"))
+            .map(|e| e.contains("invalid-handle-pointer"))
             .unwrap_or(false)
     );
     unsafe { tc_string_free(out) };
     stop(h);
+}
+
+// --- ...and the other shape the doc comment above names: a freed handle -
+//
+// The block above exercises the cross-type half of the threat
+// `handle_pointer_is_live`'s doc names; this one exercises the other half
+// named there -- a handle already freed by `tc_handle_free`. Each test
+// below starts a real handle, stops and frees it exactly as
+// `double_free_of_a_handle_is_refused_not_ub` does, then reuses the same
+// pointer VALUE -- never dereferenced unless the guard under test fails
+// -- as the argument to the entry point under test. For `tc_daemon_stop`,
+// the second stop after the free (the same shape of reuse
+// `double_free_of_a_handle_is_refused_not_ub` makes with
+// `tc_handle_free`) is that call under test.
+
+#[test]
+fn tc_daemon_stop_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // The call under test: a second stop against the same, now-freed,
+    // handle pointer.
+    unsafe { tc_daemon_stop(h) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false),
+        "{:?}",
+        last_error()
+    );
+}
+
+#[test]
+fn tc_call_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // `tc_call` never returns NULL: a freed handle must still produce a
+    // JSON error frame, not a null pointer or a crash.
+    let bad = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!bad.is_null());
+    let s = unsafe { CStr::from_ptr(bad) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(bad) };
+    assert!(s.contains("invalid-handle-pointer"), "{s}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_subscribe_refuses_a_freed_handle() {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "a freed handle must not yield a subscription token"
+    );
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // Any nonzero token: the pointer-liveness check runs before the token
+    // is ever looked up, so no real subscription is needed here.
+    unsafe { tc_unsubscribe(h, 1) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_preview_open_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_open(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_turns_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
 }
 
 // --- Discriminating token uniqueness for tc_subscribe -------------------
