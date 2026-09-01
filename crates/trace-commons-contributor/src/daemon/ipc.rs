@@ -384,6 +384,20 @@ pub struct DaemonShared {
     /// this handle -- the pool must not hold an `Arc<DaemonShared>` through
     /// the scheduler, or the two would keep each other alive forever.
     pub previews: Arc<PreviewScheduler>,
+    /// The routing overlay's one long-lived instance, built once from the
+    /// declaration in settings and refreshed on the poll tick.
+    ///
+    /// `None` is the majority case -- no proxy declared -- and stays `None`
+    /// for the daemon's whole lifetime; nothing here rebuilds it. Settings
+    /// keep describing the *declaration* (`DaemonSettings::source_roots`
+    /// stays bare); this is the single place the *instance* lives, because
+    /// a ledger built per call would hand every caller a cold, empty
+    /// snapshot -- see [`Self::source_roots_with_routing`].
+    pub routing: Option<Arc<crate::routing::ironwire::IronWireLedger>>,
+    /// Whether the last state this daemon reported for `routing` was
+    /// "has rows". Compared against on every refresh so a transition is
+    /// reported once, not on every poll -- see [`Self::routing_transition`].
+    routing_had_rows: AtomicBool,
 }
 
 impl DaemonShared {
@@ -430,6 +444,11 @@ impl DaemonShared {
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
+        // Built once, here, from the declaration this settings file carries
+        // at startup. A settings edit that changes the declaration takes
+        // effect on the next daemon restart, same as every other setting
+        // this constructor reads once.
+        let routing = super::settings::ironwire_ledger_for(settings.ironwire.as_ref());
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
         Ok(Self {
@@ -445,7 +464,59 @@ impl DaemonShared {
             shutdown_signal: Arc::new(Notify::new()),
             events,
             previews: Arc::new(PreviewScheduler::default()),
+            routing,
+            routing_had_rows: AtomicBool::new(false),
         })
+    }
+
+    /// Source roots with the daemon's live routing ledger attached.
+    ///
+    /// Settings describe the declaration; the daemon owns the instance.
+    /// Building a ledger per call would hand every caller its own cold
+    /// snapshot, which is the defect this helper exists to prevent -- see
+    /// `DaemonSettings::source_roots`, which stays bare on purpose.
+    pub(crate) fn source_roots_with_routing(&self) -> crate::source::SourceRoots {
+        let roots = {
+            let s = self.settings.lock().expect("settings lock");
+            s.source_roots()
+        };
+        let ledger = self
+            .routing
+            .clone()
+            .map(|l| l as Arc<dyn crate::routing::RoutingLedger>);
+        roots.with_routing(ledger)
+    }
+
+    /// Refresh the routing ledger, if the contributor declared one, and
+    /// report a data-state transition.
+    ///
+    /// Infallible by construction: `IronWireLedger::refresh` never returns
+    /// an error and carries its own short timeout, so awaiting it here
+    /// cannot fail or stall the poll tick that calls this.
+    pub(crate) async fn refresh_routing(&self) {
+        let Some(ledger) = self.routing.clone() else {
+            return;
+        };
+        ledger.refresh().await;
+        if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
+            // Hash-only by construction: `has_rows` is a bool, and nothing
+            // else about the ledger -- port, token, row contents -- appears
+            // here. A machine whose proxy was installed today legitimately
+            // logs `has_rows=false` once; that is not an error.
+            tracing::info!(has_rows, "routing ledger data state changed");
+        }
+    }
+
+    /// Whether `has_rows` differs from the state last reported for the
+    /// routing ledger, updating the reported state either way.
+    ///
+    /// Returns the new state only on an actual change, so a caller logs
+    /// once per transition rather than once per poll -- the same shape as
+    /// `HealthState::fail`/`resolve`, but for a condition that is not an
+    /// error and must never be treated as one.
+    fn routing_transition(&self, has_rows: bool) -> Option<bool> {
+        let previous = self.routing_had_rows.swap(has_rows, Ordering::Relaxed);
+        (previous != has_rows).then_some(has_rows)
     }
 
     pub fn publish(&self, event: &str, data: serde_json::Value) {
@@ -1894,10 +1965,11 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
-    let (near_ai, source_roots) = {
+    let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        s.near_ai.clone()
     };
+    let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
@@ -2099,10 +2171,11 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let (near_ai, source_roots) = {
+    let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        s.near_ai.clone()
     };
+    let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
         super::find_session(&sources, entry).ok_or((ERR_BAD_PARAMS, "session-file-vanished"))?;
@@ -2844,6 +2917,166 @@ mod tests {
         // borrows its path.
         std::mem::forget(_d);
         DaemonShared::load(store).unwrap()
+    }
+
+    /// A daemon whose settings never declared a proxy builds no ledger and
+    /// attempts no connection.
+    #[test]
+    fn no_proxy_declared_builds_no_ledger() {
+        assert!(shared().routing.is_none());
+    }
+
+    /// `source_roots_with_routing` is the one insertion point: bare roots
+    /// with no ledger, decorated roots when the daemon holds one.
+    #[test]
+    fn source_roots_with_routing_reflects_whether_a_ledger_is_held() {
+        let s = shared();
+        assert!(
+            !s.source_roots_with_routing().is_routed(),
+            "no ledger held, so the roots must stay bare"
+        );
+
+        let mut s = shared();
+        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
+            8463,
+            "t".to_string(),
+        )));
+        assert!(
+            s.source_roots_with_routing().is_routed(),
+            "a held ledger must be attached"
+        );
+    }
+
+    /// A refresh against a port nothing is listening on must not fail or
+    /// hang the caller -- the same guarantee `IronWireLedger::refresh` makes
+    /// on its own, exercised here through the daemon's own entry point.
+    #[tokio::test]
+    async fn a_refresh_failure_leaves_the_daemon_running_and_the_overlay_empty() {
+        // Bind to get a genuinely free loopback port, then drop the
+        // listener so nothing answers on it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut s = shared();
+        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
+            port,
+            "t".to_string(),
+        )));
+        s.refresh_routing().await;
+        assert!(
+            !s.routing.as_ref().unwrap().has_rows(),
+            "an unreachable proxy leaves the snapshot empty, not the daemon down"
+        );
+        assert!(
+            s.source_roots_with_routing().is_routed(),
+            "the ledger stays attached even though it has nothing to say"
+        );
+    }
+
+    /// `has_rows` only gets reported when it changes, not on every poll.
+    #[test]
+    fn routing_state_reports_only_on_transition() {
+        let s = shared();
+        assert_eq!(
+            s.routing_transition(false),
+            None,
+            "still empty is not a transition"
+        );
+        assert_eq!(
+            s.routing_transition(true),
+            Some(true),
+            "empty to reading is a transition"
+        );
+        assert_eq!(
+            s.routing_transition(true),
+            None,
+            "still reading is not a transition"
+        );
+        assert_eq!(
+            s.routing_transition(false),
+            Some(false),
+            "reading to empty is a transition"
+        );
+    }
+
+    /// The full loop: a mock IronWire server, the ledger the daemon owns,
+    /// a real session file on disk, and `source_roots_with_routing`'s
+    /// output actually run through `all_sources` and `load`. This is the
+    /// assertion Task 5 could only pin with a test-only accessor -- here the
+    /// routing row is asserted on the transcript a real adapter produced,
+    /// not on whether a ledger happens to be reachable.
+    #[tokio::test]
+    async fn a_refreshed_ledger_reaches_a_loaded_transcript() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let project_dir = claude_root.path().join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let session_path = project_dir.join("sess-1.jsonl");
+        std::fs::write(
+            &session_path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\
+             \"cwd\":\"/x/proj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+             \"version\":\"2.0.1\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "exchanges": [{
+                        "started_at": "2026-08-08T10:05:00Z",
+                        "client_session_id": "sess-1",
+                        "facade": "anthropic",
+                        "backend": "claude-sub",
+                        "rung": "same_model",
+                        "attempts": 1,
+                        "status": 200
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut s = shared();
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root.path().to_path_buf(),
+            });
+        }
+        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
+            port,
+            "t".to_string(),
+        )));
+
+        // This is the seam this task installs: refresh, then build sources
+        // off the daemon's own held instance.
+        s.refresh_routing().await;
+        assert!(
+            s.routing.as_ref().unwrap().has_rows(),
+            "the mock server's row must have reached the snapshot"
+        );
+
+        let roots = s.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let claude = sources
+            .iter()
+            .find(|src| src.name() == crate::source::SOURCE_CLAUDE_CODE)
+            .expect("the claude source is present");
+        let refs = claude.discover().expect("discovers the fixture");
+        let session_ref = refs
+            .into_iter()
+            .find(|r| r.path == session_path)
+            .expect("the written session was discovered");
+        let transcript = claude.load(&session_ref).expect("loads");
+        assert_eq!(
+            transcript.routing.len(),
+            1,
+            "the refreshed row reached the loaded transcript"
+        );
     }
 
     /// Every source declaration carries a local filesystem path, and this

@@ -115,10 +115,11 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 /// is a blocking filesystem or lock operation) and why `tick` runs it
 /// through `run_blocking`.
 fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
-    let (max_queue_entries, source_roots) = {
+    let max_queue_entries = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        s.max_queue_entries
     };
+    let source_roots = shared.source_roots_with_routing();
     tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
 }
 
@@ -189,10 +190,11 @@ pub async fn tick_paths(
     if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
-    let (max_queue_entries, source_roots) = {
+    let max_queue_entries = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        s.max_queue_entries
     };
+    let source_roots = shared.source_roots_with_routing();
     super::run_blocking(|| {
         tick_over_paths(
             shared,
