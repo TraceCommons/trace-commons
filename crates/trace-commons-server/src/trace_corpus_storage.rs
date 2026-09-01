@@ -2035,6 +2035,19 @@ pub struct CorrectionSignalRow {
     pub correction_simhash: Option<i64>,
 }
 
+/// The four cross-trace dedup fields written for one decision row
+/// (migrations V40 and V56). Bundled for the reason V48 bundled its own six:
+/// three of the four are positional integers and UUIDs that transpose
+/// silently, and the stamp has to travel with the simhash it names rather
+/// than trailing it as a sixth argument nobody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupAssignmentWrite {
+    pub dedup_simhash: i64,
+    pub dedup_cluster_id: Uuid,
+    pub dedup_cluster_size: i32,
+    pub dedup_signal_version: String,
+}
+
 /// The six shadow correction-value fields written for one decision row
 /// (migration V48). Bundled so the write is one argument rather than six
 /// positional integers that are easy to transpose.
@@ -2958,15 +2971,42 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         _tenant_id: &str,
         _decision_id: Uuid,
-        _dedup_simhash: i64,
-        _dedup_cluster_id: Uuid,
-        _dedup_cluster_size: i32,
-        _dedup_signal_version: &str,
+        _write: DedupAssignmentWrite,
     ) -> Result<(), DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_dedup called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the two cluster columns (`dedup_cluster_id`,
+    /// `dedup_cluster_size`) for the decision row identified by `(tenant_id,
+    /// decision_id)`. The simhash and its version stamp are left exactly as
+    /// they are. Implementations MUST scope by `tenant_id` (forced RLS).
+    /// Defaults to a log-once warning + no-op so a backend without a real
+    /// impl cannot silently drop the write.
+    ///
+    /// This is what the recluster sweep uses, and the narrowness is the
+    /// point. The sweep re-clusters simhashes that are already stored; it
+    /// derives neither the simhash nor the stamp, so it has no standing to
+    /// write either. Writing the stamp back would materialise the legacy
+    /// literal into every pre-V56 row -- exactly the assertion-in-the-schema
+    /// that V56's header refuses a DEFAULT for, made by a background pass
+    /// instead of by the migration.
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _dedup_cluster_id: Uuid,
+        _dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_dedup_cluster called on a backend without a real impl"
             );
         });
         Ok(())

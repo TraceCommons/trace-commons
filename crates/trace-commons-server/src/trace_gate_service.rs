@@ -132,13 +132,19 @@ pub struct GateDecision {
     /// that derives the value some other way). Persisted beside the value it
     /// describes so no consumer clusters, compares or caches across versions.
     ///
-    /// `None` means no derivation was named. Every `TraceGateService` in this
-    /// crate names one; a synthetic copy built without a simhash has nothing
-    /// to name. A stored `NULL` means the row predates the stamp and is read
+    /// Not optional: a decision that carries a `dedup_simhash` always names
+    /// how it made one, the way it always carries the number itself. A copy
+    /// built without a real simhash still names the version it would be read
+    /// under, exactly as it still carries `dedup_simhash: 0`.
+    ///
+    /// The column is nullable and this field is not, which is the correct
+    /// asymmetry: a stored `NULL` means the row predates the stamp and is
+    /// decoded by
+    /// [`crate::trace_corpus_storage::DedupSignalRow::effective_signal_version`]
     /// as the legacy v1 stamp
     /// ([`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`]), never as
-    /// "unknown".
-    pub dedup_signal_version: Option<String>,
+    /// "unknown". Nothing this build writes is ever NULL.
+    pub dedup_signal_version: String,
     /// 64-bit token simhash of `outcome.human_correction`, when the envelope
     /// carries one. `None` means "this service did not observe a correction" —
     /// either the envelope has none, or the service never sees plaintext (the
@@ -406,7 +412,7 @@ fn build_deterministic_decision(
         dedup_simhash,
         // Names the derivation above, so the value is never clustered against
         // a real simhash from the enclave path.
-        dedup_signal_version: Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION.to_string()),
+        dedup_signal_version: DETERMINISTIC_DEDUP_SIGNAL_VERSION.to_string(),
         // Deterministic services never see plaintext (see `dedup_simhash`
         // above), so they cannot know whether the envelope carries a
         // correction. `None` says exactly that; a digest-derived stand-in
@@ -777,11 +783,11 @@ where
             // enclave renderer that produced the text, and the simhash
             // algorithm that reduced it. Composed rather than hard-coded so
             // bumping either const moves the stamp without a second edit here.
-            dedup_signal_version: Some(format!(
+            dedup_signal_version: format!(
                 "{}+{}",
                 trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
                 crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
-            )),
+            ),
             // Same trust boundary and the same `plaintext` in scope: the
             // correction's simhash is computed here so the correction text
             // itself never crosses back to the caller.

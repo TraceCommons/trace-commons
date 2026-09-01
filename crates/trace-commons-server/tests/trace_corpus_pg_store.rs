@@ -4040,10 +4040,12 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
         .update_trace_gate_decision_dedup(
             &tenant_id,
             decision_id,
-            42i64,
-            cluster_id,
-            3,
-            signal_version,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 42,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: 3,
+                dedup_signal_version: signal_version.to_string(),
+            },
         )
         .await
         .expect("dedup update succeeds");

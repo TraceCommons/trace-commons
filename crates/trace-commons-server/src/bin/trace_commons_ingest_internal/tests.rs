@@ -4077,10 +4077,13 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
         .update_trace_gate_decision_dedup(
             "tenant-a",
             decision_id,
-            42_i64,
-            Uuid::new_v4(),
-            3,
-            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 42_,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 3,
+                dedup_signal_version:
+                    trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string(),
+            },
         )
         .await
         .expect("dedup assignment writes");
@@ -67047,20 +67050,46 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         &self,
         tenant_id: &str,
         decision_id: Uuid,
-        dedup_simhash: i64,
-        dedup_cluster_id: Uuid,
-        dedup_cluster_size: i32,
-        dedup_signal_version: &str,
+        write: trace_commons_server::trace_corpus_storage::DedupAssignmentWrite,
     ) -> Result<(), DatabaseError> {
         self.dedup.write().unwrap().insert(
             (tenant_id.to_string(), decision_id),
             RecordedDedup {
-                simhash: dedup_simhash,
-                cluster_id: dedup_cluster_id,
-                cluster_size: dedup_cluster_size,
-                signal_version: Some(dedup_signal_version.to_string()),
+                simhash: write.dedup_simhash,
+                cluster_id: write.dedup_cluster_id,
+                cluster_size: write.dedup_cluster_size,
+                signal_version: Some(write.dedup_signal_version),
             },
         );
+        Ok(())
+    }
+
+    /// In-memory analogue of the Postgres
+    /// `update_trace_gate_decision_dedup_cluster` impl: move ONLY the cluster
+    /// id and size of an already-recorded assignment, leaving the simhash and
+    /// its stamp untouched -- so a NULL stamp survives a recluster sweep here
+    /// exactly as it does in the real UPDATE, whose SET list does not mention
+    /// the column.
+    ///
+    /// A decision with no recorded assignment has no dedup columns in this
+    /// representation and is left alone. The sweep never reaches one: it
+    /// skips every row whose `dedup_simhash` is `None`.
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        if let Some(entry) = self
+            .dedup
+            .write()
+            .unwrap()
+            .get_mut(&(tenant_id.to_string(), decision_id))
+        {
+            entry.cluster_id = dedup_cluster_id;
+            entry.cluster_size = dedup_cluster_size;
+        }
         Ok(())
     }
     /// In-memory analogue of the Postgres
@@ -68409,10 +68438,12 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         decision_id,
-        42i64,
-        cluster,
-        3,
-        "events.v1+fnv1a-2shingle.v1",
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 42,
+            dedup_cluster_id: cluster,
+            dedup_cluster_size: 3,
+            dedup_signal_version: "events.v1+fnv1a-2shingle.v1".to_string(),
+        },
     )
     .await
     .expect("dedup update succeeds");
@@ -68479,6 +68510,80 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
         after.row.peak_novelty_micros,
         before_row.peak_novelty_micros
     );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+/// The narrower sibling: `update_trace_gate_decision_dedup_cluster` moves ONLY
+/// `dedup_cluster_id` and `dedup_cluster_size`. The simhash and its version
+/// stamp are left exactly as they were, INCLUDING a stamp that is NULL.
+///
+/// This is what the recluster sweep uses, and the whole point of a second,
+/// narrower write is that a row recorded before V56 comes out of a sweep
+/// still recorded before V56. If the pass wrote the version it read the row
+/// as, every pre-column row would acquire the legacy literal on the first
+/// sweep -- the schema-level assertion V56's header refuses a DEFAULT for,
+/// made by a background job instead, and no later pass could then tell a
+/// row it re-derived from a row it merely re-clustered.
+#[tokio::test]
+async fn update_trace_gate_decision_dedup_cluster_touches_only_cluster_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    // A row as it exists before V56: a simhash, a cluster, and no stamp.
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        decision_id,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 42,
+            dedup_cluster_id: Uuid::from_u128(7),
+            dedup_cluster_size: 3,
+            dedup_signal_version: "events.v1+fnv1a-2shingle.v1".to_string(),
+        },
+    )
+    .await
+    .expect("dedup update succeeds");
+    db.overwrite_dedup_signal_version_for_tests("tenant-a", decision_id, None);
+
+    let moved = Uuid::from_u128(9);
+    db.update_trace_gate_decision_dedup_cluster("tenant-a", decision_id, moved, 5)
+        .await
+        .expect("cluster update succeeds");
+
+    let after = db
+        .gate_decision_with_dedup_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The two cluster values moved to exactly what we passed.
+    assert_eq!(after.dedup_cluster_id, Some(moved));
+    assert_eq!(after.dedup_cluster_size, Some(5));
+
+    // The two derived values did not.
+    assert_eq!(
+        after.dedup_simhash,
+        Some(42),
+        "the sweep re-clusters a stored simhash; it never recomputes one"
+    );
+    assert_eq!(
+        after.dedup_signal_version,
+        Some(None),
+        "a NULL stamp survives the write: the pass reads the row as the \
+         legacy version but has no evidence to record that it IS one"
+    );
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
     assert_eq!(after.row.chunk_count, before_row.chunk_count);
     assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
 }
@@ -69247,30 +69352,36 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row_a.decision_id,
-        shared_simhash,
-        Uuid::new_v4(),
-        1,
-        V1_STAMP,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: shared_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_a dedup");
     db.update_trace_gate_decision_dedup(
         "tenant-b",
         row_b.decision_id,
-        shared_simhash,
-        Uuid::new_v4(),
-        1,
-        V1_STAMP,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: shared_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_b dedup");
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row_c.decision_id,
-        distinct_simhash,
-        Uuid::new_v4(),
-        1,
-        V1_STAMP,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: distinct_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_c dedup");
@@ -69416,10 +69527,12 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
         db.update_trace_gate_decision_dedup(
             tenant,
             row.decision_id,
-            shared_simhash,
-            Uuid::new_v4(),
-            1,
-            stamp,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: shared_simhash,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 1,
+                dedup_signal_version: stamp.to_string(),
+            },
         )
         .await
         .expect("seed dedup");
@@ -69476,17 +69589,21 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
         "the v2 row is a singleton despite Hamming distance 0 from three peers"
     );
 
-    // The pass re-stamps each row with its own version and invents none: it
-    // re-clusters stored simhashes and never re-renders, so it has no
-    // standing to claim a row was derived any other way than it already says.
+    // The pass writes NO stamp at all: it re-clusters stored simhashes and
+    // never re-renders, so it derives neither the simhash nor the version and
+    // has nothing to say about either. Every row keeps exactly the stamp it
+    // arrived with.
     assert_eq!(
         after_v1_a.dedup_signal_version,
         Some(Some(V1_STAMP.to_string()))
     );
     assert_eq!(
         after_null.dedup_signal_version,
-        Some(Some(V1_STAMP.to_string())),
-        "a NULL row is stamped with the legacy version it was already read as"
+        Some(None),
+        "a NULL stamp is READ as the legacy version and STAYS NULL: the pass \
+         has no evidence for the reading, and a row it stamped would be \
+         indistinguishable from one the re-derivation pass actually \
+         re-derived -- which is the reason V56 refuses a column DEFAULT"
     );
     assert_eq!(
         after_v2.dedup_signal_version,
@@ -69707,10 +69824,13 @@ async fn recompute_contributor_caps_touches_only_contributor_columns() {
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row.decision_id,
-        0x1111_2222_3333_4444,
-        Uuid::new_v4(),
-        2,
-        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 0x1111_2222_3333_4444,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 2,
+            dedup_signal_version: trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
+                .to_string(),
+        },
     )
     .await
     .expect("seed dedup");
@@ -70870,89 +70990,88 @@ fn base_gate_version_hash() -> String {
     )
 }
 
-/// The gate version hash MUST move when the chunk-SELECTION algorithm
-/// changes, not just when the chunk-packing knobs do.
+/// Every gate version hash the baseline config has ever produced, oldest
+/// first, each labelled with the dimension whose arrival moved it.
 ///
-/// Before coverage-preserving strided selection, the canonical string ended
-/// at the `chunking=` line and carried nothing identifying which chunks
-/// survive the cap. Prefix truncation and stride selection therefore stamped
-/// identical hashes while producing scores that are not comparable to each
-/// other. The pre-stride golden below is the hash the baseline config
-/// produced then; the current hash must differ from it, and must equal the
-/// post-stride golden so the stamp cannot drift again unnoticed.
-#[test]
-fn gate_version_hash_moved_for_strided_chunk_selection() {
-    /// sha256 of the canonical string WITHOUT a `chunk_selection=` line.
-    const PRE_STRIDE_GOLDEN: &str =
-        "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68";
-    /// sha256 of the canonical string WITH
-    /// `chunk_selection=stride_endpoint_inclusive.v1` and the `render=` line
-    /// that #211 added after it.
-    const POST_STRIDE_GOLDEN: &str = CURRENT_GATE_VERSION_HASH_GOLDEN;
+/// One list rather than a golden per rotation. The per-rotation form chained
+/// -- each new test pinned the current value and the previous test's golden
+/// became "the one before" -- and by the second rotation the same number was
+/// written in three places, where a rotation that updated two of them leaves
+/// the third passing against a stamp nothing produces. Here the current value
+/// is whichever entry is last, and there is exactly one of it.
+///
+/// Appending a row is the deliberate act that records a rotation. Editing an
+/// existing row is not: those are hashes already stamped onto decisions in
+/// the field, and rewriting one makes a historical stamp unattributable.
+const GATE_VERSION_HASH_HISTORY: &[(&str, &str)] = &[
+    // Before coverage-preserving strided selection the canonical string ended
+    // at the `chunking=` line, so prefix truncation and stride selection
+    // stamped the same hash while producing scores not comparable to each
+    // other.
+    (
+        "pre-chunk-selection",
+        "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68",
+    ),
+    // `chunk_selection=` arrived. Which chunks survive the cap was covered;
+    // what the text inside them says was not.
+    (
+        "pre-render",
+        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac",
+    ),
+    // `render=events.v1` arrived (#211, design D7). Selecting identical
+    // chunks says nothing about comparability if the text inside them was
+    // rendered differently -- the premise of sub-project D is that a render
+    // change moves perplexity, novelty and the simhash at once. PR 1 binds
+    // the name with the VALUE unchanged, so this rotation measures the
+    // plumbing and nothing else; PR 2 bumps the value and appends a row.
+    (
+        "events.v1",
+        "sha256:d1db609337e39b60a15e29339e8e61c0133eb044676ee5e6930592c6ec78eb97",
+    ),
+];
 
-    // The golden is only meaningful while the enclave still names this
-    // algorithm exactly this way; the two are pinned together on purpose.
+/// The stamp is what the history says it is, and every rotation in it was
+/// real.
+///
+/// Distinctness is the load-bearing half: two equal entries would mean a
+/// dimension was added to the canonical string without moving the hash, which
+/// is the exact failure both retired tests existed to catch, and it is caught
+/// here for every pair at once rather than for the one pair a new test
+/// remembered to compare.
+#[test]
+fn the_gate_version_hash_history_ends_at_todays_stamp() {
+    // The goldens are only meaningful while the enclave still names these two
+    // const-valued dimensions exactly this way; they are pinned together on
+    // purpose, because bumping either must append a row.
     assert_eq!(
         trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
         "stride_endpoint_inclusive.v1",
-        "bumping the selection algorithm must also move the golden below"
+        "bumping the selection algorithm must also append to the history"
     );
-
-    let base = base_gate_version_hash();
-    assert_ne!(
-        base, PRE_STRIDE_GOLDEN,
-        "changing chunk selection MUST break the gate version stamp"
-    );
-    assert_eq!(
-        base, POST_STRIDE_GOLDEN,
-        "gate version hash drifted without a deliberate stamp change"
-    );
-}
-
-/// sha256 of the canonical string as it stands: `chunk_selection=` followed
-/// by `render=events.v1`. Named once and shared, because two tests pin the
-/// same number and a rotation that updated only one of them would leave the
-/// other passing against a stamp nothing produces.
-const CURRENT_GATE_VERSION_HASH_GOLDEN: &str =
-    "sha256:d1db609337e39b60a15e29339e8e61c0133eb044676ee5e6930592c6ec78eb97";
-
-/// The sibling of `gate_version_hash_moved_for_strided_chunk_selection`, for
-/// the dimension #211 added: which RENDERER produced the text inside the
-/// chunks, as distinct from which chunks survived the cap.
-///
-/// Selecting identical chunks says nothing about comparability if the text
-/// inside them was rendered differently — the whole premise of sub-project D
-/// is that a render change moves every similarity signal at once. Before this
-/// line, the stamp claimed a decision was reproducible when re-rendering the
-/// same envelope would have moved perplexity, novelty and the simhash
-/// together. The pre-render golden is the hash the baseline config produced
-/// then, and it is the value the strided-selection test pinned until #211;
-/// the rotation away from it is deliberate (design D7).
-#[test]
-fn gate_version_hash_moved_for_canonical_render() {
-    /// sha256 of the canonical string WITHOUT a `render=` line.
-    const PRE_RENDER_GOLDEN: &str =
-        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac";
-
-    // Same pinning as the selection test: the golden below is only meaningful
-    // while the enclave still names this renderer exactly this way. PR 1 of
-    // sub-project D binds the name with the value UNCHANGED, so the rotation
-    // here measures the plumbing and nothing else; PR 2 bumps the value and
-    // rotates it a second time.
     assert_eq!(
         trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
         "events.v1",
-        "bumping the canonical renderer must also move the golden below"
+        "bumping the canonical renderer must also append to the history"
     );
 
-    let base = base_gate_version_hash();
-    assert_ne!(
-        base, PRE_RENDER_GOLDEN,
-        "binding the canonical renderer MUST break the gate version stamp"
-    );
+    for (i, (label, hash)) in GATE_VERSION_HASH_HISTORY.iter().enumerate() {
+        for (other_label, other_hash) in &GATE_VERSION_HASH_HISTORY[i + 1..] {
+            assert_ne!(
+                hash, other_hash,
+                "{label} and {other_label} stamp the same hash: a dimension \
+                 was added to the canonical string without moving the stamp"
+            );
+        }
+    }
+
+    let (label, current) = GATE_VERSION_HASH_HISTORY
+        .last()
+        .expect("the history is never empty");
     assert_eq!(
-        base, CURRENT_GATE_VERSION_HASH_GOLDEN,
-        "gate version hash drifted without a deliberate stamp change"
+        &base_gate_version_hash().as_str(),
+        current,
+        "gate version hash drifted without a deliberate stamp change; the \
+         newest history entry is {label}"
     );
 }
 
@@ -71179,17 +71298,10 @@ fn compute_gate_version_hash_changes_on_any_dimension() {
         );
     }
 
-    // The chunk-selection algorithm and the canonical renderer are the two
-    // dimensions that arrive as consts rather than arguments, so they cannot
-    // be permuted through this helper. Each has its own golden-pinned test
-    // above; what this asserts is that both are actually IN the hash, by
-    // pinning the current value the two of them produce. A const dropped from
-    // the canonical string would move it.
-    assert_eq!(
-        base, CURRENT_GATE_VERSION_HASH_GOLDEN,
-        "gate_version_hash must keep covering the const-valued dimensions \
-         (chunk selection and canonical render), not only its arguments"
-    );
+    // The chunk-selection algorithm and the canonical renderer arrive as
+    // consts rather than arguments, so they cannot be permuted through this
+    // helper at all. They are covered by GATE_VERSION_HASH_HISTORY, which is
+    // the only place today's stamp is written down.
 }
 
 /// A2.3 production-gate init test. Exercises

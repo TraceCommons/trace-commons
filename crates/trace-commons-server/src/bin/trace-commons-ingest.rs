@@ -50849,9 +50849,7 @@ async fn evaluate_and_record_gate(
     // Which renderer and simhash algorithm produced the value above. Rows
     // stamped differently are not comparable to it, however close the two
     // numbers are, so this scopes the candidate set below (V56, #211).
-    let dedup_signal_version = decision.dedup_signal_version.clone().unwrap_or_else(|| {
-        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
-    });
+    let dedup_signal_version = decision.dedup_signal_version.clone();
     let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
     let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
     // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
@@ -50910,10 +50908,12 @@ async fn evaluate_and_record_gate(
         .update_trace_gate_decision_dedup(
             tenant_id,
             decision_id,
-            dedup_simhash,
-            cluster_id,
-            new_size,
-            &dedup_signal_version,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: new_size,
+                dedup_signal_version,
+            },
         )
         .await
     {
@@ -51549,11 +51549,14 @@ struct ReclusterDedupSummary {
 /// recorded simhash cannot be clustered and are left untouched (not counted,
 /// not written).
 ///
-/// Candidates are scoped to the row's own `dedup_signal_version` (V57): the
-/// pass reads stored simhashes and never re-renders, so two values derived by
-/// different renderers or different simhash algorithms are not comparable and
-/// must never fuse. `NULL` is read as the legacy v1 stamp, so a corpus that
-/// has not yet been re-derived clusters exactly as it did before V56.
+/// Candidates are scoped to the row's own `dedup_signal_version` (V57) by
+/// `assign_cluster` itself: the pass reads stored simhashes and never
+/// re-renders, so two values derived by different renderers or different
+/// simhash algorithms are not comparable and must never fuse. `NULL` is read
+/// as the legacy v1 stamp, so a corpus that has not yet been re-derived
+/// clusters exactly as it did before V57 -- and is left NULL, because reading
+/// a row as v1 is not the same as recording that it is v1. The pass writes
+/// the two cluster columns and nothing else.
 ///
 /// Final cluster sizes are computed AFTER the full sweep completes, so every
 /// member of a cluster is written with the same total membership count — not
@@ -51578,14 +51581,13 @@ async fn run_recluster_dedup_pass(
     let mut reps: std::collections::HashMap<uuid::Uuid, (u64, &str)> =
         std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
-    /// One row the sweep placed, carrying what pass 2 needs to write it.
-    /// Named rather than a tuple because the fields are read by name in the
-    /// write loop and two of them are opaque integers side by side.
+    /// One row the sweep placed, carrying what pass 2 needs to write it --
+    /// which is the cluster and nothing else. The simhash and the stamp are
+    /// deliberately absent: the pass read them, it did not derive them, so it
+    /// has nothing to say about them.
     struct AssignedRow<'a> {
         row: &'a trace_commons_server::trace_corpus_storage::DedupSignalRow,
-        simhash: i64,
         cluster_id: uuid::Uuid,
-        signal_version: &'a str,
     }
     let mut assigned: Vec<AssignedRow<'_>> = Vec::new();
 
@@ -51631,12 +51633,7 @@ async fn run_recluster_dedup_pass(
             }
         };
         *counts.entry(cluster_id).or_insert(0) += 1;
-        assigned.push(AssignedRow {
-            row,
-            simhash: simhash_i64,
-            cluster_id,
-            signal_version: row_version,
-        });
+        assigned.push(AssignedRow { row, cluster_id });
     }
 
     // Pass 2: write every assigned row with its cluster's FINAL total
@@ -51647,19 +51644,19 @@ async fn run_recluster_dedup_pass(
         let cluster_id = assignment.cluster_id;
         let final_size =
             i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
+        // Cluster columns only. The pass derives neither the simhash nor the
+        // stamp, so it writes neither -- and in particular it does not
+        // materialise the legacy literal into a row whose stamp is NULL.
+        // That row is READ as the legacy version; writing the reading back
+        // would make it indistinguishable from a row the re-derivation pass
+        // has actually re-stamped, which is the precise reason V56 refuses a
+        // column DEFAULT.
         match db
-            .update_trace_gate_decision_dedup(
+            .update_trace_gate_decision_dedup_cluster(
                 &row.tenant_id,
                 row.decision_id,
-                assignment.simhash,
                 cluster_id,
                 final_size,
-                // The row's own version, re-stamped rather than recomputed:
-                // the pass re-clusters stored simhashes, it never re-renders,
-                // so it has no standing to claim a row was derived any other
-                // way than it already says. A NULL row is stamped with the
-                // legacy version it was already being read as.
-                assignment.signal_version,
             )
             .await
         {
@@ -52607,7 +52604,11 @@ async fn gate_evaluate_worker_handler(
             // derivation to name. `None` here can never reach a row — this
             // copy is not persisted — and would read as the legacy stamp if
             // it somehow did.
-            dedup_signal_version: None,
+            // Named explicitly, the way `dedup_simhash: 0` above is: this
+            // copy is never persisted, and a version it "would be read under"
+            // is the only honest value for a simhash that is a placeholder.
+            dedup_signal_version: trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
+                .to_string(),
             // Same reason: this throwaway copy carries no plaintext, and the
             // correction value already ran inline against the real decision.
             correction_simhash: None,

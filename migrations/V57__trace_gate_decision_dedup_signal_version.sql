@@ -12,12 +12,13 @@
 -- cannot tell "a different number" from "a different algorithm".
 --
 -- That matters now because changing what the canonical renderer emits moves
--- every simhash at once. Measured on the pilot corpus, the same eight-event
--- trace rendered before and after a candidate render change sits at Hamming
--- 12 against a clustering threshold of 10 -- far enough to split every
--- existing cluster, and close enough that the split is invisible in the data.
--- dedup_cluster_size divides the duplicate penalty and increments the
--- per-contributor cap, so a silent split changes money.
+-- every simhash at once. Two measurements, neither of them of a real corpus:
+-- a scratch render-diff test over one synthetic eight-event trace put the
+-- before/after pair at Hamming 12, and #211 reported 18 on a different
+-- envelope in July. Both are above the clustering threshold of 10 -- far
+-- enough to split every existing cluster, and close enough that the split is
+-- invisible in the data. dedup_cluster_size divides the duplicate penalty and
+-- increments the per-contributor cap, so a silent split changes money.
 --
 -- The stamp is TEXT, not the INTEGER of V39's credit_quality_calibration_version
 -- or V48's correction_value_version, because it carries two independently

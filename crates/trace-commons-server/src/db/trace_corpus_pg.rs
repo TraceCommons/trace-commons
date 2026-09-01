@@ -6219,10 +6219,7 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
         decision_id: Uuid,
-        dedup_simhash: i64,
-        dedup_cluster_id: Uuid,
-        dedup_cluster_size: i32,
-        dedup_signal_version: &str,
+        write: crate::trace_corpus_storage::DedupAssignmentWrite,
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -6243,10 +6240,43 @@ impl TraceCorpusStore for PgBackend {
             &[
                 &tenant_id,
                 &decision_id,
-                &dedup_simhash,
+                &write.dedup_simhash,
+                &write.dedup_cluster_id,
+                &write.dedup_cluster_size,
+                &write.dedup_signal_version,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the two cluster columns. `dedup_simhash` and
+        // `dedup_signal_version` are deliberately absent from the SET list:
+        // the recluster sweep re-clusters values it read and derived neither
+        // of them, so re-writing the stamp would turn a NULL -- "recorded
+        // before the stamp existed" -- into a positive claim the pass has no
+        // evidence for.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET dedup_cluster_id = $3,
+                    dedup_cluster_size = $4
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[
+                &tenant_id,
+                &decision_id,
                 &dedup_cluster_id,
                 &dedup_cluster_size,
-                &dedup_signal_version,
             ],
         )
         .await
