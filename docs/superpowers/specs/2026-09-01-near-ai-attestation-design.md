@@ -18,14 +18,24 @@ accounts, which is the ratio that decides whether a credit ledger can be farmed.
 >
 > A fresh, nonce-bound Intel TDX + NVIDIA Hopper attestation **is served today,
 > unauthenticated** — better than assumed, and verifiable without asking NEAR AI
-> for anything. But it is a public document that identifies a *machine*, not a
-> contributor, so it cannot carry half 2. The per-request receipt that half 2
-> needs remains unconfirmed.
+> for anything. And a **per-request signed receipt also exists** (Object B),
+> confirmed from NEAR AI's own reference verifier rather than from prose. The
+> "nothing is buildable until we negotiate a receipt" premise was simply wrong.
 >
-> The design therefore splits into Object A (available, buildable now) and
-> Object B (unconfirmed, blocking). Sections below are marked accordingly. Half
-> 1 is partly reachable; **half 2 is blocked**, and no configuration should be
-> able to reach it until Object B exists.
+> What is genuinely missing is narrower than the original blocker list, and
+> exactly the field the spec predicted would matter: **the receipt carries no
+> account subject**. Nothing in it says who ran the inference.
+>
+> So the design splits along a different line than expected. **Half 1 — an
+> envelope carrying verifiable evidence that specific turns ran in a NEAR AI
+> enclave — is buildable now**, end to end, with no ask on NEAR AI. **Half 2 —
+> admitting uninvited contributors — is blocked**, because admission needs an
+> identity the receipt does not carry, and no configuration should be able to
+> reach it until one exists.
+>
+> One consequence deserves stating up front: the cost floor and the
+> per-contributor cap were treated as one security argument and are not. The
+> floor survives without identity; the cap does not. See "Sybil economics".
 
 This spec depends on
 [`2026-09-01-ironwire-ledger-enrichment-design.md`](./2026-09-01-ironwire-ledger-enrichment-design.md)
@@ -94,29 +104,65 @@ therefore cannot attest to *who* obtained it, *who* ran an inference, or *that
 any particular trace* passed through the enclave. It attests to a machine, not
 to a relationship with a contributor.
 
-**Object B — a per-request signed receipt. Unverified; may not exist.** This is
-what the rest of this spec needs, and what remains to be settled with NEAR AI.
-Nothing establishes that a completion response is signed by `signing_address`.
-Probes of `/v1/signature`, `/v1/signature/test` and similar return 401, but so
-does every unknown path on that host, so 401 distinguishes nothing either way.
+**Object B — a per-request signed receipt. It exists.** Confirmed from NEAR AI's
+own verifier, `github.com/nearai/nearai-cloud-verifier` (`py/chat_verifier.py`,
+`ts/chat_verifier.ts`), not from documentation prose. The earlier 401s on
+`/v1/signature/...` were an authenticated endpoint refusing an unauthenticated
+probe, not an absent one.
 
-The fields below describe **Object B**. Trust there anchors in NEAR AI's signing
-key — genuinely a weaker claim than Object A's hardware quote, and the honest
-one to make about a receipt.
+**How it works, from the reference implementation:**
 
-For a single object to serve both halves, the receipt must carry:
+1. A completion response carries an `id` — the `chat_id`. Our client currently
+   discards it: serde keeps only `token_logprobs`.
+2. `GET {base}/v1/signature/{chat_id}?model={model}&signing_algo=ecdsa`, with
+   `Authorization: Bearer {api_key}`, returns
+   `{text, signature, signing_address}`.
+3. `text` is colon-separated, two or three parts. With three, the leading part
+   is discarded and the hashes are `parts[1]`, `parts[2]`; with two they are
+   `parts[0]`, `parts[1]`. **Both are lowercase SHA-256 hex** — of the request
+   body as sent, and of the response text.
+4. `signature` is an Ethereum `personal_sign` (`encode_defunct`) over `text`.
+   Recover the address and compare to `signing_address`.
+5. Bind that key to hardware:
+   `GET /v1/attestation/report?model={model}&nonce={nonce}&signing_algo=ecdsa&signing_address={addr}`
+   — **404 if the address does not match**, which makes the check crisp. In the
+   quote, `report_data[0..32] = SHA256(signing_address || spki_hash)` and
+   `report_data[32..64] = nonce`, so the signing key *and* the TLS SPKI are
+   bound to the measured enclave.
 
-| Field | Why |
-|---|---|
-| account subject | Binds the turn to a contributor **and** is the identity onboarding uses. The load-bearing field. |
-| request hash, response hash | Binds the receipt to specific content, so it cannot be moved to a trace it did not cover. |
-| model | Provenance, and lets a coverage claim name what served it. |
-| timestamp | Freshness, and ordering against the transcript. |
-| response id or nonce | Replay defence, and the join key onto our events. |
-| key id | Rotation, resolved against a published keyset. |
+Two canonicalization details an implementer will otherwise get wrong. The
+request hash is over **the exact bytes sent**, so the envelope must retain them
+rather than a re-serialization. For a streaming response the hashed text is
+every SSE line joined with a trailing `"\n"` on each, including the terminal
+one — reconstructing it from parsed deltas will not reproduce the hash.
 
-Signed with a key published at a rotating keyset URL, the pattern the
-upload-claim issuer already uses.
+NEAR AI's own note, worth repeating because it bounds the claim: the verifier
+supplies a fresh nonce at step 5, so the attestation it fetches is not the one
+that signed. It proves the signing key is bound to valid hardware — **not** that
+a specific attestation was used for this completion.
+
+### What Object B does not carry
+
+**No account subject. No user identifier. Nothing about who ran it.** The signed
+text is hashes and an optional prefix. This is the field the original spec named
+as load-bearing and said to insist on, and it is absent.
+
+The API key gates *fetching* a signature, which is a real but weak binding: it
+proves whoever fetched it held a key at fetch time, and the artifact is a bearer
+token afterwards. It does not prove to us which account produced the inference,
+and two people can present the same receipt.
+
+So the original table below is now a comparison between what was wanted and what
+exists, not a specification to build:
+
+| Field | Why it was wanted | Present? |
+|---|---|---|
+| account subject | Binds the turn to a contributor **and** is the identity onboarding uses. | **No** |
+| request hash, response hash | Binds the receipt to specific content, so it cannot be moved to a trace it did not cover. | **Yes**, SHA-256 of both |
+| model | Provenance, and lets a coverage claim name what served it. | Query parameter, not signed |
+| timestamp | Freshness, and ordering against the transcript. | **No** |
+| response id or nonce | Replay defence, and the join key onto our events. | `chat_id` addresses the receipt; not inside the signed text |
+| key id | Rotation, resolved against a published keyset. | `signing_address`, resolved against the attestation rather than a keyset |
 
 **The split this spec warned about has happened.** The original text said: "If
 NEAR AI's receipt omits the account subject, this design splits in two — part 1
@@ -151,8 +197,9 @@ not depend on NEAR AI adding a new field.
 
 ## The receipt is destroyed in transit
 
-> **Object B.** Moot until a per-request receipt exists — there is nothing to
-> preserve yet. Retained because the transit problem is real the moment one does.
+> **Object B — now live.** The receipt exists, so this problem is no longer
+> hypothetical: `chat_id` and the exact request/response bytes must survive to
+> reach us, and the current path preserves none of them.
 
 NEAR AI returns the receipt in its response. IronWire forwards that response to
 Claude Code, which writes **its own** transcript format and drops fields it does
@@ -173,8 +220,9 @@ paths must be supported, and the direct path is the one that can ship first.
 
 ## Coverage, not a boolean
 
-> **Object B.** Coverage counts attested turns, and nothing can be attested at
-> turn level today. The argument for counts-not-a-boolean stands regardless.
+> **Object B — buildable.** Turn-level attestation exists, so coverage is
+> computable now. The counts-not-a-boolean argument stands and now has data
+> behind it.
 
 "This trace was inferenced on NEAR AI" is almost never wholly true.
 
@@ -196,7 +244,8 @@ makes it authorization rather than attribution.
 
 ## Where receipts ride
 
-> **Object B**, and additionally gated on PR #513 landing.
+> **Object B — buildable**, gated only on PR #513 landing. The `chat_id` is the
+> natural per-turn join, alongside that PR's session-level one.
 
 Receipts attach to the `RoutingDecision` events introduced by the enrichment
 spec — the events that already record `backend` — reached by the same
@@ -220,8 +269,9 @@ that plan, this spec inherits the same silent quarantine regression.
 
 ## Verification at ingest
 
-> **Object B.** Object A's verification is a different path: a periodic check of
-> the endpoint we call, not a per-submission check of contributor-supplied data.
+> **Object B — buildable, and this is the security-critical path.** Distinct from
+> Object A's verification, which is a periodic check of the endpoint we call
+> rather than a per-submission check of contributor-supplied data.
 
 Receipts are verified before gating.
 
@@ -237,9 +287,10 @@ the clear, or the request/response hashes' preimages.
 
 ## Onboarding
 
-> **Object B, and blocked.** Object A carries no identity, so it cannot admit
-> anyone. Nothing in this section is reachable until a receipt with an account
-> subject exists.
+> **Blocked, and now for a precise reason.** Object B exists but carries no
+> account subject, and Object A is a public document identifying a machine.
+> Neither can admit anyone. Nothing here is reachable until a receipt names an
+> account.
 
 NEAR AI becomes a second trusted issuer in the existing instance-enroll flow.
 
@@ -271,8 +322,8 @@ or absent admission method requires attestation rather than waiving it.
 | unknown / absent | attestation required (fail closed) |
 
 **The `NEAR attestation` row is not reachable yet, and the column is worth
-building anyway.** It depends on Object B, which is unconfirmed. Object A cannot
-substitute: it carries no identity, so nothing can be admitted by it.
+building anyway.** It depends on an account subject, which neither object
+carries — Object B omits it, and Object A identifies a machine, not a person.
 
 Build the column, the provenance, and the fail-closed default now; leave that
 one row unreachable until Object B exists. The column is what makes the gate
@@ -326,6 +377,31 @@ cheaper than the credit a trace earns. That is a pricing relationship, not a
 cryptographic one, and it should be monitored rather than assumed. If credit per
 trace ever exceeds the inference cost of producing one, this gate inverts.
 
+### The two properties need different things, and only one is blocked
+
+This section originally treated the cost floor and the per-contributor cap as
+one argument. They are not, and separating them is what makes partial delivery
+possible.
+
+**The cost floor does not need identity.** Requiring every inference-bearing
+turn to carry a valid Object B receipt means producing a trace requires paying
+for the inference that produced it — whether or not we know whose account paid.
+The receipt's request and response hashes bind it to *this* trace, so it cannot
+be reused across submissions. That property is available now.
+
+**The per-contributor cap does need identity.** The cap binds sybils together by
+computing across tenants per `auth_principal_ref`, which relies on one NEAR
+account resolving to one principal. With no account subject in the receipt there
+is nothing to derive that principal from, so an attacker with many API keys —
+or one key and many enrollments — gets a fresh cap each time.
+
+The consequence for admission is precise rather than fatal. Attestation-gated
+admission gives a **per-trace cost floor without a per-attacker ceiling**. Which
+is to say: an attacker pays full inference cost for every trace, and can do so
+unboundedly in parallel. Whether that is acceptable is a pricing judgement — the
+same judgement the paragraph above describes — and it should be made explicitly
+rather than inherited by assuming the cap still binds. It does not.
+
 ## Blockers
 
 The original list said "nothing here is buildable". That was true of the design
@@ -346,21 +422,32 @@ to *verified present*, and the work it unblocks is real.
    spec asks for it to be asserted by test rather than review, and it does not
    depend on any NEAR AI artifact.
 
+4. **Object B verification and per-trace coverage.** The receipt exists and its
+   format is known from NEAR AI's reference verifier, so coverage — every
+   inference-bearing turn carrying a hash-bound, TEE-signed receipt — is
+   buildable. This was the largest blocker and it is gone.
+5. **Capturing what verification needs.** `chat_id` from the completion
+   response, and the exact request bytes and response text, none of which the
+   current client retains. This is a change to what we record, not a
+   negotiation.
+
 **Still blocked:**
 
-4. **Object B — a per-request receipt**, above all its account-subject field.
-   Everything about coverage, per-trace binding, and attestation-gated admission
-   waits on this. It is the whole security argument: without it, cost scales
-   with accounts rather than traces.
-5. **A published, rotating keyset.** Confirmed absent (404). Object A
-   self-publishes its key inside the report, which is adequate for verifying
-   that report and not a substitute for a keyset that survives rotation.
-6. **The third IronWire ask** — receipt on the exchange row — for the
-   proxy-mediated path. Moot until Object B exists; there is no receipt to
-   record.
-7. **The enrichment spec's `routing_metadata` presence category.** Now more
-   concrete than when written: it lives on PR #513, which is open with CI green
-   and unreviewed. This design cannot land before it does.
+6. **An account subject.** Confirmed absent from Object B. This blocks
+   attestation-gated *admission* and the per-contributor cap's sybil binding —
+   not coverage. It is now the entire remaining ask on NEAR AI.
+7. **A published, rotating keyset.** Confirmed absent (404). Object A
+   self-publishes its key inside the report and
+   `?signing_address=` returns 404 on mismatch, which is adequate for verifying
+   a given signature and is not a substitute for a keyset that survives
+   rotation.
+8. **The third IronWire ask** — receipt on the exchange row. Now well-specified
+   rather than speculative: the row needs `chat_id`, and the proxy is the only
+   component that sees both the request bytes and the response text. Worth
+   filing once PR #513 lands.
+9. **The enrichment spec's `routing_metadata` presence category.** It lives on
+   PR #513, open with CI green and unreviewed. This design cannot land before it
+   does.
 
 ## Open items
 
