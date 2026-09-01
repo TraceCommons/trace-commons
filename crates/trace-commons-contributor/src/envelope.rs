@@ -527,7 +527,8 @@ fn build_raw_contribution_with_id(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events: Vec<RawTraceContributionEvent> = raw_events_for(&t.events, now);
+    let events: Vec<RawTraceContributionEvent> =
+        raw_events_for_with_routing(&t.events, &t.routing, now);
     // Which tools a replay would have to stand up. The list was empty on every
     // envelope this client ever sent, which also zeroed the scorecard's
     // coverage term for a transcript that plainly covered tools.
@@ -815,6 +816,69 @@ fn raw_events_for(events: &[SessionEvent], now: DateTime<Utc>) -> Vec<RawTraceCo
     mapped
 }
 
+/// [`raw_events_for`] plus one `RoutingDecision` per joined inference hop.
+///
+/// The routing events are appended rather than interleaved. A hop is not a
+/// step in the transcript -- it is how a step was served -- and giving it a
+/// position in the sequence would assert an ordering the ledger cannot
+/// support: rows are timestamped by the proxy, session events by the harness,
+/// and the two clocks are not the same clock.
+fn raw_events_for_with_routing(
+    events: &[SessionEvent],
+    routing: &[crate::routing::RoutedExchange],
+    now: DateTime<Utc>,
+) -> Vec<RawTraceContributionEvent> {
+    let mut mapped = raw_events_for(events, now);
+    mapped.extend(routing.iter().map(raw_routing_event_for));
+    mapped
+}
+
+/// One inference hop as an envelope event.
+///
+/// Numbers go in the typed fields the event already carries. Only the labels
+/// with no typed home -- backend, rung, attempts, the requested/served model
+/// pair, the cache token split -- go in `structured_payload`, and that is what
+/// `routing_metadata` declares. `content` stays empty: nothing here is text
+/// from the session, and a routing event that carried prose would declare
+/// `message_text` and mean something else entirely.
+fn raw_routing_event_for(row: &crate::routing::RoutedExchange) -> RawTraceContributionEvent {
+    RawTraceContributionEvent {
+        event_id: Uuid::new_v4(),
+        parent_event_id: None,
+        event_type: TraceContributionEventType::RoutingDecision,
+        timestamp: row.started_at,
+        content: None,
+        structured_payload: serde_json::json!({
+            "backend": row.backend,
+            "facade": row.facade,
+            "rung": row.rung,
+            "attempts": row.attempts,
+            "requested_model": row.requested_model,
+            "served_model": row.served_model,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "status": row.status,
+        }),
+        tool_name: None,
+        tool_call_id: None,
+        latency_ms: row.total_ms.and_then(|ms| u64::try_from(ms).ok()),
+        token_counts: match (row.input_tokens, row.output_tokens) {
+            (Some(input), Some(output)) => Some(TokenCounts {
+                input_tokens: u32::try_from(input).unwrap_or(u32::MAX),
+                output_tokens: u32::try_from(output).unwrap_or(u32::MAX),
+            }),
+            // `None`, never a fabricated zero: an unreported count that summed
+            // as zero would understate what the session actually consumed.
+            _ => None,
+        },
+        cost_usd: row.cost_usd.and_then(|usd| {
+            trace_commons_protocol::trace_contribution::Decimal::try_from(usd).ok()
+        }),
+        success: None,
+        failure_modes: Vec::new(),
+    }
+}
+
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
     let (event_type, content, structured_payload) = match e.kind {
         SessionEventKind::User => (
@@ -898,6 +962,26 @@ mod tests {
         let src = ClaudeCodeSource::new(root);
         let refs = src.discover().unwrap();
         src.load(&refs[0]).unwrap()
+    }
+
+    fn sample_routed_exchange() -> crate::routing::RoutedExchange {
+        crate::routing::RoutedExchange {
+            started_at: chrono::Utc::now(),
+            client_session_id: Some("s-1".to_string()),
+            total_ms: Some(1200),
+            facade: "anthropic".to_string(),
+            backend: "claude-sub".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            served_model: Some("claude-opus-4-6".to_string()),
+            rung: "same_model".to_string(),
+            attempts: 1,
+            input_tokens: Some(1000),
+            cache_read_tokens: Some(500),
+            cache_write_tokens: None,
+            output_tokens: Some(200),
+            cost_usd: Some(0.02),
+            status: 200,
+        }
     }
 
     fn test_config() -> crate::config::ContributorConfig {
@@ -1914,41 +1998,23 @@ mod tests {
     /// derivation is the one that can overrule this one.
     ///
     /// `fixture_transcript()` is a real captured claude-code session and
-    /// carries no `RoutingDecision` events, so the routing-metadata class
-    /// would read `false` on both sides regardless of whether the two
-    /// derivations actually agree on it. A synthetic `RoutingDecision` event
-    /// with a non-empty `structured_payload` is pushed onto `raw.events`
-    /// below so the field is genuinely exercised, not trivially equal.
+    /// carries no `RoutingDecision` events on its own, so a
+    /// [`crate::routing::RoutedExchange`] is attached to `t.routing` and the
+    /// envelope is built by the real path (`build_raw_contribution`, which
+    /// now calls `raw_events_for_with_routing`) rather than by mutating
+    /// `raw.events` after the builder has already run. That is the gap this
+    /// test used to leave open: it pinned the derivation logic against a
+    /// hypothetical event shape, not against anything the real builder
+    /// emits.
     #[tokio::test]
     async fn the_two_content_derivations_agree() {
         use trace_commons_protocol::trace_contribution::derive_envelope_content_presence;
 
         let cfg = test_config();
-        let t = fixture_transcript();
-        let mut raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        raw.events.push(RawTraceContributionEvent {
-            event_id: Uuid::new_v4(),
-            parent_event_id: None,
-            event_type: TraceContributionEventType::RoutingDecision,
-            timestamp: chrono::Utc::now(),
-            content: None,
-            structured_payload: serde_json::json!({"backend": "nearai", "rung": "same_model"}),
-            tool_name: None,
-            tool_call_id: None,
-            latency_ms: Some(1200),
-            token_counts: None,
-            cost_usd: None,
-            success: None,
-            failure_modes: Vec::new(),
-        });
-        // Recompute the declaration over the augmented event list, the same
-        // way `build_raw_contribution_with_id` does at build time -- the
-        // added event was pushed after that call ran, so `raw.consent` does
-        // not yet reflect it.
+        let mut t = fixture_transcript();
+        t.routing = vec![sample_routed_exchange()];
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         let declared = declared_content_presence(&raw.events);
-        raw.consent.message_text_included = declared.message_text;
-        raw.consent.tool_payloads_included = declared.tool_payloads;
-        raw.consent.routing_metadata_included = declared.routing_metadata;
 
         let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
         let envelope = redact_to_envelope(&redactor, raw)
@@ -1974,6 +2040,47 @@ mod tests {
             ),
             "the client declaration and the server derivation must not disagree"
         );
+    }
+
+    #[test]
+    fn a_routing_row_becomes_an_event_carrying_its_numbers_in_typed_fields() {
+        // The numbers go in the typed fields the event already has. Only the
+        // labels with no typed home go in `structured_payload`, and that is
+        // what the routing_metadata presence class exists to declare.
+        let events =
+            raw_events_for_with_routing(&[], &[sample_routed_exchange()], chrono::Utc::now());
+        let routing: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == TraceContributionEventType::RoutingDecision)
+            .collect();
+        assert_eq!(routing.len(), 1);
+        let e = routing[0];
+        assert_eq!(e.latency_ms, Some(1200));
+        assert!(e.cost_usd.is_some());
+        assert_eq!(e.token_counts.as_ref().map(|t| t.input_tokens), Some(1000));
+        assert!(
+            e.content.as_deref().unwrap_or("").is_empty(),
+            "the overlay is numbers and labels, never text"
+        );
+        assert_eq!(e.structured_payload["backend"], "claude-sub");
+    }
+
+    #[test]
+    fn routing_events_do_not_declare_a_tool_payload() {
+        // The whole point of task 1, asserted where the events are actually
+        // built.
+        let events =
+            raw_events_for_with_routing(&[], &[sample_routed_exchange()], chrono::Utc::now());
+        let presence = declared_content_presence(&events);
+        assert!(presence.routing_metadata);
+        assert!(!presence.tool_payloads);
+    }
+
+    #[test]
+    fn a_session_with_no_routing_rows_produces_exactly_what_it_did_before() {
+        let before = raw_events_for(&[], chrono::Utc::now());
+        let after = raw_events_for_with_routing(&[], &[], chrono::Utc::now());
+        assert_eq!(before.len(), after.len());
     }
 
     /// A result that names its call should also name its tool.
