@@ -58,6 +58,7 @@ use crate::envelope::{
     redact_to_envelope,
 };
 use crate::source::{SessionRef, TraceSource};
+use trace_commons_protocol::canonical_json;
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceContributionEventType,
 };
@@ -122,8 +123,15 @@ pub fn envelope_digest(envelope: &TraceContributionEnvelope) -> Result<String> {
     let mut value = serde_json::to_value(envelope)
         .map_err(|_| anyhow::anyhow!("envelope-digest-serialize-failed"))?;
     strip_volatile(&mut value);
-    // `serde_json::Value`'s map is a `BTreeMap` under this crate's feature
-    // set, so serialization is key-ordered and the digest is stable.
+    // Sort every object's keys before serializing. This is what makes the
+    // digest stable: `serde_json::Value`'s map is key-ordered only while it
+    // is a `BTreeMap`, and any dependency in the build enabling
+    // `serde_json/preserve_order` swaps it for an insertion-ordered map.
+    // Under today's feature set the call changes nothing, which is why it
+    // could be adopted without moving the pinned digest below. See
+    // `trace_commons_protocol::canonical_json`, whose guard test fails
+    // loudly if that feature is ever switched on.
+    canonical_json::canonicalize(&mut value);
     //
     // The canonical bytes are hashed as the serializer produces them rather
     // than collected into a `Vec<u8>` first: `HashingWriter` feeds each

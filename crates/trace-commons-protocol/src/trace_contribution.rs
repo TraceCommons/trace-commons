@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::canonical_json;
 use crate::llm::recording::{TraceFile, TraceResponse};
 use crate::redaction::redact_sensitive_json;
 
@@ -3981,6 +3982,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
         }
 
         let residual_pii_risk = residual_risk(&trace.consent, &report);
+        canonicalize_event_payloads(&mut events);
         let redaction_hash = redaction_hash(&events, &report.counts);
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
@@ -4169,6 +4171,7 @@ pub fn rescrub_trace_envelope_with(
         &mut envelope.privacy.warnings,
         vec!["Server-side trace re-scrub was applied before corpus storage.".to_string()],
     );
+    canonicalize_event_payloads(&mut envelope.events);
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
@@ -4578,6 +4581,7 @@ pub async fn rescrub_envelope_prose_pii_with(
         &mut envelope.privacy.warnings,
         privacy_warnings(envelope.privacy.residual_pii_risk),
     );
+    canonicalize_event_payloads(&mut envelope.events);
     envelope.privacy.redaction_hash =
         redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
 
@@ -6004,19 +6008,29 @@ fn canonical_event_line(event: &TraceContributionEvent) -> String {
 fn safe_payload_summary(payload: &Value) -> String {
     match payload {
         Value::Object(map) => {
-            let keys = map
-                .iter()
+            // Sorted before the take, at both levels. This text is the input
+            // to the novelty embedding and the simhash dedup key, so map
+            // iteration order reaches the corpus directly -- and the
+            // truncation makes an unsorted order worse than cosmetic: the
+            // first eight of an insertion-ordered map are a different eight
+            // keys, not the same eight in a different order. `Value`'s map
+            // iterates in key order only while it is a `BTreeMap`; sorting
+            // is a no-op today and holds under `serde_json/preserve_order`.
+            let keys = canonical_json::sorted_entries(map)
+                .into_iter()
                 .take(8)
                 .map(|(key, value)| match value {
                     // One level only. Deeper nesting is not more signal, and
                     // an unbounded walk over an attacker-shaped payload is
                     // not something this runs.
-                    Value::Object(inner) if REPLAY_ARGUMENT_KEYS.contains(&key.as_str()) => {
-                        let inner_keys =
-                            inner.keys().take(8).map(String::as_str).collect::<Vec<_>>();
+                    Value::Object(inner) if REPLAY_ARGUMENT_KEYS.contains(&key) => {
+                        let inner_keys = canonical_json::sorted_keys(inner)
+                            .into_iter()
+                            .take(8)
+                            .collect::<Vec<_>>();
                         format!("{key}:[{}]", inner_keys.join(","))
                     }
-                    _ => key.clone(),
+                    _ => key.to_string(),
                 })
                 .collect::<Vec<_>>();
             format!("keys({})", keys.join(","))
@@ -6031,6 +6045,22 @@ fn safe_payload_summary(payload: &Value) -> String {
 fn canonical_hash(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     format!("sha256:{}", hex::encode(digest))
+}
+
+/// Put every event's untyped payload into key order.
+///
+/// `structured_payload` is a `serde_json::Value`, and `redaction_hash` is
+/// taken over the serialized events -- so the order that map iterates in is
+/// part of the hash. It is key-ordered only while `serde_json::Map` is a
+/// `BTreeMap`; any dependency in the build enabling
+/// `serde_json/preserve_order` makes it insertion-ordered instead. Sorting
+/// here is a no-op under today's feature set, and pins the bytes under
+/// either. Call it immediately before recomputing the hash, after the last
+/// pass that may have rewritten a payload.
+fn canonicalize_event_payloads(events: &mut [TraceContributionEvent]) {
+    for event in events {
+        canonical_json::canonicalize(&mut event.structured_payload);
+    }
 }
 
 fn redaction_hash(events: &[TraceContributionEvent], counts: &BTreeMap<String, u32>) -> String {
