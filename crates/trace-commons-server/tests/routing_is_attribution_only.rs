@@ -18,8 +18,20 @@
 //! RAW envelope JSON when an envelope has no renderable events (empty
 //! `events` array, or no `events` key at all). So the property is a side
 //! effect of two decisions made for other reasons, and this file is what
-//! makes it a stated rule with a test behind it -- including the part of it
-//! that is still a real hole (see the last test below).
+//! makes it a stated rule with a test behind it.
+//!
+//! **Two separate facts about that fallback, not one.** (a) It is a real gap:
+//! the raw envelope JSON, whatever it contains, is exactly what gets chunked
+//! and scored, so any non-event envelope content can reach the scorer through
+//! it (see the last test below). (b) A routing cost specifically CANNOT reach
+//! the scorer through this fallback, because the two conditions needed --
+//! "the fallback fires" and "a routing cost exists" -- are mutually
+//! exclusive: the fallback only fires when `events` is empty
+//! (`chunker.rs::parse_envelope_rendered_events`), and `cost_usd` exists only
+//! as a field on `TraceContributionEvent`, i.e. only inside `events`. This is
+//! a structural exclusion that falls out of the two independent facts, not a
+//! guarantee anyone built on purpose -- an envelope-level cost field, or a
+//! fallback that could fire on a non-empty envelope, would break it.
 //!
 //! This test lives in `trace-commons-server` rather than the permissive
 //! `trace-commons-contributor` crate. The server crate is itself
@@ -213,22 +225,39 @@ fn a_routing_event_does_not_declare_a_tool_payload() {
 /// two tests above are the property that actually protects a normal
 /// contribution.
 ///
-/// The fallback is reachable, though, whenever a decision-worthy envelope
-/// ends up with an empty `events` array by the time it reaches the chunker --
-/// e.g. every event redacted away by a privacy pass but the envelope (and its
-/// routing-only consent flag) still submitted. On that path the sentinel
-/// cost is NOT scrubbed: the raw JSON, cost included, is exactly what gets
-/// chunked and handed to the scorer and the dedup simhash.
+/// **What this test actually demonstrates: the fallback leaks arbitrary
+/// envelope content, not specifically a routing cost.** `cost_usd` lives only
+/// on `TraceContributionEvent` (see `trace_contribution.rs`), so clearing
+/// `events` to reach the fallback deletes every routing cost the envelope
+/// had -- there is no envelope-level cost field for one to survive in. The
+/// sentinel this test plants and finds in the chunked output is stashed in
+/// `contributor.credit_account_ref` instead, standing in for any other
+/// envelope-level content. That is still a real gap: whatever the raw
+/// envelope JSON contains reaches the scorer and the dedup simhash verbatim
+/// on this path, unscrubbed.
 ///
-/// This test does not assert the sentinel is absent on the fallback path --
-/// it is present, and asserting otherwise would misrepresent what the code
-/// does. It demonstrates the fallback is taken and that the sentinel survives
-/// it, so the gap stays visible instead of silently "proven" closed.
-/// Fixing this (refuse an envelope with no renderable events, or strip
-/// metadata on the fallback path) is out of scope here: it means changing the
-/// chunker, which is production code this task must not touch.
+/// **The narrower, stronger fact -- a routing cost specifically is safe here
+/// -- is structural, not tested by chunking:** the fallback requires
+/// `events` empty, and a routing cost can only exist inside an event, so
+/// "fallback fires" and "a routing cost exists in this envelope" cannot both
+/// be true of the same envelope. See the assertion below, which pins that
+/// directly against the envelope's own `events` field rather than against
+/// parsed JSON -- it is about what the Rust type can hold, not what this run
+/// happened to serialize. That exclusion is incidental to how the two pieces
+/// of code were written, not a rule anyone enforced on purpose: an
+/// envelope-level cost field, or a fallback that could fire alongside a
+/// non-empty `events`, would break it silently.
+///
+/// This test does not assert the sentinel content is absent from the
+/// fallback's output -- it is present, and asserting otherwise would
+/// misrepresent what the code does. It demonstrates the fallback is taken
+/// and that arbitrary envelope content survives it, so the gap stays visible
+/// instead of silently "proven" closed. Fixing this (refuse an envelope with
+/// no renderable events, or strip metadata on the fallback path) is out of
+/// scope here: it means changing the chunker, which is production code this
+/// task must not touch.
 #[test]
-fn known_gap_the_empty_events_fallback_carries_the_raw_routing_cost() {
+fn known_gap_the_empty_events_fallback_chunks_raw_envelope_json() {
     let mut envelope = envelope_with_routing_cost();
     envelope.events.clear();
     // Attach the sentinel somewhere still present in the serialized envelope
@@ -236,7 +265,23 @@ fn known_gap_the_empty_events_fallback_carries_the_raw_routing_cost() {
     // any typed field that can carry a raw string; what matters is that the
     // JSON serialization still contains the sentinel digits with an empty
     // `events` array, which is exactly the condition the fallback checks.
+    // This is NOT a routing cost: see the doc comment above and the
+    // structural-exclusion assertion below for why a routing cost cannot be
+    // the thing planted here.
     envelope.contributor.credit_account_ref = Some(format!("sentinel:{SENTINEL_COST_TEXT}"));
+
+    // Structural exclusion, asserted directly against the typed envelope
+    // (not the JSON it serializes to): `cost_usd` exists only on
+    // `TraceContributionEvent`, so an empty `events` vec means there is no
+    // per-event cost_usd anywhere in this envelope's Rust representation for
+    // the fallback below to leak. This is what would need to fail for a
+    // routing cost to become reachable through this path.
+    assert!(
+        envelope.events.is_empty(),
+        "sanity: cost_usd lives only inside TraceContributionEvent, so an \
+         empty events vec structurally means no routing cost exists in this \
+         envelope to leak"
+    );
 
     let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
     let parsed: Value = serde_json::from_slice(&plaintext).expect("valid json");
@@ -252,13 +297,15 @@ fn known_gap_the_empty_events_fallback_carries_the_raw_routing_cost() {
         "an empty events array must fall through to the raw-text path"
     );
 
-    // The fallback chunks the raw JSON, sentinel and all. This is the gap:
-    // not this test's job to close it, only to say so plainly.
+    // The fallback chunks the raw JSON, sentinel and all. This is the real
+    // gap -- arbitrary envelope content, not specifically a routing cost --
+    // and this test's job is only to say so plainly, not to close it.
     let plan = chunk_envelope_plaintext(&plaintext, &cfg());
     let chunked: String = plan.chunks.iter().map(|c| c.text.as_str()).collect();
     assert!(
         chunked.contains(SENTINEL_COST_TEXT),
-        "known gap: the empty-events fallback chunks the raw envelope JSON, \
-         so a routing cost that reaches it is NOT scrubbed before scoring:\n{chunked}"
+        "known gap: the empty-events fallback chunks the raw envelope JSON \
+         verbatim, so arbitrary envelope content that reaches it is NOT \
+         scrubbed before scoring:\n{chunked}"
     );
 }
