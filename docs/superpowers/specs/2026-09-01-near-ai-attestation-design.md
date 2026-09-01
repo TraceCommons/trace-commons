@@ -397,11 +397,13 @@ The server verifies it against the redacted bytes it already holds.
 
 - Content binding is restored without NEAR AI signing usage, because the witness
   sees the real bytes.
-- The pseudonym stops being an ask: the witness observes the API key when it
-  fetches `/v1/signature/{chat_id}`, so it can emit a stable salted
-  `H(salt, key)` itself. That is per-**key**, not per-account, so a payer with
-  several keys still gets several caps -- weaker than what we would have asked
-  NEAR AI for, but it needs nobody's cooperation and can be strengthened later.
+- The pseudonym does **not** stop being an ask. An earlier note here claimed the
+  witness could derive `H(salt, api_key)` because it would observe the key while
+  fetching the signature. That was wrong: fetching requires the contributor to
+  hand the witness custody of a live paid credential, which is a serious ask and
+  should not be assumed. If the contributor fetches the receipt and supplies it,
+  the witness never sees a key. Sybil binding therefore remains an ask on NEAR
+  AI. See the witness spec's "The pseudonym question, corrected".
 
 **Costs, stated plainly.** It is a new service to build, operate and keep
 attested -- the largest single component in this design, and a central chokepoint
@@ -409,7 +411,7 @@ on the submission path. Raw data transits to it, so a compromised witness is a
 real exposure. It also inherits the redaction policy version as a compatibility
 surface: a policy change invalidates the ability to re-derive old certificates.
 
-**This wants its own spec.** It is a system, not a section.
+**It has its own spec:** [`2026-09-01-redaction-witness-design.md`](./2026-09-01-redaction-witness-design.md).
 
 ### The requirement was never content identity
 
