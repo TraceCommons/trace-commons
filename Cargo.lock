@@ -7935,6 +7935,7 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "ripemd",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",
