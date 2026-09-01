@@ -43,7 +43,16 @@ pub struct IronWireLedger {
     /// `reqwest::Client` builds its own TLS config and connection pool, which
     /// is wasted work on every poll tick for a client that only ever talks to
     /// one loopback host with `Connection: keep-alive` semantics anyway.
-    client: reqwest::Client,
+    ///
+    /// `Option` because building a client can fail -- this crate pins
+    /// `rustls-tls-native-roots`, which loads the platform trust store during
+    /// `build()`, and an unreadable or malformed store makes that fail on a
+    /// real machine. A client we could not build means no enrichment, exactly
+    /// the same state as a proxy that was never installed: `routing/mod.rs`
+    /// treats absence and failure as the same state, and panicking here would
+    /// take down the whole daemon over a condition this module otherwise
+    /// shrugs off.
+    client: Option<reqwest::Client>,
 }
 
 impl std::fmt::Debug for IronWireLedger {
@@ -63,7 +72,7 @@ impl IronWireLedger {
             port,
             token,
             snapshot: Arc::new(RwLock::new(Vec::new())),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder().build().ok(),
         }
     }
 
@@ -99,6 +108,10 @@ impl IronWireLedger {
     /// snapshot as it was. A 401 is a configuration fact, not a transient, so
     /// nothing here retries.
     pub async fn refresh(&self) {
+        let Some(client) = self.client.as_ref() else {
+            tracing::debug!("routing ledger has no client, skipping refresh");
+            return;
+        };
         let since = Utc::now() - chrono::Duration::hours(REFRESH_WINDOW_HOURS);
         // The `Z` form deliberately: a literal `+` in a query string is a
         // space, so an offset-form timestamp arrives malformed.
@@ -107,8 +120,7 @@ impl IronWireLedger {
             self.port,
             since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         );
-        let Ok(response) = self
-            .client
+        let Ok(response) = client
             .get(&url)
             .timeout(REFRESH_TIMEOUT)
             .header("authorization", format!("Bearer {}", self.token))
@@ -161,6 +173,28 @@ impl RoutingLedger for IronWireLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ledger whose client could not be built (the `Client::builder().build()`
+    /// call failed, e.g. a broken platform trust store) must not panic on
+    /// `refresh()` -- it must behave exactly like any other unreachable
+    /// proxy and leave the snapshot as it was. Constructs the struct directly
+    /// with `client: None` rather than forcing a real build failure, which
+    /// is not reproducible on a healthy test machine.
+    #[tokio::test]
+    async fn refresh_with_no_client_does_not_panic() {
+        let ledger = IronWireLedger {
+            port: 8463,
+            token: "t".to_string(),
+            snapshot: Arc::new(RwLock::new(Vec::new())),
+            client: None,
+        };
+        ledger.refresh().await;
+        assert!(
+            ledger
+                .exchanges_since(chrono::DateTime::UNIX_EPOCH)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn a_ledger_that_has_never_refreshed_has_no_rows() {

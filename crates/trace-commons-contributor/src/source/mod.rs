@@ -720,9 +720,11 @@ mod tests {
         // inner adapter -- it overwrites `transcript.routing` from the
         // ledger. So the routing-declared case must come back non-empty
         // (proving the wrapper ran and can see this session) while the
-        // no-proxy case must come back empty -- proving the returned source
-        // in that case is not a `RoutingEnrichedSource` at all, not just one
-        // wrapping an empty ledger.
+        // no-proxy case must come back empty -- proving only that no overlay
+        // is attached in the bare case, not that the returned source is some
+        // different concrete type: a wrapper over an empty ledger would pass
+        // this half identically. The contrast with the wrapped arm below is
+        // what actually carries the test.
         let session = "33333333-3333-3333-3333-333333333333";
         let (root, _file) = claude_code_fixture(session);
         let root_path = root.path().to_str().unwrap();

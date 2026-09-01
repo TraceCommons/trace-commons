@@ -4842,8 +4842,13 @@ mod tests {
     #[test]
     fn set_settings_accepts_ironwire_and_persists_it() {
         // Before this, `ironwire` was not in `apply_settings_object`'s
-        // whitelist, so the only way to turn the proxy overlay on was
-        // hand-editing settings.json and restarting the daemon.
+        // whitelist, so the only way to declare the proxy overlay was
+        // hand-editing settings.json. `set_settings` now persists the
+        // declaration the same way, but `routing` is still built once at
+        // startup (see `ipc.rs` above, near the `Shared` constructor), so
+        // the overlay itself only takes effect on the next daemon restart --
+        // this test asserts the live settings value and the persisted file,
+        // not that the overlay activates without a restart.
         let s = shared();
         let r = handle_request(
             &s,

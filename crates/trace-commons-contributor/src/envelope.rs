@@ -2119,6 +2119,14 @@ mod tests {
     /// `raw_events_for`/`raw_events_for_with_routing` can never compare equal
     /// on the raw structs -- this is what lets the comparison look at
     /// everything that actually describes the event.
+    ///
+    /// This hand-lists every field of `RawTraceContributionEvent` except
+    /// `event_id`, so it is complete as of this writing -- but it is a list,
+    /// not a projection derived from the struct. A field added to
+    /// `RawTraceContributionEvent` later does not fail to compile here; it
+    /// just never enters the comparison, and tests built on this function
+    /// silently stop covering it. Update this tuple (and its type) when the
+    /// struct gains a field.
     fn normalize_for_comparison(
         events: &[RawTraceContributionEvent],
     ) -> Vec<(
