@@ -1912,15 +1912,43 @@ mod tests {
 
     /// Both halves agree on the same envelope. Pinned because the server
     /// derivation is the one that can overrule this one.
+    ///
+    /// `fixture_transcript()` is a real captured claude-code session and
+    /// carries no `RoutingDecision` events, so the routing-metadata class
+    /// would read `false` on both sides regardless of whether the two
+    /// derivations actually agree on it. A synthetic `RoutingDecision` event
+    /// with a non-empty `structured_payload` is pushed onto `raw.events`
+    /// below so the field is genuinely exercised, not trivially equal.
     #[tokio::test]
     async fn the_two_content_derivations_agree() {
         use trace_commons_protocol::trace_contribution::derive_envelope_content_presence;
 
         let cfg = test_config();
         let t = fixture_transcript();
-        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        let declared_message_text = raw.consent.message_text_included;
-        let declared_tool_payloads = raw.consent.tool_payloads_included;
+        let mut raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+        raw.events.push(RawTraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::RoutingDecision,
+            timestamp: chrono::Utc::now(),
+            content: None,
+            structured_payload: serde_json::json!({"backend": "nearai", "rung": "same_model"}),
+            tool_name: None,
+            tool_call_id: None,
+            latency_ms: Some(1200),
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+        });
+        // Recompute the declaration over the augmented event list, the same
+        // way `build_raw_contribution_with_id` does at build time -- the
+        // added event was pushed after that call ran, so `raw.consent` does
+        // not yet reflect it.
+        let declared = declared_content_presence(&raw.events);
+        raw.consent.message_text_included = declared.message_text;
+        raw.consent.tool_payloads_included = declared.tool_payloads;
+        raw.consent.routing_metadata_included = declared.routing_metadata;
 
         let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
         let envelope = redact_to_envelope(&redactor, raw)
@@ -1928,9 +1956,22 @@ mod tests {
             .expect("redaction succeeds");
         let presence = derive_envelope_content_presence(&envelope);
 
+        assert!(
+            declared.routing_metadata && presence.routing_metadata,
+            "the fixture must actually exercise routing_metadata on both \
+             sides, or this test proves nothing about it"
+        );
         assert_eq!(
-            (declared_message_text, declared_tool_payloads),
-            (presence.message_text, presence.tool_payloads),
+            (
+                declared.message_text,
+                declared.tool_payloads,
+                declared.routing_metadata,
+            ),
+            (
+                presence.message_text,
+                presence.tool_payloads,
+                presence.routing_metadata,
+            ),
             "the client declaration and the server derivation must not disagree"
         );
     }
