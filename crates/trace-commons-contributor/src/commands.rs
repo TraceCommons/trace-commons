@@ -743,10 +743,18 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// What to call this session's origin in a table: what it declares itself
+/// to be when discovery knows, and otherwise the adapter that found it.
+///
+/// See `SessionRef::declared_source` for why the two differ at all.
+fn displayed_source(r: &SessionRef) -> &str {
+    r.declared_source.as_deref().unwrap_or(r.source)
+}
+
 fn session_row(idx: usize, r: &SessionRef) -> Vec<String> {
     vec![
         (idx + 1).to_string(),
-        r.source.to_string(),
+        displayed_source(r).to_string(),
         r.project.clone().unwrap_or_else(|| "-".to_string()),
         format_age(r.started_at),
         format_size(r.size_bytes),
@@ -795,8 +803,13 @@ pub fn list(trajectory: Option<&Path>, json: bool) -> Result<()> {
         let items: Vec<serde_json::Value> = sessions
             .iter()
             .map(|r| {
+                // `source` stays the adapter, because a consumer uses it to
+                // ask for the same session again (`--source`). The origin is
+                // ADDED beside it rather than replacing it, so this stays
+                // the field it has always been.
                 serde_json::json!({
                     "source": r.source,
+                    "declared_source": r.declared_source,
                     "project": r.project,
                     "started_at": r.started_at,
                     "size_bytes": r.size_bytes,
@@ -2202,7 +2215,10 @@ mod tests {
 
 #[cfg(test)]
 mod project_filter_tests {
-    use super::{cwd_matches_project, project_filter_undecided, resolve_undecided_project_refs};
+    use super::{
+        cwd_matches_project, project_filter_undecided, resolve_undecided_project_refs, session_row,
+        submit_picker_row,
+    };
     use crate::source::SessionRef;
     use std::path::Path;
 
@@ -2323,6 +2339,7 @@ mod project_filter_tests {
     fn undecided_ref(path: std::path::PathBuf) -> SessionRef {
         SessionRef {
             source: "test-source",
+            declared_source: None,
             path,
             project: None,
             cwd: None,
@@ -2331,6 +2348,46 @@ mod project_filter_tests {
             group_modified_at: None,
             group_member_count: 0,
         }
+    }
+
+    /// `list` and the picker name what a trace came FROM, not how it is
+    /// stored.
+    ///
+    /// An imported Antigravity conversation is staged as a trajectory file
+    /// and read by the `trajectory` adapter, so both tables called it
+    /// `trajectory`. That is a word for the storage format and not the one
+    /// the contributor typed to collect it -- someone who ran
+    /// `import-antigravity` and then `list` saw no row that said so.
+    ///
+    /// The adapter name stays on `source`, because that is what pairs a ref
+    /// back to something that can load it. Only the display changes.
+    #[test]
+    fn a_row_names_the_declared_source_when_discovery_knows_it() {
+        let imported = SessionRef {
+            source: crate::source::SOURCE_TRAJECTORY,
+            declared_source: Some("antigravity".to_string()),
+            ..undecided_ref("/staged/conversation.json".into())
+        };
+        assert_eq!(
+            session_row(0, &imported)[1],
+            "antigravity",
+            "an imported conversation must not be listed under the adapter that stores it"
+        );
+        // The picker is the same row plus its marker, so it follows.
+        assert_eq!(
+            submit_picker_row(0, &imported, Some(false))[1],
+            "antigravity"
+        );
+
+        // A named `--trajectory` path is offered without a discovery-time
+        // parse, so nothing is known to declare: fall back to the adapter
+        // rather than printing an empty column or guessing.
+        let named = SessionRef {
+            source: crate::source::SOURCE_TRAJECTORY,
+            declared_source: None,
+            ..undecided_ref("/named/file.json".into())
+        };
+        assert_eq!(session_row(0, &named)[1], "trajectory");
     }
 
     #[test]
@@ -3917,6 +3974,7 @@ mod submit_scope_tests {
     fn a_ref(cwd: &str, project: &str, at: &str) -> SessionRef {
         SessionRef {
             source: crate::source::SOURCE_CLAUDE_CODE,
+            declared_source: None,
             path: Path::new("/store/s.jsonl").to_path_buf(),
             project: Some(project.to_string()),
             cwd: Some(cwd.to_string()),

@@ -184,6 +184,45 @@ public sealed class NativeRoundTripTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The seeded queue entry must be dated from the clock, never from the
+    /// calendar.
+    ///
+    /// This fixture once carried <c>discovered_at = "2026-08-18T10:01:00Z"</c>.
+    /// The daemon expires a Pending entry once
+    /// <c>discovered_at &lt; now - queue_ttl_days</c>, and that default is 14,
+    /// so the fixture worked for exactly a fortnight and then began expiring
+    /// before the test could approve it. It went off at 10:01 UTC on
+    /// 2026-09-01 and took three unrelated PRs red within the hour.
+    ///
+    /// Nothing caught it earlier because nothing was looking: the failure
+    /// surfaced several steps downstream, as an assertion about an approval
+    /// deadline, and it was intermittent for one morning while CI runs
+    /// straddled the cutoff, which reads exactly like a flake.
+    ///
+    /// So the guard is recency, not validity. A hardcoded date fails this on
+    /// the day it is written rather than a fortnight later, which is the only
+    /// version of the check worth having: one tied to the TTL would pass for
+    /// two weeks and then fail in somebody else's unrelated PR.
+    /// </summary>
+    [Fact]
+    public void TheSeededQueueEntryIsDatedFromTheClockNotTheCalendar()
+    {
+        SeedEnrolledQueuedSession();
+
+        string line = File.ReadAllLines(Path.Combine(_configDir, "daemon-queue.jsonl"))[0];
+        using JsonDocument entry = JsonDocument.Parse(line);
+        string raw = entry.RootElement.GetProperty("discovered_at").GetString()!;
+
+        DateTimeOffset discoveredAt = DateTimeOffset.Parse(
+            raw,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind);
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        Assert.InRange(discoveredAt, now.AddMinutes(-10), now.AddMinutes(1));
+    }
+
     [Fact]
     public void DaemonStartsAndHandshakes()
     {

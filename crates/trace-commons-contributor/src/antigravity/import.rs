@@ -155,16 +155,38 @@ fn resolved_form(path: &Path) -> PathBuf {
 /// flag's own help text, and comparing it as written makes every workspace
 /// path fail `starts_with`, so every conversation would be reported as
 /// belonging to another project.
+/// A `--project` path that is not there is refused rather than filtered
+/// with. `submit --project` has always said so -- `discover_filtered`
+/// rejects a missing path and its comment gives the reason: silent-empty
+/// makes a typo indistinguishable from "this project has no traces". The
+/// same argument applies with more force here, because this command's whole
+/// premise is that an empty import must never be ambiguous.
+///
+/// Only the contributor's own argument is held to this. The other side of
+/// the comparison -- the workspace a conversation was recorded in -- is
+/// still reduced by `resolved_form`, which deliberately tolerates a path
+/// this machine no longer has: a conversation from a deleted checkout is a
+/// real thing to hold, while a `--project` naming a directory that is not
+/// there is a mistake to report.
 fn resolve_project(project: Option<&str>) -> Result<PathBuf> {
     let raw = match project {
         Some(p) => PathBuf::from(p),
         None => return std::env::current_dir().map_err(|_| anyhow!(ERR_NO_PROJECT)),
     };
-    if raw.is_absolute() {
-        return Ok(raw);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map_err(|_| anyhow!(ERR_NO_PROJECT))?
+            .join(raw)
+    };
+    if !absolute.exists() {
+        return Err(anyhow!(
+            "--project path {} does not exist",
+            absolute.display()
+        ));
     }
-    let cwd = std::env::current_dir().map_err(|_| anyhow!(ERR_NO_PROJECT))?;
-    Ok(cwd.join(raw))
+    Ok(absolute)
 }
 
 /// Whether a listed conversation belongs to `project`.
@@ -211,8 +233,7 @@ fn stage(staging: &Path, cascade_id: &str, records: &[serde_json::Value]) -> Res
 pub(crate) async fn import_with<A: AntigravityApi>(
     api: &A,
     staging: &Path,
-    project: Option<&str>,
-    all: bool,
+    filter: Option<&Path>,
 ) -> ImportOutcome {
     let mut summary = ImportSummary {
         imported: 0,
@@ -228,17 +249,6 @@ pub(crate) async fn import_with<A: AntigravityApi>(
             }
         };
     }
-
-    // Resolved before any network call so a run that cannot know its own
-    // project fails before it has read anything.
-    let filter: Option<PathBuf> = if all {
-        None
-    } else {
-        match resolve_project(project) {
-            Ok(p) => Some(p),
-            Err(e) => stop!(e),
-        }
-    };
 
     let listing = match api.list_trajectories().await {
         Ok(listing) => listing,
@@ -321,10 +331,24 @@ pub async fn import_antigravity(
     project: Option<&str>,
     all: bool,
 ) -> Result<ImportOutcome> {
+    // Resolved before the IDE is even looked for, so a run that cannot know
+    // its own project -- or was handed one that is not there -- fails before
+    // it has read anything at all.
+    //
+    // `None` here means "no filter", which is exactly `--all`. Resolving at
+    // the entry rather than inside `import_with` is what removes the fourth
+    // state the old (project, all) pair could express: not-all with no
+    // project, which had to be silently rewritten to the working directory
+    // deep inside the run.
+    let filter = if all {
+        None
+    } else {
+        Some(resolve_project(project)?)
+    };
     let endpoint = discover().await?;
     let api = HttpApi::new(endpoint)?;
     let staging = store.dir().join(TRAJECTORY_STAGING_SUBDIR);
-    Ok(import_with(&api, &staging, project, all).await)
+    Ok(import_with(&api, &staging, filter.as_deref()).await)
 }
 
 #[cfg(test)]
@@ -422,7 +446,7 @@ mod tests {
     async fn only_conversations_matching_the_project_are_staged() {
         let dir = tempfile::tempdir().unwrap();
         let api = two_projects();
-        let summary = import_with(&api, dir.path(), Some(FIXTURE_PROJECT), false)
+        let summary = import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
             .await
             .into_result()
             .expect("import must succeed");
@@ -443,7 +467,7 @@ mod tests {
     async fn a_project_filter_matching_nothing_stages_nothing_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let api = two_projects();
-        let summary = import_with(&api, dir.path(), Some("/somewhere/else"), false)
+        let summary = import_with(&api, dir.path(), Some(Path::new("/somewhere/else")))
             .await
             .into_result()
             .unwrap();
@@ -461,7 +485,7 @@ mod tests {
     async fn all_imports_every_conversation_and_skips_none() {
         let dir = tempfile::tempdir().unwrap();
         let api = two_projects();
-        let summary = import_with(&api, dir.path(), None, true)
+        let summary = import_with(&api, dir.path(), None)
             .await
             .into_result()
             .unwrap();
@@ -493,7 +517,7 @@ mod tests {
                 Some("file:///Users/anonymized/code/trace-commons-server"),
             ),
         ]);
-        let summary = import_with(&api, dir.path(), Some(FIXTURE_PROJECT), false)
+        let summary = import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
             .await
             .into_result()
             .expect("one empty conversation must not fail the run");
@@ -513,7 +537,7 @@ mod tests {
     async fn the_staged_file_is_named_for_the_cascade_id() {
         let dir = tempfile::tempdir().unwrap();
         let api = FixtureApi::new();
-        import_with(&api, dir.path(), Some(FIXTURE_PROJECT), false)
+        import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
             .await
             .into_result()
             .unwrap();
@@ -540,11 +564,46 @@ mod tests {
     /// Parsing is not enough on its own -- a file that parses can still
     /// have lost or reordered turns on the way to disk -- so the turns are
     /// asserted through the staged BYTES, by content and in order.
+    /// The end a contributor actually sees: after importing, `list` names
+    /// the conversation `antigravity`, not the adapter that stores it.
+    ///
+    /// The unit test on `session_row` pins the rendering; this pins the
+    /// whole path -- convert writes `meta.source`, staging puts the file
+    /// where the trajectory source reads it, and discovery carries that
+    /// value out on the ref. A break anywhere along it lands here.
+    #[tokio::test]
+    async fn a_staged_conversation_is_discovered_as_antigravity_not_as_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = FixtureApi::new();
+        import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
+            .await
+            .into_result()
+            .unwrap();
+
+        // The staging directory is exactly the scope the trajectory source
+        // auto-reads, so point one at it the way the daemon does.
+        let source =
+            crate::source::trajectory::TrajectorySource::auto(None, Some(dir.path().to_path_buf()));
+        let refs = crate::source::TraceSource::discover(&source).unwrap();
+        assert_eq!(refs.len(), 1, "the staged conversation must be discovered");
+
+        assert_eq!(
+            refs[0].source,
+            crate::source::SOURCE_TRAJECTORY,
+            "the adapter is still what loads it -- `source` must stay resolvable"
+        );
+        assert_eq!(
+            refs[0].declared_source.as_deref(),
+            Some("antigravity"),
+            "but what it declares itself to be is what a contributor is shown"
+        );
+    }
+
     #[tokio::test]
     async fn a_staged_file_round_trips_its_turns_through_the_trajectory_source() {
         let dir = tempfile::tempdir().unwrap();
         let api = FixtureApi::new();
-        import_with(&api, dir.path(), Some(FIXTURE_PROJECT), false)
+        import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT)))
             .await
             .into_result()
             .unwrap();
@@ -608,6 +667,39 @@ mod tests {
         // The raw comparison the old code performed, shown to fail: this
         // is why the argument is resolved rather than compared as typed.
         assert!(!Path::new(&format!("{}/src", cwd.display())).starts_with("."));
+    }
+
+    /// A `--project` path that is not there is a typo, not an empty result.
+    ///
+    /// `submit --project` has always said so -- `discover_filtered` refuses
+    /// a missing path with "does it exist?" and its comment gives the
+    /// reason: silent-empty makes a typo indistinguishable from "this
+    /// project has no traces". `import --project` accepted anything and
+    /// filtered with it, so one mistyped character reported every
+    /// conversation as belonging to another project, which is the same
+    /// output as a correct run against a project with nothing in it.
+    #[test]
+    fn a_project_path_that_does_not_exist_is_refused_rather_than_matching_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("no-such-checkout");
+        assert!(!missing.exists());
+
+        let err = resolve_project(Some(missing.to_str().unwrap()))
+            .expect_err("a missing --project path must not resolve");
+        let message = err.to_string();
+        assert!(
+            message.contains("no-such-checkout"),
+            "the error must name the path the contributor typed: {message}"
+        );
+
+        // A relative path is resolved before the check, so a missing one is
+        // refused for the same reason rather than slipping through as
+        // "cannot canonicalize, compare it as typed".
+        assert!(resolve_project(Some("no-such-checkout-either")).is_err());
+
+        // And a path that IS there still resolves, so the check rejects
+        // only what it is meant to.
+        assert!(resolve_project(Some(root.path().to_str().unwrap())).is_ok());
     }
 
     /// The premise a lexical normalization step was built on, checked
@@ -799,7 +891,7 @@ mod tests {
             ]),
             served: std::cell::Cell::new(0),
         };
-        let outcome = import_with(&api, dir.path(), Some(FIXTURE_PROJECT), false).await;
+        let outcome = import_with(&api, dir.path(), Some(Path::new(FIXTURE_PROJECT))).await;
 
         let err = outcome.error.as_ref().expect("the failure must survive");
         assert_eq!(err.to_string(), crate::antigravity::client::ERR_API_FAILED);
