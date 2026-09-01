@@ -66004,6 +66004,14 @@ impl PerplexityDriverTestDb {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerplexityDriverTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
@@ -71310,6 +71318,56 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
     assert_eq!(
         community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
+    );
+}
+
+#[tokio::test]
+async fn clear_stale_prior_risk_requires_admin_token() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/pii-backstop-clear-stale-prior-risk")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    // token-a is a contributor token. This route rewrites the recorded risk of
+    // a privacy decision, so it is admin-only.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// An omitted limit must be a sample, never every quarantined submission.
+#[test]
+fn clear_stale_prior_risk_limit_defaults_small_and_is_clamped() {
+    let clamp = |requested: Option<i64>| requested.unwrap_or(10).clamp(1, 1_000);
+    assert_eq!(clamp(None), 10, "omitted limit must be a sample");
+    assert_eq!(clamp(Some(0)), 1, "zero must not mean unbounded");
+    assert_eq!(clamp(Some(-5)), 1, "negative must not mean unbounded");
+    assert_eq!(clamp(Some(100_000)), 1_000);
+}
+
+/// The justification for this route is that the risk ratchet stays intact: the
+/// escape hatch is an audited human assertion, not a relaxed rule.
+///
+/// The rule itself lives in the protocol crate, and its own tests guard it
+/// (`canary_healthy_but_no_findings_cannot_lower_high_risk` and siblings).
+/// What this asserts is narrower and local: that the server crate has not grown
+/// a second downgrade path that sidesteps it.
+#[test]
+fn the_server_crate_does_not_reimplement_the_downgrade_rule() {
+    let storage_src = include_str!("../../trace_corpus_storage.rs");
+    assert!(
+        !storage_src.contains("fn can_downgrade"),
+        "can_downgrade belongs to the protocol crate; a copy here would let the \
+         ratchet be relaxed without the protocol tests noticing"
     );
 }
 
@@ -78364,6 +78422,14 @@ impl PerUserTestDeviceKeyDb {
 // never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerUserTestDeviceKeyDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
@@ -79309,6 +79375,14 @@ impl DeviceGrantScopeTestDb {
 // issuer device-key ceiling path never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for DeviceGrantScopeTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
@@ -80330,6 +80404,14 @@ impl MockDbWithChunkEntries {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for MockDbWithChunkEntries {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
@@ -82961,6 +83043,14 @@ fn awaiting_pii_backstop_excluded_from_export_until_released() {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBackstopDriverTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
@@ -85249,6 +85339,14 @@ async fn logging_out_a_native_token_revokes_its_session_row() {
 // this file stubs it.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
     async fn requeue_quarantined_for_pii_backstop(
         &self,
         _: &str,
