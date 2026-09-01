@@ -104,18 +104,23 @@ On success the witness signs:
 ```
 H(redacted_artifact)
 chat_id
-account_pseudonym          <- stable per-account, opaque; see Deployment
 prompt_tokens, completion_tokens
 model
 timestamp
 redaction_policy_version
-witness_enclave_measurement
+witness_measurement
 ```
 
-`account_pseudonym` is the field that makes the per-contributor cap bind. It is
-available only because NEAR AI hosts the witness and therefore already knows the
-account; it is opaque and must never be a name, an email, or anything resolvable
-to a person. We hash it on arrival regardless.
+**There is deliberately no `account_pseudonym` field.** An earlier draft carried
+one, from when NEAR AI was to host the witness and would therefore already know
+which account paid. **We host it**, so the witness has no way to learn that --
+and a signed field that can never be populated is worse than an absent one: it
+reads as a guarantee and delivers nothing.
+
+If NEAR AI later adds a stable per-account pseudonym to the *receipt*, the
+witness verifies that receipt and can relay the value faithfully. That is a
+certificate format version bump when it happens, and an honest one. Adding a
+field we cannot fill today, in anticipation, is not.
 
 The server verifies the signature against the witness's own attestation, then
 checks `H(redacted_artifact)` against the bytes it holds. Raw never reaches the
