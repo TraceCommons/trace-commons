@@ -14,6 +14,13 @@
 //! to accepting the submitted artifact, and no silent truncation, collapsing
 //! or reordering of overlapping spans.
 //!
+//! Replacements are constrained to the redaction placeholder grammar, so that
+//! applying a span list can only ever *remove* information and stamp a marker
+//! in its place. Without that constraint a span is an insertion channel: any
+//! span, not merely a zero-width one, could swap raw text for arbitrary
+//! attacker-chosen content and still satisfy the correspondence check, and
+//! the artifact would not derive from the raw text by redaction alone.
+//!
 //! No function here logs, and callers must not log the values either: `raw`,
 //! the returned text, and the span list are all contributor content.
 
@@ -43,6 +50,16 @@ pub enum CorrespondenceError {
         start: usize,
         end: usize,
     },
+    /// `start == end`. A redaction removes something; a zero-width span
+    /// removes nothing and only inserts, so it is not a redaction even when
+    /// its replacement is a well-formed placeholder.
+    #[error("redaction span {index} is empty")]
+    EmptySpan { index: usize },
+    /// The replacement is not a redaction placeholder. Carries no copy of the
+    /// offending text: it is contributor content, and the text an attacker
+    /// tried to insert is exactly what must not reach a log.
+    #[error("redaction span {index} has a replacement that is not a placeholder")]
+    MalformedReplacement { index: usize },
     /// `end` is past the last codepoint of the raw text. A byte offset
     /// supplied where a codepoint index was expected usually lands here.
     #[error("redaction span {index} ends past the input")]
@@ -53,15 +70,59 @@ pub enum CorrespondenceError {
     },
     /// Two spans cover the same region. Applying either one silently would
     /// change what the other asserts, so both are refused.
-    #[error("redaction spans {first} and {second} overlap")]
+    ///
+    /// Classifiers do genuinely return overlapping spans, which is why the
+    /// client's redaction path collapses them. Seeing this error usually means
+    /// a caller passed the raw classifier list rather than the collapsed one.
+    #[error(
+        "redaction spans {first} and {second} overlap; the witness consumes the post-collapse span list, not a raw classifier list"
+    )]
     OverlappingSpans { first: usize, second: usize },
+}
+
+/// The longest label this accepts. Real labels are a closed allowlist of short
+/// identifiers (`private_email`, `secret_like`, `unknown`); the cap is generous
+/// headroom over those, and exists so the label cannot itself become a payload.
+const MAX_LABEL_LEN: usize = 64;
+
+/// Is `replacement` a redaction placeholder -- `[REDACTED]`, or
+/// `[REDACTED:<label>]` with a non-empty label of lowercase ASCII letters,
+/// digits and underscores?
+///
+/// The charset is a deliberate superset of the labels the client emits, which
+/// come from a closed allowlist in `trace-commons-protocol`. The witness checks
+/// mechanics, not redaction policy, so it must not need changing when that
+/// allowlist grows a label.
+fn is_redaction_placeholder(replacement: &str) -> bool {
+    if replacement == "[REDACTED]" {
+        return true;
+    }
+    let Some(label) = replacement
+        .strip_prefix("[REDACTED:")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    !label.is_empty()
+        && label.len() <= MAX_LABEL_LEN
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Apply `spans` to `raw`, returning the redacted text.
 ///
+/// `spans` is the **post-collapse** list -- the spans the client actually
+/// applied, after its own overlap-collapsing step -- not the list a classifier
+/// returned. Classifiers do return overlapping spans, which is why that
+/// collapse step exists; a witness handed the raw list would refuse honest
+/// submissions with [`CorrespondenceError::OverlappingSpans`]. The client
+/// applies policy, the witness only checks mechanics.
+///
 /// `spans` need not be sorted; disjoint spans describe the same result in any
-/// order. They must not overlap, must not be inverted, and must not run past
-/// the end of `raw` in codepoints.
+/// order. They must not overlap, must not be inverted, must not be empty, must
+/// not run past the end of `raw` in codepoints, and each replacement must be a
+/// redaction placeholder.
 pub fn apply_spans(raw: &str, spans: &[RedactionSpan]) -> Result<String, CorrespondenceError> {
     // `boundaries[i]` is the byte offset of codepoint `i`, with a final entry
     // of `raw.len()`, so a valid `end` is `<= boundaries.len() - 1`. Building
@@ -79,12 +140,18 @@ pub fn apply_spans(raw: &str, spans: &[RedactionSpan]) -> Result<String, Corresp
                 end: span.end,
             });
         }
+        if span.start == span.end {
+            return Err(CorrespondenceError::EmptySpan { index });
+        }
         if span.end > codepoint_len {
             return Err(CorrespondenceError::SpanOutOfRange {
                 index,
                 end: span.end,
                 len: codepoint_len,
             });
+        }
+        if !is_redaction_placeholder(&span.replacement) {
+            return Err(CorrespondenceError::MalformedReplacement { index });
         }
     }
 
@@ -127,6 +194,10 @@ pub fn apply_spans(raw: &str, spans: &[RedactionSpan]) -> Result<String, Corresp
 mod tests {
     use super::*;
 
+    /// The placeholder every test that is not about the grammar uses, so that
+    /// a grammar failure can never be what such a test is actually observing.
+    const PLACEHOLDER: &str = "[REDACTED]";
+
     fn span(start: usize, end: usize, replacement: &str) -> RedactionSpan {
         RedactionSpan {
             start,
@@ -135,32 +206,42 @@ mod tests {
         }
     }
 
+    fn redact(start: usize, end: usize) -> RedactionSpan {
+        span(start, end, PLACEHOLDER)
+    }
+
     #[test]
     fn spans_apply_in_order_and_produce_the_expected_text() {
         let out = apply_spans(
             "call alice at 555-0100 today",
-            &[span(5, 10, "[NAME]"), span(14, 22, "[PHONE]")],
+            &[
+                span(5, 10, "[REDACTED:private_name]"),
+                span(14, 22, "[REDACTED:private_phone]"),
+            ],
         )
         .unwrap();
-        assert_eq!(out, "call [NAME] at [PHONE] today");
+        assert_eq!(
+            out,
+            "call [REDACTED:private_name] at [REDACTED:private_phone] today"
+        );
     }
 
     #[test]
     fn adjacent_spans_are_not_an_overlap() {
         // end == next start touches but does not cover the same character.
-        let out = apply_spans("abcdef", &[span(1, 3, "X"), span(3, 5, "Y")]).unwrap();
-        assert_eq!(out, "aXYf");
+        let out = apply_spans("abcdef", &[redact(1, 3), span(3, 5, "[REDACTED:secret]")]).unwrap();
+        assert_eq!(out, "a[REDACTED][REDACTED:secret]f");
     }
 
     #[test]
     fn an_unsorted_span_list_applies_to_the_same_text() {
-        let out = apply_spans("abcdef", &[span(3, 5, "Y"), span(1, 3, "X")]).unwrap();
-        assert_eq!(out, "aXYf");
+        let out = apply_spans("abcdef", &[span(3, 5, "[REDACTED:secret]"), redact(1, 3)]).unwrap();
+        assert_eq!(out, "a[REDACTED][REDACTED:secret]f");
     }
 
     #[test]
     fn overlapping_spans_are_refused() {
-        let err = apply_spans("hello world", &[span(0, 5, "X"), span(3, 8, "Y")]).unwrap_err();
+        let err = apply_spans("hello world", &[redact(0, 5), redact(3, 8)]).unwrap_err();
         assert_eq!(
             err,
             CorrespondenceError::OverlappingSpans {
@@ -172,9 +253,8 @@ mod tests {
 
     #[test]
     fn a_later_span_swallowed_by_an_earlier_one_is_refused() {
-        // Sorting by start alone would place these adjacent; containment is
-        // still an overlap and the widest end so far is what must be tracked.
-        let err = apply_spans("hello world", &[span(0, 9, "X"), span(2, 4, "Y")]).unwrap_err();
+        // Containment is still an overlap.
+        let err = apply_spans("hello world", &[redact(0, 9), redact(2, 4)]).unwrap_err();
         assert_eq!(
             err,
             CorrespondenceError::OverlappingSpans {
@@ -185,8 +265,23 @@ mod tests {
     }
 
     #[test]
+    fn the_overlap_error_names_the_post_collapse_contract() {
+        // The message a caller reads when it fires is the only place the
+        // precondition is stated at runtime, so it must actually say it.
+        let rendered = CorrespondenceError::OverlappingSpans {
+            first: 0,
+            second: 1,
+        }
+        .to_string();
+        assert!(
+            rendered.contains("post-collapse"),
+            "overlap error must point the caller at the collapse step: {rendered}"
+        );
+    }
+
+    #[test]
     fn a_span_past_the_end_is_refused() {
-        let err = apply_spans("short", &[span(0, 99, "X")]).unwrap_err();
+        let err = apply_spans("short", &[redact(0, 99)]).unwrap_err();
         assert_eq!(
             err,
             CorrespondenceError::SpanOutOfRange {
@@ -199,7 +294,7 @@ mod tests {
 
     #[test]
     fn an_inverted_span_is_refused() {
-        let err = apply_spans("hello", &[span(4, 2, "X")]).unwrap_err();
+        let err = apply_spans("hello", &[redact(4, 2)]).unwrap_err();
         assert_eq!(
             err,
             CorrespondenceError::InvertedSpan {
@@ -216,17 +311,17 @@ mod tests {
         // codepoint 3 / bytes 3..5. Codepoints 5..10 are "latte"; the SAME
         // numbers read as bytes are " latt", which is also a valid char
         // boundary pair -- so a byte-index implementation does not panic
-        // here, it silently produces "caféREDACTEDe". The two answers differ.
-        let out = apply_spans("café latte", &[span(5, 10, "REDACTED")]).unwrap();
-        assert_eq!(out, "café REDACTED");
+        // here, it silently produces "café[REDACTED]e". The answers differ.
+        let out = apply_spans("café latte", &[redact(5, 10)]).unwrap();
+        assert_eq!(out, "café [REDACTED]");
     }
 
     #[test]
     fn a_span_over_a_multibyte_character_redacts_the_whole_character() {
         // Codepoint 3 is the accented e alone. Read as bytes, 3..4 would cut
         // the character in half and panic rather than truncate.
-        let out = apply_spans("café latte", &[span(3, 4, "E")]).unwrap();
-        assert_eq!(out, "cafE latte");
+        let out = apply_spans("café latte", &[redact(3, 4)]).unwrap();
+        assert_eq!(out, "caf[REDACTED] latte");
     }
 
     #[test]
@@ -234,7 +329,7 @@ mod tests {
         // "café" is 4 codepoints and 5 bytes. A caller that passed byte
         // offsets would send end == 5, which is a valid byte boundary and an
         // invalid codepoint index. It is refused, not clamped to the end.
-        let err = apply_spans("café", &[span(0, 5, "X")]).unwrap_err();
+        let err = apply_spans("café", &[redact(0, 5)]).unwrap_err();
         assert_eq!(
             err,
             CorrespondenceError::SpanOutOfRange {
@@ -247,8 +342,8 @@ mod tests {
 
     #[test]
     fn a_span_ending_exactly_at_the_end_is_accepted() {
-        let out = apply_spans("café", &[span(3, 4, "E")]).unwrap();
-        assert_eq!(out, "cafE");
+        let out = apply_spans("café", &[redact(3, 4)]).unwrap();
+        assert_eq!(out, "caf[REDACTED]");
     }
 
     #[test]
@@ -263,6 +358,115 @@ mod tests {
         assert_eq!(out, "");
     }
 
+    // --- the insertion channel ---
+
+    #[test]
+    fn a_zero_width_span_is_refused_even_with_a_well_formed_placeholder() {
+        // The replacement is impeccable; the span still removes nothing, so
+        // it is pure insertion. The grammar rule cannot be what refuses this.
+        let err = apply_spans("café latte", &[redact(3, 3)]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::EmptySpan { index: 0 });
+    }
+
+    #[test]
+    fn a_zero_width_span_at_the_very_end_is_refused() {
+        let err = apply_spans("café", &[redact(4, 4)]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::EmptySpan { index: 0 });
+    }
+
+    #[test]
+    fn an_arbitrary_replacement_is_refused() {
+        // One character out, a whole fabricated passage in. The span is
+        // well-formed in every other respect, so the empty-span rule cannot
+        // be what refuses this.
+        let err =
+            apply_spans("hello world", &[span(0, 1, "a long fabricated passage")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn a_placeholder_with_smuggled_text_after_it_is_refused() {
+        let err =
+            apply_spans("hello world", &[span(0, 5, "[REDACTED] and also this")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn a_placeholder_with_smuggled_text_before_it_is_refused() {
+        let err = apply_spans("hello world", &[span(0, 5, "smuggled [REDACTED]")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn a_label_outside_the_charset_is_refused() {
+        // Prose inside the label is the obvious way to smuggle through the
+        // labelled form; spaces and capitals are not label characters.
+        let err = apply_spans("hello world", &[span(0, 5, "[REDACTED:Private Name]")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn an_empty_label_is_refused() {
+        let err = apply_spans("hello world", &[span(0, 5, "[REDACTED:]")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn an_overlong_label_is_refused() {
+        // In-charset but long enough to be a payload rather than a label.
+        let label = "a".repeat(MAX_LABEL_LEN + 1);
+        let err =
+            apply_spans("hello world", &[span(0, 5, &format!("[REDACTED:{label}]"))]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+    }
+
+    #[test]
+    fn a_label_at_the_length_limit_is_accepted() {
+        let label = "a".repeat(MAX_LABEL_LEN);
+        let out =
+            apply_spans("hello world", &[span(0, 5, &format!("[REDACTED:{label}]"))]).unwrap();
+        assert_eq!(out, format!("[REDACTED:{label}] world"));
+    }
+
+    #[test]
+    fn every_label_the_client_emits_is_accepted() {
+        // The witness must not need changing when the client's allowlist
+        // grows, so the grammar is a superset of what it emits today.
+        for label in [
+            "account_number",
+            "credit_card",
+            "ip_address",
+            "private_address",
+            "private_date",
+            "private_email",
+            "private_location",
+            "private_name",
+            "private_person",
+            "private_phone",
+            "private_url",
+            "secret",
+            "secret_like",
+            "ssn",
+            "unknown",
+        ] {
+            let replacement = format!("[REDACTED:{label}]");
+            let out = apply_spans("hello world", &[span(0, 5, &replacement)])
+                .unwrap_or_else(|err| panic!("{label} should be accepted, got {err}"));
+            assert_eq!(out, format!("{replacement} world"));
+        }
+    }
+
+    #[test]
+    fn an_empty_span_carrying_arbitrary_text_reports_the_empty_span() {
+        // Both rules would refuse this. Pinning which one fires keeps the
+        // message an operator reads pointed at the structural fault rather
+        // than sending them hunting for a malformed label.
+        let err = apply_spans("hello world", &[span(3, 3, "fabricated")]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::EmptySpan { index: 0 });
+    }
+
+    // --- hash-only discipline ---
+
     #[test]
     fn the_error_display_carries_no_offsets_or_text() {
         let rendered = CorrespondenceError::SpanOutOfRange {
@@ -273,5 +477,17 @@ mod tests {
         .to_string();
         assert!(!rendered.contains("99"), "offsets must not reach Display");
         assert!(!rendered.contains('5'), "lengths must not reach Display");
+    }
+
+    #[test]
+    fn a_malformed_replacement_never_reaches_an_error_value() {
+        // The rejected text is what an attacker chose to insert. It must not
+        // be reachable from the error at all -- not via Display, and not via
+        // a field a caller could log with Debug.
+        let secret = "smuggled-payload";
+        let err = apply_spans("hello world", &[span(0, 5, secret)]).unwrap_err();
+        assert_eq!(err, CorrespondenceError::MalformedReplacement { index: 0 });
+        assert!(!err.to_string().contains(secret));
+        assert!(!format!("{err:?}").contains(secret));
     }
 }
