@@ -111,12 +111,33 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     /// invites a contributor to believe they have armed something that cannot
     /// be armed.
     ///
-    /// macOS offers no such control today -- Settings toggles only ask and
-    /// ignore, and the deliberate confirmation flow for arming is unbuilt --
-    /// so nothing reads this yet. It exists so the constraint is stated where
-    /// that flow will have to look, instead of being rediscovered from the
-    /// Rust when someone builds it.
+    /// Read by `offerableModes`, which is what every macOS surface with a
+    /// mode control consults. It is stated here rather than in a view
+    /// because it is a claim about what the daemon will accept, not a
+    /// presentation choice, and because a view is the one place in this
+    /// codebase nothing can execute.
     public var canBeArmed: Bool { !isUnresolvedBucket }
+
+    /// The modes this row may be put in front of a contributor, in the order
+    /// a picker should show them.
+    ///
+    /// Ask-first leads because it is the default and what happens to a
+    /// contributor who reads nothing; arming sits in the middle; the one
+    /// that stops a project being offered at all is last. Windows expresses
+    /// the same list in the same order, for the same reasons, in
+    /// `UnresolvedBucketCopy.OfferableModes`.
+    ///
+    /// A surface that wants a mode control must iterate this rather than
+    /// `ProjectMode.allCases`. The bucket cannot be armed -- `Policy`
+    /// refuses `auto_upload` for it in `set_mode` and again in `resolve` --
+    /// and offering a mode the daemon will refuse invites a contributor to
+    /// believe they have armed something that cannot be armed, with the
+    /// refusal arriving silently or not at all. Omitting the choice is the
+    /// honest answer; offering it disabled still puts an arming affordance
+    /// on a row that has none.
+    public var offerableModes: [ProjectMode] {
+        canBeArmed ? [.ask, .autoUpload, .ignore] : [.ask, .ignore]
+    }
 
     /// The name to show for this row.
     ///
@@ -137,6 +158,23 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
 /// copy -- a near-duplicate is how two surfaces start disagreeing.
 public enum ProjectCopy {
     public static let unresolvedBucketLabel = "Sessions with no project"
+
+    /// The label for one option in a mode picker.
+    ///
+    /// These are *actions* -- what selecting this does -- and are not the
+    /// state sentences Settings prints beside a row to say what the mode
+    /// currently is ("Contributed without asking"). Both exist and they are
+    /// not interchangeable: a picker of state sentences reads as a report,
+    /// and a row labelled with an action reads as a button that has not been
+    /// pressed. The words are the Linux shell's `mode_choices`.
+    public static func modeChoiceLabel(_ mode: ProjectMode) -> String {
+        switch mode {
+        case .ask: return "Ask me first"
+        case .autoUpload: return "Contribute automatically"
+        case .ignore: return "Never offer this one"
+        }
+    }
+
 
     /// A statement of what the daemon does, not an apology. Nothing in it is
     /// a contributor's to fix: the bucket exists so that a directory the
