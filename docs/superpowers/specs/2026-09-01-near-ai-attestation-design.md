@@ -1,6 +1,6 @@
 # NEAR AI inference attestation, and attestation-gated onboarding
 
-Two things, joined by one object.
+Two things, which were meant to be joined by one object and are not.
 
 1. A trace envelope can carry evidence that the agent work it records was
    inferenced on NEAR AI.
@@ -12,16 +12,50 @@ at onboarding is a toll paid once; an attestation required on every submission
 is a cost that scales with the number of traces rather than the number of
 accounts, which is the ratio that decides whether a credit ledger can be farmed.
 
+> **Revised 2026-09-01, after probing the live service.** The original draft
+> assumed no hardware attestation was available and that one negotiated receipt
+> would serve both halves. Both assumptions were wrong, in opposite directions.
+>
+> A fresh, nonce-bound Intel TDX + NVIDIA Hopper attestation **is served today,
+> unauthenticated** — better than assumed, and verifiable without asking NEAR AI
+> for anything. But it is a public document that identifies a *machine*, not a
+> contributor, so it cannot carry half 2. The per-request receipt that half 2
+> needs remains unconfirmed.
+>
+> The design therefore splits into Object A (available, buildable now) and
+> Object B (unconfirmed, blocking). Sections below are marked accordingly. Half
+> 1 is partly reachable; **half 2 is blocked**, and no configuration should be
+> able to reach it until Object B exists.
+
 This spec depends on
 [`2026-09-01-ironwire-ledger-enrichment-design.md`](./2026-09-01-ironwire-ledger-enrichment-design.md)
 and says where.
 
 ## What exists today
 
-- **No TEE attestation verification anywhere.** The only reference to NEAR AI's
-  TEE is a comment: `crates/trace-commons-gate-enclave/src/perplexity_near_ai.rs:15`
-  notes "(Intel TDX + NVIDIA GPU TEE)". Nothing verifies a quote. The property is
-  trusted by assertion.
+- **NEAR AI publishes a fresh, nonce-bound hardware attestation today.** Probed
+  2026-09-01: `GET https://qwen3-6-35b.completions.near.ai/v1/attestation/report`
+  returns HTTP 200, ~390 KB, **unauthenticated** — no credential, no negotiation.
+  It carries an `intel_quote` (TDX), a ~98 KB `nvidia_payload` (Hopper
+  `evidence_list`), `signing_address` + `signing_public_key` (secp256k1),
+  `ohttp_key_config` + `ohttp_attestation` (ed25519), and pinnable measurements
+  under `info`: `compose_hash`, `os_image_hash`, `mr_aggregated`, `app_id`,
+  `instance_id`, plus `tcb_info.{mrtd,rtmr0..3}`.
+
+  **It binds a caller nonce in hardware.** `?nonce=<exactly 64 hex chars>` is
+  echoed as `request_nonce` *and embedded in the TDX quote* — verified by
+  observing the quote bytes change with the nonce. A 32-hex nonce is rejected
+  and the field returns empty. So the report is fresh and replay-resistant, not
+  a static document that can be copied from another verifier.
+- **We verify none of it.** `perplexity_near_ai.rs:373-374` reads
+  `resp.status()` then `resp.text()`; no response header is ever inspected, and
+  deserialization (`:533-548`) keeps only `choices[].logprobs.token_logprobs`,
+  so serde silently drops everything else. Grep for
+  `signing_address|intel_quote|attestation/report` across the repo: zero hits.
+  The TEE property is currently trusted by assertion even though it is checkable.
+- **No JWKS.** `.well-known/jwks.json` returns 404 on the gateway. The signing
+  key is self-published per instance inside the report, not served from a
+  rotating keyset like our upload-claim issuer.
 - **`trace_score_attestation.rs` is not this.** It is the server signing its own
   scores (`trace_commons.score_attestation.v2`), evidence about how *we*
   evaluated an envelope. It says nothing about where the contributor's inference
@@ -39,9 +73,36 @@ and says where.
 
 ## The attestation object
 
-A **per-request signed receipt** issued by NEAR AI. Trust anchors in NEAR AI's
-signing key, not in hardware — a weaker claim than a verified TDX quote, and the
-honest one to make, so no surface may describe it as hardware-attested.
+There are **two** objects, and conflating them is the mistake this section
+originally made.
+
+**Object A — the instance attestation. Exists today, verifiable today.** The
+nonce-bound TDX + GPU report described above. It answers: *is the endpoint I am
+talking to a genuine Intel TDX enclave with an NVIDIA Hopper GPU, running this
+specific image?* Anchored in Intel and NVIDIA roots, not in NEAR AI's word.
+
+An earlier draft of this spec said trust "anchors in NEAR AI's signing key, not
+in hardware — a weaker claim than a verified TDX quote ... so no surface may
+describe it as hardware-attested." **That is wrong for Object A** and is
+corrected here: a verified TDX quote with a nonce we chose is exactly what is
+available, and calling it hardware-attested is accurate.
+
+**Object A carries no identity.** This is the load-bearing limitation. The
+report is a public, unauthenticated document — anyone can fetch it, and it
+contains nothing caller-specific except the nonce the caller supplies. It
+therefore cannot attest to *who* obtained it, *who* ran an inference, or *that
+any particular trace* passed through the enclave. It attests to a machine, not
+to a relationship with a contributor.
+
+**Object B — a per-request signed receipt. Unverified; may not exist.** This is
+what the rest of this spec needs, and what remains to be settled with NEAR AI.
+Nothing establishes that a completion response is signed by `signing_address`.
+Probes of `/v1/signature`, `/v1/signature/test` and similar return 401, but so
+does every unknown path on that host, so 401 distinguishes nothing either way.
+
+The fields below describe **Object B**. Trust there anchors in NEAR AI's signing
+key — genuinely a weaker claim than Object A's hardware quote, and the honest
+one to make about a receipt.
 
 For a single object to serve both halves, the receipt must carry:
 
@@ -57,18 +118,41 @@ For a single object to serve both halves, the receipt must carry:
 Signed with a key published at a rotating keyset URL, the pattern the
 upload-claim issuer already uses.
 
-**If NEAR AI's receipt omits the account subject, this design splits in two** —
-part 1 and part 2 then need different objects, with a separate identity
-attestation for onboarding. That field is the one to insist on when specifying
-the receipt with NEAR AI.
+**The split this spec warned about has happened.** The original text said: "If
+NEAR AI's receipt omits the account subject, this design splits in two — part 1
+and part 2 then need different objects, with a separate identity attestation for
+onboarding." The only artifact confirmed to exist (Object A) carries no account
+subject and no identity of any kind, so the contingency is now the situation.
+
+The consequence is concrete and worth stating without hedging: **onboarding
+cannot be gated on Object A.** Admitting an uninvited contributor requires
+binding *that contributor* to something, and a document any anonymous party can
+fetch binds nobody. An admission rule built on it would admit everyone, which is
+not a weaker gate but an absent one.
 
 ### The ask on NEAR AI
 
-The receipt format above, plus a published, rotating keyset. Whether any of it
-exists today is unverified; treat the table as the requirement to negotiate, not
-as a description of a shipped API.
+Object B: the receipt format above, **with the account subject the priority
+field**, plus a published rotating keyset. Object A is no longer part of the ask
+— it ships today.
+
+Ask them first whether a completion response is already signed by
+`signing_address`, since the key exists and is already bound to the enclave
+measurement. If it is, most of Object B may already be there and the negotiation
+is about exposing it, not building it.
+
+Worth raising in the same conversation: `ohttp_key_config` and
+`ohttp_attestation` are published alongside the quote, which means requests can
+be encapsulated to a key bound to the attested measurement. A contributor
+routing through OHTTP knows their own request reached the enclave. Whether that
+knowledge can be turned into something *we* can verify has not been reasoned
+through and should not be assumed — but it is the most promising path that does
+not depend on NEAR AI adding a new field.
 
 ## The receipt is destroyed in transit
+
+> **Object B.** Moot until a per-request receipt exists — there is nothing to
+> preserve yet. Retained because the transit problem is real the moment one does.
 
 NEAR AI returns the receipt in its response. IronWire forwards that response to
 Claude Code, which writes **its own** transcript format and drops fields it does
@@ -89,6 +173,9 @@ paths must be supported, and the direct path is the one that can ship first.
 
 ## Coverage, not a boolean
 
+> **Object B.** Coverage counts attested turns, and nothing can be attested at
+> turn level today. The argument for counts-not-a-boolean stands regardless.
+
 "This trace was inferenced on NEAR AI" is almost never wholly true.
 
 IronWire's design is a fidelity ladder that moves a conversation between
@@ -108,6 +195,8 @@ the enrichment spec says not to trust, and coverage gates admission here, which
 makes it authorization rather than attribution.
 
 ## Where receipts ride
+
+> **Object B**, and additionally gated on PR #513 landing.
 
 Receipts attach to the `RoutingDecision` events introduced by the enrichment
 spec — the events that already record `backend` — reached by the same
@@ -131,6 +220,9 @@ that plan, this spec inherits the same silent quarantine regression.
 
 ## Verification at ingest
 
+> **Object B.** Object A's verification is a different path: a periodic check of
+> the endpoint we call, not a per-submission check of contributor-supplied data.
+
 Receipts are verified before gating.
 
 A receipt that fails signature, key-id resolution, or hash binding is **not
@@ -144,6 +236,10 @@ logs: receipt hashes and key ids, never the receipt body, the account subject in
 the clear, or the request/response hashes' preimages.
 
 ## Onboarding
+
+> **Object B, and blocked.** Object A carries no identity, so it cannot admit
+> anyone. Nothing in this section is reachable until a receipt with an account
+> subject exists.
 
 NEAR AI becomes a second trusted issuer in the existing instance-enroll flow.
 
@@ -173,6 +269,17 @@ or absent admission method requires attestation rather than waiving it.
 | instance vouch | with or without attestation |
 | NEAR attestation | only traces where **every inference-bearing turn** is attested |
 | unknown / absent | attestation required (fail closed) |
+
+**The `NEAR attestation` row is not reachable yet, and the column is worth
+building anyway.** It depends on Object B, which is unconfirmed. Object A cannot
+substitute: it carries no identity, so nothing can be admitted by it.
+
+Build the column, the provenance, and the fail-closed default now; leave that
+one row unreachable until Object B exists. The column is what makes the gate
+survive a new tenant-creating path appearing later, and that value does not
+depend on the row being populated. Shipping the enum variant with no way to
+reach it is correct, not incomplete — and it must not be reachable by
+configuration either, or an operator will find it before the mechanism does.
 
 A refusal names the coverage fraction, so a contributor can diagnose it rather
 than guess.
@@ -221,18 +328,57 @@ trace ever exceeds the inference cost of producing one, this gate inverts.
 
 ## Blockers
 
-1. **NEAR AI receipt format**, above all the account-subject field. Nothing here
-   is buildable until the receipt's contents are settled with NEAR AI.
-2. **A published, rotating keyset** for the signing key.
-3. **The third IronWire ask** — receipt recorded on the exchange row — for the
-   proxy-mediated path. The direct-API path is unblocked.
-4. **The enrichment spec's `routing_metadata` presence category**, shared with
-   this design.
+The original list said "nothing here is buildable". That was true of the design
+as then understood and is no longer true: Object A moved from *assumed absent*
+to *verified present*, and the work it unblocks is real.
+
+**Not blocked — buildable now:**
+
+1. **Verifying Object A.** Fetch with a 32-byte nonce, verify the TDX quote to
+   Intel roots and the Hopper evidence to NVIDIA roots, confirm our nonce is in
+   the quote's report data, and pin `mr_aggregated` / `compose_hash` /
+   `os_image_hash` against an expected set. This turns a comment into a check
+   and is worth doing on its own: it is the difference between believing the
+   pilot's scorer runs in a TEE and knowing it.
+2. **The admission-method column** on `trace_tenant_policies`, with the
+   fail-closed default and the `NEAR attestation` row left unreachable.
+3. **The cap-binding test.** See "Why the per-contributor cap still binds" — the
+   spec asks for it to be asserted by test rather than review, and it does not
+   depend on any NEAR AI artifact.
+
+**Still blocked:**
+
+4. **Object B — a per-request receipt**, above all its account-subject field.
+   Everything about coverage, per-trace binding, and attestation-gated admission
+   waits on this. It is the whole security argument: without it, cost scales
+   with accounts rather than traces.
+5. **A published, rotating keyset.** Confirmed absent (404). Object A
+   self-publishes its key inside the report, which is adequate for verifying
+   that report and not a substitute for a keyset that survives rotation.
+6. **The third IronWire ask** — receipt on the exchange row — for the
+   proxy-mediated path. Moot until Object B exists; there is no receipt to
+   record.
+7. **The enrichment spec's `routing_metadata` presence category.** Now more
+   concrete than when written: it lives on PR #513, which is open with CI green
+   and unreviewed. This design cannot land before it does.
 
 ## Open items
 
-- Whether NEAR AI's receipt includes the account subject. If not, onboarding
-  needs a separate identity attestation and this spec splits.
+- ~~Whether NEAR AI's receipt includes the account subject.~~ **Settled, and
+  against us.** The only confirmed artifact carries no identity at all, so
+  onboarding needs a separate identity attestation and this spec has split. What
+  remains open is what that identity attestation is.
+- Whether a completion response is already signed by `signing_address`. The key
+  exists and is bound to the enclave measurement, so this may be a question of
+  exposure rather than construction. Ask before specifying anything new.
+- Whether OHTTP encapsulation, using the published `ohttp_key_config`, can
+  produce something a *third party* can verify — or only something the client
+  itself knows. If only the latter, it does not help admission.
+- Which measurements to pin, and the operational cost of pinning them. Pinning
+  `mr_aggregated` means every NEAR AI image upgrade breaks verification until
+  the expected set is updated. That is the correct failure direction, but it is
+  a live operational burden, and a deployment that responds by disabling the
+  check is worse off than one that never had it.
 - Whether "inference-bearing turn" is cleanly derivable from our transcripts,
   particularly for sessions that predate an IronWire install or mix
   pre- and post-install turns. The refusal path must not punish a contributor
