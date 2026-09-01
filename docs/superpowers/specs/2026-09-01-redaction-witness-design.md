@@ -232,34 +232,62 @@ attestation documents against an AWS root.
 SDK and no code changes — and it runs either on Phala Cloud or on self-hosted
 TDX hardware.
 
-### Where it runs — still open, and separable
+### Where it runs: we host it
 
-Because the attestation endpoint is the same either way, **the contributor's
-client verifies identically regardless of the host.** That is unusual and it is
-what makes the hosting question safe to defer.
+**Decided 2026-09-01 (Zaki).** We run the witness ourselves on dstack. This
+removes the dependency on NEAR AI agreeing to anything, at the cost of the
+per-account pseudonym.
+
+Because the attestation endpoint is the same wherever dstack runs, **the
+contributor's client verifies identically** — the code shipped with the
+attestation slice works unchanged. That is what makes self-hosting affordable
+here and would not have been true on GCP Confidential Space or AWS Nitro's
+native attestation.
 
 | Host | Pseudonym | New reader | Needs agreement |
 |---|---|---|---|
-| NEAR AI | **free** — they know the account | none, they already hold the bytes | yes |
-| Phala Cloud | lost | none in the trust model | no |
-| Our own TDX | lost | none in the trust model | no |
+| NEAR AI | free — they know the account | none | **yes** |
+| **us, on dstack** | **lost** | **none** | **no** |
 
-**"New reader" is none in every row, and that is not a rounding.** In a properly
-attested enclave, TDX protects memory from the host — whoever runs the machine
-cannot read the traces. The residual risks are a TDX break or a supply-chain
-compromise of the image, not operator access. An earlier draft of this spec
-framed a non-NEAR-AI host as adding a reader; that was wrong, and it was the
-main reason NEAR AI looked uniquely suited.
+**"New reader" is none in both rows.** In an attested TDX enclave the host
+cannot read enclave memory, so operating the machine does not grant access to
+traces. The residual risks are a TDX break or a supply-chain compromise of the
+pinned image.
 
-What NEAR AI hosting genuinely buys is the **pseudonym**, and only that. The
-witness would authenticate the contributor with their NEAR AI key, so it already
-knows the account and can emit a stable per-account value — which no other host
-can, because no other host knows which account paid.
+### The three ways to run dstack ourselves, and the open question
 
-So the two are not competitors so much as a strong option and a safe floor.
-**Ask NEAR AI to host it; deploy on dstack elsewhere if they decline.** A no
-costs the pseudonym, not the design — and the pseudonym is separately askable as
-a receipt field if they will not host.
+dstack proper targets **bare-metal** Intel TDX. `dstack-cloud` extends it to GCP
+Confidential VMs and AWS Nitro Enclaves, and the runtime checks the hardware
+report before treating a VM as the same app, whichever the host.
+
+| Path | Hardware burden | Attestation shape |
+|---|---|---|
+| Phala Cloud (managed dstack) | none | same as NEAR AI's — verifier unchanged |
+| Our own bare-metal TDX | provisioning, firmware, TCB upkeep | same — verifier unchanged |
+| GCP Confidential VM via `dstack-cloud` | none beyond a CVM | **unverified — see below** |
+
+**The open question, and it is load-bearing:** does `dstack-cloud` on a GCP
+Confidential VM serve the *same* nonce-bound raw TDX quote our verifier already
+consumes, or something shaped differently? A GCP CVM with TDX can expose a TDX
+quote — unlike Confidential Space, which is token-based — but that is not the
+same as confirming dstack-cloud presents it through the endpoint and layout we
+verified against NEAR AI.
+
+**Confirm this before choosing the GCP path.** If it diverges we would be
+writing a second verifier, which is the cost the dstack decision exists to
+avoid. Phala Cloud is the safe default precisely because it is the configuration
+we have already verified against, live.
+
+### What the pseudonym costs, now that it is lost
+
+Self-hosting forfeits the per-account pseudonym: only NEAR AI knows which
+account paid for an inference. Sybil binding therefore returns to being an
+upstream ask — a stable per-account value in the signed receipt — separable from
+hosting and askable on its own.
+
+Until then, attestation-gated admission gives a **per-trace cost floor with no
+per-attacker ceiling**. That is a pricing judgement, not an open door, and it
+should be made deliberately rather than inherited. See "Sybil economics".
 
 ### The costs, stated
 
@@ -323,45 +351,42 @@ that the stack is fixed and only the host is open.
   first TEE deployment", it is "is it worth one upstream conversation". That is
   a much lower bar, and the same conversation now carries the pseudonym.
 
-## The ask on NEAR AI, consolidated
+## The ask on NEAR AI, reduced to one field
 
-Everything this design needs from them, in one place. Each item is something
-they can already do or already know; none asks them to reveal content or
-identity.
+Hosting is no longer part of the ask — we run the witness. What remains is the
+field that hosting would have supplied for free:
 
-1. **Host a redaction witness** in the enclave that already serves inference —
-   a dstack app alongside the one they run today. It receives raw bytes, the
-   redacted artifact, and a span list; applies the spans to raw; requires byte
-   equality; and verifies the inference receipt against the raw bytes it was
-   given.
+**A stable per-account pseudonym in the signed receipt.** Opaque, salted, not
+resolvable to a person. It is what makes the per-contributor cap bind, and no
+host other than NEAR AI can produce it, because no other host knows which
+account paid.
 
-   If they decline, we deploy the same dstack app elsewhere and lose only
-   item 3.
-2. **Return a certificate over the redacted artifact**, with the fields in "The
-   certificate" above.
-3. **Include a stable per-account pseudonym** in that certificate. Opaque,
-   salted, not resolvable to a person. This is the field that makes the
-   per-contributor cap bind, and hosting is what makes it available.
+That is the whole ask. It reveals neither content nor identity, and it is a
+value they already hold.
 
-Notice what is *not* on this list any more: a change to the receipt format. That
-was the previous ask, and hosting subsumes it.
+If they decline, the design still works — it delivers a per-trace cost floor
+without a per-attacker ceiling, and that is a pricing judgement to make
+explicitly.
 
 ## Sequencing
 
-1. ~~The attestation verification slice.~~ **Done** — receipt and quote
-   verification are on `main`, and the live capture confirmed the receipt binds
-   the model as well as both hashes.
-2. ~~Settle API-key custody.~~ **Done.**
-3. ~~Confirm TDX availability.~~ **Moot** under the hosted design.
-4. **Run the drill once against the live service.** It has never executed end to
-   end; #527 fixed the bug that would have stopped it. This validates the
-   verification the witness certificate would reuse, and costs one completion.
-5. **Put the consolidated ask to NEAR AI.** Their answer determines whether the
-   pseudonym is available, not whether the design proceeds.
-6. Plan our two pieces — the client's send and the server's certificate check —
-   plus the witness app itself if we are deploying it. Being a `docker-compose`
-   unit on dstack, that app is a far smaller thing than the original framing
-   assumed.
+1. ~~The attestation verification slice.~~ **Done.** Receipt and quote
+   verification are on `main`, and the drill has now run green end to end
+   against the live NEAR AI service — quote verified to Intel roots, nonce bound
+   in the quote, all five measurements pinned, receipt verified, and the receipt
+   signer confirmed to be the attested key.
+2. ~~Settle API-key custody.~~ **Done:** the contributor supplies the receipt.
+3. ~~Choose the stack.~~ **Done:** dstack.
+4. ~~Choose the host.~~ **Done:** we run it.
+5. **Confirm the dstack deployment path.** Phala Cloud is the safe default
+   because it matches what we have verified live. Confirm whether
+   `dstack-cloud` on a GCP Confidential VM serves the same nonce-bound raw quote
+   before preferring it.
+6. **Plan three pieces**, all now ours: the witness app itself (a
+   `docker-compose` unit on dstack), the client's send, and the server's
+   certificate check.
+7. **Ask NEAR AI for the pseudonym**, separately and whenever. It is no longer
+   on the critical path.
 
-Nothing here is blocked on us. The next move is a conversation — and, unlike the
-previous draft, a no does not stop the work.
+The design is no longer blocked on anyone else. What remains is a deployment
+choice and three small pieces of work.
