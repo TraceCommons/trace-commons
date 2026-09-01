@@ -155,7 +155,8 @@ tenant context, outside every fail-closed gate. Do not put it behind auth.
 it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
 those pull in different trees. A new dependency must be combinable into an
 AGPL-3.0 work: GPL-2.0-only, SSPL, or proprietary is a hard conflict. CI now
-runs all three plus `check advisories` and `check sources` on every push, so
+covers all three at once by running `check licenses` and `check sources`
+under `--all-features`, and runs `check advisories` on the default graph, so
 the manual run above is a pre-flight, not the only enforcement.
 
 If the boundary test fails, remove the dependency. Do not edit the expected sets

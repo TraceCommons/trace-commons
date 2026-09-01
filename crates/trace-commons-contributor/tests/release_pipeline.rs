@@ -2045,79 +2045,84 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
 }
 
 /// `cargo-deny-action` defaults `arguments` to `--all-features`, so the
-/// property that keeps `cargo-deny-default` checking ONLY the default
-/// feature graph -- `arguments: ''` -- is an override of that default, not
-/// a value whose absence would be obvious. A future edit that "cleans up"
-/// the empty string, or that copies this job as a template for a new one,
-/// silently reunites every feature set into one union graph and defeats the
-/// reason AGENTS.md keeps three separate invocations: "the feature sets
-/// pull in different trees." This pins the three cargo-deny jobs' shape in
-/// cargo-deny.yml so that regression fails here instead of shipping
-/// quietly green.
+/// property that keeps the advisories job on the DEFAULT graph --
+/// `arguments: ''` -- is an override of that default, not a value whose
+/// absence would be obvious. A future edit that "cleans up" the empty
+/// string silently moves advisories onto the union graph, where six
+/// untriaged findings sit, and the job goes permanently red. The mirror
+/// property matters too: licences and sources must stay on
+/// `--all-features`, because a named feature list drifts (it already did --
+/// gcs-client, gcp-kms and near-attestation-collateral ship in production
+/// and went unchecked).
+///
+/// Every assertion runs against `executable_text`, so a comment describing
+/// a step can neither satisfy nor defeat it, and each pinned value is
+/// matched as a whole line rather than a substring.
 #[test]
-fn cargo_deny_job_isolates_feature_sets_and_omits_bans() {
-    let workflow = read(".github/workflows/cargo-deny.yml");
+fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
+    let workflow = executable_text(&read(".github/workflows/cargo-deny.yml"));
 
-    let default_job = extract_job(&workflow, "cargo-deny-default");
-    assert!(
-        default_job.contains("arguments: ''"),
-        "cargo-deny-default must override cargo-deny-action's own \
-         `--all-features` default with `arguments: ''`, or it silently \
-         checks the union of every feature instead of the default graph \
-         alone"
-    );
-    // Three separate checks, not one joined-string match: the invariant is
-    // that all three checks run in this one job (loading the dependency
-    // graph once), not that they appear in this exact order.
-    for check in ["licenses", "advisories", "sources"] {
-        assert!(
-            default_job.contains(check),
-            "cargo-deny-default must run `{check}` alongside the other two \
-             checks, loading the dependency graph once for all three \
-             rather than three times"
-        );
-    }
+    let has_line = |job: &str, want: &str| job.lines().any(|line| line.trim() == want);
 
-    let near_ai_scorer_job = extract_job(&workflow, "cargo-deny-near-ai-scorer");
+    let all_features = extract_job(&workflow, "cargo-deny-all-features");
     assert!(
-        near_ai_scorer_job.contains("arguments: --features near-ai-scorer"),
-        "cargo-deny-near-ai-scorer must check the near-ai-scorer feature \
-         set in isolation, not the default graph"
+        all_features.contains("uses: EmbarkStudios/cargo-deny-action"),
+        "cargo-deny-all-features must actually run cargo-deny-action -- \
+         without this the job can be replaced by anything and every other \
+         assertion here still passes"
     );
     assert!(
-        near_ai_scorer_job.contains("command-arguments: licenses"),
-        "cargo-deny-near-ai-scorer must run the licenses check"
+        has_line(all_features, "arguments: --all-features"),
+        "cargo-deny-all-features must check the union graph: a named \
+         feature list has to track every deployable feature and did not"
+    );
+    assert!(
+        has_line(all_features, "command-arguments: licenses sources"),
+        "cargo-deny-all-features must run licences and sources together, \
+         loading the dependency graph once"
     );
 
-    let local_gpu_models_job = extract_job(&workflow, "cargo-deny-local-gpu-models");
+    let advisories = extract_job(&workflow, "cargo-deny-default-advisories");
     assert!(
-        local_gpu_models_job.contains("arguments: --features local-gpu-models"),
-        "cargo-deny-local-gpu-models must check the local-gpu-models \
-         feature set in isolation, not the default graph"
+        advisories.contains("uses: EmbarkStudios/cargo-deny-action"),
+        "cargo-deny-default-advisories must actually run cargo-deny-action"
     );
     assert!(
-        local_gpu_models_job.contains("command-arguments: licenses"),
-        "cargo-deny-local-gpu-models must run the licenses check"
+        has_line(advisories, "arguments: ''"),
+        "cargo-deny-default-advisories must override cargo-deny-action's \
+         own `--all-features` default with `arguments: ''`, or it checks a \
+         union graph carrying six untriaged findings and is permanently red"
+    );
+    assert!(
+        !advisories.contains("--all-features"),
+        "cargo-deny-default-advisories must not name --all-features"
+    );
+    assert!(
+        has_line(advisories, "command-arguments: advisories"),
+        "cargo-deny-default-advisories must run the advisories check"
     );
 
     // `check bans` must not run anywhere: deny.toml's [bans] section sets
     // only `multiple-versions = "allow"` and configures no deny/skip list,
     // so the check is a standing no-op today -- a job for it would be
     // ceremony, not a gate. If deny.toml ever grows a real ban list, this
-    // assertion is the reminder to add the job back.
+    // assertion is the reminder to add the job back. Both spellings are
+    // checked: cargo-deny-action takes the checks through
+    // `command-arguments`, and its own README uses `command` for the same
+    // thing.
     for (name, job) in [
-        ("cargo-deny-default", default_job),
-        ("cargo-deny-near-ai-scorer", near_ai_scorer_job),
-        ("cargo-deny-local-gpu-models", local_gpu_models_job),
+        ("cargo-deny-all-features", all_features),
+        ("cargo-deny-default-advisories", advisories),
     ] {
         assert!(
             !job.lines().any(|line| {
                 let line = line.trim_start();
-                line.starts_with("command-arguments:") && line.contains("bans")
+                (line.starts_with("command-arguments:") || line.starts_with("command:"))
+                    && line.contains("bans")
             }),
-            "{name} must not name `bans` in a command-arguments line -- \
-             deny.toml's [bans] section enforces nothing today, so running \
-             the check would only be ceremony"
+            "{name} must not name `bans` -- deny.toml's [bans] section \
+             enforces nothing today, so running the check would only be \
+             ceremony"
         );
     }
 }

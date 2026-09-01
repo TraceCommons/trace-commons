@@ -121,9 +121,10 @@ cargo deny --features near-ai-scorer check licenses
 cargo deny --features local-gpu-models check licenses
 ```
 
-Run all three: the feature sets pull in different trees. CI now runs all
-three plus `check advisories` and `check sources` on every push, so this is
-a pre-flight rather than the only enforcement. Note this is separate
+Run all three: the feature sets pull in different trees. CI covers all
+three at once by running `check licenses` and `check sources` under
+`--all-features`, and runs `check advisories` on the default graph, so this
+is a pre-flight rather than the only enforcement. Note this is separate
 from — and does not replace — the repo's standing rule that new dependencies
 need explicit human approval before you add them.
 

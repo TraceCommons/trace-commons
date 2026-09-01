@@ -1,17 +1,29 @@
 # deny.toml has carried the AGPL-combinability licence allow list and the
 # RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
 # / AGENTS.md instruct contributors to run `cargo deny check licenses` by
-# hand under all three feature sets before pushing -- but nothing enforced
-# it. This workflow does.
+# hand before pushing -- but nothing enforced it. This workflow does.
 #
-# Licences run under all three feature sets because the feature sets pull
-# in different trees (AGENTS.md); `arguments: ''` on cargo-deny-default
-# overrides cargo-deny-action's own `--all-features` default for the same
-# reason -- deny.toml's `[graph] all-features = false` exists to match.
-# Advisories run on the default graph only: an `--all-features` version
-# currently fails with seven findings in the near-ai-scorer/local-gpu-models
-# trees, none triaged yet -- see
+# Licences and sources run under `--all-features`, not under a list of
+# named feature sets. A named list has to stay in step with every
+# independently deployable graph, and it did not: the server declares
+# gcs-client, gcp-kms, local-gpu-models-cuda and near-attestation-collateral
+# beyond the three a first draft of this file checked, and production builds
+# use them -- cloudbuild.yaml builds ingest with
+# `--features gcs-client,gcp-kms,near-ai-scorer`, and deploy/pilot-gcp adds
+# near-attestation-collateral. `--all-features` resolves 2,272 crates, a
+# superset of every named graph (the largest, local-gpu-models-cuda, is
+# 2,086), so one job covers each of them conservatively and cannot drift
+# when a feature is added. Measured 2026-09-01: licences and sources pass on
+# every graph individually and on the union.
+#
+# Advisories run on the default graph only, where `arguments: ''` overrides
+# cargo-deny-action's own `--all-features` default. Advisories do NOT pass
+# on the union: six RUSTSEC findings sit in optional trees, none triaged --
+# rustls-pemfile under gcp-kms, hickory-proto under
+# near-attestation-collateral, and crossbeam-epoch / lru / paste / fxhash
+# under near-ai-scorer and local-gpu-models. See
 # docs/superpowers/reports/2026-09-01-cargo-deny-all-features-advisories.md.
+# Gating on them today would land a permanently red required check.
 #
 # `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
 # and configures no deny/skip list, so the check is a standing no-op today.
@@ -36,8 +48,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cargo-deny-default:
-    name: cargo deny (default features)
+  cargo-deny-all-features:
+    name: cargo deny licences and sources (all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --all-features
+          command-arguments: licenses sources
+
+  cargo-deny-default-advisories:
+    name: cargo deny advisories (default features)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,28 +70,4 @@ jobs:
         with:
           log-level: info
           arguments: ''
-          command-arguments: licenses advisories sources
-
-  cargo-deny-near-ai-scorer:
-    name: cargo deny (near-ai-scorer)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: --features near-ai-scorer
-          command-arguments: licenses
-
-  cargo-deny-local-gpu-models:
-    name: cargo deny (local-gpu-models)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          log-level: info
-          arguments: --features local-gpu-models
-          command-arguments: licenses
+          command-arguments: advisories

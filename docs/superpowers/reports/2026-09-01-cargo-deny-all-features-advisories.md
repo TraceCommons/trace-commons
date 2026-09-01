@@ -9,19 +9,46 @@ Investigation only. No dependency or config changes proposed in this report.
 
 ## Why this graph
 
-The default-feature graph that `cargo-deny-default`
-(`.github/workflows/cargo-deny.yml`) checks in CI cannot see an advisory in
-a crate that only `near-ai-scorer` or `local-gpu-models` pulls in -- those
-are optional dependencies, invisible to `cargo metadata` unless their
-feature is enabled. `--all-features` unions every feature's tree into one
-graph, which is the only way to see what a `local-gpu-models` or
-`near-ai-scorer` build actually ships.
+An optional dependency is invisible to `cargo metadata` unless its feature
+is enabled, so a graph that omits a feature cannot see an advisory in a
+crate only that feature pulls in. `--all-features` unions every feature's
+tree into one graph: 2,272 crates, a superset of every named graph (the
+largest single one, `local-gpu-models-cuda`, is 2,086).
+
+This matters because production does not build the default graph.
+`cloudbuild.yaml` builds ingest with
+`--features gcs-client,gcp-kms,near-ai-scorer`, and `deploy/pilot-gcp`
+adds `near-attestation-collateral`.
+
+## Per-graph results, measured 2026-09-01
+
+| Graph | licences | sources | advisories |
+|---|---|---|---|
+| default | pass | pass | pass |
+| `near-ai-scorer` | pass | pass | **fail** |
+| `local-gpu-models` | pass | pass | **fail** |
+| `local-gpu-models-cuda` | pass | pass | **fail** |
+| `gcs-client` | pass | pass | pass |
+| `gcp-kms` | pass | pass | **fail** |
+| `near-attestation-collateral` | pass | pass | **fail** |
+| `--all-features` | pass | pass | **fail** |
+
+Licences and sources pass everywhere, which is why CI runs them once under
+`--all-features`. Advisories run on the default graph only.
 
 ## Findings
 
-Seven RUSTSEC advisories, all rooted in the mistralrs/candle/fastembed tree
-(behind `local-gpu-models`) or the google-cloud-kms tree (behind
-`gcp-kms`), none of them present in the default-feature graph.
+Six RUSTSEC advisories, none present in the default-feature graph.
+Attributed to the graph that actually pulls each one in, measured per
+feature rather than inferred from the union:
+
+- `gcp-kms` -- RUSTSEC-2025-0134 (rustls-pemfile), and nothing else.
+- `near-attestation-collateral` -- RUSTSEC-2026-0118 and -0119
+  (hickory-proto), RUSTSEC-2026-0204 (crossbeam-epoch).
+- `near-ai-scorer`, `local-gpu-models`, `local-gpu-models-cuda` --
+  RUSTSEC-2024-0436 (paste), RUSTSEC-2025-0057 (fxhash),
+  RUSTSEC-2026-0204 (crossbeam-epoch), RUSTSEC-2026-0253 (lru).
+- `gcs-client` -- none; its advisories check passes.
 
 | ID | Crate | Issue | Fix |
 |---|---|---|---|
