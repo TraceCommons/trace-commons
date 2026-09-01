@@ -3183,6 +3183,7 @@ enum TokenRole {
     ProcessEvalWorker,
     RevocationWorker,
     CompetitionReadWorker,
+    RegisterStatsWorker,
 }
 
 impl TokenRole {
@@ -3204,6 +3205,7 @@ impl TokenRole {
             "competition_read_worker" | "competition-read-worker" => {
                 Ok(Self::CompetitionReadWorker)
             }
+            "register_stats_worker" | "register-stats-worker" => Ok(Self::RegisterStatsWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -3237,11 +3239,21 @@ impl TokenRole {
             Self::ProcessEvalWorker => "process_eval_worker",
             Self::RevocationWorker => "revocation_worker",
             Self::CompetitionReadWorker => "competition_read_worker",
+            Self::RegisterStatsWorker => "register_stats_worker",
         }
     }
 }
 
 impl AppState {
+    /// The configured settlement mode's label (`"disabled"` / `"dry_run"` /
+    /// `"http"`), for surfaces that render posture text through
+    /// `trace_commons_server::credit_numbers`. Reads the value `AppState`
+    /// resolved once at startup (`NearSettlementMode::from_env`) rather than
+    /// re-reading the environment on every request.
+    fn near_settlement_mode_label(&self) -> &'static str {
+        self.near_settlement_mode.as_label()
+    }
+
     fn db_contributor_reads_for_tenant(&self, tenant_id: &str) -> bool {
         self.tenant_rollout_gates.enabled_for(
             TraceTenantRolloutFeature::DbContributorReads,
@@ -7213,6 +7225,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
+            "/v1/account/credit-summary",
+            get(account_credit_summary_handler),
+        )
+        .route(
             "/v1/account/traces/{submission_id}",
             get(account_trace_detail_handler),
         )
@@ -7319,6 +7335,9 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/source", get(source_offer_handler))
+        // Unauthenticated, like /v1/source above and for the same structural
+        // reason: it is registered here, outside every auth layer, on purpose.
+        .route("/v1/public/register-stats", get(register_stats_handler))
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -7788,6 +7807,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/workers/revocation-propagation",
             post(revocation_propagation_worker_handler),
+        )
+        .route(
+            "/v1/workers/register-stats/refresh",
+            post(register_stats_refresh_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route(
@@ -15047,6 +15070,40 @@ struct AccountTracesPage {
     next_cursor: Option<String>,
 }
 
+/// One contributor's own credit figures.
+///
+/// Deliberately small. It carries what this account earned and nothing that
+/// could address another account: no principal refs, no hashes, no ids.
+///
+/// It also carries NO spend figure. The server sees submissions, not anyone's
+/// inference bill, so a client that wants "credit covered N% of my spend"
+/// composes it from its own local ledger. An API that reported your spend back
+/// to you would have to be told it first.
+#[derive(Debug, Serialize)]
+struct AccountCreditSummary {
+    points: AccountCreditPoints,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    currency: Option<trace_commons_server::credit_numbers::CurrencyBlock>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+    period: AccountCreditPeriod,
+    /// Submissions held and not yet counted, so a contributor whose figure
+    /// looks low has somewhere to look rather than a mystery.
+    pending_review: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPoints {
+    earned_this_period: i64,
+    lifetime_earned: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPeriod {
+    /// Stated explicitly rather than implied by "this period".
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 /// Build a synthetic, low-privilege `TenantAuth` for the hash-only read audit.
 /// The audit path consumes only `tenant_id`, `principal_ref`, and `role`; this
 /// records the resolved actor (`account-actor:{id}` for the cookie path, the
@@ -15178,6 +15235,201 @@ async fn account_traces_list_handler(
     .map_err(internal_error)?;
 
     Ok(Json(AccountTracesPage { items, next_cursor }))
+}
+
+/// A contributor's own credit figures.
+///
+/// Scoped to `ctx.principal_set` — the account's active principals — because a
+/// contributor with several credentials is one contributor. Reuses the same
+/// SQL-scoped submission read `/v1/account/traces` already applies rather than
+/// a second notion of who an account is.
+async fn account_credit_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<Json<AccountCreditSummary>> {
+    // Per-account rate limit, keyed on the auth-derived account id (a uuid,
+    // not a secret), BEFORE the read. This handler is unpaginated and
+    // `account_credit_totals` reaches `list_trace_credit_events`, which
+    // returns the whole tenant's credit events and filters them in Rust -- on
+    // a shared tenant that is the entire tenant ledger per request. Reshaping
+    // that query is pre-existing work with six other callers; bounding how
+    // often this new route can trigger it is not. Collapses to a generic 429,
+    // like every other account surface: no enumeration, no size signal.
+    let account_key = ctx.account_id.as_uuid().to_string();
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("credit-summary-account:{account_key}"),
+        CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
+    let period_end = Utc::now();
+    let period_start = period_end - Duration::days(30);
+
+    let (earned_this_period, lifetime_earned, pending_review) = account_credit_totals(
+        state.as_ref(),
+        &ctx.tenant_id,
+        &ctx.principal_set,
+        period_start,
+        period_end,
+    )
+    .await?;
+
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &account_audit_tenant(&ctx),
+        "account_credit_summary",
+        1,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let rate = trace_commons_server::credit_numbers::rate_from_env();
+    let settlement_mode = state.near_settlement_mode_label();
+
+    Ok(Json(AccountCreditSummary {
+        points: AccountCreditPoints {
+            earned_this_period,
+            lifetime_earned,
+        },
+        currency: trace_commons_server::credit_numbers::currency_for(
+            earned_this_period,
+            rate.as_ref(),
+        ),
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+        period: AccountCreditPeriod {
+            start: period_start,
+            end: period_end,
+        },
+        pending_review,
+    }))
+}
+
+/// Earned in the period, earned lifetime, and submissions still held, for one
+/// account's principal set.
+///
+/// Follows `account_traces_list_handler`'s own SQL-scoped read
+/// (`list_account_trace_submissions_keyset`, walked across every page) to get
+/// this account's owned submissions — one answer to "which rows belong to this
+/// account," matching the account trace routes exactly rather than a raw query
+/// that goes around them. The credit ledger itself has no per-principal SQL
+/// filter (`list_trace_credit_events` returns every event for the tenant), so
+/// ledger rows are narrowed to this account in two steps: first to the events
+/// whose `submission_id` was just proven owned (the `owner_by_submission` map
+/// built from the SQL-scoped read). That ownership gate is what actually
+/// bounds this to the account: `trace_commons_credit_event_from_storage`
+/// stamps the owning submission's principal ref onto every event it builds,
+/// so anything that survives the first step already carries this account's
+/// principal by construction. The second pass through
+/// `visible_credit_events_for_account` — the pure `&AccountPrincipalSet`
+/// predicate beside `visible_submission_records_for_account` — is this
+/// codebase's established belt-and-braces idiom, not an independent defence
+/// on this path.
+///
+/// Points are summed as `f32` (matching how `TraceCommonsTenantCreditResponse`
+/// accumulates `credit_points_delta`) and rounded to whole points only once,
+/// at this boundary — the same `(x).round() as i64` idiom `credit_delta_micros`
+/// uses to cross from a float points figure to an integer.
+async fn account_credit_totals(
+    state: &AppState,
+    tenant_id: &str,
+    principals: &AccountPrincipalSet,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> ApiResult<(i64, i64, usize)> {
+    if principals.is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    let db = account_db(state)?;
+    let principal_refs = principals.to_vec();
+
+    // Walk every page of this account's owned submissions via the same
+    // keyset-paginated, SQL-scoped query `/v1/account/traces` uses.
+    let mut records = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = db
+            .list_account_trace_submissions_keyset(
+                tenant_id,
+                &principal_refs,
+                cursor,
+                ACCOUNT_TRACES_MAX_LIMIT as i64,
+            )
+            .await
+            .map_err(internal_error)?;
+        let page_len = page.len();
+        let next_cursor = page.last().map(|record| TraceSubmissionKeysetCursor {
+            received_at: record.received_at,
+            submission_id: record.submission_id,
+        });
+        records.extend(
+            page.into_iter()
+                .filter_map(trace_commons_record_from_storage_submission)
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(internal_error)?,
+        );
+        if page_len < ACCOUNT_TRACES_MAX_LIMIT {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    let pending_review = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop
+            )
+        })
+        .count();
+
+    if records.is_empty() {
+        return Ok((0, 0, pending_review));
+    }
+
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events(tenant_id)
+        .await
+        .map_err(internal_error)?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())
+                .map_err(internal_error)?
+        {
+            credit_events.push(event);
+        }
+    }
+    let credit_events = visible_credit_events_for_account(principals, credit_events);
+
+    let lifetime_earned: f32 = credit_events
+        .iter()
+        .map(|event| event.credit_points_delta)
+        .sum();
+    let earned_this_period: f32 = credit_events
+        .iter()
+        .filter(|event| event.created_at >= period_start && event.created_at <= period_end)
+        .map(|event| event.credit_points_delta)
+        .sum();
+
+    Ok((
+        earned_this_period.round() as i64,
+        lifetime_earned.round() as i64,
+        pending_review,
+    ))
 }
 
 /// `GET /v1/account/traces/{submission_id}` — dual-auth, account-scoped single
@@ -16279,6 +16531,13 @@ const NEAR_LOGIN_PER_KEY_LIMIT: u32 = 5;
 const NEAR_LOGIN_PUBKEY_MAX_LEN: usize = 120;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
+
+/// Per-account cap on `GET /v1/account/credit-summary` per window.
+///
+/// Lower than most account surfaces because each call currently reads the
+/// whole tenant's credit ledger (see the handler). A contributor checking
+/// their figures needs a handful a minute; nothing legitimate needs thirty.
+const CREDIT_SUMMARY_PER_ACCOUNT_LIMIT: u32 = 30;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
@@ -49887,6 +50146,243 @@ async fn revocation_propagation_worker_handler(
     Ok(Json(response))
 }
 
+/// Per-IP cap on `GET /v1/public/register-stats` per window.
+///
+/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
+/// hop, which any caller can set, so this bucket is trivially escaped by
+/// anyone who wants to. It keeps one ordinary misbehaving client from being
+/// the whole load; the global cap below is what actually bounds the endpoint.
+const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
+/// The real bound: a cap no per-request header can escape, so a distributed
+/// flood is limited too.
+const REGISTER_STATS_GLOBAL_LIMIT: u32 = 1200;
+/// Publicly cacheable: the figures move only when the refresh worker runs, and
+/// a cache in front of this is the cheapest defence it has.
+const REGISTER_STATS_CACHE_CONTROL: &str = "public, max-age=300";
+/// What the published figures actually cover, verbatim to clients.
+///
+/// Deliberately not a tenant-shaped word: it names an operator-chosen cohort,
+/// not the register as a whole, and it must not read as an identifier.
+const REGISTER_STATS_SCOPE: &str = "configured_communities";
+/// Contributors below which the counts are withheld. High by default because
+/// the failure mode of guessing low is publishing one person's earnings.
+const REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR: i64 = 25;
+
+/// The register's aggregate figures. No identity, at any aggregation, ever.
+///
+/// SCOPE: these figures cover the tenants this deployment configured as
+/// communities (`state.community_tenant_ids`, the cohort the refresh worker
+/// aggregates), not every tenant the server holds. `scope` says so on the
+/// wire, because on an unauthenticated endpoint a bare `traces_accepted`
+/// otherwise reads as a claim about the whole register.
+#[derive(Debug, Serialize)]
+struct RegisterStats {
+    /// Absent whenever the counts below are, floor included. It counts
+    /// submissions rather than people, but below the floor the people are few
+    /// by construction, and one person's trace count -- and its delta between
+    /// refreshes, which is their submission rate -- is not an aggregate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traces_accepted: Option<i64>,
+    /// Absent below the contributor floor. Absent, not zero: a zero here would
+    /// read as "nobody has contributed" rather than "we are not saying".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contributors: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    points_issued: Option<i64>,
+    /// True when the operator's suppression flag, an uncomputed row, or the
+    /// contributor floor withheld every figure above.
+    withheld: bool,
+    /// What the figures cover. Constant, and not an identifier.
+    scope: &'static str,
+    as_of: DateTime<Utc>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+}
+
+/// Whether the counts are withheld, and why.
+///
+/// Pure, and deliberately so: this is the one privacy-relevant decision in
+/// the endpoint, and CI never runs PostgreSQL, so a test that reached for a
+/// database would silently skip on every gating machine and guard nothing.
+///
+/// `refreshed` false withholds regardless of the counts. An unrefreshed row
+/// carries schema defaults, and publishing those would be a claim about the
+/// register that nobody computed.
+fn register_stats_withheld(contributors: i64, floor: i64, refreshed: bool) -> bool {
+    !refreshed || contributors < floor
+}
+
+/// Contributors below which the counts are withheld.
+///
+/// Configurable because the right number depends on the real contributor
+/// count. A malformed or negative value is ignored in favour of the default
+/// rather than parsed into a floor that suppresses nothing.
+fn register_stats_contributor_floor() -> i64 {
+    register_stats_floor_from(
+        std::env::var("TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Parse the configured floor, or fall back to the default.
+///
+/// Pure so the fallback is testable without mutating process environment,
+/// which no parallel test can do safely. Unset, blank, malformed and negative
+/// all resolve to the default: every one of those is a misconfiguration, and
+/// the safe reading of a misconfigured floor is the high one, never a zero
+/// that suppresses nothing.
+fn register_stats_floor_from(raw: Option<&str>) -> i64 {
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|floor| *floor >= 0)
+        .unwrap_or(REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR)
+}
+
+/// Render one materialised row into what may be published.
+///
+/// Pure: no state, no database, no clock. The handler is then only transport,
+/// and every suppression rule below is unit-tested without PostgreSQL.
+///
+/// Three independent reasons to say nothing, and any one of them suffices:
+///
+/// - `row.suppressed` -- the operator's lever. No refresh writes it, so
+///   suppression set during an incident survives the next scheduled run.
+/// - `row.refreshed_at.is_none()` (equivalently `row.withheld`, the computed
+///   marker every refresh clears) -- nobody has computed these figures, and
+///   schema defaults are not a claim about the register.
+/// - contributors below the floor -- see `register_stats_withheld`.
+///
+/// EVERY figure is gated, `traces_accepted` included. It counts submissions
+/// rather than people, but below the floor the people are few by construction
+/// and `withheld: true` tells the caller so: on a small cohort that field is
+/// one person's trace count, and its delta between refreshes is that person's
+/// submission rate.
+fn register_stats_response(
+    row: &trace_commons_server::register_stats::RegisterStatsRow,
+    floor: i64,
+    settlement_mode: &str,
+) -> RegisterStats {
+    let computed = row.refreshed_at.is_some() && !row.withheld;
+    let withheld = row.suppressed
+        || !computed
+        || register_stats_withheld(row.contributors, floor, row.refreshed_at.is_some());
+
+    RegisterStats {
+        traces_accepted: (!withheld).then_some(row.traces_accepted),
+        contributors: (!withheld).then_some(row.contributors),
+        points_issued: (!withheld).then_some(row.points_issued),
+        withheld,
+        scope: REGISTER_STATS_SCOPE,
+        as_of: row.as_of,
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+    }
+}
+
+/// `GET /v1/public/register-stats` — aggregate register facts, to anyone.
+///
+/// UNAUTHENTICATED by design, and registered outside every auth layer beside
+/// `/v1/source`. It reads one materialised row through the least-privileged
+/// `trace_commons_public_read` role and never queries a live table: a figure
+/// computed per request is a figure someone can poll to watch a single
+/// submission land.
+async fn register_stats_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<(
+    [(axum::http::HeaderName, HeaderValue); 1],
+    Json<RegisterStats>,
+)> {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("register-stats-ip:{client_ip}"),
+        REGISTER_STATS_PER_IP_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::fetch_public_register_stats_row(db.as_ref())
+        .await
+        .map_err(internal_error)?;
+
+    Ok((
+        [(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static(REGISTER_STATS_CACHE_CONTROL),
+        )],
+        Json(register_stats_response(
+            &row,
+            register_stats_contributor_floor(),
+            state.near_settlement_mode_label(),
+        )),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterStatsRefreshResponse {
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed_at: DateTime<Utc>,
+}
+
+/// Recompute the public aggregate row.
+///
+/// Batch-only and idempotent. It writes the single `trace_register_stats`
+/// row and stamps `refreshed_at`; until it has run at least once the public
+/// endpoint publishes nothing, because zeros would be a claim nobody made.
+///
+/// Scoped to `state.community_tenant_ids` -- the same configured cohort
+/// `compute_corpus_analytics_summary` uses for the community-analytics
+/// snapshot -- rather than an unscoped enumeration: these are the tenants
+/// already judged safe to aggregate into a public-facing figure. When that
+/// list is empty (enumerate every tenant), `compute_register_stats_totals`
+/// refuses rather than write a zero if its own fallback query comes back
+/// empty, so this handler never silently publishes a wrong number.
+///
+/// Nothing schedules this yet -- an operator wires it to a timer. That is a
+/// decision left to whoever runs the deployment, not one made here.
+async fn register_stats_refresh_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<RegisterStatsRefreshResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_register_stats_operator(&tenant)?;
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats refresh requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::run_register_stats_refresh(
+        db.as_ref(),
+        state.community_tenant_ids.as_ref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    let refreshed_at = row.refreshed_at.ok_or_else(|| {
+        internal_error(anyhow::anyhow!(
+            "register stats refresh did not stamp refreshed_at"
+        ))
+    })?;
+    Ok(Json(RegisterStatsRefreshResponse {
+        traces_accepted: row.traces_accepted,
+        contributors: row.contributors,
+        points_issued: row.points_issued,
+        refreshed_at,
+    }))
+}
+
 fn require_purge_purpose(
     dry_run: bool,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -53360,6 +53856,7 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::CompetitionReadWorker => {
             StorageTraceTenantAccessGrantRole::CompetitionReadWorker
         }
+        TokenRole::RegisterStatsWorker => StorageTraceTenantAccessGrantRole::RegisterStatsWorker,
     }
 }
 
@@ -54371,6 +54868,17 @@ fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
+fn require_register_stats_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::RegisterStatsWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or register stats worker token required",
+        ))
+    }
+}
+
 fn require_ranking_label_source_operator(
     auth: &TenantAuth,
     label_source: StorageTraceRankingLabelSource,
@@ -54581,6 +55089,40 @@ fn visible_submission_records_for_account(
     records
         .into_iter()
         .filter(|r| set.contains(&r.auth_principal_ref))
+        .collect()
+}
+
+/// Account-only visibility predicate for credit-ledger events, paired with
+/// `visible_submission_records_for_account` immediately above. Pure
+/// `&AccountPrincipalSet` set-membership, same as its sibling: NO
+/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard
+/// (unlike `visible_credit_events`/`can_access_credit_event_scoped`, which
+/// serve the reviewer/contributor surface and must keep both).
+///
+/// Unlike its submission sibling, this one IS on the request path
+/// (`GET /v1/account/credit-summary`): the credit ledger has no per-principal
+/// SQL filter to enforce membership at the query layer the way
+/// `list_account_trace_submissions_keyset` does for submissions --
+/// `list_trace_credit_events` returns every event for a tenant -- so this
+/// predicate is where "which ledger rows belong to this account" is actually
+/// decided, after the caller has already scoped `records`/`owner_by_submission`
+/// to the account via the SQL-scoped submission read.
+///
+/// MUST NOT COMPILE (Hardening C, same guarantee as `visible_submission_records_for_account`):
+/// ```compile_fail
+/// # // A `&TenantAuth` cannot be laundered into the account surface, which
+/// # // wants `&AccountPrincipalSet`:
+/// let auth: TenantAuth = unimplemented!();
+/// let events: Vec<TraceCommonsCreditLedgerRecord> = vec![];
+/// let _ = visible_credit_events_for_account(&auth, events); // E0308: expected &AccountPrincipalSet
+/// ```
+fn visible_credit_events_for_account(
+    set: &AccountPrincipalSet,
+    events: Vec<TraceCommonsCreditLedgerRecord>,
+) -> Vec<TraceCommonsCreditLedgerRecord> {
+    events
+        .into_iter()
+        .filter(|event| set.contains(&event.auth_principal_ref))
         .collect()
 }
 
@@ -56004,22 +56546,19 @@ fn corpus_status_with_pii_backstop_hold(
 /// figure, and a blank `FINAL` column, and could not tell "switched off" from
 /// "still working on it". Whichever posture is configured, the receipt says
 /// it, so the two can never drift apart again.
+///
+/// The wording itself lives once, in
+/// `trace_commons_server::credit_numbers::settlement_status_sentence`, which
+/// the credit-numbers API also renders through -- this function only maps the
+/// enum to that function's string labels. Do not put the sentences back here.
 fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
-    match mode {
-        // Deliberate and fail-safe, not a fault. Say both halves: the credit
-        // is real and recorded, and nothing is going to settle it here.
-        NearSettlementMode::Disabled => {
-            "Credit is recorded but not settled: on-chain settlement is not \
-             enabled on this deployment, so this figure stays pending."
-        }
-        // The outbox advances with synthetic transaction hashes and no funds.
-        // A settled-looking row here is not an on-chain credit.
-        NearSettlementMode::DryRun => {
-            "Settlement is running in dry-run: the credit ledger advances with \
-             synthetic transaction hashes and no on-chain credit is issued."
-        }
-        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
-    }
+    // `as_label`, not a second inline match. The credit endpoints reach the
+    // same sentence through that method, and two hand-maintained mappings with
+    // nothing asserting they agree drift silently: a label this copy got wrong
+    // would fall into `settlement_status_sentence`'s `_` arm, so the receipt
+    // would say "disabled" while the credit endpoints said "dry_run" about the
+    // same deployment.
+    trace_commons_server::credit_numbers::settlement_status_sentence(mode.as_label())
 }
 
 fn receipt_from_record(

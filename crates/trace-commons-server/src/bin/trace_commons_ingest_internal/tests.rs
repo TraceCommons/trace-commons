@@ -2926,6 +2926,264 @@ async fn insert_account_test_submission_with_status(
     submission_id
 }
 
+/// Insert a credit-ledger row directly via the DB mirror, mirroring
+/// `insert_account_test_submission`'s direct-write shape but for
+/// `trace_credit_ledger`. Bypasses the reviewer-gated
+/// `append_credit_event_handler` HTTP surface (ABAC tenant policy, reviewer
+/// role, `db_reviewer_reads` wiring) -- none of which the credit-summary read
+/// path cares about; only the stored `submission_id`/`points_delta` matter to
+/// it.
+async fn insert_account_test_credit_event(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    credit_account_ref: &str,
+    points_delta: f32,
+) {
+    backend
+        .append_trace_credit_event(StorageTraceCreditEventWrite {
+            credit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            credit_account_ref: credit_account_ref.to_string(),
+            event_type: StorageTraceCreditEventType::TrainingUtility,
+            points_delta: format!("{points_delta}"),
+            reason: "test fixture credit".to_string(),
+            external_ref: Some(format!("test-fixture:{submission_id}")),
+            actor_principal_ref: "review-token-a".to_string(),
+            actor_role: "reviewer".to_string(),
+            settlement_state: StorageTraceCreditSettlementState::Pending,
+        })
+        .await
+        .expect("insert credit event");
+}
+
+/// The account's own figures, summed over its whole principal set: a
+/// contributor with a device key AND a passkey is one contributor, not one
+/// per credential -- and never anything belonging to another account.
+///
+/// Seeds the three-way shape `account_traces_list_returns_only_owned_submissions`
+/// below uses (owned / foreign-same-tenant / other-tenant), but with a credit
+/// ledger row on each submission rather than just the submission itself, since
+/// this handler sums ledger rows, not submission-level `credit_points_pending`.
+#[tokio::test]
+async fn credit_summary_scopes_to_the_calling_accounts_principal_set() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link token-a's device principal to a durable account under tenant-a via
+    // the real mint+redeem ceremony, and keep the resulting session cookie: a
+    // device bearer alone no longer resolves to an `AccountCtx` (#262), so
+    // `account_ctx_ext` needs the cookie the redeemed session issues, not
+    // `auth_headers` directly.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+
+    // Owned: a submission + credit event for the account's own principal.
+    let owned_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        owned_submission,
+        &device_principal,
+        7.0,
+    )
+    .await;
+
+    // Foreign, same tenant: a principal that is NOT linked to this account.
+    let foreign_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else")
+            .await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        foreign_submission,
+        "principal_someone_else",
+        1000.0,
+    )
+    .await;
+
+    // A different tenant entirely, same device principal -- must not leak
+    // across tenants even though the principal ref string matches.
+    let other_tenant_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-b",
+        other_tenant_submission,
+        &device_principal,
+        2000.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+
+    assert_eq!(
+        summary.points.earned_this_period, 7,
+        "only the account's own credit event counts, not the foreign or other-tenant ones"
+    );
+    assert_eq!(summary.points.lifetime_earned, 7);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+/// A deployment with no configured rate has made no claim about what a point
+/// is worth. Asserted over the SERIALIZED value, not the struct field: a
+/// struct assertion passes even when the `#[serde(skip_serializing_if)]`
+/// attribute is wrong, and that attribute is the mechanism actually carrying
+/// the property.
+#[tokio::test]
+async fn credit_summary_omits_currency_when_no_rate_is_configured() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        3.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    assert!(
+        value.get("currency").is_none(),
+        "no rate is configured in this test environment, so the currency key \
+         must be absent entirely, not present and zero: got {value}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The server sees submissions, not anyone's inference bill, and must never
+/// imply otherwise. Scans the whole serialized response -- keys and string
+/// values -- for anything naming or containing "spent" or "spend", rather
+/// than checking one specific path, so a spend figure added anywhere in the
+/// shape trips this test.
+#[tokio::test]
+async fn credit_summary_never_reports_a_spend_figure() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        5.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    fn assert_no_spend_mentions(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let lower = key.to_ascii_lowercase();
+                    assert!(
+                        !lower.contains("spent") && !lower.contains("spend"),
+                        "response key names spend at {path}.{key}"
+                    );
+                    assert_no_spend_mentions(child, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    assert_no_spend_mentions(item, &format!("{path}[{i}]"));
+                }
+            }
+            serde_json::Value::String(s) => {
+                let lower = s.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("spent") && !lower.contains("spend"),
+                    "response value names spend at {path}: {s}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_no_spend_mentions(&value, "$");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn account_traces_list_returns_only_owned_submissions() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -87727,6 +87985,235 @@ fn classify_policy_env_defaults_closed() {
             None => std::env::remove_var(VAR),
         }
     }
+}
+
+// -- Public register-stats endpoint -----------------------------------------
+//
+// Every assertion below runs WITHOUT PostgreSQL, on purpose. CI does not run
+// the pg suite, so the `let Some(backend) = ... else { return }` idiom used
+// elsewhere in this file makes a test that silently skips on every gating
+// machine. The suppression rule is the privacy-relevant behaviour in this
+// endpoint, so it lives in pure functions and is tested here directly.
+
+/// A materialised row in whatever state the assertion needs.
+fn register_stats_row_fixture(
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed: bool,
+) -> trace_commons_server::register_stats::RegisterStatsRow {
+    trace_commons_server::register_stats::RegisterStatsRow {
+        traces_accepted,
+        contributors,
+        points_issued,
+        // What a refresh leaves behind: the schema default is TRUE and every
+        // successful refresh clears it.
+        withheld: !refreshed,
+        // Not suppressed: the operator lever is off unless a test sets it.
+        suppressed: false,
+        as_of: Utc::now(),
+        refreshed_at: refreshed.then(Utc::now),
+    }
+}
+
+#[test]
+fn register_stats_withholds_one_contributor_below_the_floor() {
+    // The boundary in both directions, so an off-by-one in either sense fails.
+    assert!(register_stats_withheld(24, 25, true), "floor-1 is withheld");
+    assert!(
+        !register_stats_withheld(25, 25, true),
+        "the floor itself is not withheld"
+    );
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_however_large_the_count() {
+    // An unrefreshed row carries schema defaults. Publishing those would be a
+    // claim about the register that nobody computed.
+    assert!(register_stats_withheld(1_000_000, 25, false));
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_even_with_a_floor_of_zero() {
+    // A floor of 0 disables the cohort rule; it must not also disable the
+    // never-computed rule, which is a separate reason to say nothing.
+    assert!(register_stats_withheld(0, 0, false));
+    assert!(!register_stats_withheld(0, 0, true));
+}
+
+#[test]
+fn a_misconfigured_floor_falls_back_to_the_high_default_not_to_zero() {
+    // The literal, not the constant. Comparing against the constant would
+    // pass just as happily if someone set it to 0 and deleted the privacy
+    // floor along with it, which is the whole thing this guards.
+    assert_eq!(
+        REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR, 25,
+        "lowering the default floor publishes smaller cohorts; change it \
+         deliberately, against a real contributor count, not incidentally"
+    );
+    // Every one of these is a misconfiguration, and the safe reading of a
+    // misconfigured floor is the high one: a zero would suppress nothing.
+    for raw in [None, Some(""), Some("   "), Some("many"), Some("-5")] {
+        assert_eq!(
+            register_stats_floor_from(raw),
+            25,
+            "raw {raw:?} must fall back to the default floor"
+        );
+    }
+    assert_eq!(register_stats_floor_from(Some("40")), 40);
+    // Explicitly disabling the floor is allowed, but only explicitly.
+    assert_eq!(register_stats_floor_from(Some("0")), 0);
+}
+
+#[test]
+fn register_stats_below_the_floor_omits_the_counts_rather_than_zeroing_them() {
+    // Absent, never a small number and never a zero: with few contributors a
+    // known cohort plus a total is one person's earnings, and a zero would
+    // read as nobody having contributed rather than as us declining to say.
+    let row = register_stats_row_fixture(900, 2, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+    // traces_accepted too. It counts submissions rather than people, but
+    // below the floor the people are few by construction and `withheld: true`
+    // says so, which makes this one person's trace count -- and its delta
+    // between refreshes is that person's submission rate.
+    assert!(body.get("traces_accepted").is_none());
+}
+
+#[test]
+fn the_operator_suppression_lever_withholds_a_perfectly_good_row() {
+    // Distinct from every other reason to withhold: the row is refreshed, the
+    // cohort is well above the floor, and the figures are real. An operator
+    // said not to publish, and that is sufficient on its own.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.suppressed = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn a_refresh_does_not_lift_the_operator_suppression() {
+    // The lever must survive the scheduled refresh, or it is not a lever. A
+    // refresh clears `withheld` and stamps `refreshed_at` -- exactly the row
+    // built here -- and `suppressed` still withholds. The other half of this
+    // property, that the refresh SQL never writes the column at all, is
+    // `the_refresh_never_clears_the_operator_suppression` in db::postgres.
+    let mut refreshed = register_stats_row_fixture(900, 50, 4_500, true);
+    refreshed.suppressed = true;
+    assert!(!refreshed.withheld, "a refresh clears the computed marker");
+    assert!(refreshed.refreshed_at.is_some(), "a refresh stamps the row");
+    let body = serde_json::to_value(register_stats_response(&refreshed, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
+}
+
+#[test]
+fn register_stats_above_the_floor_reports_the_counts() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], false);
+    assert_eq!(body["contributors"], 50);
+    assert_eq!(body["points_issued"], 4_500);
+    assert_eq!(body["traces_accepted"], 900);
+}
+
+#[test]
+fn an_unrefreshed_register_publishes_no_figure_at_all() {
+    // Not even the trace count: an unrefreshed zero is a false claim either
+    // way, and `as_of` plus a posture is all an unwired deployment may say.
+    let row = register_stats_row_fixture(0, 0, 0, false);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn the_stored_computed_marker_stops_publication_on_its_own() {
+    // `withheld` on the row is the computed/never-computed marker, and a row
+    // still carrying it has not been computed whatever `refreshed_at` says.
+    // It is NOT the operator lever -- every refresh clears it, which is why
+    // `suppressed` exists separately.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.withheld = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+}
+
+#[test]
+fn register_stats_carries_no_identifying_field() {
+    // The response is aggregate or it is nothing. Any of these appearing means
+    // a breakdown was added that can be differenced back to a person.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let text = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises")
+        .to_string();
+    for forbidden in ["tenant", "account", "principal", "submission_id", "sha256:"] {
+        assert!(!text.contains(forbidden), "response leaked {forbidden}");
+    }
+}
+
+#[test]
+fn register_stats_says_what_the_figures_cover() {
+    // The refresh is scoped to the configured community tenants, not to every
+    // tenant the server holds, so a client drawing a headline number can read
+    // what it is looking at without consulting a runbook.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["scope"], "configured_communities");
+}
+
+#[test]
+fn register_stats_reports_the_deployments_settlement_posture() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "dry_run"))
+        .expect("register stats serialises");
+    assert_eq!(body["posture"]["settlement"], "dry_run");
+    assert_eq!(body["posture"]["graded"], false);
+}
+
+/// The transport, end to end, including `SET ROLE trace_commons_public_read`.
+///
+/// Skips without PostgreSQL, so it proves nothing in CI -- which is exactly
+/// why the suppression rules above do not depend on it.
+#[tokio::test]
+async fn register_stats_handler_needs_no_credential() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // No headers, no bearer, no session cookie: the handler takes no auth
+    // extractor at all, which is what makes it servable outside every layer.
+    let (_, Json(body)) = register_stats_handler(State(state), HeaderMap::new())
+        .await
+        .expect("public register stats succeeds");
+    assert_eq!(body.scope, "configured_communities");
 }
 
 // -- NEAR AI attestation drill --------------------------------------------

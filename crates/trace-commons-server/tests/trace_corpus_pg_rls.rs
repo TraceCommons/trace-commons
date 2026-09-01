@@ -1475,7 +1475,7 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     );
     sql.push_str(
         &std::fs::read_to_string(
-            migrations_root.join("V55__community_withdrawal_eviction_rls.sql"),
+            migrations_root.join("V56__community_withdrawal_eviction_rls.sql"),
         )
         .expect("read community withdrawal eviction production hardening migration"),
     );
@@ -1543,7 +1543,7 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     );
     sql.push_str(
         &std::fs::read_to_string(
-            migrations_root.join("V55__community_withdrawal_eviction_rls.sql"),
+            migrations_root.join("V56__community_withdrawal_eviction_rls.sql"),
         )
         .expect("read community withdrawal eviction central RLS policy migration"),
     );
@@ -5923,7 +5923,7 @@ async fn delete_eviction_under_tenant(
 }
 
 /// V46 shipped this table with no RLS at all while it carries `tenant_id`,
-/// `principal_ref` and the withdrawn contributor's handle. V55 gives it the
+/// `principal_ref` and the withdrawn contributor's handle. V56 gives it the
 /// central tenant predicate; this asserts the predicate actually isolates.
 #[tokio::test]
 async fn community_withdrawal_evictions_are_tenant_isolated() {
@@ -6010,7 +6010,7 @@ async fn community_withdrawal_evictions_are_tenant_isolated() {
 }
 
 /// The drain is deliberately cross-tenant: one statement marks every pending
-/// eviction for a (window, metric). V55 gates it on a transaction-local GUC
+/// eviction for a (window, metric). V56 gates it on a transaction-local GUC
 /// instead of a tenant predicate. This asserts the drain still drains across
 /// tenants, and that the allowance is no wider than that.
 #[tokio::test]
@@ -6137,7 +6137,7 @@ async fn community_withdrawal_eviction_drain_crosses_tenants_within_drain_scope(
 /// The raw-SQL tests above pin the policy. This one pins the caller: the real
 /// `drain_community_snapshot_invalidation` must still drain across tenants
 /// once the table is protected. It is the statement that would have gone
-/// silently no-op had V55 shipped the tenant predicate alone.
+/// silently no-op had V56 shipped the tenant predicate alone.
 #[tokio::test]
 async fn store_facade_drains_withdrawal_evictions_across_tenants() {
     let Some(backend) = postgres_backend().await else {
