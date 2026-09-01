@@ -85,6 +85,20 @@ does not. No surface may describe a witnessed trace as "verified clean".
 
 ## The certificate
 
+**And a labelled placeholder is not a verified claim.** Replacements are
+constrained to `[REDACTED]` or `[REDACTED:<label>]` so that applying spans can
+only remove information and stamp a marker -- without that rule, an arbitrary
+replacement is an insertion channel and the artifact no longer derives from raw
+*by redaction alone*. But the grammar constrains what a span may **say**, not
+whether it is honest. A span may claim `[REDACTED:private_name]` over a phone
+number, or over text that was never PII.
+
+That is sufficiency again, and already disclaimed -- but a *labelled*
+placeholder reads like a statement about the content it replaced, and a later
+surface could easily treat it as one. It is not. Any surface that displays or
+aggregates these labels must say they are the client's assertion, not a
+witnessed fact.
+
 On success the witness signs:
 
 ```
