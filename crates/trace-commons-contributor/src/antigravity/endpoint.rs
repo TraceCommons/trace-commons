@@ -347,21 +347,49 @@ mod tests {
     #[tokio::test]
     async fn probe_skips_a_port_with_nothing_listening_without_stalling() {
         // Bind to grab a free port, then drop the listener so nothing is
-        // there to answer -- the connection is refused immediately rather
-        // than hanging until PROBE_TIMEOUT.
+        // there to answer -- the connection is refused rather than hanging
+        // until PROBE_TIMEOUT. This matters because `discover` walks up to 64
+        // ports in sequence: if a closed port costs a full timeout instead of
+        // a refusal, discovery goes from near-instant to sixteen seconds.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
         let client = probe_client();
-        let started = std::time::Instant::now();
-        let found = probe_port(&client, port, TEST_TOKEN).await;
-        let elapsed = started.elapsed();
+        assert!(!probe_port(&client, port, TEST_TOKEN).await);
 
-        assert!(!found);
+        // Assert the reason, not the clock.
+        //
+        // This was originally `elapsed < PROBE_TIMEOUT` around the call above,
+        // which is a measurement with no margin: the budget being checked is
+        // the very constant that bounds the operation, and the elapsed time
+        // also includes client setup and task scheduling. On a loaded Windows
+        // CI runner it came in at 252.8ms against a 250ms timeout and failed
+        // the branch. Widening it to a tolerance would have been worse than
+        // the flake -- a genuine stall lands at almost exactly PROBE_TIMEOUT,
+        // so any margin big enough to absorb the noise also swallows the
+        // defect the test exists to catch.
+        //
+        // The property is not "this was fast", it is "this failed by refusal
+        // rather than by running out the clock". reqwest distinguishes those
+        // two, so ask it directly: immune to load, and still red if a
+        // platform really does leave closed-port connects hanging.
+        let error = client
+            .post(format!("http://127.0.0.1:{port}{PROBE_PATH}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+            .expect_err("nothing is listening, so this cannot succeed");
         assert!(
-            elapsed < PROBE_TIMEOUT,
-            "a refused connection took {elapsed:?}, as long as a real timeout -- probe is stalling on closed ports"
+            !error.is_timeout(),
+            "connecting to a closed port ran out the {PROBE_TIMEOUT:?} timeout \
+             instead of being refused -- probe stalls on closed ports, making \
+             a full sweep cost 64 timeouts: {error}"
+        );
+        assert!(
+            error.is_connect(),
+            "expected a connection error from a closed port, got: {error}"
         );
     }
 
