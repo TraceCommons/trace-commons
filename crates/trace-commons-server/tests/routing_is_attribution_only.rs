@@ -60,6 +60,13 @@ use uuid::Uuid;
 /// coincidence in any of the envelope's other fields.
 const SENTINEL_COST_TEXT: &str = "133713.37";
 
+/// A stand-in for generic leaked envelope content -- deliberately NOT a cost
+/// or anything money-shaped, so it cannot be mistaken for testing the
+/// routing-cost property. Used only by the known-gap test below, where the
+/// point is that the fallback leaks whatever content the envelope has left,
+/// not specifically a cost.
+const GENERIC_LEAK_MARKER: &str = "arbitrary-envelope-content-483920";
+
 /// Build a minimal, otherwise-empty envelope carrying exactly the events
 /// given. Mirrors the shape production code emits (see
 /// `crates/trace-commons-protocol/src/trace_contribution.rs`,
@@ -237,51 +244,51 @@ fn a_routing_event_does_not_declare_a_tool_payload() {
 /// on this path, unscrubbed.
 ///
 /// **The narrower, stronger fact -- a routing cost specifically is safe here
-/// -- is structural, not tested by chunking:** the fallback requires
-/// `events` empty, and a routing cost can only exist inside an event, so
-/// "fallback fires" and "a routing cost exists in this envelope" cannot both
-/// be true of the same envelope. See the assertion below, which pins that
-/// directly against the envelope's own `events` field rather than against
-/// parsed JSON -- it is about what the Rust type can hold, not what this run
-/// happened to serialize. That exclusion is incidental to how the two pieces
-/// of code were written, not a rule anyone enforced on purpose: an
-/// envelope-level cost field, or a fallback that could fire alongside a
-/// non-empty `events`, would break it silently.
+/// -- is structural:** the fallback requires `events` empty, and a routing
+/// cost can only exist inside an event, so "fallback fires" and "a routing
+/// cost exists in this envelope" cannot both be true of the same envelope.
+/// The assertion below checks this directly -- it serializes the envelope
+/// right after `events.clear()` and confirms the routing cost is actually
+/// gone from that output, which is what would fail the day `cost_usd` (or
+/// any equivalent) gains a home outside `events`, e.g. an envelope-level
+/// field. That exclusion is incidental to how the two pieces of code were
+/// written, not a rule anyone enforced on purpose: an envelope-level cost
+/// field, or a fallback that could fire alongside a non-empty `events`,
+/// would break it.
 ///
-/// This test does not assert the sentinel content is absent from the
-/// fallback's output -- it is present, and asserting otherwise would
-/// misrepresent what the code does. It demonstrates the fallback is taken
-/// and that arbitrary envelope content survives it, so the gap stays visible
-/// instead of silently "proven" closed. Fixing this (refuse an envelope with
-/// no renderable events, or strip metadata on the fallback path) is out of
-/// scope here: it means changing the chunker, which is production code this
-/// task must not touch.
+/// This test does not assert generic leaked content is absent from the
+/// fallback's output -- it is present (see `GENERIC_LEAK_MARKER` below), and
+/// asserting otherwise would misrepresent what the code does. It
+/// demonstrates the fallback is taken and that arbitrary envelope content
+/// survives it, so the gap stays visible instead of silently "proven"
+/// closed. Fixing this (refuse an envelope with no renderable events, or
+/// strip metadata on the fallback path) is out of scope here: it means
+/// changing the chunker, which is production code this task must not touch.
 #[test]
 fn known_gap_the_empty_events_fallback_chunks_raw_envelope_json() {
     let mut envelope = envelope_with_routing_cost();
     envelope.events.clear();
-    // Attach the sentinel somewhere still present in the serialized envelope
-    // even with no events -- the contributor block is as good a stand-in as
-    // any typed field that can carry a raw string; what matters is that the
-    // JSON serialization still contains the sentinel digits with an empty
-    // `events` array, which is exactly the condition the fallback checks.
-    // This is NOT a routing cost: see the doc comment above and the
-    // structural-exclusion assertion below for why a routing cost cannot be
-    // the thing planted here.
-    envelope.contributor.credit_account_ref = Some(format!("sentinel:{SENTINEL_COST_TEXT}"));
 
-    // Structural exclusion, asserted directly against the typed envelope
-    // (not the JSON it serializes to): `cost_usd` exists only on
-    // `TraceContributionEvent`, so an empty `events` vec means there is no
-    // per-event cost_usd anywhere in this envelope's Rust representation for
-    // the fallback below to leak. This is what would need to fail for a
-    // routing cost to become reachable through this path.
+    // Structural guard, checked against the actual serialized output rather
+    // than the vec's own `is_empty()` (which `clear()` trivially guarantees
+    // and proves nothing). This is the assertion that would fail the day a
+    // routing cost gains a home outside `events` -- e.g. an envelope-level
+    // `cost_usd` field -- because clearing `events` would then no longer be
+    // enough to remove it from what gets serialized and chunked.
+    let plaintext_after_clear = serde_json::to_vec(&envelope).expect("envelope serializes");
+    let raw_after_clear = String::from_utf8_lossy(&plaintext_after_clear);
     assert!(
-        envelope.events.is_empty(),
-        "sanity: cost_usd lives only inside TraceContributionEvent, so an \
-         empty events vec structurally means no routing cost exists in this \
-         envelope to leak"
+        !raw_after_clear.contains(SENTINEL_COST_TEXT),
+        "the routing cost must not survive clearing events -- if it does, \
+         cost_usd has grown a home outside TraceContributionEvent and the \
+         structural exclusion this test documents no longer holds:\n{raw_after_clear}"
     );
+
+    // Now plant an unrelated, non-cost marker standing in for arbitrary
+    // envelope content, and show THAT survives the fallback -- this is the
+    // real gap: whatever content is left, cost or not, reaches the scorer
+    // unscrubbed on this path.
+    envelope.contributor.credit_account_ref = Some(format!("marker:{GENERIC_LEAK_MARKER}"));
 
     let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
     let parsed: Value = serde_json::from_slice(&plaintext).expect("valid json");
@@ -297,15 +304,20 @@ fn known_gap_the_empty_events_fallback_chunks_raw_envelope_json() {
         "an empty events array must fall through to the raw-text path"
     );
 
-    // The fallback chunks the raw JSON, sentinel and all. This is the real
+    // The fallback chunks the raw JSON, marker and all. This is the real
     // gap -- arbitrary envelope content, not specifically a routing cost --
     // and this test's job is only to say so plainly, not to close it.
     let plan = chunk_envelope_plaintext(&plaintext, &cfg());
     let chunked: String = plan.chunks.iter().map(|c| c.text.as_str()).collect();
     assert!(
-        chunked.contains(SENTINEL_COST_TEXT),
+        chunked.contains(GENERIC_LEAK_MARKER),
         "known gap: the empty-events fallback chunks the raw envelope JSON \
          verbatim, so arbitrary envelope content that reaches it is NOT \
          scrubbed before scoring:\n{chunked}"
+    );
+    assert!(
+        !chunked.contains(SENTINEL_COST_TEXT),
+        "the routing cost specifically must still be absent even on the \
+         fallback path, since it was removed along with events:\n{chunked}"
     );
 }
