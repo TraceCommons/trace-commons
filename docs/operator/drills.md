@@ -28,7 +28,7 @@ All drills:
 | Object store migration | `/v1/admin/object-store-migration-drill` | Migration steps (if any) idempotent | nice-to-have | Before promotions |
 | Rollback | `/v1/admin/rollback-drill` | Rollback path documented + dry-run executable | yes | Before each deploy |
 | Credit settlement | `/v1/admin/credit-settlement-drill` | Settlement scheduler can resolve allowed policy version + issuer approval, can build a settlement event without committing | yes | Daily; before each settlement cycle |
-| NEAR AI attestation | `/v1/admin/near-attestation-drill` | The inference endpoint is a TDX enclave running a pinned image, and the key signing its receipts is the key that enclave attests. See [`near-attestation-drill.md`](near-attestation-drill.md) | yes | Daily. **Costs one minimal paid completion per run** |
+| NEAR AI attestation | `/v1/admin/near-attestation-drill` | The inference endpoint is a TDX enclave running a pinned image, and the key signing its receipts is the key that enclave attests. See [`near-attestation-drill.md`](near-attestation-drill.md) | yes, **when a NEAR AI endpoint is configured**; reported not-applicable otherwise | Daily. **Costs one minimal paid completion per run** |
 
 ## Failure modes feeding `rollout-smoke/evidence`
 

@@ -463,17 +463,18 @@ pub async fn run_near_attestation_drill(
     // default mode and compares the address; if the fetch ever grows that
     // flag, the padding stops being zero and this fails loudly rather than
     // comparing an address against the first 20 bytes of a hash.
-    let attested_address = if verified.report_data.len() < 64 {
-        None
-    } else if verified.report_data[20..32].iter().any(|byte| *byte != 0) {
-        log.fail(
-            NearAttestationDrillStep::SignerBindingDefaultMode,
-            "report_data_signer_padding_not_zero",
-        );
-        None
-    } else {
-        log.pass(NearAttestationDrillStep::SignerBindingDefaultMode);
-        Some(format!("0x{}", hex::encode(&verified.report_data[0..20])))
+    let attested_address = match attested_signer_address(&verified.report_data) {
+        Ok(address) => {
+            log.pass(NearAttestationDrillStep::SignerBindingDefaultMode);
+            Some(address)
+        }
+        Err(error) => {
+            log.fail(
+                NearAttestationDrillStep::SignerBindingDefaultMode,
+                error.label(),
+            );
+            None
+        }
     };
     if let Some(address) = attested_address.as_deref() {
         outcome.attested_signer_ref = Some(secret_ref(&address.to_ascii_lowercase()));
@@ -572,7 +573,7 @@ pub async fn run_near_attestation_drill(
     } else {
         log.fail(
             NearAttestationDrillStep::ReceiptSignerIsAttestedKey,
-            "receipt_signer_is_not_the_attested_key",
+            RECEIPT_SIGNER_NOT_ATTESTED,
         );
     }
 
@@ -616,6 +617,71 @@ fn measurement_evidence(verdict: &MeasurementVerdict) -> NearAttestationMeasurem
         },
     }
 }
+
+/// Why the verified quote's report data does not yield a signing address.
+///
+/// A layout problem and a key substitution are different failures with
+/// different next actions, and they must never collapse into one label: an
+/// operator told "the layout is not what we expect" should be looking at how
+/// the report was fetched, and one told "the receipt signer is not the
+/// attested key" should be taking the endpoint out of service. The two are
+/// raised from different steps and carry different reasons for exactly that
+/// reason.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SignerBindingError {
+    /// `report_data` is shorter than the 64 bytes TDX defines.
+    #[error("report data is {len} bytes, expected at least 64")]
+    ReportDataTooShort { len: usize },
+    /// Bytes 20..32 are not zero, so `[0..20]` is not a raw address.
+    #[error("report data bytes 20..32 are not zero; the report was served in TLS-fingerprint mode")]
+    TlsFingerprintMode,
+}
+
+impl SignerBindingError {
+    /// A stable label for evidence. The condition, never the message.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ReportDataTooShort { .. } => "report_data_too_short",
+            Self::TlsFingerprintMode => "report_data_signer_padding_not_zero",
+        }
+    }
+}
+
+/// The signing address a TDX report binds, read out of verified report data.
+///
+/// NEAR AI serves `/v1/attestation/report` in two modes, and the difference
+/// is not visible from the bytes' length:
+///
+/// - **Default** (what this drill fetches): `report_data[0..20]` is the raw
+///   20-byte signing address, `[20..32]` are zero, `[32..64]` is the nonce.
+/// - **`?include_tls_fingerprint=true`**: `report_data[0..32]` is
+///   `SHA256(signing_address || spki_hash)` in full. NEAR AI's own verifier
+///   README documents only this form.
+///
+/// So the zero padding is the discriminator, and asserting it is what keeps
+/// the signer comparison honest. Without it, a future change that adds the
+/// TLS flag would leave this function returning the first twenty bytes of a
+/// hash, formatted as an address, which would never equal any real signer --
+/// and the drill would go red at the *substitution* step, sending an
+/// operator to hunt for a key attack that is not happening. Both mistakes
+/// are avoided by refusing here, with [`SignerBindingError::TlsFingerprintMode`].
+pub fn attested_signer_address(report_data: &[u8]) -> Result<String, SignerBindingError> {
+    if report_data.len() < 64 {
+        return Err(SignerBindingError::ReportDataTooShort {
+            len: report_data.len(),
+        });
+    }
+    if report_data[20..32].iter().any(|byte| *byte != 0) {
+        return Err(SignerBindingError::TlsFingerprintMode);
+    }
+    Ok(format!("0x{}", hex::encode(&report_data[0..20])))
+}
+
+/// The reason [`NearAttestationDrillStep::ReceiptSignerIsAttestedKey`] fails.
+///
+/// Named as a constant so the test that keeps it distinct from every
+/// [`SignerBindingError::label`] cannot drift out of sync with the drill.
+pub const RECEIPT_SIGNER_NOT_ATTESTED: &str = "receipt_signer_is_not_the_attested_key";
 
 /// The drill's TCB policy, as a function so it can be tested against the
 /// statuses Intel actually emits.
@@ -1152,6 +1218,110 @@ mod tests {
                 "{status} must be refused and named"
             );
         }
+    }
+
+    #[test]
+    fn the_default_report_mode_yields_the_raw_signing_address() {
+        // Twenty address bytes, twelve zero bytes, then the nonce. Measured
+        // against the live service, not read off documentation -- NEAR AI's
+        // own README describes only the other mode.
+        let mut report_data = vec![0u8; 64];
+        report_data[..20].copy_from_slice(&hex::decode(&ATTESTED_ADDRESS[2..]).unwrap());
+        report_data[32..].copy_from_slice(&hex::decode(fixture_nonce()).unwrap());
+        assert_eq!(
+            attested_signer_address(&report_data).unwrap(),
+            ATTESTED_ADDRESS
+        );
+    }
+
+    #[test]
+    fn tls_fingerprint_mode_is_refused_rather_than_silently_truncated() {
+        // The whole point of the zero-padding assertion. In this mode all 32
+        // bytes are SHA256(signing_address || spki_hash); taking the first 20
+        // of them and calling it an address is the failure this prevents.
+        let mut report_data = vec![0u8; 64];
+        report_data[..32].copy_from_slice(&Sha256::digest(b"address || spki"));
+        let error = attested_signer_address(&report_data)
+            .expect_err("a hashed report_data must not be read as an address");
+        assert_eq!(error, SignerBindingError::TlsFingerprintMode);
+        assert_eq!(error.label(), "report_data_signer_padding_not_zero");
+    }
+
+    #[test]
+    fn a_single_non_zero_padding_byte_is_enough_to_refuse() {
+        // Not "the padding looks hashed" but "the padding is not zero".
+        // A check that only rejected an obviously-hashed prefix would let a
+        // near-zero one through.
+        for index in 20..32 {
+            let mut report_data = vec![0u8; 64];
+            report_data[index] = 1;
+            assert_eq!(
+                attested_signer_address(&report_data),
+                Err(SignerBindingError::TlsFingerprintMode),
+                "byte {index} must be checked"
+            );
+        }
+        // ... and bytes outside 20..32 must not trip it.
+        for index in [0usize, 19, 32, 63] {
+            let mut report_data = vec![0u8; 64];
+            report_data[index] = 1;
+            assert!(
+                attested_signer_address(&report_data).is_ok(),
+                "byte {index} is not padding"
+            );
+        }
+    }
+
+    #[test]
+    fn short_report_data_is_refused_distinctly_from_the_wrong_mode() {
+        let error =
+            attested_signer_address(&[0u8; 48]).expect_err("48 bytes is not a TDX report_data");
+        assert_eq!(error, SignerBindingError::ReportDataTooShort { len: 48 });
+        assert_eq!(error.label(), "report_data_too_short");
+    }
+
+    #[test]
+    fn a_layout_failure_is_never_reported_as_a_key_substitution() {
+        // An operator who sees "the layout is not what we expect" should be
+        // looking at how the report was fetched. One who sees the
+        // substitution reason should be taking the endpoint out of service.
+        // Collapsing the two would send them to the wrong place.
+        for error in [
+            SignerBindingError::TlsFingerprintMode,
+            SignerBindingError::ReportDataTooShort { len: 0 },
+        ] {
+            assert_ne!(error.label(), RECEIPT_SIGNER_NOT_ATTESTED);
+        }
+        assert_ne!(
+            SignerBindingError::TlsFingerprintMode.label(),
+            SignerBindingError::ReportDataTooShort { len: 0 }.label()
+        );
+    }
+
+    #[test]
+    fn a_real_quote_with_non_zero_padding_is_refused_by_the_seam() {
+        // Not a synthetic buffer: real report_data off a real signed quote,
+        // in the shape a `?include_tls_fingerprint=true` fetch would return.
+        //
+        // This stops at the seam rather than running the whole drill because
+        // no obtainable fixture can reach the binding step -- a quote that
+        // verifies has zero padding, and this one fails at `quote_verified`
+        // first. The drill's own use of this function is covered from the
+        // other direction: `the_drill_fails_when_the_receipt_signer_is_not_
+        // the_attested_key` asserts `SignerBindingDefaultMode` *passed* for
+        // the good fixture, so removing the check from the seam fails the
+        // test above and removing the call from the drill fails that one.
+        let quote = AttestationReport::from_json(OUTDATED_REPORT)
+            .unwrap()
+            .quote_bytes()
+            .unwrap();
+        let report_data = &quote[568..632];
+        // Measured, not assumed.
+        assert!(report_data[20..32].iter().any(|byte| *byte != 0));
+        assert_eq!(
+            attested_signer_address(report_data),
+            Err(SignerBindingError::TlsFingerprintMode)
+        );
     }
 
     #[test]

@@ -1493,6 +1493,19 @@ struct AppState {
     /// A drill run against `None` refuses with a named missing control; it
     /// never reports a pass it did not earn.
     near_attestation_client: Option<Arc<dyn NearAttestationClient>>,
+    /// Frozen clock for the attestation drill's collateral-validity check.
+    ///
+    /// `None` means wall-clock time, which is the only correct production
+    /// value, and [`AppState::from_env`] sets it to `None` unconditionally --
+    /// it is deliberately not readable from the environment, so it can never
+    /// become a lever for making an expired-collateral failure go away.
+    ///
+    /// It exists because the handler is the one place in this slice where the
+    /// verification clock would otherwise be implicit: a test driving the
+    /// handler against a captured collateral fixture would start failing on
+    /// the fixture's `nextUpdate` date rather than on a code change, and a
+    /// test that fails on a calendar date is worse than no test.
+    near_attestation_verification_clock: Option<DateTime<Utc>>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,
@@ -3895,6 +3908,7 @@ impl AppState {
         Ok(Self {
             root,
             near_attestation_client,
+            near_attestation_verification_clock: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
@@ -71755,6 +71769,7 @@ impl TraceOperationalSummaryResponse {
             &promotion_gates,
             &inputs.rollout_smoke_evidence,
             inputs.generated_at,
+            inputs.state.near_attestation_client.is_some(),
         );
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
@@ -72191,7 +72206,11 @@ async fn run_near_attestation_drill(
     match state.near_attestation_client.as_ref() {
         Some(client) if expected_measurements_valid => {
             let nonce = generate_drill_nonce();
-            let now_unix = generated_at.timestamp().max(0) as u64;
+            let now_unix = state
+                .near_attestation_verification_clock
+                .unwrap_or(generated_at)
+                .timestamp()
+                .max(0) as u64;
             outcome = Some(
                 run_near_attestation_drill_steps(
                     client.as_ref(),
@@ -72307,6 +72326,33 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "object_deletion_refs",
     "worker_queue_invalidation",
 ];
+/// Checks that are required only when the surface they cover is in use.
+///
+/// `near_attestation` proves the NEAR AI inference endpoint is the enclave we
+/// pinned. A deployment that routes no inference through NEAR AI has nothing
+/// for it to prove, and holding a permanently red required check over such a
+/// deployment teaches operators to ignore red checks -- which is the failure
+/// this whole surface exists to prevent.
+///
+/// This keys on **whether the surface is configured at all**, never on the
+/// drill's result. A deployment that does use NEAR AI cannot opt out of a red
+/// drill; there is no allow-list, no severity dial and no acknowledgement
+/// flag. That distinction is the whole of it.
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] = &["near_attestation"];
+
+/// The required checks for a deployment, given which conditional surfaces it
+/// has configured.
+fn rollout_smoke_required_checks(near_attestation_configured: bool) -> Vec<&'static str> {
+    TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        .iter()
+        .copied()
+        .filter(|check| {
+            !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check)
+                || (*check == "near_attestation" && near_attestation_configured)
+        })
+        .collect()
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -72526,6 +72572,11 @@ struct TraceOperationalRolloutSmokeSummary {
     failed_evidence_count: usize,
     stale_evidence_count: usize,
     required_checks: Vec<String>,
+    /// Conditional checks this deployment does not require, and why they are
+    /// absent from `required_checks`. Reported rather than silently omitted:
+    /// a check that vanished from the list without a word would be
+    /// indistinguishable from one that was quietly dropped.
+    not_applicable_checks: Vec<String>,
     passed_evidence_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     failed_evidence_checks: Vec<String>,
@@ -72538,16 +72589,26 @@ impl TraceOperationalRolloutSmokeSummary {
         promotion_gates: &TraceOperationalPromotionGateSummary,
         evidence: &[TraceRolloutSmokeEvidenceResponse],
         generated_at: DateTime<Utc>,
+        near_attestation_configured: bool,
     ) -> Self {
-        let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        let applicable = rollout_smoke_required_checks(near_attestation_configured);
+        let required_checks = applicable
             .iter()
             .map(|check| (*check).to_string())
             .collect::<Vec<_>>();
-        let latest_evidence_by_check =
-            latest_rollout_smoke_evidence_map(evidence.iter().filter(|record| {
-                TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
-                    .contains(&record.check_name.as_str())
-            }));
+        let not_applicable_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+            .iter()
+            .filter(|check| !applicable.contains(check))
+            .map(|check| (*check).to_string())
+            .collect::<Vec<_>>();
+        // Evidence for a check this deployment does not require must not
+        // count towards stale or failed either -- it is not a gap, and
+        // counting it would reintroduce the red check by another route.
+        let latest_evidence_by_check = latest_rollout_smoke_evidence_map(
+            evidence
+                .iter()
+                .filter(|record| applicable.contains(&record.check_name.as_str())),
+        );
         let stale_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
@@ -72627,6 +72688,7 @@ impl TraceOperationalRolloutSmokeSummary {
             failed_evidence_count: failed_evidence_checks.len(),
             stale_evidence_count: stale_evidence_checks.len(),
             required_checks,
+            not_applicable_checks,
             passed_evidence_checks,
             missing_evidence_checks,
             failed_evidence_checks,

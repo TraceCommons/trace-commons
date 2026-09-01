@@ -51,7 +51,8 @@ an endpoint we have not established. A run that refuses on configuration
 never spends anything.
 
 Rollout-smoke evidence goes stale after 24 hours, so a deployment that keeps
-`near_attestation` green is paying for roughly one completion a day.
+`near_attestation` green is paying for roughly one completion a day. See
+"when the check is required" below for which deployments that applies to.
 
 ## Configuration
 
@@ -174,8 +175,25 @@ curl -sS -X POST \
 ```
 
 `record_evidence: true` writes a `near_attestation` rollout-smoke evidence
-row, which is a required promotion check. A failed drill records **failed**
-evidence — the row follows the result.
+row. A failed drill records **failed** evidence — the row follows the result.
+
+### When the check is required
+
+`near_attestation` is a required rollout-smoke check **only on a deployment
+that has a NEAR AI endpoint configured** (`TRACE_COMMONS_NEAR_AI_BASE_URL`,
+`_MODEL` and `_API_KEY` all set). Elsewhere it is reported in the summary's
+`not_applicable_checks` and left out of `required_checks`, rather than
+sitting permanently red on a deployment that routes no inference through NEAR
+AI. A required check nobody can ever turn green teaches operators to ignore
+red checks, which is the opposite of what this surface is for.
+
+That condition keys on **whether the surface is in use at all — never on the
+drill's outcome.** Once an endpoint is configured there is no allow-list, no
+severity dial and no acknowledgement flag: a red drill blocks promotion, and
+the only way to clear it is to fix what it found.
+
+Rollout-smoke evidence goes stale after 24 hours, so a deployment in the
+required case is paying for roughly one minimal completion a day.
 
 Admin bearer token only. The response body is safe to paste into a ticket:
 it carries the nonce, the verified measurement registers, the TCB status and

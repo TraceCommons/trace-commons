@@ -4744,6 +4744,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     Arc::new(AppState {
         root,
         near_attestation_client: None,
+        near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -25578,6 +25579,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
         near_attestation_client: None,
+        near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -60240,11 +60242,11 @@ async fn operational_summary_reports_rollout_smoke_preflight_evidence_gap() {
     );
     assert_eq!(
         operational_json["rollout_smoke"]["required_check_count"],
-        serde_json::json!(24)
+        serde_json::json!(23)
     );
     assert_eq!(
         operational_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(24)
+        serde_json::json!(23)
     );
     assert!(
         operational
@@ -60334,7 +60336,7 @@ async fn operational_summary_reports_rollout_smoke_preflight_evidence_gap() {
         operational
             .rollout_smoke
             .blocker_reasons
-            .contains(&"smoke_rehearsal_evidence_missing=24".to_string())
+            .contains(&"smoke_rehearsal_evidence_missing=23".to_string())
     );
 }
 
@@ -60414,7 +60416,7 @@ async fn admin_rollout_smoke_evidence_records_clear_required_check_gap() {
     );
     assert_eq!(
         operational_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(23)
+        serde_json::json!(22)
     );
     assert!(
         !operational
@@ -61014,6 +61016,7 @@ fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
         },
         &out_of_order_evidence,
         Utc::now(),
+        true,
     );
     assert_eq!(summary.passed_evidence_checks, vec!["audit_reads"]);
     assert!(summary.failed_evidence_checks.is_empty());
@@ -61049,6 +61052,9 @@ fn rollout_smoke_summary_blocks_stale_passed_evidence() {
         },
         &old_passed_evidence,
         generated_at,
+        // Every check in the catalogue, including the conditional one, so
+        // the counts below are over the full set.
+        true,
     );
 
     assert!(!summary.ready);
@@ -61190,7 +61196,7 @@ async fn admin_rollout_smoke_preflight_returns_latest_hash_only_evidence() {
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["required_check_count"],
-        serde_json::json!(24)
+        serde_json::json!(23)
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["recorded_evidence_count"],
@@ -61202,7 +61208,7 @@ async fn admin_rollout_smoke_preflight_returns_latest_hash_only_evidence() {
     );
     assert_eq!(
         preflight_json["rollout_smoke"]["missing_evidence_count"],
-        serde_json::json!(23)
+        serde_json::json!(22)
     );
     assert_eq!(
         preflight_json["latest_evidence"].as_array().map(Vec::len),
@@ -61704,7 +61710,7 @@ async fn admin_operational_metrics_route_exports_safe_promotion_gauges() {
             "trace_commons_operational_object_store_readiness{{tenant_storage_ref=\"{tenant_ref}\",state=\"restore_after_delete_supported\"}} 0"
         )));
     assert!(body_text.contains(&format!(
-            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 24"
+            "trace_commons_operational_rollout_smoke_missing_evidence{{tenant_storage_ref=\"{tenant_ref}\"}} 23"
         )));
     assert!(body_text.contains(&format!(
             "trace_commons_operational_rollout_smoke_check{{tenant_storage_ref=\"{tenant_ref}\",check_name=\"submit_status\",state=\"missing\"}} 1"
@@ -87640,6 +87646,10 @@ fn classify_policy_env_defaults_closed() {
 /// gets all the way to the last step and fails there. That is the strongest
 /// end-to-end shape available offline, and it is what proves the handler
 /// really hands its client to the drill.
+/// 2026-09-01T12:00:00Z, the day the report and collateral fixtures were
+/// captured. The same constant the `near_attestation::drill` tests pin.
+const FIXTURE_COLLATERAL_CAPTURED_AT: i64 = 1_788_264_000;
+
 struct FixtureAttestationEndpoint;
 
 #[async_trait::async_trait]
@@ -87774,9 +87784,17 @@ async fn near_attestation_drill_records_failed_smoke_evidence() {
 async fn near_attestation_drill_runs_the_configured_endpoint_and_leaks_nothing() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
-    Arc::get_mut(&mut state)
-        .expect("the test holds the only reference")
-        .near_attestation_client = Some(Arc::new(FixtureAttestationEndpoint));
+    {
+        let state = Arc::get_mut(&mut state).expect("the test holds the only reference");
+        state.near_attestation_client = Some(Arc::new(FixtureAttestationEndpoint));
+        // Pin the verification clock to the day the collateral fixture was
+        // captured. Without this the handler passes `Utc::now()`, the
+        // fixture's `nextUpdate` (2026-09-30T23:45:01Z) lapses, and this
+        // test starts failing on a calendar date rather than on a code
+        // change -- which is worse than not having the test.
+        state.near_attestation_verification_clock =
+            Some(DateTime::from_timestamp(FIXTURE_COLLATERAL_CAPTURED_AT, 0).expect("valid"));
+    }
 
     let Json(drill) = near_attestation_drill_handler(
         State(state),
@@ -87808,4 +87826,101 @@ async fn near_attestation_drill_runs_the_configured_endpoint_and_leaks_nothing()
         );
     }
     assert!(!body.contains("e5d0fec43b001f181a3410b96715ec54171f36da"));
+}
+
+#[test]
+fn near_attestation_is_required_only_where_a_near_ai_endpoint_is_configured() {
+    // The ruling this implements: key on whether the surface is in use at
+    // all, never on the drill's result. A deployment routing no inference
+    // through NEAR AI has nothing for the drill to prove, and a permanently
+    // red required check teaches operators to ignore red checks.
+    let configured = rollout_smoke_required_checks(true);
+    let unconfigured = rollout_smoke_required_checks(false);
+
+    assert!(configured.contains(&"near_attestation"));
+    assert!(!unconfigured.contains(&"near_attestation"));
+    assert_eq!(configured.len(), unconfigured.len() + 1);
+    // Nothing else moved. A filter that dropped a second check would be a
+    // silent weakening of the promotion gate.
+    assert_eq!(
+        configured
+            .iter()
+            .filter(|check| **check != "near_attestation")
+            .copied()
+            .collect::<Vec<_>>(),
+        unconfigured
+    );
+    assert_eq!(
+        configured.len(),
+        TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.len()
+    );
+}
+
+#[test]
+fn an_unconfigured_near_attestation_check_is_reported_not_applicable_not_passed() {
+    // Absent from `required_checks` is not the same as green, and it must
+    // not be indistinguishable from a check that was quietly dropped.
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        &[],
+        Utc::now(),
+        false,
+    );
+    assert_eq!(
+        summary.not_applicable_checks,
+        vec!["near_attestation".to_string()]
+    );
+    assert!(
+        !summary
+            .passed_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(
+        !summary
+            .missing_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(
+        !summary
+            .required_checks
+            .contains(&"near_attestation".to_string())
+    );
+}
+
+#[test]
+fn a_configured_near_attestation_check_cannot_be_opted_out_of_by_failing() {
+    // The other half of the ruling: once the surface is configured, a red
+    // drill blocks. There is no path from "the drill failed" back to "not
+    // applicable".
+    let failed = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        check_name: "near_attestation".to_string(),
+        status: TraceRolloutSmokeEvidenceStatus::Failed,
+        evidence_hash: sha256_prefixed("a red attestation drill"),
+        evidence_ref_hash: None,
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
+        recorded_at: Utc::now(),
+    };
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        &[failed],
+        Utc::now(),
+        true,
+    );
+    assert!(!summary.ready);
+    assert!(
+        summary
+            .failed_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(summary.not_applicable_checks.is_empty());
+    assert_eq!(summary.evidence_status, "failed_rehearsal_evidence");
 }

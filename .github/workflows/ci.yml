@@ -206,6 +206,32 @@ jobs:
       - run: cargo check -p trace-commons-server --bins --features near-ai-scorer
       - run: cargo test -p trace-commons-gate-enclave --features near-ai-scorer --lib perplexity_near_ai
 
+  cargo-check-near-attestation-collateral:
+    name: cargo check (near-attestation-collateral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-near-attestation-collateral-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-near-attestation-collateral-
+      # The Intel DCAP collateral client behind `#[cfg(feature = ...)]` in
+      # near_attestation/client.rs is the only code that fetches collateral in
+      # production, and no other job compiles it. Without this job that cfg arm
+      # rots silently and the first sign is a red attestation drill on a pilot
+      # host. It also pulls reqwest 0.13 into the tree, which nothing else in
+      # this workspace builds.
+      - run: cargo check -p trace-commons-server --bins --features near-attestation-collateral
+      - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
+
   cargo-test-default:
     name: cargo test (default features)
     runs-on: ubuntu-latest
