@@ -73,8 +73,8 @@ The protocol crate is `crates/trace-commons-protocol`; the server crate is
 
 ## CI
 
-Every job in `.github/workflows/ci.yml` gates every PR. There are seventeen
-as of 2026-08-28; the list below covers the long-standing ones and is not
+Every job in `.github/workflows/ci.yml` gates every PR. There are eighteen
+as of 2026-08-29; the list below covers the long-standing ones and is not
 a full inventory -- read the workflow for that. (It said "nine" while the
 file held fifteen, so treat any count here as stale until re-checked.)
 

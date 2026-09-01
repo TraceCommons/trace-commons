@@ -77,9 +77,20 @@ struct OnboardingRootsView: View {
                 .font(.body)
 
             Text("""
-                Answer for each. Leaving one blank is not the same as skipping it — an \
-                unanswered folder falls back to the standard location, which is \
-                probably your real work.
+                Answer for Claude Code and Codex. Declining is an answer — leaving one \
+                blank is not, and the watcher would fall back to the standard location \
+                for it, which is probably your real work.
+                """)
+                .font(.body)
+
+            // Gemini is the one row where a blank genuinely reads as
+            // "nothing", so it is the one row where the warning above does
+            // not apply -- saying "answer for all three" would be false, and
+            // leaving the old "answer for both" in place would have made the
+            // sentence above silently wrong about a row now on the screen.
+            Text("""
+                Gemini CLI is optional. Left blank it is not read at all — unlike the \
+                other two, there is no fallback to a standard location.
                 """)
                 .font(.body)
         }
@@ -87,10 +98,30 @@ struct OnboardingRootsView: View {
 
     // MARK: - Rows
 
+    /// Which rows this screen offers, in order.
+    ///
+    /// Derived from `allCases` rather than written out, because writing it
+    /// out is exactly how Gemini went missing: the screen listed Claude Code
+    /// and Codex, `gemini-cli` was added to the Rust source registry, and
+    /// nothing connected the two. The Gemini candidate was fetched by
+    /// `discover()` and dropped for want of a row.
+    ///
+    /// Nothing complained, and each silence was by design. `gemini-cli` is
+    /// `Undeclared::Nothing`, so an absent declaration constructs no adapter
+    /// -- that is what stops a shell built before the source existed from
+    /// scanning a contributor's real `~/.gemini`. And `isComplete` is
+    /// deliberately two-conjunct, so an unanswered Gemini row cannot block
+    /// Continue. Correct choices both, and together they meant the screen
+    /// could stop asking about a whole source without anything noticing.
+    ///
+    /// A fourth adapter now appears here by being added to `SourceKind`.
+    static let offeredKinds: [SourceKind] = SourceKind.allCases
+
     private var rows: some View {
         VStack(alignment: .leading, spacing: TC.Space.m) {
-            row(for: .claudeCode)
-            row(for: .codex)
+            ForEach(Self.offeredKinds, id: \.self) { kind in
+                row(for: kind)
+            }
         }
     }
 
@@ -189,7 +220,12 @@ struct OnboardingRootsView: View {
 
     private func start() {
         guard let settingsJSON = roots.settingsJSON() else {
-            failure = "Answer for each before continuing."
+            // Names the two rows that actually gate Continue. This merged
+            // badly: this branch had reworded it to "each" while main gained
+            // an optional Gemini row, and "each" would now promise that a
+            // blank Gemini row is what is blocking, which it never is --
+            // `isComplete` is claude && codex by design.
+            failure = "Answer for Claude Code and Codex before continuing."
             return
         }
         failure = nil

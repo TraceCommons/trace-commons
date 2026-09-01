@@ -366,6 +366,7 @@ checklist and drill.
 | `TRACE_COMMONS_PII_BACKSTOP_TICK_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_BATCH_SIZE` | optional | `5` | Held submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it (it stays held on `awaiting_pii_backstop`). Clamped to `[1, 1000]`. |
+| `TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS` | optional | `900` | Wall-clock ceiling on re-redacting ONE submission. Without it a single large trace monopolises the driver: on the pilot, one submission consumed 50 hours and ~1,250 classify windows while 210 others were never enumerated. A submission that outruns the budget is charged an attempt (being too large is a property of the trace, not the upstream), so backoff applies and it is eventually quarantined for review rather than retried forever. Clamped to `[1, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a re-redaction failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
 | `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when enabled | (none, refuses boot) | See §7 above and [`pii-backstop.md`](pii-backstop.md). |
 
@@ -445,7 +446,7 @@ audit-relevant and is included in gate version hash derivation.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| `self-hosted` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
 | `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |
@@ -461,6 +462,40 @@ audit-relevant and is included in gate version hash derivation.
 
 ---
 
+### Self-hosted privacy filter
+
+Set when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. The backend talks to the
+`trace-commons-privacy-filter` service on loopback (see
+`deploy/pilot-gcp/privacy-filter/`), which serves the same `openai/privacy-filter`
+weights the hosted endpoint serves.
+
+Prefer it to `near-ai` for locality: no unredacted prose leaves the host.
+
+Both backends window, but for different reasons, and the difference decides how
+you tune them. The hosted endpoint serves a model reporting
+`context_length: 512` behind an internal splitter and fails above ~3,000 input
+tokens, so it *must* window at 2,000 tokens. The local model has its real 128k
+context and would accept a whole field in one request -- but CPU inference is
+linear in input length and slow, so a large field in one request runs for
+minutes and trips the timeout. The local budget is therefore chosen from the
+timeout, not imposed by the model, and windowing keeps large fields covered
+rather than failing them closed.
+
+It fails closed on adapter error, alongside `near-ai` rather than `sidecar`.
+Running on loopback makes it more reliable, not less required.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL` | R when `self-hosted` | (none, refuses boot) | Base URL of the loopback shim, including the `/v1` suffix, e.g. `http://127.0.0.1:8471/v1`. A configured backend with no endpoint refuses at startup rather than defaulting. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL` | optional | `openai/privacy-filter` | Passed through in the classify request. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_TOKENS` | optional | `4000` | Input tokens per request. **Not an upstream limit** -- the local model's context is 128k and would take a whole field. This is a *duration* budget: CPU inference runs at roughly 58 characters/second, so 4,000 tokens (~16 KB of prose) is about five minutes. Raise it only alongside the timeout; a budget that outruns the timeout fails every large field. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_CONCURRENT_WINDOWS` | optional | `3` | Windows for one field in flight at once. **Deliberately not 1**, unlike the hosted backend, whose limit is a scar from concurrency collapsing against NEAR AI's service -- a finding about that vendor, not about a local process. One request saturates at ~1.75 of 4 cores because this model's `hidden_size` is 640 and the matmuls are too small to scale across threads; the rest is only reachable by overlapping requests. Measured on the pilot under load: 2 gave 1.32x, 3 gave 1.58x. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_TIMEOUT_MS` | optional | `600000` | Per-window timeout, 10 minutes. Sized against the token budget above, with headroom for a slower host or a token-dense window. |
+| `TRACE_PRIVACY_FILTER_SELF_HOSTED_MAX_INPUT_BYTES` | optional | `MAX_TRACE_ENVELOPE_BYTES` | Resource bound on a whole field before windowing. Fields are split to fit the token budget, so this does not need lowering to bound request duration. |
+
+No API key variable exists for this backend by design; the transport never
+leaves the machine.
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.
@@ -472,6 +507,7 @@ These aren't env vars but they gate which envs even matter at runtime.
 | `local-gpu-models` | Compiles the mistralrs perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. A2.3 migrated the scorer off candle-direct; architecture is auto-detected from `config.json`. |
 | `local-gpu-models-cuda` | Implies `local-gpu-models`, adds the mistralrs CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
 | `near-ai-privacy-filter` | Compiles the NEAR AI Cloud privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=near-ai`. Pilot builds enable this feature. |
+| `self-hosted-privacy-filter` | Compiles the loopback privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. Pilot builds enable this feature. |
 
 Production build command:
 

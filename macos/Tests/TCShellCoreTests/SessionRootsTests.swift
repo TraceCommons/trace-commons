@@ -158,4 +158,77 @@ final class SessionRootsTests: XCTestCase {
         XCTAssertEqual(roots.claude, .watch(path: "/Users/someone/.claude/projects"))
         XCTAssertEqual(roots.codex, .undecided, "adopting one source must not answer for the other")
     }
+
+    // MARK: - Gemini
+
+    // `SessionRoots` has carried a `gemini` field, a `gemini_source` key and
+    // a documented tri-state since the source was added, and none of it was
+    // covered here. That absence is why the roots screen could stop offering
+    // the row without a test noticing.
+
+    func testAnUndecidedGeminiIsOmittedRatherThanSentAsOff() throws {
+        // Absent means "never asked", which the contributor library answers
+        // by constructing no adapter. Sending `off` instead would record a
+        // refusal the contributor never made -- a different thing to store,
+        // and a worse one, because it is indistinguishable from someone who
+        // said they do not use it.
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(Set(decoded.keys), ["claude_source", "codex_source"])
+    }
+
+    func testAnAnsweredGeminiIsCarried() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off,
+            gemini: .watch(path: "/Users/someone/.gemini/tmp")
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(
+            try declaration(decoded, "gemini_source"),
+            ["mode": "watch", "path": "/Users/someone/.gemini/tmp"]
+        )
+    }
+
+    func testDecliningGeminiSaysOff() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off,
+            gemini: .off
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(try declaration(decoded, "gemini_source"), ["mode": "off"])
+    }
+
+    func testGeminiCannotBlockContinue() {
+        // Deliberate, and load-bearing: this mirrors the two-conjunct
+        // `roots_declared` on the Rust side. Requiring a Gemini answer would
+        // re-onboard every contributor upgrading from a build that never
+        // asked them, for a store the daemon will not touch either way.
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off
+        )
+        XCTAssertTrue(roots.isComplete, "an unanswered Gemini row must not gate the daemon start")
+        XCTAssertNotNil(roots.settingsJSON())
+    }
+
+    func testGeminiIsAddressableByItsKind() {
+        // The subscript is what the screen's generic row helpers go through,
+        // so a kind the subscript cannot round-trip cannot be answered on
+        // screen at all.
+        var roots = SessionRoots()
+        roots[.geminiCli] = .watch(path: "/Users/someone/.gemini/tmp")
+
+        XCTAssertEqual(roots.gemini, .watch(path: "/Users/someone/.gemini/tmp"))
+        XCTAssertEqual(roots[.geminiCli], .watch(path: "/Users/someone/.gemini/tmp"))
+        XCTAssertEqual(roots.claude, .undecided, "answering Gemini must not answer for the others")
+        XCTAssertEqual(roots.codex, .undecided)
+    }
 }

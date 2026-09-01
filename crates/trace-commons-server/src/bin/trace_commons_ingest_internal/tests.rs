@@ -66004,6 +66004,22 @@ impl PerplexityDriverTestDb {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerplexityDriverTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -71303,6 +71319,92 @@ fn community_snapshot_cohort_size_comes_from_privacy_metadata() {
         community_snapshot_missing_controls(&row, CommunitySurface::Analytics),
         vec![COMMUNITY_NOISE_MECHANISM_CONTROL]
     );
+}
+
+#[tokio::test]
+async fn clear_stale_prior_risk_requires_admin_token() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/pii-backstop-clear-stale-prior-risk")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    // token-a is a contributor token. This route rewrites the recorded risk of
+    // a privacy decision, so it is admin-only.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// An omitted limit must be a sample, never every quarantined submission.
+#[test]
+fn clear_stale_prior_risk_limit_defaults_small_and_is_clamped() {
+    let clamp = |requested: Option<i64>| requested.unwrap_or(10).clamp(1, 1_000);
+    assert_eq!(clamp(None), 10, "omitted limit must be a sample");
+    assert_eq!(clamp(Some(0)), 1, "zero must not mean unbounded");
+    assert_eq!(clamp(Some(-5)), 1, "negative must not mean unbounded");
+    assert_eq!(clamp(Some(100_000)), 1_000);
+}
+
+/// The justification for this route is that the risk ratchet stays intact: the
+/// escape hatch is an audited human assertion, not a relaxed rule.
+///
+/// The rule itself lives in the protocol crate, and its own tests guard it
+/// (`canary_healthy_but_no_findings_cannot_lower_high_risk` and siblings).
+/// What this asserts is narrower and local: that the server crate has not grown
+/// a second downgrade path that sidesteps it.
+#[test]
+fn the_server_crate_does_not_reimplement_the_downgrade_rule() {
+    let storage_src = include_str!("../../trace_corpus_storage.rs");
+    assert!(
+        !storage_src.contains("fn can_downgrade"),
+        "can_downgrade belongs to the protocol crate; a copy here would let the \
+         ratchet be relaxed without the protocol tests noticing"
+    );
+}
+
+#[tokio::test]
+async fn pii_backstop_requeue_quarantined_requires_admin_token() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/pii-backstop-requeue-quarantined")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    // token-a is a contributor token in the fixture. This route moves
+    // submissions OUT of quarantine for re-assessment, so it is admin-only.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// An omitted `limit` must be a small sample, never "every quarantined
+/// submission". The first intended use of this route is a sample: re-run a
+/// handful and compare the new verdict against the recorded one.
+#[test]
+fn pii_backstop_requeue_limit_defaults_small_and_is_clamped() {
+    let clamp = |requested: Option<i64>| requested.unwrap_or(10).clamp(1, 1_000);
+    assert_eq!(clamp(None), 10, "omitted limit must be a sample");
+    assert_eq!(clamp(Some(0)), 1, "zero must not mean unbounded");
+    assert_eq!(clamp(Some(-5)), 1, "negative must not mean unbounded");
+    assert_eq!(clamp(Some(50)), 50);
+    assert_eq!(clamp(Some(100_000)), 1_000, "clamped to a sane ceiling");
 }
 
 #[tokio::test]
@@ -78320,6 +78422,22 @@ impl PerUserTestDeviceKeyDb {
 // never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PerUserTestDeviceKeyDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -79257,6 +79375,22 @@ impl DeviceGrantScopeTestDb {
 // issuer device-key ceiling path never calls any of them.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for DeviceGrantScopeTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -80270,6 +80404,22 @@ impl MockDbWithChunkEntries {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for MockDbWithChunkEntries {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,
@@ -81805,12 +81955,95 @@ impl Drop for NearAiEnvGuard {
     }
 }
 
+/// A submission that outruns the per-submission budget is charged an attempt
+/// and the driver moves on.
+///
+/// Without this bound one large trace holds the driver forever: the pilot
+/// spent 50 hours and ~1,250 classify windows on a single submission while 210
+/// others were never enumerated. The timeout is charged to the TRACE, not the
+/// upstream -- being too large is a property of the submission -- so it spends
+/// the attempt budget and is eventually quarantined rather than retried
+/// forever.
+#[tokio::test]
+async fn pii_backstop_charges_an_attempt_when_a_submission_outruns_its_budget() {
+    let _env = near_ai_env_lock().lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn, artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+
+    // Reuse the standard responder so the canary still passes, and add a delay
+    // ONLY for this submission's content. Delaying the canary too would abort
+    // the tick before any submission is reached -- testing the canary rather
+    // than the budget.
+    let server = wiremock::MockServer::start().await;
+    let marker_owned = marker.to_string();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/privacy/classify"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            let response = near_ai_classify_response(input, &marker_owned, ClassifierMode::Healthy);
+            if input.contains(&marker_owned) {
+                response.set_delay(StdDuration::from_secs(30))
+            } else {
+                response
+            }
+        })
+        .mount(&server)
+        .await;
+    let _guard = NearAiEnvGuard::set(&server.uri());
+
+    let config = PiiBackstopDriverConfig {
+        per_submission_timeout: StdDuration::from_millis(200),
+        ..backstop_driver_config()
+    };
+
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
+        .await
+        .expect("the tick itself succeeds; the submission fails inside it");
+
+    assert_eq!(
+        (summary.done, summary.transient),
+        (0, 0),
+        "an over-budget submission is neither released nor treated as a transient upstream fault"
+    );
+    assert_eq!(
+        summary.failed + summary.exhausted,
+        1,
+        "the submission must be charged, so backoff applies and it cannot block forever"
+    );
+}
+
+/// The adapter the driver tick is given, built from the NEAR-AI env the
+/// backstop tests already set via `NearAiEnvGuard`.
+///
+/// The tick takes its adapter as an argument rather than reading process env,
+/// so these tests do not have to mutate `TRACE_PRIVACY_FILTER_BACKEND`. That
+/// variable is read by `test_state`, so setting it process-wide was visible to
+/// every other test running in parallel.
+fn backstop_test_adapter()
+-> Arc<dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter> {
+    trace_commons_protocol::privacy_filter_near_ai::build_from_env()
+        .expect("near-ai adapter builds from the guarded test env")
+}
+
 fn backstop_driver_config() -> PiiBackstopDriverConfig {
     PiiBackstopDriverConfig {
         interval: StdDuration::from_secs(30),
         batch_size: 10,
         max_attempts: 5,
         backoff_base_seconds: 30,
+        // Generous: these tests exercise outcomes, not the budget. The
+        // budget's own behaviour has its own test below.
+        per_submission_timeout: StdDuration::from_secs(3_600),
     }
 }
 
@@ -82039,9 +82272,13 @@ async fn pii_backstop_driver_tick_releases_held_submission() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::Healthy).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("healthy tick succeeds");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("healthy tick succeeds");
     assert_eq!(
         (summary.done, summary.failed, summary.exhausted),
         (1, 0, 0),
@@ -82106,9 +82343,13 @@ async fn pii_backstop_driver_tick_holds_and_bumps_on_permanent_classifier_failur
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
     assert_eq!(
         (summary.done, summary.failed, summary.exhausted),
         (0, 1, 0),
@@ -82152,7 +82393,7 @@ async fn pii_backstop_driver_tick_below_threshold_still_holds_and_retries() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82215,7 +82456,7 @@ async fn pii_backstop_driver_tick_quarantines_on_attempt_exhaustion() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmissionPermanent).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82298,9 +82539,13 @@ async fn pii_backstop_driver_tick_transient_failure_does_not_bump() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::FailSubmission).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let summary = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config())
-        .await
-        .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
+    let summary = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await
+    .expect("tick itself succeeds; the per-item failure is tallied, not fatal");
     assert_eq!(
         (
             summary.done,
@@ -82359,7 +82604,7 @@ async fn pii_backstop_transient_failures_never_exhaust_a_trace() {
     // trace would have been excluded before this loop finished.
     let config = backstop_driver_config();
     for round in 1..=(config.max_attempts + 2) {
-        let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+        let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
             .await
             .expect("tick itself succeeds");
         assert_eq!(
@@ -82410,7 +82655,7 @@ async fn pii_backstop_driver_tick_breaker_aborts_after_consecutive_failures() {
 
     let mut config = backstop_driver_config();
     config.batch_size = ids.len() as i64;
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82475,7 +82720,7 @@ async fn pii_backstop_driver_tick_below_breaker_processes_rest_of_batch() {
 
     let mut config = backstop_driver_config();
     config.batch_size = (poisoned.len() + 1) as i64;
-    let summary = run_pii_backstop_driver_tick(state.clone(), &config)
+    let summary = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82537,7 +82782,7 @@ async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
 
     // Tick 1: the poisoned head fills the batch and trips the breaker, so
     // nothing else is reached. This much was true before the fix too.
-    let first = run_pii_backstop_driver_tick(state.clone(), &config)
+    let first = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert!(
@@ -82556,7 +82801,7 @@ async fn pii_backstop_transient_head_of_line_does_not_starve_the_backlog() {
     // Tick 2: the poisoned three now carry a `last_attempt_at`, so the
     // never-attempted clean traces sort ahead of them and get processed.
     // Without the fix this tick is byte-for-byte identical to tick 1, forever.
-    let second = run_pii_backstop_driver_tick(state.clone(), &config)
+    let second = run_pii_backstop_driver_tick(state.clone(), &config, backstop_test_adapter())
         .await
         .expect("tick itself succeeds");
     assert_eq!(
@@ -82708,7 +82953,12 @@ async fn pii_backstop_driver_tick_aborts_when_canary_unhealthy() {
     mount_near_ai_classifier(&server, marker, ClassifierMode::UnhealthyCanary).await;
     let _guard = NearAiEnvGuard::set(&server.uri());
 
-    let outcome = run_pii_backstop_driver_tick(state.clone(), &backstop_driver_config()).await;
+    let outcome = run_pii_backstop_driver_tick(
+        state.clone(),
+        &backstop_driver_config(),
+        backstop_test_adapter(),
+    )
+    .await;
     assert!(
         outcome.is_err(),
         "an unhealthy canary must abort the tick, got {outcome:?}"
@@ -82793,6 +83043,22 @@ fn awaiting_pii_backstop_excluded_from_export_until_released() {
 
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBackstopDriverTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         write: StorageTraceSubmissionWrite,
@@ -85073,6 +85339,22 @@ async fn logging_out_a_native_token_revokes_its_session_row() {
 // this file stubs it.
 #[async_trait::async_trait]
 impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for NativeAuthTestDb {
+    async fn list_quarantined_with_only_residual_survivor(
+        &self,
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        unimplemented!("test double does not enumerate stale prior risk")
+    }
+
+    async fn requeue_quarantined_for_pii_backstop(
+        &self,
+        _: &str,
+        _: i64,
+    ) -> Result<u64, DatabaseError> {
+        unimplemented!("test double does not serve the PII backstop requeue")
+    }
+
     async fn upsert_trace_submission(
         &self,
         _: StorageTraceSubmissionWrite,

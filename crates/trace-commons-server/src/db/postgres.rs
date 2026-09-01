@@ -4830,12 +4830,22 @@ impl Database for PgBackend {
                 // targets; both are per-submission constants, so they do not
                 // change dedup cardinality, and both are dropped when mapping
                 // to GateWorkItem.
+                // `rescrubbed_envelope` is accepted alongside `submitted_envelope`
+                // so a submission that has ALREADY been through the backstop can
+                // be re-enumerated. Requeueing a quarantined submission
+                // invalidates nothing and resurrects nothing: its
+                // `submitted_envelope` ref stays invalidated -- an active
+                // pre-scrub ref is the concurrent-read hazard documented in
+                // `process_one_pii_backstop` -- and the driver reads through the
+                // record's own pointers, which already address the rescrubbed
+                // artifact. Without this, flipping a quarantined submission back
+                // to `awaiting_pii_backstop` would silently never be picked up.
                 "SELECT DISTINCT s.tenant_id, s.submission_id, s.received_at, a.last_attempt_at
                  FROM trace_submissions s
                  JOIN trace_object_refs o
                    ON o.tenant_id = s.tenant_id
                   AND o.submission_id = s.submission_id
-                  AND o.artifact_kind = 'submitted_envelope'
+                  AND o.artifact_kind IN ('submitted_envelope', 'rescrubbed_envelope')
                   AND o.invalidated_at IS NULL
                   AND o.deleted_at IS NULL
                  LEFT JOIN trace_pii_backstop a
