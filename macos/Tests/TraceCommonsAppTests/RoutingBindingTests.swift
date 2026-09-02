@@ -1,3 +1,4 @@
+import TCBridge
 import TCShellCore
 import XCTest
 
@@ -22,6 +23,18 @@ import XCTest
 /// reports the text it was looking in when it does not find what it needs,
 /// so a refactor that moves this card produces a failure to fix and not a
 /// test that quietly stops asserting.
+
+/// The Rust-side calls as the app wires them. Spelled here rather than taken
+/// from `AppModel` so these assertions do not need a live model.
+private let routingCalls = RoutingCalls(
+    tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
+    unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
+    toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
+    stateLine: { TCRoutingCopy.stateLine(state: $0) },
+    stateTone: { TCRoutingCopy.stateTone(state: $0) }
+)
+
 private enum RoutingCard {
     /// `.../macos/Tests/TraceCommonsAppTests/RoutingBindingTests.swift`
     static let viewPath = URL(fileURLWithPath: #filePath)
@@ -384,7 +397,9 @@ final class RoutingBindingTests: XCTestCase {
             "the sentence is not built from that state: \(body)"
         )
         XCTAssertTrue(
-            body.contains("RoutingSurface.showsLastChecked(forState: state)"),
+            body.contains(
+                "RoutingSurface.showsLastChecked(forState: state, calls: model.routingCalls)"
+            ),
             "the stamp is not gated on that same state: \(body)"
         )
         XCTAssertTrue(
@@ -417,7 +432,10 @@ final class RoutingBindingTests: XCTestCase {
         let body = try XCTUnwrap(RoutingCard.stateBody())
 
         XCTAssertTrue(
-            body.contains("let stateTone = tone(RoutingSurface.tone(forState: state))"),
+            body.contains(
+                "let stateTone = tone("
+                    + "RoutingSurface.tone(forState: state, calls: model.routingCalls))"
+            ),
             "the status line's tone is not the surface's, from the daemon's state: \(body)"
         )
         XCTAssertTrue(
@@ -449,7 +467,7 @@ final class RoutingBindingTests: XCTestCase {
         let state = try XCTUnwrap(RoutingCard.stateBody())
         let bridge = try XCTUnwrap(RoutingCard.toneBridge())
 
-        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows"), .held)
+        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: routingCalls), .held)
         XCTAssertTrue(
             bridge.contains("case .held: return .held"),
             "the tone bridge no longer carries held through: \(bridge)"

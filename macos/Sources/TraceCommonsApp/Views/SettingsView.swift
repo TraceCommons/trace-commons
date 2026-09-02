@@ -813,7 +813,7 @@ struct SettingsContent: View {
         // From the state, never from the sentence it produced. `tone` maps
         // only the three values this surface can take, so nothing here can
         // reach a fault colour whatever the daemon reports.
-        let stateTone = tone(RoutingSurface.tone(forState: state))
+        let stateTone = tone(RoutingSurface.tone(forState: state, calls: model.routingCalls))
         VStack(alignment: .leading, spacing: TC.Space.xxs) {
             Text(RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls))
                 .font(TC.Font_.body)
@@ -822,7 +822,7 @@ struct SettingsContent: View {
             // "Last checked" is a stamp on the running daemon -- never an
             // install date, never a connected-since -- so it is only shown
             // on a state that has actually had an answer.
-            if RoutingSurface.showsLastChecked(forState: state),
+            if RoutingSurface.showsLastChecked(forState: state, calls: model.routingCalls),
                let at = model.status.routing.lastRefreshAt,
                let line = TCRoutingCopy.lastChecked(
                    when: Self.lastChecked.localizedString(for: at, relativeTo: Date())

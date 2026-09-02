@@ -306,6 +306,22 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// How firmly the sentence <see cref="tc_routing_state_line"/> returned
+    /// reads: <c>TC_ROUTING_TONE_*</c>.
+    ///
+    /// The last routing branch table that was still written out natively in
+    /// each shell. <c>awaiting_rows</c> is held and never a fault: a reader
+    /// built a moment ago starts cold by construction.
+    ///
+    /// Never fails -- a state this build has never heard of, and a NULL one,
+    /// both answer the neutral tone, exactly as their sentence claims
+    /// nothing.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_routing_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>

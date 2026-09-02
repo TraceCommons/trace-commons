@@ -267,6 +267,57 @@ pub fn ironwire_state_line(state: &str) -> &'static str {
     }
 }
 
+/// How firmly a daemon state reads.
+///
+/// Three values, and none of them is a fault: `awaiting_rows` is
+/// [`StateTone::Held`] and never an error. A reader built a moment ago
+/// starts empty by construction, and a declaration change puts a working
+/// install back into that state, so this is what a contributor sees
+/// immediately after touching anything on this card. Painting it as broken
+/// would accuse a working proxy at exactly that moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateTone {
+    /// Nothing is declared, so nothing is claimed.
+    Neutral,
+    /// Declared, and no answer has arrived yet. Normal, not broken.
+    Held,
+    /// Declared, and answers are arriving.
+    Clear,
+}
+
+/// The tone [`ironwire_state_line`]'s sentence is painted in.
+///
+/// ONE BRANCH TABLE, NOT TWO -- and, since this crossed the ABI, not four.
+/// This takes what the sentence takes, so the two stay in step by
+/// construction, and no shell may recover it by comparing the rendered
+/// sentence against one of the three state constants.
+///
+/// A state this build has never heard of is [`StateTone::Neutral`], which
+/// claims nothing, exactly as its sentence does.
+#[must_use]
+pub fn ironwire_state_tone(state: &str) -> StateTone {
+    match state {
+        "awaiting_rows" => StateTone::Held,
+        "rows_seen" => StateTone::Clear,
+        _ => StateTone::Neutral,
+    }
+}
+
+/// Whether the "last checked" stamp says anything on this state.
+///
+/// It is a per-process stamp on the running daemon -- never an install
+/// date, never a connected-since -- and it starts empty again every time
+/// that process comes back up. On a state that has had no answer at all
+/// there is nothing for it to report.
+///
+/// Derived from [`ironwire_state_tone`] rather than matched again, so a
+/// state added later cannot be given a sentence and a tone here and then
+/// silently disagree with the three shells about the stamp.
+#[must_use]
+pub fn ironwire_shows_last_checked(state: &str) -> bool {
+    ironwire_state_tone(state) != StateTone::Neutral
+}
+
 /// When the daemon last got an answer.
 ///
 /// "Last checked", never "connected since" and never a date this install
@@ -445,6 +496,45 @@ mod tests {
             tool_word("watch", ToolWiring::NotWired),
             tool_word("watch", ToolWiring::Unknown)
         );
+    }
+
+    /// The state's tone and its sentence are one decision.
+    ///
+    /// Asserted over every state this build knows plus ones it does not, so
+    /// the two tables cannot disagree about what a state means -- which is
+    /// the whole reason both cross the ABI rather than being written out in
+    /// each shell.
+    #[test]
+    fn every_state_tone_agrees_with_the_sentence_that_state_gets() {
+        for state in [
+            "not_declared",
+            "awaiting_rows",
+            "rows_seen",
+            "",
+            "ROWS_SEEN",
+            "a_state_from_a_later_daemon",
+        ] {
+            let line = ironwire_state_line(state);
+            let tone = ironwire_state_tone(state);
+            let expected = match line {
+                IRONWIRE_STATE_WAITING => StateTone::Held,
+                IRONWIRE_STATE_READING => StateTone::Clear,
+                _ => StateTone::Neutral,
+            };
+            assert_eq!(tone, expected, "{state:?} reads {line:?} as {tone:?}");
+            // The stamp is shown exactly where the state has had an answer.
+            assert_eq!(
+                ironwire_shows_last_checked(state),
+                tone != StateTone::Neutral,
+                "{state:?}"
+            );
+        }
+
+        // Named rather than left to the loop: the state that is normal and
+        // must never read as a fault.
+        assert_eq!(ironwire_state_tone("awaiting_rows"), StateTone::Held);
+        assert_eq!(ironwire_state_tone("not_declared"), StateTone::Neutral);
+        assert!(!ironwire_shows_last_checked("not_declared"));
     }
 
     /// The tone and the word are one decision, asserted over every input

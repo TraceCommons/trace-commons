@@ -83,17 +83,38 @@ public static class RoutingSurface
     /// what crossing the boundary is meant to stop.
     /// </summary>
     public static RoutingTone ToolTone(string? sourceMode, ToolWiring wiring) =>
-        NativeMethods.tc_routing_tool_tone(sourceMode, (int)wiring) == AbiToneClear
-            ? RoutingTone.Clear
-            : RoutingTone.Neutral;
+        FromAbiTone(NativeMethods.tc_routing_tool_tone(sourceMode, (int)wiring));
 
     /// <summary>
-    /// <c>TC_TOOL_TONE_CLEAR</c>. Spelled out rather than cast from
-    /// <see cref="RoutingTone"/>, whose Clear is 2 because it carries a third
-    /// value the tool words never take. The two numberings are unrelated and
-    /// a cast between them would be silently wrong.
+    /// How firmly the sentence <see cref="StateLine"/> returned reads.
+    ///
+    /// The last routing branch table this shell wrote out for itself. Never
+    /// null and never a failure: a state this build has never heard of
+    /// answers the neutral tone, exactly as its sentence claims nothing.
     /// </summary>
-    private const int AbiToneClear = 1;
+    public static RoutingTone StateTone(string? state) =>
+        FromAbiTone(NativeMethods.tc_routing_state_tone(state));
+
+    /// <summary>
+    /// The ABI's <c>TC_ROUTING_TONE_*</c>, which one numbering serves for
+    /// both calls.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out rather than cast from <see cref="RoutingTone"/>. The two
+    /// happen to agree today; a cast would make that coincidence load-bearing
+    /// and a reordered enum would then mispaint a privacy claim rather than
+    /// fail. Anything this build does not know is the tone that claims
+    /// nothing.
+    /// </remarks>
+    private static RoutingTone FromAbiTone(int value) => value switch
+    {
+        AbiToneHeld => RoutingTone.Held,
+        AbiToneClear => RoutingTone.Clear,
+        _ => RoutingTone.Neutral,
+    };
+
+    private const int AbiToneHeld = 1;
+    private const int AbiToneClear = 2;
 
     /// <summary>
     /// The daemon's routing state, in words, decided by the shared branch

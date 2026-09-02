@@ -123,7 +123,8 @@ final class AppModel: ObservableObject {
         unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
         toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
         toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
-        stateLine: { TCRoutingCopy.stateLine(state: $0) }
+        stateLine: { TCRoutingCopy.stateLine(state: $0) },
+        stateTone: { TCRoutingCopy.stateTone(state: $0) }
     )
     @Published private(set) var outcomeCounts: [String: Int] = [:]
     @Published private(set) var audit: [AuditEntry] = []

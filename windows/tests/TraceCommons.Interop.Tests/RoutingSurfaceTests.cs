@@ -728,6 +728,12 @@ public class RoutingSurfaceTests
         Assert.Contains("RoutingSurface.ToolWord(sourceMode, wiring)", source, StringComparison.Ordinal);
         Assert.Contains("RoutingSurface.ToolTone(sourceMode, wiring)", source, StringComparison.Ordinal);
         Assert.Contains("RoutingSurface.StateLine(state)", source, StringComparison.Ordinal);
+        Assert.Contains("RoutingSurface.StateTone(state)", source, StringComparison.Ordinal);
+
+        // The state names are wire values this shell and its tests talk in.
+        // They may no longer be the arms of a table.
+        Assert.DoesNotContain("AwaitingRows =>", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("RowsSeen =>", source, StringComparison.Ordinal);
 
         // The words may be reached only as the fallback for a call the ABI
         // refused, never as the arms of a table. WordUnknown and StateOff are
@@ -955,6 +961,72 @@ public class RoutingSurfaceTests
         int end = xaml.IndexOf("Settings.HasRoutingLastChecked", StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start, "the routing card is no longer in this markup");
         return xaml[start..end];
+    }
+
+    /// <summary>
+    /// The daemon state's tone is the shared table's answer, and it agrees
+    /// with the sentence that state gets.
+    ///
+    /// This was the last routing branch table still written out natively in
+    /// all three shells. Change which tone a state maps to in
+    /// <c>routing_copy.rs</c> -- without touching a string -- and this goes
+    /// red.
+    /// </summary>
+    [Fact]
+    public void TheToneEachStateGetsIsTheRustsChoiceAndNotThisShells()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.Equal(RoutingTone.Clear, RoutingTools.StateTone(RoutingTools.RowsSeen));
+        Assert.Equal(RoutingTone.Neutral, RoutingTools.StateTone(RoutingTools.NotDeclared));
+
+        foreach (string state in new[]
+                 {
+                     RoutingTools.NotDeclared, RoutingTools.AwaitingRows, RoutingTools.RowsSeen,
+                     "", "ROWS_SEEN", "a_state_from_a_later_daemon",
+                 })
+        {
+            RoutingTone tone = RoutingTools.StateTone(state);
+            // The tone and the sentence are one decision.
+            Assert.Equal(tone == RoutingTone.Neutral, RoutingTools.StateLine(copy, state) == copy.StateOff);
+            // And the stamp is gated on that same reading.
+            Assert.Equal(
+                tone != RoutingTone.Neutral,
+                RoutingTools.StatusLine(copy, state, DateTimeOffset.UtcNow).LastChecked is not null);
+        }
+
+        // A state this build has never heard of claims nothing rather than
+        // falling through to either "on" tone.
+        Assert.Equal(RoutingTone.Neutral, RoutingTools.StateTone("a_state_from_a_later_daemon"));
+        Assert.Equal(RoutingTone.Neutral, RoutingTools.StateTone(""));
+    }
+
+    /// <summary>
+    /// One tone numbering serves both calls, and a tool word can never take
+    /// the held tone.
+    /// </summary>
+    /// <remarks>
+    /// Two numberings would mean two <c>1</c>s meaning different things on
+    /// one ABI, and a shell that mapped the wrong one would mispaint a
+    /// privacy claim rather than fail. <see cref="RoutingTone"/>'s own
+    /// ordering happens to agree with the ABI's; that is asserted rather
+    /// than cast, so a reordered enum fails here instead of silently.
+    /// </remarks>
+    [Fact]
+    public void OneToneNumberingServesBothCallsAndAToolWordIsNeverHeld()
+    {
+        RoutingCopy copy = Copy();
+        foreach (string mode in new[] { "off", "watch", "unset", "", "something_new" })
+        {
+            foreach (ToolWiring wiring in new[] { ToolWiring.Wired, ToolWiring.NotWired, ToolWiring.Unknown })
+            {
+                Assert.NotEqual(RoutingTone.Held, RoutingTools.ToolTone(mode, wiring));
+            }
+        }
+
+        // The held tone is reachable, from the one thing that may hold.
+        Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.Equal(copy.StateWaiting, RoutingTools.StateLine(copy, RoutingTools.AwaitingRows));
     }
 
     /// <summary>

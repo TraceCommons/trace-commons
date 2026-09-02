@@ -12,8 +12,8 @@ use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
-    tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
+    tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone,
+    tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
     tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
@@ -2026,7 +2026,8 @@ const WIRED: i32 = 0;
 const NOT_WIRED: i32 = 1;
 const UNKNOWN: i32 = 2;
 const TONE_NEUTRAL: i32 = 0;
-const TONE_CLEAR: i32 = 1;
+const TONE_HELD: i32 = 1;
+const TONE_CLEAR: i32 = 2;
 
 fn tool_word(mode: &str, wiring: i32) -> String {
     let mode = cstr_str(mode);
@@ -2124,6 +2125,78 @@ fn the_state_branch_table_crosses_the_abi_and_an_unknown_state_claims_nothing() 
     assert_eq!(
         take_owned(unsafe { tc_routing_state_line(std::ptr::null()) }),
         copy::IRONWIRE_STATE_OFF
+    );
+}
+
+#[test]
+fn the_state_tone_branch_table_crosses_the_abi_and_agrees_with_the_sentence() {
+    // The last routing branch table that was still written out natively in
+    // all three shells. Compared against the Rust's own function, so this
+    // asserts the export IS the shared table.
+    use trace_commons_contributor::routing_copy as copy;
+    let tone = |state: &str| {
+        let state = cstr_str(state);
+        unsafe { tc_routing_state_tone(state.as_ptr()) }
+    };
+
+    assert_eq!(tone("awaiting_rows"), TONE_HELD);
+    assert_eq!(tone("rows_seen"), TONE_CLEAR);
+    assert_eq!(tone("not_declared"), TONE_NEUTRAL);
+
+    for state in [
+        "not_declared",
+        "awaiting_rows",
+        "rows_seen",
+        "",
+        "ROWS_SEEN",
+        "a_state_from_a_later_daemon",
+    ] {
+        let expected = match copy::ironwire_state_tone(state) {
+            copy::StateTone::Neutral => TONE_NEUTRAL,
+            copy::StateTone::Held => TONE_HELD,
+            copy::StateTone::Clear => TONE_CLEAR,
+        };
+        assert_eq!(tone(state), expected, "{state:?}");
+        // The tone and the sentence are one decision across the boundary.
+        assert_eq!(
+            tone(state) == TONE_NEUTRAL,
+            state_line(state) == copy::IRONWIRE_STATE_OFF,
+            "{state:?}"
+        );
+    }
+
+    // A state this build has never heard of, and no pointer at all, both
+    // claim nothing rather than falling through to either "on" tone.
+    assert_eq!(tone("a_state_from_a_later_daemon"), TONE_NEUTRAL);
+    assert_eq!(
+        unsafe { tc_routing_state_tone(std::ptr::null()) },
+        TONE_NEUTRAL
+    );
+}
+
+#[test]
+fn one_tone_numbering_serves_both_calls_and_a_tool_word_is_never_held() {
+    // Two numberings would mean two 1s meaning different things on one ABI.
+    // A shell that mapped the wrong one would mispaint a privacy claim
+    // rather than fail, so the shared numbering is asserted rather than
+    // assumed -- and the value a tool word can never take is named.
+    for mode in ["off", "watch", "unset", "", "something_new"] {
+        for wiring in [WIRED, NOT_WIRED, UNKNOWN, 99] {
+            let mode_c = cstr_str(mode);
+            let tone = unsafe { tc_routing_tool_tone(mode_c.as_ptr(), wiring) };
+            assert_ne!(tone, TONE_HELD, "{mode:?}/{wiring} took the held tone");
+            assert!(
+                tone == TONE_NEUTRAL || tone == TONE_CLEAR,
+                "{mode:?}/{wiring}"
+            );
+        }
+    }
+
+    // And the held tone is reachable, from the one thing that may hold.
+    let waiting = cstr_str("awaiting_rows");
+    assert_eq!(
+        unsafe { tc_routing_state_tone(waiting.as_ptr()) },
+        TONE_HELD
     );
 }
 

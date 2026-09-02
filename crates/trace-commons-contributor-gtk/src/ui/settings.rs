@@ -898,19 +898,21 @@ fn probe_line(outcome: &ProbeOutcome) -> String {
     }
 }
 
-/// The tone of the daemon's three states.
+/// The tone of the daemon's three states, onto this shell's palette.
 ///
-/// `awaiting_rows` is `Held` and not `Attention`: a reader built a moment
-/// ago starts cold by construction, so this is the state a contributor
-/// sees immediately after touching anything on this card. Painting it as a
-/// fault would accuse a working proxy of being broken at exactly that
+/// NOT A BRANCH TABLE HERE. Which tone each state reads in is decided once,
+/// in `routing_copy`, beside the sentence it goes with -- this only carries
+/// that answer onto `style::Tone`, which has two values this surface can
+/// never reach. `awaiting_rows` is `Held` and not `Attention`: a reader
+/// built a moment ago starts cold by construction, so this is the state a
+/// contributor sees immediately after touching anything on this card, and
+/// painting it as a fault would accuse a working proxy at exactly that
 /// moment.
 fn routing_tone(state: &str) -> Tone {
-    use trace_commons_contributor::daemon::ipc::{ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN};
-    match state {
-        ROUTING_AWAITING_ROWS => Tone::Held,
-        ROUTING_ROWS_SEEN => Tone::Clear,
-        _ => Tone::Neutral,
+    match copy::ironwire_state_tone(state) {
+        copy::StateTone::Held => Tone::Held,
+        copy::StateTone::Clear => Tone::Clear,
+        copy::StateTone::Neutral => Tone::Neutral,
     }
 }
 
@@ -1114,7 +1116,7 @@ fn render_routing_status(app: &Rc<App>, status: &Status) {
         // that has had no answer at all.
         copy::ironwire_last_checked(status.routing.last_refresh_at)
             .as_deref()
-            .filter(|_| routing_tone(state) != Tone::Neutral),
+            .filter(|_| copy::ironwire_shows_last_checked(state)),
     ));
 }
 
@@ -2706,6 +2708,63 @@ mod tests {
             let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
             assert_eq!(word, copy::TOOL_UNKNOWN, "{dead}");
             assert_ne!(word, copy::TOOL_PRIVATE, "{dead}");
+        }
+    }
+
+    /// The daemon state's tone is the shared table's, not a fourth copy.
+    ///
+    /// This was the last routing branch table written out natively in all
+    /// three shells. Asserted on the source of the mapper, because three
+    /// copies that agree today are what drift looks like the day before it
+    /// happens -- and a value-level test would pass against a native table
+    /// that still agreed.
+    #[test]
+    fn the_daemon_state_tone_is_not_reimplemented_in_this_shell() {
+        use trace_commons_contributor::daemon::ipc::{
+            ROUTING_AWAITING_ROWS, ROUTING_NOT_DECLARED, ROUTING_ROWS_SEEN,
+        };
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn routing_tone(")
+            .expect("the state tone mapper exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("copy::ironwire_state_tone(state)"),
+            "the state tone must come from the shared branch table"
+        );
+        for spelled in [
+            "ROUTING_AWAITING_ROWS",
+            "ROUTING_ROWS_SEEN",
+            "awaiting_rows",
+            "rows_seen",
+        ] {
+            assert!(
+                !body.contains(spelled),
+                "the state tone is still branched on here: {spelled}"
+            );
+        }
+
+        // And it carries the shared answer faithfully, over states this
+        // build knows and ones it does not.
+        for state in [
+            ROUTING_NOT_DECLARED,
+            ROUTING_AWAITING_ROWS,
+            ROUTING_ROWS_SEEN,
+            "",
+            "a_state_from_a_later_daemon",
+        ] {
+            let expected = match copy::ironwire_state_tone(state) {
+                copy::StateTone::Held => Tone::Held,
+                copy::StateTone::Clear => Tone::Clear,
+                copy::StateTone::Neutral => Tone::Neutral,
+            };
+            assert_eq!(routing_tone(state), expected, "{state}");
+            // Neither of this palette's fault tones is reachable from any
+            // state, including one this build has never heard of.
+            assert_ne!(routing_tone(state), Tone::Attention, "{state}");
+            assert_ne!(routing_tone(state), Tone::Refused, "{state}");
         }
     }
 

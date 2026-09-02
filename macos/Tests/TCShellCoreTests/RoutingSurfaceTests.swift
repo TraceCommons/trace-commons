@@ -62,8 +62,11 @@ final class RoutingSurfaceTests: XCTestCase {
             tokenLine: { path in path.map { "L-TOKEN:\($0)" } ?? "L-TOKEN:none" },
             unreachableLine: { port in port.map { "L-UNREACHABLE:\($0)" } ?? "L-UNREACHABLE:none" },
             toolWord: { mode, wiring in "W:\(mode):\(wiring)" },
-            toolTone: { _, wiring in wiring == RoutingToolWiring.notWired.abiValue ? 1 : 0 },
-            stateLine: { state in "S:\(state)" }
+            toolTone: { _, wiring in wiring == RoutingToolWiring.notWired.abiValue ? 2 : 0 },
+            stateLine: { state in "S:\(state)" },
+            // Echoes the state's length, so a tone read here is provably
+            // the one this fake was asked for and not the real rule.
+            stateTone: { state in state.count == 3 ? 1 : 2 }
         )
     }
 
@@ -76,7 +79,8 @@ final class RoutingSurfaceTests: XCTestCase {
             unreachableLine: { _ in nil },
             toolWord: { _, _ in nil },
             toolTone: { _, _ in 0 },
-            stateLine: { _ in nil }
+            stateLine: { _ in nil },
+            stateTone: { _ in 0 }
         )
     }
 
@@ -232,25 +236,41 @@ final class RoutingSurfaceTests: XCTestCase {
     /// empty by construction, so this is the state a contributor sees
     /// immediately after changing anything here -- painting it as an error
     /// would accuse a working proxy of being broken at that exact moment.
-    func testWaitingForRowsIsNotAFault() {
-        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows"), .held)
+    /// The state reaches the shared tone table verbatim, and the answer that
+    /// comes back is the one used. Which tone each state means is the Rust's
+    /// decision, pinned against the real dylib in `RoutingSurfaceExportTests`.
+    ///
+    /// The fake keys off the state's length, which is not the real rule, so
+    /// a `switch` that had quietly survived in this file could not produce
+    /// these results.
+    func testTheStateIsPassedToTheSharedToneTableAndItsAnswerIsUsed() {
+        XCTAssertEqual(RoutingSurface.tone(forState: "abc", calls: calls()), .held)
+        XCTAssertEqual(RoutingSurface.tone(forState: "abcd", calls: calls()), .clear)
+        XCTAssertEqual(RoutingSurface.tone(forState: "rows_seen", calls: silentCalls()), .neutral)
     }
 
-    func testTheOtherTwoStatesKeepTheirOwnTone() {
-        XCTAssertEqual(RoutingSurface.tone(forState: "rows_seen"), .clear)
-        XCTAssertEqual(RoutingSurface.tone(forState: "not_declared"), .neutral)
-        XCTAssertEqual(RoutingSurface.tone(forState: "some_new_state"), .neutral)
+    /// A tone value this build has never heard of claims nothing, and the
+    /// decoder is the ABI's numbering rather than this enum's declaration
+    /// order.
+    func testAToneTheAbiDoesNotDefineClaimsNothing() {
+        XCTAssertEqual(RoutingTone.fromABI(0), .neutral)
+        XCTAssertEqual(RoutingTone.fromABI(1), .held)
+        XCTAssertEqual(RoutingTone.fromABI(2), .clear)
+        XCTAssertEqual(RoutingTone.fromABI(3), .neutral)
+        XCTAssertEqual(RoutingTone.fromABI(-1), .neutral)
     }
 
     /// "Last checked" is a per-process stamp on the running daemon, so it is
     /// only shown where it says something. On a state that has had no answer
     /// at all it would read as an install date or a connected-since, which is
     /// what it is not.
+    ///
+    /// Derived from the same shared tone, so the stamp cannot be gated on a
+    /// different reading of the state than the sentence above it.
     func testTheLastCheckedStampIsWithheldOnAStateThatNeverAnswered() {
-        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: "not_declared"))
-        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: "some_new_state"))
-        XCTAssertTrue(RoutingSurface.showsLastChecked(forState: "awaiting_rows"))
-        XCTAssertTrue(RoutingSurface.showsLastChecked(forState: "rows_seen"))
+        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: "any", calls: silentCalls()))
+        XCTAssertTrue(RoutingSurface.showsLastChecked(forState: "abc", calls: calls()))
+        XCTAssertTrue(RoutingSurface.showsLastChecked(forState: "abcd", calls: calls()))
     }
 
     // MARK: - Per-tool words, from the tools answer and not the switch
@@ -392,14 +412,6 @@ final class RoutingSurfaceTests: XCTestCase {
         XCTAssertEqual(rendered[0].tone, .neutral)
         XCTAssertEqual(rendered[1].tone, .clear)
         XCTAssertEqual(rendered[2].tone, .neutral)
-    }
-
-    /// A tone value this build has never heard of claims nothing.
-    func testAToneTheAbiDoesNotDefineClaimsNothing() {
-        XCTAssertEqual(RoutingTone.fromToolToneABI(1), .clear)
-        XCTAssertEqual(RoutingTone.fromToolToneABI(0), .neutral)
-        XCTAssertEqual(RoutingTone.fromToolToneABI(2), .neutral)
-        XCTAssertEqual(RoutingTone.fromToolToneABI(-1), .neutral)
     }
 
     /// The wiring numbering is the ABI's, not this enum's declaration order

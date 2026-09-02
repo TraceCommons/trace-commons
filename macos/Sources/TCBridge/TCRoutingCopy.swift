@@ -59,6 +59,15 @@ public enum TCRoutingCopy {
         return String(cString: raw)
     }
 
+    /// How firmly that sentence reads: `TC_ROUTING_TONE_*`.
+    ///
+    /// The last routing branch table that was still written out natively in
+    /// each shell. Never fails -- a state this build has never heard of
+    /// answers the neutral tone, exactly as its sentence claims nothing.
+    public static func stateTone(state: String) -> Int32 {
+        state.withCString { tc_routing_state_tone($0) }
+    }
+
     /// "That file could not be used", assembled on the Rust side.
     ///
     /// `path` is nil when nothing resolved at all, which is a different

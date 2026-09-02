@@ -203,14 +203,19 @@ public enum RoutingTone: Equatable, Sendable {
     /// The reassuring reading.
     case clear
 
-    /// A tool word's tone as the ABI answers it: `TC_TOOL_TONE_*`.
+    /// A tone as the ABI answers it: `TC_ROUTING_TONE_*`.
     ///
-    /// Anything else is `.neutral`, the tone that claims nothing. Note this
-    /// is not this enum's own ordering -- the ABI has only the two values a
-    /// tool word can take, and `held` belongs to the daemon's state line --
-    /// so the two must never be cast into each other.
-    public static func fromToolToneABI(_ value: Int32) -> RoutingTone {
-        value == 1 ? .clear : .neutral
+    /// One numbering serves both the tool words and the daemon's state, so
+    /// this is the only decoder. Anything this build does not know is
+    /// `.neutral`, the tone that claims nothing. Spelled out rather than
+    /// derived from this enum's declaration order, which is a Swift detail
+    /// and not the contract.
+    public static func fromABI(_ value: Int32) -> RoutingTone {
+        switch value {
+        case 1: return .held
+        case 2: return .clear
+        default: return .neutral
+        }
     }
 }
 
@@ -239,26 +244,32 @@ public struct RoutingCalls: Sendable {
     /// have caught it.
     public let toolWord: @Sendable (String, Int32) -> String?
 
-    /// How that word is painted, from the same two inputs: `TC_TOOL_TONE_*`.
-    /// Never nil, because a styling call that failed would leave this shell
-    /// choosing a tone for itself.
+    /// How that word is painted, from the same two inputs:
+    /// `TC_ROUTING_TONE_*`. Never nil, because a styling call that failed
+    /// would leave this shell choosing a tone for itself.
     public let toolTone: @Sendable (String, Int32) -> Int32
 
     /// The daemon's state, in words. Crosses for the reason `toolWord` does.
     public let stateLine: @Sendable (String) -> String?
+
+    /// How firmly that sentence reads. The last routing branch table that
+    /// was still a `switch` in this file; it crosses for the same reason.
+    public let stateTone: @Sendable (String) -> Int32
 
     public init(
         tokenLine: @escaping @Sendable (String?) -> String?,
         unreachableLine: @escaping @Sendable (UInt16?) -> String?,
         toolWord: @escaping @Sendable (String, Int32) -> String?,
         toolTone: @escaping @Sendable (String, Int32) -> Int32,
-        stateLine: @escaping @Sendable (String) -> String?
+        stateLine: @escaping @Sendable (String) -> String?,
+        stateTone: @escaping @Sendable (String) -> Int32
     ) {
         self.tokenLine = tokenLine
         self.unreachableLine = unreachableLine
         self.toolWord = toolWord
         self.toolTone = toolTone
         self.stateLine = stateLine
+        self.stateTone = stateTone
     }
 }
 
@@ -368,17 +379,16 @@ public enum RoutingSurface {
         calls.stateLine(state) ?? copy.stateOff
     }
 
+    /// NOT A BRANCH TABLE HERE, for the reason on `stateLine`. This was the
+    /// last one in this file.
+    ///
     /// `awaiting_rows` is `.held` and **not** an error tone. A reader built
     /// a moment ago starts empty by construction, so this is the state a
     /// contributor sees immediately after touching anything on this card;
     /// painting it as a fault would accuse a working proxy of being broken
     /// at exactly that moment.
-    public static func tone(forState state: String) -> RoutingTone {
-        switch state {
-        case State.awaitingRows: return .held
-        case State.rowsSeen: return .clear
-        default: return .neutral
-        }
+    public static func tone(forState state: String, calls: RoutingCalls) -> RoutingTone {
+        RoutingTone.fromABI(calls.stateTone(state))
     }
 
     /// Whether the "last checked" stamp says anything on this state.
@@ -387,8 +397,8 @@ public enum RoutingSurface {
     /// date, never a connected-since -- and it starts empty again every time
     /// that process comes back up. On a state that has had no answer at all
     /// there is nothing for it to report.
-    public static func showsLastChecked(forState state: String) -> Bool {
-        tone(forState: state) != .neutral
+    public static func showsLastChecked(forState state: String, calls: RoutingCalls) -> Bool {
+        tone(forState: state, calls: calls) != .neutral
     }
 
     // MARK: Per-tool words
@@ -413,7 +423,7 @@ public enum RoutingSurface {
     public static func toolTone(
         sourceMode: String, wiring: RoutingToolWiring, calls: RoutingCalls
     ) -> RoutingTone {
-        RoutingTone.fromToolToneABI(calls.toolTone(sourceMode, wiring.abiValue))
+        RoutingTone.fromABI(calls.toolTone(sourceMode, wiring.abiValue))
     }
 
     /// All three rows, always, in one order: a missing answer is a word

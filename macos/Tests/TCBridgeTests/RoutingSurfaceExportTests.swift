@@ -32,7 +32,8 @@ final class RoutingSurfaceExportTests: XCTestCase {
         unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
         toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
         toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
-        stateLine: { TCRoutingCopy.stateLine(state: $0) }
+        stateLine: { TCRoutingCopy.stateLine(state: $0) },
+        stateTone: { TCRoutingCopy.stateTone(state: $0) }
     )
 
     private func rows(
@@ -155,6 +156,36 @@ final class RoutingSurfaceExportTests: XCTestCase {
         XCTAssertEqual(rendered[0].tone, .clear)
         XCTAssertEqual(rendered[1].tone, .neutral)
         XCTAssertEqual(rendered[2].tone, .neutral)
+    }
+
+    /// The daemon state's tone is the Rust's choice, not this shell's, and it
+    /// agrees with the sentence that state gets.
+    ///
+    /// This was the last routing branch table still written out natively
+    /// here. Change which tone a state maps to in `routing_copy.rs` --
+    /// without touching a string -- and this goes red.
+    func testTheToneEachStateGetsIsTheRustsChoiceAndNotThisShells() {
+        guard let copy = copy() else { return }
+        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: calls), .held)
+        XCTAssertEqual(RoutingSurface.tone(forState: "rows_seen", calls: calls), .clear)
+        XCTAssertEqual(RoutingSurface.tone(forState: "not_declared", calls: calls), .neutral)
+
+        for state in ["not_declared", "awaiting_rows", "rows_seen", "", "ROWS_SEEN", "later"] {
+            let tone = RoutingSurface.tone(forState: state, calls: calls)
+            let line = RoutingSurface.stateLine(state, copy: copy, calls: calls)
+            // The tone and the sentence are one decision.
+            XCTAssertEqual(tone == .neutral, line == copy.stateOff, state)
+            // The stamp is gated on the same reading.
+            XCTAssertEqual(
+                RoutingSurface.showsLastChecked(forState: state, calls: calls),
+                tone != .neutral,
+                state
+            )
+        }
+
+        // `awaiting_rows` is what a contributor sees immediately after
+        // touching anything on this card. It is held, and never a fault.
+        XCTAssertNotEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: calls), .neutral)
     }
 
     /// A state this build has never heard of claims nothing: it reads as the

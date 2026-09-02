@@ -460,12 +460,7 @@ public static class RoutingTools
     /// anything on this card. Painting it as broken would accuse a working
     /// proxy at exactly that moment.
     /// </remarks>
-    public static RoutingTone StateTone(string state) => state switch
-    {
-        AwaitingRows => RoutingTone.Held,
-        RowsSeen => RoutingTone.Clear,
-        _ => RoutingTone.Neutral,
-    };
+    public static RoutingTone StateTone(string state) => RoutingSurface.StateTone(state);
 
     /// <summary>
     /// "Last checked ...", around this shell's own humanised time.

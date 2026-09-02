@@ -309,9 +309,20 @@ char*       tc_routing_copy(void);
 #define TC_TOOL_WIRING_NOT_WIRED 1
 #define TC_TOOL_WIRING_UNKNOWN   2
 
-/* How a tool's word is painted. tc_routing_tool_tone answers one of these. */
-#define TC_TOOL_TONE_NEUTRAL 0
-#define TC_TOOL_TONE_CLEAR   1
+/* How a word or a state sentence is painted. tc_routing_tool_tone and
+ * tc_routing_state_tone both answer one of these.
+ *
+ * ONE NUMBERING FOR BOTH. A tool word can never be HELD -- only a daemon
+ * state waits on something -- but two numberings would mean two 1s meaning
+ * different things on one ABI, and a shell that mapped the wrong one would
+ * mispaint a privacy claim rather than fail.
+ *
+ * None of these is a fault tone. Neither call can return one, because none of
+ * the states this surface has is a fault.
+ */
+#define TC_ROUTING_TONE_NEUTRAL 0
+#define TC_ROUTING_TONE_HELD    1
+#define TC_ROUTING_TONE_CLEAR   2
 
 /* One tool's word, from what the contributor said about that tool's sessions
  * and what IronWire said about that tool.
@@ -349,9 +360,9 @@ char*       tc_routing_tool_word(const char* source_mode, int32_t wiring);
  * claim, and "Private" is a substring of "Not private".
  *
  * Never fails: a NULL or non-UTF-8 source_mode, and a caught panic, all
- * answer TC_TOOL_TONE_NEUTRAL, the tone that claims nothing. There is no
+ * answer TC_ROUTING_TONE_NEUTRAL, the tone that claims nothing. There is no
  * error value, because a styling call that returned one would leave a shell
- * choosing a tone for itself.
+ * choosing a tone for itself. A tool word is never TC_ROUTING_TONE_HELD.
  */
 int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
 
@@ -370,6 +381,24 @@ int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
  * panic.
  */
 char*       tc_routing_state_line(const char* state);
+
+/* How firmly the sentence tc_routing_state_line returned reads:
+ * TC_ROUTING_TONE_NEUTRAL, _HELD or _CLEAR.
+ *
+ * Exported for the reason the sentence is. This was the last routing branch
+ * table still written out natively in all three shells, and three copies of
+ * one decision agree today and drift apart in silence tomorrow.
+ *
+ * awaiting_rows is HELD and never a fault: a reader built a moment ago starts
+ * empty by construction, and that is the state a contributor sees immediately
+ * after touching anything on this card. Painting it as broken would accuse a
+ * working proxy at exactly that moment.
+ *
+ * Never fails. A state this build has never heard of, a NULL or non-UTF-8
+ * state, and a caught panic all answer TC_ROUTING_TONE_NEUTRAL -- the same
+ * fallback, for the same state, as tc_routing_state_line.
+ */
+int32_t     tc_routing_state_tone(const char* state);
 
 /* The routing surface's "that file could not be used" sentence, assembled.
  *

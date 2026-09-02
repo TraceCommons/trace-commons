@@ -35,6 +35,18 @@ private final class RecordingDaemon: DaemonCalling {
     }
 }
 
+
+/// The Rust-side calls as the app wires them. Spelled here rather than taken
+/// from `AppModel` so these assertions do not need a live model.
+private let routingCalls = RoutingCalls(
+    tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
+    unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
+    toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
+    stateLine: { TCRoutingCopy.stateLine(state: $0) },
+    stateTone: { TCRoutingCopy.stateTone(state: $0) }
+)
+
 final class RoutingCallTests: XCTestCase {
     private var daemon = RecordingDaemon()
     private var client: DaemonClient!
@@ -205,7 +217,7 @@ final class RoutingCallTests: XCTestCase {
         let status = try client.status()
         XCTAssertEqual(status.routing, .notDeclared)
         XCTAssertNil(status.routing.lastRefreshAt)
-        XCTAssertEqual(RoutingSurface.tone(forState: status.routing.state), .neutral)
-        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: status.routing.state))
+        XCTAssertEqual(RoutingSurface.tone(forState: status.routing.state, calls: routingCalls), .neutral)
+        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: status.routing.state, calls: routingCalls))
     }
 }
