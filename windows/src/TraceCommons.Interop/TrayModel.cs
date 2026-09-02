@@ -363,9 +363,24 @@ public static class DigestText
     }
 
     /// <summary>
-    /// "a", "a and b", "a, b and c" -- the spec's own list form. An empty
-    /// list yields an empty string, so the sentence degrades to "3 sessions
-    /// ready." rather than trailing a dangling "from".
+    /// The most names a notification will list before summarising the rest
+    /// as a count. A contributor with fifteen active projects wants a
+    /// digest, not a manifest.
+    /// </summary>
+    /// <remarks>
+    /// Three, matching the daemon's <c>digest_text</c> and
+    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
+    /// and macOS's <c>DigestCopy.joined</c>. This shell listed every name,
+    /// so the same eight-project contributor read a one-line summary on
+    /// Linux and macOS and a paragraph on Windows.
+    /// </remarks>
+    private const int MaxNamedProjects = 3;
+
+    /// <summary>
+    /// "a", "a and b", "a, b and c", then "a, b, c and N more" -- the spec's
+    /// own list form. An empty list yields an empty string, so the sentence
+    /// degrades to "3 sessions ready." rather than trailing a dangling
+    /// "from".
     /// </summary>
     private static string JoinProjects(IReadOnlyList<string> labels)
     {
@@ -376,6 +391,13 @@ public static class DigestText
             {
                 named.Add(label);
             }
+        }
+
+        if (named.Count > MaxNamedProjects)
+        {
+            int more = named.Count - MaxNamedProjects;
+            string head = string.Join(", ", named.GetRange(0, MaxNamedProjects));
+            return $" from {head} and {more} more";
         }
 
         return named.Count switch

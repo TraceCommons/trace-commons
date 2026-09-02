@@ -44,6 +44,65 @@ public class DigestContributionTests
     }
 
     /// <summary>
+    /// Three names, then a count -- the same rule the daemon's
+    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
+    /// and macOS's <c>DigestCopy.joined</c> follow. A contributor with eight
+    /// armed projects should read the same one-line summary here as there.
+    /// </summary>
+    [Fact]
+    public void ManyProjectsSummariseAfterThree()
+    {
+        Assert.Equal(
+            "9 sessions contributed from api, web, cli and 5 more.",
+            DigestText.ContributionLine(
+                9,
+                new[] { "api", "web", "cli", "docs", "infra", "mobile", "sdk", "tools" },
+                0));
+    }
+
+    /// <summary>
+    /// The boundary: exactly three still reads as a list, not "and 0 more".
+    /// </summary>
+    [Fact]
+    public void ExactlyThreeProjectsStillReadAsAList()
+    {
+        Assert.Equal(
+            "3 sessions contributed from api, web and cli.",
+            DigestText.ContributionLine(3, new[] { "api", "web", "cli" }, 0));
+    }
+
+    /// <summary>
+    /// The cap applies to the waiting half too. <c>Body</c> and
+    /// <c>ContributionLine</c> share <c>JoinProjects</c>, and the daemon caps
+    /// in both <c>digest_text</c> and <c>contribution_text</c>.
+    /// </summary>
+    [Fact]
+    public void TheWaitingHalfSummarisesAfterThreeToo()
+    {
+        Assert.StartsWith(
+            "9 sessions ready from api, web, cli and 5 more.",
+            DigestText.Body(
+                9,
+                new[] { "api", "web", "cli", "docs", "infra", "mobile", "sdk", "tools" }),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// De-duplication happens before the cap, so eight entries from four
+    /// distinct projects name all four rather than reporting phantom extras.
+    /// </summary>
+    [Fact]
+    public void DuplicateLabelsAreCollapsedBeforeTheCap()
+    {
+        Assert.Equal(
+            "8 sessions contributed from api, web, cli and 1 more.",
+            DigestText.ContributionLine(
+                8,
+                new[] { "api", "api", "web", "web", "cli", "cli", "docs", "docs" },
+                0));
+    }
+
+    /// <summary>
     /// A notification may be persisted in the Windows notification centre.
     /// Labels only, never a path -- the same rule the waiting half follows.
     /// </summary>

@@ -42,6 +42,26 @@ pub fn digest_due(
     if pending == 0 && contributed == 0 {
         return false;
     }
+    interval_elapsed(last_digest_at, now, interval_secs)
+}
+
+/// The clock half of [`digest_due`], on its own.
+///
+/// `digest_due` needs a contribution count, and getting one means reading and
+/// parsing the history file. That is wasted on almost every tick: the poll
+/// runs far more often than the digest interval, and no count can make a
+/// digest fire before the interval has elapsed. Callers use this first and
+/// only pay for the history read when the answer could matter.
+///
+/// Deliberately the same expression `digest_due` uses rather than a copy of
+/// it -- a pre-check that disagreed with the real predicate would suppress
+/// digests that were genuinely due, which is the failure this whole path
+/// exists to prevent.
+pub fn interval_elapsed(
+    last_digest_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    interval_secs: u64,
+) -> bool {
     match last_digest_at {
         None => true,
         Some(last) => now.signed_duration_since(last) >= Duration::seconds(interval_secs as i64),
@@ -355,5 +375,46 @@ mod tests {
         a.project_label = String::new();
         let text = digest_text(&[&a]);
         assert_eq!(text, "1 session ready to contribute");
+    }
+
+    /// The poll loop uses `interval_elapsed` to decide whether reading the
+    /// history file is worth it, then `digest_due` to decide whether to
+    /// speak. If the first were ever stricter than the second, a digest that
+    /// was genuinely due would be skipped with no count to explain why --
+    /// silence, which is the exact failure the contribution half of the
+    /// digest exists to prevent.
+    ///
+    /// So: whenever there is something to say, the two must agree exactly.
+    #[test]
+    fn interval_elapsed_never_suppresses_a_due_digest() {
+        let now = at("2026-08-08T12:00:00Z");
+        let intervals = [0u64, 1, 3600, 14400, 86400];
+        let lasts = [
+            None,
+            Some(at("2026-08-08T12:00:00Z")),
+            Some(at("2026-08-08T11:59:59Z")),
+            Some(at("2026-08-08T11:00:00Z")),
+            Some(at("2026-08-08T08:00:00Z")),
+            Some(at("2026-08-07T12:00:00Z")),
+        ];
+
+        for interval in intervals {
+            for last in lasts {
+                let gate = interval_elapsed(last, now, interval);
+                for (pending, contributed) in [(1usize, 0usize), (0, 1), (1, 1), (3, 2)] {
+                    assert_eq!(
+                        digest_due(last, now, interval, pending, contributed),
+                        gate,
+                        "interval={interval} last={last:?} pending={pending} \
+                         contributed={contributed}: the pre-check and the real \
+                         predicate disagree"
+                    );
+                }
+                // And with nothing to say, the pre-check may be true while
+                // digest_due is false -- that direction only costs a wasted
+                // history read, never a missed digest.
+                assert!(!digest_due(last, now, interval, 0, 0));
+            }
+        }
     }
 }

@@ -1037,10 +1037,23 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // ever -- see `notify::digest_due`. A cache that cannot be read is not a
     // reason to skip the digest: it degrades to the queue-only digest that
     // shipped before, rather than to silence.
-    let contributed = history::contributed_since(
-        &history::HistoryCache::load(&shared.store).unwrap_or_default(),
-        last_digest_at,
-    );
+    //
+    // Behind the interval check, because this runs on every poll tick and the
+    // poll is far more frequent than the digest interval. No contribution
+    // count can make a digest fire early, so reading and parsing the history
+    // file before the clock is even close is work whose result is discarded.
+    // `interval_elapsed` is the same expression `digest_due` applies, not a
+    // second opinion about it.
+    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+        history::contributed_since(
+            &history::HistoryCache::load(&shared.store).unwrap_or_default(),
+            last_digest_at,
+        )
+    } else {
+        // Only reachable when `digest_due` is about to be false anyway: the
+        // interval has not elapsed, so neither half of the digest can fire.
+        history::ContributedSince::default()
+    };
     if notify::digest_due(
         last_digest_at,
         now,
