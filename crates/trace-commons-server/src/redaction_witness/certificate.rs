@@ -281,6 +281,42 @@ impl WitnessCertificate {
         }
     }
 
+    /// Rebuild a certificate that arrived over the wire, from fields a
+    /// decoder parsed one by one.
+    ///
+    /// **This is the second construction path the type doc promises, and it
+    /// is the last one.** It exists because the receiving side has no proof
+    /// and cannot have one: a server holding an artifact and a claimed digest
+    /// has, by construction, only what the sender said. Anything else it
+    /// could do here would be theatre.
+    ///
+    /// # Why a typed digest is harmless here, unlike in [`Self::from_proof`]
+    ///
+    /// Private fields exist so that nobody on the *issuing* side can mint a
+    /// certificate over a digest they typed instead of one a correspondence
+    /// check produced. That argument does not transfer to the receiving side,
+    /// where the certificate is untrusted input by definition. A certificate
+    /// built here is worth exactly nothing until
+    /// [`verify_witness_certificate`](super::verification::verify_witness_certificate)
+    /// has recovered the pinned signer from a signature over
+    /// [`Self::signing_bytes`] -- which covers every field, digest included --
+    /// pinned the measurement, and matched the digest against the bytes the
+    /// server actually holds. Typing a field here only produces a certificate
+    /// that fails all three.
+    ///
+    /// The caller is `redaction_witness::request::witness_headers`, and it
+    /// must stay the only one: a second decoder is a second wire format, and
+    /// two wire formats is how an honest certificate starts failing.
+    pub fn from_wire(redacted_sha256: String, details: CertificateDetails) -> Self {
+        WitnessCertificate {
+            redacted_sha256,
+            residual_risk_verdict: details.residual_risk_verdict,
+            redaction_policy_version: details.redaction_policy_version,
+            witness_measurement: details.witness_measurement,
+            timestamp: details.timestamp,
+        }
+    }
+
     /// Build a certificate with an arbitrary digest, for tests that need a
     /// certificate covering bytes no proof was taken over.
     ///
