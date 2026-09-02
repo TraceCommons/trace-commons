@@ -1992,6 +1992,33 @@ pub struct DedupSignalRow {
     pub decision_id: Uuid,
     pub dedup_cluster_id: Option<Uuid>,
     pub dedup_simhash: Option<i64>,
+    /// Which renderer and simhash algorithm produced `dedup_simhash`
+    /// (migration V57). `None` means the row was recorded before the stamp
+    /// existed and is read as
+    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`] -- never as
+    /// "unknown". Two rows whose effective versions differ are not
+    /// comparable, however close their simhashes are.
+    pub dedup_signal_version: Option<String>,
+}
+
+impl DedupSignalRow {
+    /// The version this row's `dedup_simhash` was derived under. `NULL` (and
+    /// an empty string, which is a `NULL` that survived a round trip through
+    /// a text column) reads as
+    /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`], never as
+    /// "unknown": an unknown would have to cluster either with everything or
+    /// with nothing, and both are wrong.
+    ///
+    /// This is the ONE place a stored `NULL` is decoded, and it sits on the
+    /// row because that is where the `Option` originates. A caller that
+    /// decoded it for itself would be a second answer to the question, free
+    /// to drift from this one.
+    pub fn effective_signal_version(&self) -> &str {
+        match self.dedup_signal_version.as_deref() {
+            Some(v) if !v.is_empty() => v,
+            _ => crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        }
+    }
 }
 
 /// Correction-value signal for one decision row (migration V48), read
@@ -2006,6 +2033,19 @@ pub struct CorrectionSignalRow {
     pub decision_id: Uuid,
     pub correction_cluster_id: Option<Uuid>,
     pub correction_simhash: Option<i64>,
+}
+
+/// The four cross-trace dedup fields written for one decision row
+/// (migrations V40 and V57). Bundled for the reason V48 bundled its own six:
+/// three of the four are positional integers and UUIDs that transpose
+/// silently, and the stamp has to travel with the simhash it names rather
+/// than trailing it as a sixth argument nobody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupAssignmentWrite {
+    pub dedup_simhash: i64,
+    pub dedup_cluster_id: Uuid,
+    pub dedup_cluster_size: i32,
+    pub dedup_signal_version: String,
 }
 
 /// The six shadow correction-value fields written for one decision row
@@ -2571,9 +2611,9 @@ pub trait TraceCorpusStore: Send + Sync {
     }
 
     /// Drop this submission's gate decisions out of any dedup cluster
-    /// (migration V40 columns back to NULL). Peer rows keep their own cluster
-    /// assignment; their `dedup_cluster_size` snapshot is refreshed by the
-    /// existing recluster pass.
+    /// (migration V40 columns, and V57's version stamp, back to NULL). Peer
+    /// rows keep their own cluster assignment; their `dedup_cluster_size`
+    /// snapshot is refreshed by the existing recluster pass.
     async fn clear_trace_dedup_cluster_for_submission(
         &self,
         _tenant_id: &str,
@@ -2916,24 +2956,57 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
-    /// Update ONLY the dedup columns (migration V40) for the decision row
-    /// identified by `(tenant_id, decision_id)`. Perplexity, novelty,
-    /// tail-fraction, vector, gate status, and credit are left untouched.
-    /// Implementations MUST scope by `tenant_id` (forced RLS). Defaults to a
-    /// log-once warning + no-op so a backend without a real impl cannot
-    /// silently drop the write.
+    /// Update ONLY the dedup columns (migrations V40 and V57) for the
+    /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
+    /// novelty, tail-fraction, vector, gate status, and credit are left
+    /// untouched. Implementations MUST scope by `tenant_id` (forced RLS).
+    /// Defaults to a log-once warning + no-op so a backend without a real
+    /// impl cannot silently drop the write.
+    ///
+    /// `dedup_signal_version` names the derivation behind `dedup_simhash` and
+    /// is written in the same statement, never separately: a simhash whose
+    /// stamp lands in a later write is a row that reads as the legacy version
+    /// in between, and the recluster sweep runs continuously.
     async fn update_trace_gate_decision_dedup(
         &self,
         _tenant_id: &str,
         _decision_id: Uuid,
-        _dedup_simhash: i64,
+        _write: DedupAssignmentWrite,
+    ) -> Result<(), DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_dedup called on a backend without a real impl"
+            );
+        });
+        Ok(())
+    }
+
+    /// Update ONLY the two cluster columns (`dedup_cluster_id`,
+    /// `dedup_cluster_size`) for the decision row identified by `(tenant_id,
+    /// decision_id)`. The simhash and its version stamp are left exactly as
+    /// they are. Implementations MUST scope by `tenant_id` (forced RLS).
+    /// Defaults to a log-once warning + no-op so a backend without a real
+    /// impl cannot silently drop the write.
+    ///
+    /// This is what the recluster sweep uses, and the narrowness is the
+    /// point. The sweep re-clusters simhashes that are already stored; it
+    /// derives neither the simhash nor the stamp, so it has no standing to
+    /// write either. Writing the stamp back would materialise the legacy
+    /// literal into every pre-V57 row -- exactly the assertion-in-the-schema
+    /// that V57's header refuses a DEFAULT for, made by a background pass
+    /// instead of by the migration.
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
         _dedup_cluster_id: Uuid,
         _dedup_cluster_size: i32,
     ) -> Result<(), DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
-                "update_trace_gate_decision_dedup called on a backend without a real impl"
+                "update_trace_gate_decision_dedup_cluster called on a backend without a real impl"
             );
         });
         Ok(())
@@ -3261,5 +3334,56 @@ mod residual_risk_basis_tests {
             ResidualRiskCondition::KeyFinding,
         ]);
         assert_eq!(stored, vec!["coverage_incomplete", "key_finding"]);
+    }
+}
+
+#[cfg(test)]
+mod dedup_signal_version_tests {
+    use super::DedupSignalRow;
+    use crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    use crate::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION;
+    use uuid::Uuid;
+
+    fn row(stored: Option<&str>) -> DedupSignalRow {
+        DedupSignalRow {
+            tenant_id: "tenant-a".to_string(),
+            decision_id: Uuid::from_u128(1),
+            dedup_cluster_id: None,
+            dedup_simhash: Some(42),
+            dedup_signal_version: stored.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_null_stamp_reads_as_the_legacy_v1_stamp() {
+        assert_eq!(
+            row(None).effective_signal_version(),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+        // An empty string is a NULL that survived a round trip through a text
+        // column, not a version anyone named.
+        assert_eq!(
+            row(Some("")).effective_signal_version(),
+            LEGACY_DEDUP_SIGNAL_VERSION
+        );
+    }
+
+    #[test]
+    fn a_named_stamp_is_returned_verbatim() {
+        assert_eq!(
+            row(Some("events.v2+fnv1a-2shingle.v1")).effective_signal_version(),
+            "events.v2+fnv1a-2shingle.v1"
+        );
+        // A deterministic service's stamp is its own version, not the legacy
+        // one: its value is a window of the decision digest, not a simhash of
+        // any rendered text, so it must never be read as the enclave's v1.
+        assert_eq!(
+            row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
+            DETERMINISTIC_DEDUP_SIGNAL_VERSION
+        );
+        assert_ne!(
+            row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
+            row(None).effective_signal_version()
+        );
     }
 }

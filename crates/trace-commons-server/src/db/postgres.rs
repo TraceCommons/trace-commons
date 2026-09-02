@@ -2063,6 +2063,33 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        // V57 names the derivation behind dedup_simhash (#211, #325).
+        // Additive, nullable and backfill-free: a row written before it keeps
+        // NULL, which code reads as the legacy v1 stamp rather than as
+        // unknown. Also grants the new column to the gate-driver role, which
+        // holds column-scoped grants and now selects it in
+        // `list_dedup_signals`.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&57_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V57__trace_gate_decision_dedup_signal_version.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&57_i32, &"trace_gate_decision_dedup_signal_version"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -5188,7 +5215,12 @@ impl Database for PgBackend {
         // SELECT policies authorize this read across every tenant's decisions.
         let rows = client
             .query(
-                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash
+                // `dedup_signal_version` (V57) is selected here, so V57 also
+                // grants it to trace_gate_driver: the role holds
+                // COLUMN-scoped grants, and column privileges cover every
+                // column a query references.
+                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash,
+                        dedup_signal_version
                  FROM trace_gate_decisions
                  ORDER BY decided_at ASC
                  LIMIT $1",
@@ -5203,6 +5235,7 @@ impl Database for PgBackend {
                 decision_id: row.get("decision_id"),
                 dedup_cluster_id: row.get("dedup_cluster_id"),
                 dedup_simhash: row.get("dedup_simhash"),
+                dedup_signal_version: row.get("dedup_signal_version"),
             })
             .collect())
     }
@@ -6210,6 +6243,87 @@ mod tests {
             V55.contains("GRANT trace_commons_public_read TO CURRENT_USER"),
             "V55 must grant whoever applies the migration membership in the \
              role, or nothing can ever assume it"
+        );
+    }
+
+    /// V57 names the derivation behind `dedup_simhash` (#211, #325). The
+    /// column has to be nullable and backfill-free for the reason V53 and V54
+    /// are, and for one of its own: a DEFAULT would assert in the schema the
+    /// reading that code makes explicitly (NULL means the legacy v1 stamp),
+    /// and a later re-derivation pass could no longer tell a defaulted row
+    /// from a stamped one.
+    #[test]
+    fn v57_adds_a_nullable_dedup_signal_version_column() {
+        const V57: &str = include_str!(
+            "../../../../migrations/V57__trace_gate_decision_dedup_signal_version.sql"
+        );
+        // Comment lines stripped first (the idiom V55's test uses), because
+        // this file's header explains at length why there is NO DEFAULT and
+        // no backfill -- prose that would trip every negative assertion
+        // below and make them vacuous to "fix".
+        let sql_only = V57
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            sql_only.contains("ADD COLUMN IF NOT EXISTS dedup_signal_version TEXT"),
+            "V57 must add the dedup-signal-version column as TEXT: it carries \
+             a composed \"<render>+<simhash>\" name plus a third value that is \
+             neither, which an integer version cannot express"
+        );
+        assert!(
+            !sql_only.to_uppercase().contains("NOT NULL")
+                && !sql_only.to_uppercase().contains("DEFAULT"),
+            "V57 must stay nullable and default-free: NULL is what says \
+             \"recorded before the stamp existed\", and code maps it to the \
+             legacy v1 stamp"
+        );
+        assert!(
+            !sql_only
+                .to_uppercase()
+                .contains("UPDATE TRACE_GATE_DECISIONS"),
+            "V57 must not backfill: the re-derivation pass rewrites these \
+             rows from retained inputs, and a migration cannot render text"
+        );
+        // Unlike V53/V54, this column IS read on the gate-driver pool.
+        assert!(
+            sql_only.contains(
+                "GRANT SELECT (dedup_signal_version) ON trace_gate_decisions TO trace_gate_driver"
+            ),
+            "V57 must grant the new column to trace_gate_driver: \
+             `list_dedup_signals` runs on that pool and now selects it, and \
+             column privileges cover every column a query references"
+        );
+        assert!(
+            !sql_only
+                .to_uppercase()
+                .contains("DISABLE ROW LEVEL SECURITY"),
+            "V57 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47, V53 and V54: wiring,
+    /// pinned. Counted rather than merely present, because a literal in the
+    /// assertion's own source would satisfy the assertion by itself and pass
+    /// with the migration wired into nothing.
+    #[test]
+    fn v57_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!(
+            "migrations/V{}__trace_gate_decision_dedup_signal_version.sql",
+            57
+        );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V57 must be named exactly twice: once by run_migrations' include_str! \
+             and once by the migration-content test above"
+        );
+        let version_marker = format!("&{}_i32", 57);
+        assert!(
+            THIS_FILE.contains(&version_marker),
+            "V57 must record itself in _trace_commons_migrations"
         );
     }
 

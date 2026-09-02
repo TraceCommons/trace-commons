@@ -5442,6 +5442,11 @@ async fn gate_driver_column_grants_exclude_object_keys_and_wide_columns() {
              AND has_column_privilege('trace_gate_driver', 'trace_submissions', 'auth_principal_ref', 'SELECT')
              AND has_column_privilege('trace_gate_driver', 'trace_submissions', 'received_at', 'SELECT')
              AND has_column_privilege('trace_gate_driver', 'trace_gate_decisions', 'credit_quality_micros', 'SELECT')
+             -- V57. `list_dedup_signals` runs on this pool and selects this
+             -- column, and PostgreSQL column privileges cover every column a
+             -- query REFERENCES, so a missing grant fails the recluster pass
+             -- on its first query rather than at deploy.
+             AND has_column_privilege('trace_gate_driver', 'trace_gate_decisions', 'dedup_signal_version', 'SELECT')
              AND has_column_privilege('trace_gate_driver', 'trace_gate_evaluation_attempts', 'attempts', 'SELECT')",
             &[],
         )
