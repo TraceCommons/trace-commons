@@ -15,6 +15,7 @@ pub mod issuer_client;
 pub mod picker;
 pub mod pricing;
 pub mod routing;
+pub mod routing_copy;
 pub mod source;
 pub mod submit;
 pub mod update;

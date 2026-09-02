@@ -12,6 +12,7 @@ use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
+    tc_routing_copy, tc_routing_last_checked, tc_routing_token_line, tc_routing_unreachable_line,
     tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
@@ -1889,6 +1890,147 @@ fn a_roots_refusal_never_echoes_a_path_back_across_the_boundary() {
         !msg.contains("acme-unreleased-product") && !msg.contains(dir.path().to_str().unwrap()),
         "a refusal must not echo settings_json back: {msg}"
     );
+}
+
+/// Read an owned `char*` this ABI returned, freeing it. Panics on NULL,
+/// which every routing export reserves for a caught panic.
+fn take_owned(out: *mut c_char) -> String {
+    assert!(!out.is_null(), "the export returned NULL");
+    let s = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+    s
+}
+
+#[test]
+fn the_routing_vocabulary_crossing_the_abi_is_the_one_in_the_rust() {
+    // The whole point of this task: the words a shell renders are the words
+    // this repo defines, not a transcription in Swift or C# that stops
+    // matching the day one of them changes.
+    let json = take_owned(tc_routing_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let object = parsed.as_object().expect("a JSON object");
+
+    // Compared against the constants themselves, not against words written
+    // here -- pinning them in this test would be the same transcription bug
+    // one layer down. The shells' own suites pin the literals; that is where
+    // a rename is meant to be noticed.
+    use trace_commons_contributor::routing_copy as copy;
+    assert_eq!(
+        object["word_private"],
+        serde_json::json!(copy::TOOL_PRIVATE)
+    );
+    assert_eq!(object["word_direct"], serde_json::json!(copy::TOOL_DIRECT));
+    assert_eq!(
+        object["word_unknown"],
+        serde_json::json!(copy::TOOL_UNKNOWN)
+    );
+    assert_eq!(
+        object["word_not_used"],
+        serde_json::json!(copy::TOOL_NOT_USED)
+    );
+
+    let expected = serde_json::to_value(copy::routing_copy()).expect("the payload serialises");
+    assert_eq!(
+        parsed, expected,
+        "the ABI must hand over the payload unchanged"
+    );
+
+    for (field, value) in object {
+        let text = value
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is not a string"));
+        assert!(!text.is_empty(), "{field} crossed the boundary empty");
+    }
+}
+
+#[test]
+fn only_the_wired_word_crossing_the_abi_claims_privacy() {
+    // The substring trap, asserted on what actually crosses rather than on
+    // the Rust constants: a shell reading these with a `contains` must not be
+    // able to match a denial that is not there.
+    let json = take_owned(tc_routing_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+    let private = parsed["word_private"].as_str().expect("a string");
+    assert!(private.to_lowercase().contains("privat"));
+
+    let words = [
+        parsed["word_private"].as_str().expect("a string"),
+        parsed["word_direct"].as_str().expect("a string"),
+        parsed["word_unknown"].as_str().expect("a string"),
+        parsed["word_not_used"].as_str().expect("a string"),
+    ];
+    for word in &words[1..] {
+        assert!(
+            !word.to_lowercase().contains("privat"),
+            "a word that denies privacy crossed the boundary: {word}"
+        );
+    }
+    for (i, one) in words.iter().enumerate() {
+        for (j, other) in words.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            assert!(
+                !one.to_lowercase().contains(&other.to_lowercase()),
+                "{other:?} is a substring of {one:?} across the boundary"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_routing_sentences_cross_assembled_and_never_as_a_template() {
+    // A template with a hole in it would make every shell a place this
+    // wording lives. What crosses is finished text, so this asserts the hole
+    // is filled and no format marker survives.
+    let path = cstr_str("/home/x/.ironwire/control.token");
+    let named = take_owned(unsafe { tc_routing_token_line(path.as_ptr()) });
+    assert!(named.contains("/home/x/.ironwire/control.token"), "{named}");
+
+    // NULL is the "nothing resolved at all" case, not an error: the sentence
+    // still has to say what to do.
+    let unnamed = take_owned(unsafe { tc_routing_token_line(std::ptr::null()) });
+    assert!(!unnamed.contains("/home/x"), "{unnamed}");
+    assert_ne!(named, unnamed);
+
+    let with_port = take_owned(tc_routing_unreachable_line(8463));
+    assert!(with_port.contains("8463"), "{with_port}");
+    // 0 means no port was tried. It must not become "port 0".
+    let no_port = take_owned(tc_routing_unreachable_line(0));
+    assert!(!no_port.contains('0'), "{no_port}");
+    // Out of range is the same case, and must not wrap into a real port.
+    assert_eq!(no_port, take_owned(tc_routing_unreachable_line(70_000)));
+    assert_eq!(no_port, take_owned(tc_routing_unreachable_line(-1)));
+
+    let when = cstr_str("an hour ago");
+    let checked = take_owned(unsafe { tc_routing_last_checked(when.as_ptr()) });
+    assert_eq!(checked, "Last checked an hour ago");
+
+    for sentence in [&named, &unnamed, &with_port, &no_port, &checked] {
+        for marker in ["{}", "{path}", "{port}", "{when}", "%s", "%d"] {
+            assert!(
+                !sentence.contains(marker),
+                "a format marker reached a shell in: {sentence}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_last_checked_call_with_no_timestamp_is_an_error_and_not_a_half_sentence() {
+    // The one routing export that refuses. "Last checked " with nothing
+    // after it is worse than no line at all, so this must not be produced.
+    let out = unsafe { tc_routing_last_checked(std::ptr::null()) };
+    assert!(out.is_null());
+    let err = tc_last_error();
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(msg, "null-pointer");
 }
 
 #[test]

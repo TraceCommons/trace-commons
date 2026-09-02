@@ -269,6 +269,81 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  */
 char*       tc_discover_sources(void);
 
+/* Every fixed word on the routing surface, in one call.
+ *
+ * Takes no handle: it describes the build, not a running daemon.
+ *
+ * Returns an owned JSON object; free it with tc_string_free. Its keys are
+ * tools_heading, word_private, word_direct, word_unknown, word_not_used,
+ * tool_claude, tool_codex, tool_gemini, intro, toggle, applies_at_once,
+ * port_title, port_note, folder_title, folder_note, apply, checking,
+ * check_unavailable, probe_reachable, state_off, state_waiting and
+ * state_reading. Every value is a non-empty string.
+ *
+ * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
+ * question and returns a single list; this is a whole screen's wording and
+ * must arrive as a set. Exporting the words one at a time would let a shell
+ * take four of them and hand-write the fifth, and a hand-written word on this
+ * surface is a privacy claim that silently stops matching the one the other
+ * two shells print.
+ *
+ * Exactly one of these words -- word_private -- claims privacy, and no word
+ * denies one. Do not derive a "not private" label from any of the others:
+ * "Private" is a substring of "Not private", and a shell that renders both is
+ * one substring match away from showing the wrong verdict.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_routing_copy(void);
+
+/* The routing surface's "that file could not be used" sentence, assembled.
+ *
+ * token_path may be NULL, which is the case where nothing resolved at all;
+ * the sentence for that says what to do instead of naming a file it does not
+ * have.
+ *
+ * ASSEMBLED ON THE RUST SIDE, DELIBERATELY. This ABI does not export a
+ * template with a hole in it, because a template each shell fills in is a
+ * fourth, fifth and sixth place this wording lives, each free to drop a
+ * clause around the hole, with nothing to notice when one does. Do not
+ * reassemble these sentences from parts.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_token_line(const char* token_path);
+
+/* The routing surface's "nothing answered" sentence, assembled.
+ *
+ * port outside 1..65535 -- including the 0 a caller passes for "no port was
+ * tried" -- produces the sentence that names no port, rather than one that
+ * names a port number nobody used.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_unreachable_line(int32_t port);
+
+/* The routing surface's "Last checked ..." sentence, assembled.
+ *
+ * when is the shell's own humanised time -- "an hour ago", "yesterday". That
+ * is the one piece of this surface each shell renders for itself, because it
+ * is a rendering of a timestamp and not wording about routing. The words
+ * around it are still written once, on the Rust side.
+ *
+ * Returns NULL for a NULL or non-UTF-8 when, recording "null-pointer" or
+ * "invalid-utf8" for tc_last_error: unlike the two sentences above there is
+ * no meaningful shorter form of this one -- "Last checked " with nothing
+ * after it is worse than no line at all -- and a shell with no timestamp
+ * should not be calling it.
+ *
+ * Returns an owned string; free it with tc_string_free.
+ */
+char*       tc_routing_last_checked(const char* when);
+
+
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
  * contributor what is removed without transcribing the list.
  *
