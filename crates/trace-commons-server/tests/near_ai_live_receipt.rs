@@ -219,9 +219,10 @@ fn this_fixtures_signer_is_not_the_other_fixtures_signer() {
     // A different model host with a different enclave key. Pinned so that
     // nothing grows a constant assuming one signing address across fixtures.
     let t = triple();
-    let other: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/near_ai_attestation_report.json"))
-            .expect("report fixture parses");
+    let other: serde_json::Value = serde_json::from_str(include_str!(
+        "../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+    ))
+    .expect("report fixture parses");
     let other_signer = other["signing_address"].as_str().expect("signing_address");
     assert!(!t.report.signing_address.eq_ignore_ascii_case(other_signer));
 }

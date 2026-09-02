@@ -1,40 +1,24 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Pinning the TDX image measurements a NEAR AI enclave is allowed to run.
+//! The NEAR-AI-specific half of measurement pinning.
 //!
-//! [`super::AttestationReport::quote_binds_nonce`] proves the report is fresh.
-//! [`super::quote::verify_quote`] proves the quote is genuine. Neither says
-//! anything about *what software* the enclave is running: a real, Intel-vouched
-//! TDX machine running an entirely different image passes both. This module
-//! closes that gap by comparing the measurement registers against a set the
-//! operator has pinned in advance.
+//! The pinning itself -- [`MeasurementField`], [`ExpectedMeasurements`],
+//! [`check_measurements`] and [`check_measurements_opt`] -- lives in the
+//! permissive `trace-commons-attestation` crate, because a contributor must be
+//! able to check a redaction witness's image before sending it raw bytes, and
+//! that code cannot sit behind this crate's AGPL boundary. It is re-exported
+//! here so `crate::near_attestation::measurements::*` keeps resolving.
 //!
-//! Two properties are load-bearing.
-//!
-//! **The comparison is against the verified quote, never the report JSON.**
-//! [`check_measurements`] takes a [`VerifiedQuote`], whose `mrtd` and `rtmr`
-//! were read out of the signature-covered quote structure. The same registers
-//! also appear in the report's unsigned `info.tcb_info`, and pinning against
-//! *those* would amount to asking the server whether it is running what it
-//! says it is running. See [`json_claim_anomalies`] for the one legitimate use
-//! of the JSON copy: reporting that the server's claim about itself disagrees
-//! with what the hardware signed.
-//!
-//! **Only `mrtd` and `rtmr0..3` are pinnable.** The report also carries
-//! `compose_hash`, `os_image_hash` and `mr_aggregated`, but those exist only in
-//! the unsigned JSON and are not recoverable from the quote without
-//! reproducing dstack's RTMR extension derivation, which this crate does not
-//! do. Naming one of them in the expected set is therefore a *config error*
-//! ([`ExpectedMeasurementsError::NotVerifiableFromQuote`]) and not a quietly
-//! skipped key -- a value labelled "pinned" that nothing verifies is worse
-//! than no pinning at all, because it reads as a control that is present.
-//!
-//! Absence of an expected set fails closed: [`check_measurements_opt`] refuses
-//! with a named missing control rather than passing.
+//! What stays here is what is about NEAR AI rather than about TDX: the names
+//! of this deployment's control and environment variable, and the comparison
+//! between a NEAR AI report's unsigned JSON self-description and what the
+//! hardware actually signed. A witness will pin its own image under its own
+//! control name and has no JSON envelope of this shape at all, so a shared
+//! constant would be generic in spelling and wrong in every deployment.
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
+pub use trace_commons_attestation::measurements::*;
+
 use std::fmt;
 
 use super::UnverifiedJsonMeasurements;
@@ -46,342 +30,25 @@ pub const EXPECTED_MEASUREMENTS_ENV: &str = "TRACE_COMMONS_NEAR_AI_EXPECTED_MEAS
 /// Missing-control name reported when nothing has been pinned.
 pub const EXPECTED_MEASUREMENTS_CONTROL: &str = "near_ai_expected_measurements";
 
-/// Hex length of a TDX measurement register (SHA-384, 48 bytes).
-const MEASUREMENT_HEX_LEN: usize = 96;
-
-/// A measurement register that can actually be checked against a verified
-/// quote.
+/// Load the pinned set from [`EXPECTED_MEASUREMENTS_ENV`].
 ///
-/// The ordering is the canonical one and is what makes verdicts deterministic
-/// regardless of the order the operator wrote the pins in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MeasurementField {
-    Mrtd,
-    Rtmr0,
-    Rtmr1,
-    Rtmr2,
-    Rtmr3,
+/// `Ok(None)` means the variable is unset or empty, which is *not* an
+/// acceptance -- see [`check_measurements_opt`], which must still be given
+/// [`EXPECTED_MEASUREMENTS_CONTROL`] so the refusal names this deployment's
+/// control.
+pub fn expected_measurements_from_env()
+-> Result<Option<ExpectedMeasurements>, ExpectedMeasurementsError> {
+    ExpectedMeasurements::from_env_value(std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref())
 }
 
-impl MeasurementField {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MeasurementField::Mrtd => "mrtd",
-            MeasurementField::Rtmr0 => "rtmr0",
-            MeasurementField::Rtmr1 => "rtmr1",
-            MeasurementField::Rtmr2 => "rtmr2",
-            MeasurementField::Rtmr3 => "rtmr3",
-        }
-    }
-
-    fn parse(key: &str) -> Option<Self> {
-        match key {
-            "mrtd" => Some(MeasurementField::Mrtd),
-            "rtmr0" => Some(MeasurementField::Rtmr0),
-            "rtmr1" => Some(MeasurementField::Rtmr1),
-            "rtmr2" => Some(MeasurementField::Rtmr2),
-            "rtmr3" => Some(MeasurementField::Rtmr3),
-            _ => None,
-        }
-    }
-
-    /// The value of this register as read out of a verified quote.
-    fn read(self, quote: &VerifiedQuote) -> &str {
-        match self {
-            MeasurementField::Mrtd => &quote.mrtd,
-            MeasurementField::Rtmr0 => &quote.rtmr[0],
-            MeasurementField::Rtmr1 => &quote.rtmr[1],
-            MeasurementField::Rtmr2 => &quote.rtmr[2],
-            MeasurementField::Rtmr3 => &quote.rtmr[3],
-        }
-    }
-
-    /// The value of this register as the report *claims* it in unsigned JSON.
-    fn read_claim(self, claim: &UnverifiedJsonMeasurements) -> &str {
-        match self {
-            MeasurementField::Mrtd => &claim.mrtd,
-            MeasurementField::Rtmr0 => &claim.rtmr0,
-            MeasurementField::Rtmr1 => &claim.rtmr1,
-            MeasurementField::Rtmr2 => &claim.rtmr2,
-            MeasurementField::Rtmr3 => &claim.rtmr3,
-        }
-    }
-
-    /// Every field, in canonical order.
-    pub const ALL: [MeasurementField; 5] = [
-        MeasurementField::Mrtd,
-        MeasurementField::Rtmr0,
-        MeasurementField::Rtmr1,
-        MeasurementField::Rtmr2,
-        MeasurementField::Rtmr3,
-    ];
-}
-
-impl fmt::Display for MeasurementField {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Keys the report carries but that cannot be checked against a quote.
-///
-/// Naming one of these is a config error rather than an unknown key, because
-/// the operator's mistake is different and so is the fix: the value is real,
-/// it is just not something the hardware signed.
-const JSON_ONLY_KEYS: [&str; 3] = ["compose_hash", "os_image_hash", "mr_aggregated"];
-
-/// Why an expected-measurement configuration was rejected.
-///
-/// Every variant is a refusal to load. There is deliberately no "ignored the
-/// key and carried on" path: a silently dropped `mrtdd=...` would leave an
-/// operator believing `mrtd` was pinned when nothing was.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ExpectedMeasurementsError {
-    #[error("expected-measurement entry {index} is not in key=value form")]
-    MalformedEntry { index: usize },
-    #[error("expected-measurement entry {index} has an empty key")]
-    EmptyKey { index: usize },
-    #[error(
-        "unknown expected-measurement key {key:?}; expected one of mrtd, rtmr0, rtmr1, rtmr2, rtmr3"
-    )]
-    UnknownField { key: String },
-    #[error(
-        "expected-measurement key {key:?} appears only in the report's unsigned JSON and cannot be \
-         checked against the signed quote; pin mrtd and rtmr0..rtmr3 instead"
-    )]
-    NotVerifiableFromQuote { key: String },
-    #[error("expected-measurement key {key} is set more than once")]
-    DuplicateField { key: MeasurementField },
-    #[error(
-        "expected value for {key} must be {MEASUREMENT_HEX_LEN} hex characters, got {len} \
-         characters"
-    )]
-    ValueWrongLength { key: MeasurementField, len: usize },
-    #[error("expected value for {key} is not hex")]
-    ValueNotHex { key: MeasurementField },
-    #[error("expected-measurement configuration named no measurements")]
-    NoPins,
-}
-
-/// A set of measurement registers an operator has pinned.
-///
-/// Only the registers named are checked. An empty set cannot be constructed:
-/// [`ExpectedMeasurementsError::NoPins`] is raised instead, so "configured"
-/// always means "checks at least one thing".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpectedMeasurements {
-    pins: BTreeMap<MeasurementField, String>,
-}
-
-impl ExpectedMeasurements {
-    /// Load the pinned set from [`EXPECTED_MEASUREMENTS_ENV`].
-    ///
-    /// `Ok(None)` means the variable is unset or empty, which is *not* an
-    /// acceptance -- see [`check_measurements_opt`].
-    pub fn from_env() -> Result<Option<Self>, ExpectedMeasurementsError> {
-        Self::from_env_value(std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref())
-    }
-
-    /// Parse a comma-separated `key=value` list.
-    ///
-    /// Whitespace around entries, keys and values is ignored, and keys are
-    /// matched case-insensitively. Neither leniency can hide a pin: a
-    /// misspelled key is still an error.
-    pub fn from_env_value(value: Option<&str>) -> Result<Option<Self>, ExpectedMeasurementsError> {
-        let Some(raw) = value else {
-            return Ok(None);
-        };
-        if raw.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let mut pins: BTreeMap<MeasurementField, String> = BTreeMap::new();
-        for (index, entry) in raw.split(',').enumerate() {
-            let entry = entry.trim();
-            // A stray separator is tolerated because it cannot hide a pin.
-            if entry.is_empty() {
-                continue;
-            }
-            let (key, value) = entry
-                .split_once('=')
-                .ok_or(ExpectedMeasurementsError::MalformedEntry { index })?;
-            let key = key.trim();
-            let value = value.trim();
-            if key.is_empty() {
-                return Err(ExpectedMeasurementsError::EmptyKey { index });
-            }
-            let lowered = key.to_ascii_lowercase();
-            let field = match MeasurementField::parse(&lowered) {
-                Some(field) => field,
-                None if JSON_ONLY_KEYS.contains(&lowered.as_str()) => {
-                    return Err(ExpectedMeasurementsError::NotVerifiableFromQuote { key: lowered });
-                }
-                None => return Err(ExpectedMeasurementsError::UnknownField { key: lowered }),
-            };
-            if value.len() != MEASUREMENT_HEX_LEN {
-                return Err(ExpectedMeasurementsError::ValueWrongLength {
-                    key: field,
-                    len: value.len(),
-                });
-            }
-            if !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(ExpectedMeasurementsError::ValueNotHex { key: field });
-            }
-            match pins.entry(field) {
-                Entry::Occupied(_) => {
-                    return Err(ExpectedMeasurementsError::DuplicateField { key: field });
-                }
-                Entry::Vacant(slot) => {
-                    slot.insert(value.to_ascii_lowercase());
-                }
-            }
-        }
-
-        if pins.is_empty() {
-            return Err(ExpectedMeasurementsError::NoPins);
-        }
-        Ok(Some(ExpectedMeasurements { pins }))
-    }
-
-    /// The registers this set pins, in canonical order.
-    pub fn pinned_fields(&self) -> Vec<MeasurementField> {
-        self.pins.keys().copied().collect()
-    }
-}
-
-/// One register whose verified value is not the pinned one.
-///
-/// Measurement values are public image identifiers, not secrets, so carrying
-/// them here and into log lines is deliberate: an operator holding both halves
-/// can go straight to the image, which is the whole point of naming the field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeasurementMismatch {
-    pub field: MeasurementField,
-    pub expected: String,
-    pub actual: String,
-}
-
-impl fmt::Display for MeasurementMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} differs (expected {}, got {})",
-            self.field, self.expected, self.actual
-        )
-    }
-}
-
-/// The outcome of checking a verified quote against a pinned set.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MeasurementVerdict {
-    /// Every pinned register matched. `fields` is what was actually checked,
-    /// so a caller can report the strength of the check and not merely that it
-    /// passed.
-    Pinned { fields: Vec<MeasurementField> },
-    /// At least one pinned register differs. Every differing register is
-    /// listed: "attestation failed" sends an operator to the wrong place,
-    /// "rtmr2 differs" sends them to the image.
-    ///
-    /// `fields` is the whole pinned set, exactly as on
-    /// [`MeasurementVerdict::Pinned`], and it is here so that the answer to
-    /// "how strong was this check" does not change meaning between the two
-    /// verdicts. Derive it from `mismatches` and a run that pinned all five
-    /// registers and saw `rtmr2` drift becomes indistinguishable from one
-    /// that only ever pinned `rtmr2` -- reported at exactly the moment an
-    /// operator is judging how much the check was worth.
-    Mismatch {
-        fields: Vec<MeasurementField>,
-        mismatches: Vec<MeasurementMismatch>,
-    },
-    /// Nothing was pinned, so nothing was checked. This is a refusal, not a
-    /// pass.
-    Refused { control: &'static str },
-}
-
-impl MeasurementVerdict {
-    /// True only for [`MeasurementVerdict::Pinned`]. A refusal is not a pass.
-    pub fn is_pinned(&self) -> bool {
-        matches!(self, MeasurementVerdict::Pinned { .. })
-    }
-
-    /// The registers that differ, in canonical order. Empty unless the verdict
-    /// is a mismatch.
-    pub fn mismatched_fields(&self) -> Vec<MeasurementField> {
-        match self {
-            MeasurementVerdict::Mismatch { mismatches, .. } => {
-                mismatches.iter().map(|m| m.field).collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-}
-
-impl fmt::Display for MeasurementVerdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MeasurementVerdict::Pinned { fields } => {
-                let names: Vec<&str> = fields.iter().map(|x| x.as_str()).collect();
-                write!(f, "measurements match pinned set ({})", names.join(", "))
-            }
-            MeasurementVerdict::Mismatch { mismatches, .. } => {
-                let rendered: Vec<String> = mismatches.iter().map(|m| m.to_string()).collect();
-                write!(f, "measurements do not match: {}", rendered.join("; "))
-            }
-            MeasurementVerdict::Refused { control } => {
-                write!(f, "measurement pinning refused: missing control {control}")
-            }
-        }
-    }
-}
-
-/// Compare a verified quote's registers against a pinned set.
-///
-/// `actual` is a [`VerifiedQuote`] and nothing else. The report's
-/// `info.tcb_info` carries the same register names, and comparing against
-/// those would verify the server's own claim about itself.
-///
-/// Hex comparison is ASCII-case-insensitive and otherwise exact; a shorter
-/// expected value never matches by prefix.
-pub fn check_measurements(
-    expected: &ExpectedMeasurements,
-    actual: &VerifiedQuote,
-) -> MeasurementVerdict {
-    let mut mismatches = Vec::new();
-    for (field, want) in &expected.pins {
-        let got = field.read(actual);
-        if !want.eq_ignore_ascii_case(got) {
-            mismatches.push(MeasurementMismatch {
-                field: *field,
-                expected: want.clone(),
-                actual: got.to_string(),
-            });
-        }
-    }
-    if mismatches.is_empty() {
-        MeasurementVerdict::Pinned {
-            fields: expected.pinned_fields(),
-        }
-    } else {
-        MeasurementVerdict::Mismatch {
-            fields: expected.pinned_fields(),
-            mismatches,
-        }
-    }
-}
-
-/// As [`check_measurements`], but fails closed when nothing is pinned.
-///
-/// An operator who has configured no expected set gets a refusal naming the
-/// missing control, never a green tick that means nothing.
-pub fn check_measurements_opt(
-    expected: Option<&ExpectedMeasurements>,
-    actual: &VerifiedQuote,
-) -> MeasurementVerdict {
-    match expected {
-        Some(expected) => check_measurements(expected, actual),
-        None => MeasurementVerdict::Refused {
-            control: EXPECTED_MEASUREMENTS_CONTROL,
-        },
+/// The value of a register as a NEAR AI report *claims* it in unsigned JSON.
+fn read_claim(field: MeasurementField, claim: &UnverifiedJsonMeasurements) -> &str {
+    match field {
+        MeasurementField::Mrtd => &claim.mrtd,
+        MeasurementField::Rtmr0 => &claim.rtmr0,
+        MeasurementField::Rtmr1 => &claim.rtmr1,
+        MeasurementField::Rtmr2 => &claim.rtmr2,
+        MeasurementField::Rtmr3 => &claim.rtmr3,
     }
 }
 
@@ -421,7 +88,7 @@ pub fn json_claim_anomalies(
     MeasurementField::ALL
         .iter()
         .filter_map(|field| {
-            let claimed = field.read_claim(claim);
+            let claimed = read_claim(*field, claim);
             let actual = field.read(verified);
             (!claimed.eq_ignore_ascii_case(actual)).then(|| JsonClaimAnomaly {
                 field: *field,
@@ -438,9 +105,12 @@ mod tests {
     use crate::near_attestation::AttestationReport;
     use crate::near_attestation::quote::{parse_collateral, verify_quote};
 
-    const FIXTURE: &str = include_str!("../../tests/fixtures/near_ai_attestation_report.json");
-    const COLLATERAL: &str =
-        include_str!("../../tests/fixtures/near_ai_attestation_collateral.json");
+    const FIXTURE: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+    );
+    const COLLATERAL: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+    );
     /// See `quote::tests::FIXTURE_CAPTURED_AT`: `verify_quote` consults no
     /// clock but this one, so these tests fail on a code change, never on a
     /// calendar date.
@@ -474,91 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn matching_measurements_pass_and_report_what_was_checked() {
+    fn an_absent_expected_set_refuses_under_this_deployments_control_name() {
+        // The generic refusal is tested in the permissive crate. What is
+        // specific here, and what an operator actually reads in the drill
+        // evidence, is that the name reported is *this* deployment's.
         let v = verified();
-        let verdict = check_measurements(&expected_matching(&v), &v);
-        assert_eq!(
-            verdict,
-            MeasurementVerdict::Pinned {
-                fields: MeasurementField::ALL.to_vec()
-            },
-            "{verdict}"
-        );
-        assert!(verdict.is_pinned());
-    }
-
-    #[test]
-    fn one_changed_measurement_fails_and_names_which() {
-        // "Attestation failed" sends an operator to the wrong place; "rtmr2
-        // differs" sends them to the image.
-        let v = verified();
-        let mut tampered = v.rtmr[2].clone();
-        // Flip the leading nibble to something it is not, so the mutation is
-        // guaranteed to be a real change and not a no-op rewrite.
-        let head = if tampered.starts_with('0') { '1' } else { '0' };
-        tampered.replace_range(0..1, &head.to_string());
-        assert_ne!(tampered, v.rtmr[2], "the mutation must actually change it");
-        assert_eq!(
-            tampered.len(),
-            v.rtmr[2].len(),
-            "and must not change the length, or this would fail for that reason"
-        );
-
-        let raw = format!("mrtd={},rtmr2={}", v.mrtd, tampered);
-        let expected = ExpectedMeasurements::from_env_value(Some(&raw))
-            .unwrap()
-            .unwrap();
-        let verdict = check_measurements(&expected, &v);
-
-        assert_eq!(verdict.mismatched_fields(), vec![MeasurementField::Rtmr2]);
-        let MeasurementVerdict::Mismatch { fields, mismatches } = &verdict else {
-            panic!("expected a mismatch, got {verdict}");
-        };
-        // The whole pinned set, not just the register that drifted. A
-        // mismatch that reported only `rtmr2` here would be
-        // indistinguishable from a deployment that only ever pinned `rtmr2`.
-        assert_eq!(fields, &expected.pinned_fields());
-        assert!(fields.len() > 1, "this fixture pins more than one register");
-        assert_eq!(mismatches.len(), 1);
-        assert_eq!(mismatches[0].field.as_str(), "rtmr2");
-        assert_eq!(mismatches[0].expected, tampered);
-        assert_eq!(mismatches[0].actual, v.rtmr[2]);
-        // The rendering an operator sees must name the register.
-        assert!(verdict.to_string().contains("rtmr2"), "{verdict}");
-        assert!(!verdict.is_pinned());
-    }
-
-    #[test]
-    fn every_differing_register_is_named_not_just_the_first() {
-        // A verdict that stops at the first difference understates the blast
-        // radius: an operator told only "mrtd differs" may conclude one
-        // register drifted when the whole image is different.
-        let v = verified();
-        let raw = format!(
-            "mrtd={},rtmr0={},rtmr3={}",
-            "a".repeat(96),
-            v.rtmr[0],
-            "b".repeat(96)
-        );
-        let expected = ExpectedMeasurements::from_env_value(Some(&raw))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            check_measurements(&expected, &v).mismatched_fields(),
-            vec![MeasurementField::Mrtd, MeasurementField::Rtmr3],
-            "rtmr0 was pinned correctly and must not be reported"
-        );
-    }
-
-    #[test]
-    fn an_absent_expected_set_refuses_rather_than_passing() {
-        let v = verified();
-        assert_eq!(ExpectedMeasurements::from_env_value(None), Ok(None));
-        // An explicitly empty value is the same case, not a config error: it
-        // still pins nothing, and the refusal below is what matters.
-        assert_eq!(ExpectedMeasurements::from_env_value(Some("   ")), Ok(None));
-
-        let verdict = check_measurements_opt(None, &v);
+        let verdict = check_measurements_opt(None, &v, EXPECTED_MEASUREMENTS_CONTROL);
         assert_eq!(
             verdict,
             MeasurementVerdict::Refused {
@@ -570,192 +161,26 @@ mod tests {
     }
 
     #[test]
-    fn a_set_that_pins_nothing_cannot_be_constructed() {
-        // Guards the gap between "configured" and "checks something". A value
-        // of "," parses to zero pins; if that yielded a set, check_measurements
-        // would return Pinned { fields: [] } -- a green tick over an empty
-        // check, which is exactly the false-confidence failure this task
-        // exists to prevent.
+    fn the_env_loader_reads_this_deployments_variable() {
+        // `from_env_value` is covered in the permissive crate; what is
+        // untested there is that the server reads
+        // TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS and not some other
+        // name. Asserting the constant's spelling is the falsifiable half --
+        // the loader itself cannot be exercised here without mutating
+        // process-wide environment under a parallel test runner.
         assert_eq!(
-            ExpectedMeasurements::from_env_value(Some(",,")),
-            Err(ExpectedMeasurementsError::NoPins)
+            EXPECTED_MEASUREMENTS_ENV,
+            "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS"
         );
-    }
-
-    #[test]
-    fn an_expected_set_naming_an_unknown_field_is_a_config_error() {
-        // The test that matters most. A silently ignored `mrtdd=...` would let
-        // an operator believe mrtd was pinned when nothing was. Asserting the
-        // specific variant and key, rather than is_err(), is what confirms the
-        // rejection is *because of the typo* and not because the parser
-        // tripped over something else in the string.
-        let good = "a".repeat(96);
-        let err = ExpectedMeasurements::from_env_value(Some(&format!("mrtdd={good}")))
-            .expect_err("a misspelled key must be rejected");
+        // And the loader is exactly `from_env_value` applied to that
+        // variable's current value, whatever it happens to be. Unconditional
+        // on purpose: a `if var.is_err()` guard would make this assertion
+        // skippable by the ambient environment, which is the same
+        // never-runs defect the pinning code exists to avoid.
+        let current = std::env::var(EXPECTED_MEASUREMENTS_ENV).ok();
         assert_eq!(
-            err,
-            ExpectedMeasurementsError::UnknownField {
-                key: "mrtdd".to_string()
-            }
-        );
-
-        // And the control: the same string with the key spelled correctly is
-        // accepted, so the rejection above is about the key and nothing else.
-        let ok = ExpectedMeasurements::from_env_value(Some(&format!("mrtd={good}")))
-            .expect("the correctly spelled key is accepted")
-            .expect("and yields a set");
-        assert_eq!(ok.pinned_fields(), vec![MeasurementField::Mrtd]);
-
-        // A typo must never be absorbed by a well-spelled neighbour either.
-        let err = ExpectedMeasurements::from_env_value(Some(&format!("mrtd={good},rtmr9={good}")))
-            .expect_err("a typo alongside a valid pin is still a config error");
-        assert_eq!(
-            err,
-            ExpectedMeasurementsError::UnknownField {
-                key: "rtmr9".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn json_only_keys_are_a_config_error_with_their_own_reason() {
-        // compose_hash, os_image_hash and mr_aggregated exist only in the
-        // report's unsigned JSON. Accepting them would produce a pin that
-        // nothing verifies; skipping them silently would be worse. Both are
-        // refused, with a message that tells the operator why rather than
-        // calling a real field a typo.
-        let good = "a".repeat(96);
-        for key in ["compose_hash", "os_image_hash", "mr_aggregated"] {
-            let err =
-                ExpectedMeasurements::from_env_value(Some(&format!("{key}={good}"))).unwrap_err();
-            assert_eq!(
-                err,
-                ExpectedMeasurementsError::NotVerifiableFromQuote {
-                    key: key.to_string()
-                },
-                "{key}"
-            );
-        }
-    }
-
-    #[test]
-    fn comparison_is_case_insensitive_on_hex() {
-        // Two layers, asserted separately, because the first alone makes the
-        // second unfalsifiable: parsing lowercases the value, so a
-        // case-*sensitive* comparator would still pass the parsed-path test.
-        let v = verified();
-        let upper = v.mrtd.to_ascii_uppercase();
-        assert_ne!(
-            upper, v.mrtd,
-            "the fixture's mrtd must actually contain letters, or this test proves nothing"
-        );
-
-        // 1. Through the config path: an uppercase pin, and an uppercase key.
-        let expected = ExpectedMeasurements::from_env_value(Some(&format!("MRTD={upper}")))
-            .unwrap()
-            .unwrap();
-        let verdict = check_measurements(&expected, &v);
-        assert!(verdict.is_pinned(), "{verdict}");
-
-        // 2. In the comparator itself, bypassing that normalization. If the
-        //    parse-time lowercasing is ever dropped, this is what still holds.
-        let smuggled = ExpectedMeasurements {
-            pins: BTreeMap::from([(MeasurementField::Mrtd, upper)]),
-        };
-        assert!(check_measurements(&smuggled, &v).is_pinned());
-    }
-
-    #[test]
-    fn a_short_expected_value_never_matches_by_prefix() {
-        // Two independent guards, because either alone could rot.
-        let v = verified();
-        let truncated = &v.mrtd[..40];
-        assert!(
-            v.mrtd.starts_with(truncated),
-            "the truncated value must genuinely be a prefix, or a prefix-matching \
-             implementation would pass this test for the wrong reason"
-        );
-
-        // 1. Parsing refuses a wrong-length value outright.
-        assert_eq!(
-            ExpectedMeasurements::from_env_value(Some(&format!("mrtd={truncated}"))),
-            Err(ExpectedMeasurementsError::ValueWrongLength {
-                key: MeasurementField::Mrtd,
-                len: 40
-            })
-        );
-
-        // 2. And the comparator itself does not prefix-match, proven by
-        //    building the set directly and bypassing that validation. If the
-        //    length check above is ever relaxed, this is what still holds.
-        let smuggled = ExpectedMeasurements {
-            pins: BTreeMap::from([(MeasurementField::Mrtd, truncated.to_string())]),
-        };
-        assert_eq!(
-            check_measurements(&smuggled, &v).mismatched_fields(),
-            vec![MeasurementField::Mrtd]
-        );
-    }
-
-    #[test]
-    fn a_non_hex_expected_value_is_a_config_error() {
-        let mut value = "a".repeat(95);
-        value.push('z');
-        assert_eq!(
-            ExpectedMeasurements::from_env_value(Some(&format!("rtmr1={value}"))),
-            Err(ExpectedMeasurementsError::ValueNotHex {
-                key: MeasurementField::Rtmr1
-            })
-        );
-    }
-
-    #[test]
-    fn malformed_entries_are_config_errors() {
-        let good = "a".repeat(96);
-        assert_eq!(
-            ExpectedMeasurements::from_env_value(Some("mrtd")),
-            Err(ExpectedMeasurementsError::MalformedEntry { index: 0 })
-        );
-        assert_eq!(
-            ExpectedMeasurements::from_env_value(Some(&format!("={good}"))),
-            Err(ExpectedMeasurementsError::EmptyKey { index: 0 })
-        );
-        // A register pinned twice is ambiguous: silently keeping one of the
-        // two values would pin something the operator did not choose.
-        assert_eq!(
-            ExpectedMeasurements::from_env_value(Some(&format!("rtmr0={good},rtmr0={good}"))),
-            Err(ExpectedMeasurementsError::DuplicateField {
-                key: MeasurementField::Rtmr0
-            })
-        );
-    }
-
-    #[test]
-    fn whitespace_around_entries_is_tolerated() {
-        let v = verified();
-        let raw = format!("  mrtd = {} , rtmr0 = {} , ", v.mrtd, v.rtmr[0]);
-        let expected = ExpectedMeasurements::from_env_value(Some(&raw))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            expected.pinned_fields(),
-            vec![MeasurementField::Mrtd, MeasurementField::Rtmr0]
-        );
-        assert!(check_measurements(&expected, &v).is_pinned());
-    }
-
-    #[test]
-    fn a_partial_pin_checks_only_what_it_names() {
-        let v = verified();
-        let expected = ExpectedMeasurements::from_env_value(Some(&format!("rtmr3={}", v.rtmr[3])))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            check_measurements(&expected, &v),
-            MeasurementVerdict::Pinned {
-                fields: vec![MeasurementField::Rtmr3]
-            },
-            "an operator must be able to see that only rtmr3 was checked"
+            expected_measurements_from_env(),
+            ExpectedMeasurements::from_env_value(current.as_deref())
         );
     }
 
@@ -782,6 +207,7 @@ mod tests {
         assert_eq!(anomalies.len(), 1);
         assert_eq!(anomalies[0].field, MeasurementField::Rtmr1);
         assert_eq!(anomalies[0].verified, v.rtmr[1]);
+        assert_eq!(anomalies[0].claimed, claim.rtmr1);
 
         // The pin, which reads the quote, is unmoved by the lie in either
         // direction: it still passes against the real values...
@@ -796,5 +222,31 @@ mod tests {
             check_measurements(&expected, &v).mismatched_fields(),
             vec![MeasurementField::Rtmr1]
         );
+    }
+
+    #[test]
+    fn every_lying_register_is_reported_not_just_the_first() {
+        // json_claim_anomalies iterates MeasurementField::ALL; a version that
+        // stopped at the first disagreement, or that read the wrong register
+        // from the claim, would still pass the single-lie test above.
+        let v = verified();
+        let mut claim = fixture_report().unverified_json_measurements();
+        claim.mrtd = "d".repeat(96);
+        claim.rtmr3 = "e".repeat(96);
+
+        let anomalies = json_claim_anomalies(&claim, &v);
+        assert_eq!(
+            anomalies.iter().map(|a| a.field).collect::<Vec<_>>(),
+            vec![MeasurementField::Mrtd, MeasurementField::Rtmr3]
+        );
+        assert_eq!(anomalies[0].claimed, claim.mrtd);
+        assert_eq!(anomalies[0].verified, v.mrtd);
+        assert_eq!(anomalies[1].claimed, claim.rtmr3);
+        assert_eq!(anomalies[1].verified, v.rtmr[3]);
+        // The rendering an operator sees must name the register and both
+        // sides, or the report is unactionable.
+        let rendered = anomalies[1].to_string();
+        assert!(rendered.contains("rtmr3"), "{rendered}");
+        assert!(rendered.contains(&v.rtmr[3]), "{rendered}");
     }
 }

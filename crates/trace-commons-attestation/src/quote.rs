@@ -127,16 +127,12 @@ pub fn verify_quote(
 mod tests {
     use super::*;
 
-    // The fixtures stay in the server crate: four modules there still read
-    // the same two files, and a second copy would drift. `include_str!` is a
-    // compile-time read under `cfg(test)`, so it costs this crate nothing
-    // when it is vendored into a harness -- but it does mean a packaged copy
-    // of this crate alone cannot run its own tests.
-    const FIXTURE: &str =
-        include_str!("../../trace-commons-server/tests/fixtures/near_ai_attestation_report.json");
-    const COLLATERAL: &str = include_str!(
-        "../../trace-commons-server/tests/fixtures/near_ai_attestation_collateral.json"
-    );
+    // The fixtures live in this crate, so a packaged copy of it alone can
+    // run its own tests. The server crate's five call sites read the same
+    // two files from here rather than holding a second copy that would
+    // drift.
+    const FIXTURE: &str = include_str!("../tests/fixtures/near_ai_attestation_report.json");
+    const COLLATERAL: &str = include_str!("../tests/fixtures/near_ai_attestation_collateral.json");
 
     /// 2026-09-01T12:00:00Z. The fixture report and its collateral were both
     /// captured on 2026-09-01; the collateral's `nextUpdate` is

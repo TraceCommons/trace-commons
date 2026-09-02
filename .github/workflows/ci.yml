@@ -250,13 +250,15 @@ jobs:
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-attestation-collateral
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
       - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
-      # `--lib near_attestation` used to sweep the whole attestation module,
-      # receipt and quote verification included. Both moved to the permissive
-      # `trace-commons-attestation` crate, so that filter silently stopped
-      # matching them -- 70 tests before the move, 45 after -- while the job's
-      # name went on claiming otherwise. `cargo test --workspace` still runs
-      # them, but not in the feature configuration this job exists to cover.
-      # This restores that: the same 25 tests, built with the feature that
+      # `--lib near_attestation` used to sweep the whole attestation module:
+      # receipt, quote and measurement verification included. All three moved
+      # to the permissive `trace-commons-attestation` crate, so that filter
+      # silently stopped matching them -- the filter matched 46 before the
+      # measurement move and 36 after, having already lost receipt and quote
+      # -- while the job's name went on claiming otherwise. `cargo test
+      # --workspace` still runs them, but not in the feature configuration
+      # this job exists to cover. This restores that: the 40 that now live in
+      # the permissive crate, built with the feature that
       # `near-attestation-collateral` forwards to.
       - run: cargo test -p trace-commons-attestation --features collateral-client
 

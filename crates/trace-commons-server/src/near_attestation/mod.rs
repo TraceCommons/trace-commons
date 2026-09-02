@@ -153,7 +153,9 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../../tests/fixtures/near_ai_attestation_report.json");
+    const FIXTURE: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+    );
 
     #[test]
     fn parses_a_real_report() {
