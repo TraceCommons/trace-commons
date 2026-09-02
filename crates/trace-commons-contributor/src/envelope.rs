@@ -668,19 +668,12 @@ pub fn parse_use_names(names: &[String]) -> Vec<TraceAllowedUse> {
 
 /// Overwrite the envelope's consent metadata and trace card with the
 /// claim-granted set. Called after redaction, before size check/upload.
-pub fn apply_granted_scopes(
-    envelope: &mut TraceContributionEnvelope,
-    granted_scopes: &[ConsentScope],
-    granted_uses: &[TraceAllowedUse],
-) {
-    envelope.consent.scopes = granted_scopes.to_vec();
-    envelope.trace_card.allowed_uses = granted_uses.to_vec();
-    envelope.trace_card.consent_scope = granted_scopes
-        .iter()
-        .find(|s| **s != ConsentScope::PublicAttribution)
-        .copied()
-        .unwrap_or(ConsentScope::DebuggingEvaluation);
-}
+///
+/// Moved to `trace-commons-protocol` and re-exported here so no caller moved.
+/// The redaction witness has to apply the grants before it serialises and
+/// digests the envelope -- a grant stamped afterwards is a byte change the
+/// certificate does not cover -- and it cannot reach this crate to do it.
+pub use trace_commons_protocol::trace_contribution::apply_granted_scopes;
 
 /// Stamp the contributor's verdict onto an already-redacted envelope.
 ///

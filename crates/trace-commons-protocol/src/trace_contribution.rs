@@ -5689,6 +5689,37 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     }
 }
 
+/// Overwrite an envelope's consent metadata and trace card with the
+/// claim-granted set.
+///
+/// Lives here rather than in `trace-commons-contributor`, where it was
+/// written, because the redaction witness must apply the grants *before* it
+/// serialises and digests the envelope -- a grant stamped after certification
+/// is a byte change the certificate does not cover. The witness is an AGPL
+/// crate and may depend on this permissive one; it must not depend on
+/// `trace-commons-contributor`, which would pull `reqwest`, `notify`,
+/// `sysinfo` and `tempfile` into an enclave image whose measurement is the
+/// thing a contributor pins. `trace-commons-contributor::apply_granted_scopes`
+/// re-exports this, so no existing caller moved.
+///
+/// The trace card's `consent_scope` deliberately skips
+/// [`ConsentScope::PublicAttribution`]: it is an attribution decision rather
+/// than a use, and a card naming it as *the* scope would describe the trace
+/// by how it may be credited instead of by what may be done with it.
+pub fn apply_granted_scopes(
+    envelope: &mut TraceContributionEnvelope,
+    granted_scopes: &[ConsentScope],
+    granted_uses: &[TraceAllowedUse],
+) {
+    envelope.consent.scopes = granted_scopes.to_vec();
+    envelope.trace_card.allowed_uses = granted_uses.to_vec();
+    envelope.trace_card.consent_scope = granted_scopes
+        .iter()
+        .find(|scope| **scope != ConsentScope::PublicAttribution)
+        .copied()
+        .unwrap_or(ConsentScope::DebuggingEvaluation);
+}
+
 fn build_trace_card(
     consent_scopes: &[ConsentScope],
     channel: TraceChannel,
