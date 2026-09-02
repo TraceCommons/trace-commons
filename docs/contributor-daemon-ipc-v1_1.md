@@ -38,6 +38,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   consent scope but had no way to claim the handle that scope is about, so
   the "Go public" flow and the settings profile panel were unreachable from
   every application. See ["The public profile"](#the-public-profile).
+- `status.routing` — whether the IronWire proxy overlay is declared and
+  whether it is producing anything, in three states rather than two. Before
+  this, a contributor who declared a proxy that never produced a row saw the
+  same nothing as one who never declared it, and a declaration change did
+  not take effect until the daemon was restarted. It now applies on the
+  `set_settings` call. See ["`routing`"](#routing).
 - `list_projects` now reports **discovered** projects as well as configured
   ones, each with the mode actually in force and a `configured` boolean. An
   onboarding screen that asks a contributor to exclude a repository has to
@@ -442,7 +448,8 @@ history record, audit entry, notification text, or IPC response.
     "blocked": true,
     "blocked_entries": 14,
     "blocked_bytes": 137283584
-  }
+  },
+  "routing": { "state": "not_declared", "last_refresh_at": null }
 }
 ```
 
@@ -486,6 +493,45 @@ Counts and timestamps only. No entry id, hash, or path appears here.
 Approved entries are not listed by `list_pending`, which returns `pending`
 entries only, so this is the only place the condition is reported; there is
 no per-entry equivalent.
+
+#### `routing`
+
+Additive, and the protocol version is unchanged: `trace_commons.daemon.v1_1`
+stays as it is. Every shell ignores keys it does not know — the Swift models
+decode declared keys only, the GTK models carry no `deny_unknown_fields`, and
+the Windows deserializer is left at its default — so an older shell against a
+newer daemon behaves exactly as it did before, which is the rule this
+document's "additive" status already states.
+
+Whether the IronWire proxy overlay is declared and whether it is producing
+anything. **Three states, not two.**
+
+| `state` | meaning |
+| --- | --- |
+| `not_declared` | no proxy declared; the daemon holds no ledger and reads nothing |
+| `awaiting_rows` | declared, and the daemon holds a ledger, but no row has arrived yet |
+| `rows_seen` | declared, and the last refresh window had rows |
+
+`awaiting_rows` is **not an error** and a client must not render it as one.
+A machine whose proxy was installed this morning reports it, and so does one
+whose declaration changed a second ago: `set_settings` rebuilds the ledger in
+place — no restart — and a rebuilt ledger starts cold by construction. Say
+"nothing seen yet", not "broken".
+
+The distinction `not_declared` carries cannot be recovered from row counts:
+a daemon holding no ledger and a daemon holding a ledger that has read
+nothing both have zero rows, and reporting them the same way tells a
+contributor whose declaration never took that everything is fine.
+
+`last_refresh_at` is when a refresh last **reached** the proxy and came back
+readable — RFC 3339, or `null` when none ever has. It is not stamped on a
+failed attempt, which is what makes it useful: rows say data exists, not that
+the proxy answers now, and a proxy that died an hour ago still has rows. With
+`awaiting_rows`, a non-null `last_refresh_at` means the proxy answered and
+this window genuinely had nothing in it; a null one means nothing has
+answered yet.
+
+No port, token, or row content appears here.
 
 ### `preview`
 

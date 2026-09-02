@@ -98,7 +98,7 @@
 //!   here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(unix)]
 use anyhow::bail;
@@ -385,21 +385,49 @@ pub struct DaemonShared {
     /// this handle -- the pool must not hold an `Arc<DaemonShared>` through
     /// the scheduler, or the two would keep each other alive forever.
     pub previews: Arc<PreviewScheduler>,
-    /// The routing overlay's one long-lived instance, built once from the
+    /// The routing overlay's one long-lived instance, built from the
     /// declaration in settings and refreshed on the poll tick.
     ///
-    /// `None` is the majority case -- no proxy declared -- and stays `None`
-    /// for the daemon's whole lifetime; nothing here rebuilds it. Settings
-    /// keep describing the *declaration* (`DaemonSettings::source_roots`
-    /// stays bare); this is the single place the *instance* lives, because
-    /// a ledger built per call would hand every caller a cold, empty
-    /// snapshot -- see [`Self::source_roots_with_routing`].
-    pub routing: Option<Arc<crate::routing::ironwire::IronWireLedger>>,
+    /// `None` is the majority case -- no proxy declared. Settings keep
+    /// describing the *declaration* (`DaemonSettings::source_roots` stays
+    /// bare); this is the single place the *instance* lives, because a
+    /// ledger built per call would hand every caller a cold, empty snapshot
+    /// -- see [`Self::source_roots_with_routing`].
+    ///
+    /// Behind an `RwLock` because the declaration can change while the
+    /// daemon runs: `set_settings` rebuilds this in place (see
+    /// [`Self::rebuild_routing`]). Telling a contributor to restart the
+    /// daemon because they typed a port number is the friction that makes a
+    /// feature feel broken. Readers take the lock only long enough to clone
+    /// the `Arc` out -- nothing holds it across an await, and nothing holds
+    /// it while doing I/O.
+    routing: RwLock<Option<Arc<crate::routing::ironwire::IronWireLedger>>>,
     /// Whether the last state this daemon reported for `routing` was
     /// "has rows". Compared against on every refresh so a transition is
     /// reported once, not on every poll -- see [`Self::routing_transition`].
     routing_had_rows: AtomicBool,
 }
+
+/// `status.routing.state`: the contributor never declared a proxy.
+///
+/// The state `IronWireLedger::has_rows` cannot express. A daemon holding no
+/// ledger and a daemon holding a ledger that has read nothing both report
+/// "no rows", and collapsing them tells a contributor who declared a proxy
+/// that everything is fine when the declaration never took.
+pub const ROUTING_NOT_DECLARED: &str = "not_declared";
+
+/// `status.routing.state`: a proxy is declared and the daemon holds a
+/// ledger, but no row has arrived yet.
+///
+/// **Not an error.** A proxy installed this morning reports this, and so
+/// does one whose declaration was changed a second ago -- a rebuilt ledger
+/// starts cold by construction. A shell that renders this as a fault will
+/// be wrong on both. `routing.last_refresh_at` is what separates "the proxy
+/// answered and had nothing" from "nothing has answered yet".
+pub const ROUTING_AWAITING_ROWS: &str = "awaiting_rows";
+
+/// `status.routing.state`: a proxy is declared and rows have been read.
+pub const ROUTING_ROWS_SEEN: &str = "rows_seen";
 
 impl DaemonShared {
     pub fn load(store: ConfigStore) -> Result<Self> {
@@ -445,11 +473,12 @@ impl DaemonShared {
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
-        // Built once, here, from the declaration this settings file carries
-        // at startup. A settings edit that changes the declaration takes
-        // effect on the next daemon restart, same as every other setting
-        // this constructor reads once.
-        let routing = super::settings::ironwire_ledger_for(settings.ironwire.as_ref());
+        // Built here from the declaration this settings file carries at
+        // startup. A later edit does not wait for a restart:
+        // `set_settings` rebuilds the instance in place.
+        let routing = RwLock::new(super::settings::ironwire_ledger_for(
+            settings.ironwire.as_ref(),
+        ));
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
         Ok(Self {
@@ -482,10 +511,42 @@ impl DaemonShared {
             s.source_roots(&self.store)
         };
         let ledger = self
-            .routing
-            .clone()
+            .routing_ledger()
             .map(|l| l as Arc<dyn crate::routing::RoutingLedger>);
         roots.with_routing(ledger)
+    }
+
+    /// The routing ledger the daemon currently holds, if any.
+    ///
+    /// Every reader goes through here rather than touching the lock, so the
+    /// guard is never held for longer than the clone -- in particular never
+    /// across the await in [`Self::refresh_routing`], where holding it would
+    /// block `set_settings` for the length of a network call.
+    pub(crate) fn routing_ledger(&self) -> Option<Arc<crate::routing::ironwire::IronWireLedger>> {
+        self.routing
+            .read()
+            .expect("routing lock")
+            .as_ref()
+            .map(Arc::clone)
+    }
+
+    /// Rebuild the held ledger from a declaration, replacing whatever was
+    /// there.
+    ///
+    /// The rebuilt instance starts **cold** -- an empty snapshot until the
+    /// next refresh. That is correct and it is not an error: it is exactly
+    /// the "declared, nothing seen yet" state `status_value` reports, and
+    /// the same state a machine whose proxy was installed this morning is
+    /// in. It also resets the transition state, so the first refresh after
+    /// a declaration change logs the new ledger's data state rather than
+    /// comparing it against the old one's.
+    pub(crate) fn rebuild_routing(
+        &self,
+        declaration: Option<&super::settings::IronWireDeclaration>,
+    ) {
+        let rebuilt = super::settings::ironwire_ledger_for(declaration);
+        *self.routing.write().expect("routing lock") = rebuilt;
+        self.routing_had_rows.store(false, Ordering::Relaxed);
     }
 
     /// Refresh the routing ledger, if the contributor declared one, and
@@ -495,7 +556,7 @@ impl DaemonShared {
     /// an error and carries its own short timeout, so awaiting it here
     /// cannot fail or stall the poll tick that calls this.
     pub(crate) async fn refresh_routing(&self) {
-        let Some(ledger) = self.routing.clone() else {
+        let Some(ledger) = self.routing_ledger() else {
             return;
         };
         ledger.refresh().await;
@@ -595,6 +656,10 @@ impl DaemonShared {
         // Taken before the queue lock below, and released with it, because
         // `daily_budget` takes the queue, state, and settings locks itself.
         let budget = self.daily_budget(now);
+        // Taken before the locks below for the same reason as `budget`:
+        // this reads the routing lock, and taking locks in one order
+        // everywhere is what keeps that safe.
+        let routing = self.routing_value();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -625,6 +690,35 @@ impl DaemonShared {
                 "blocked_entries": budget.blocked_entries,
                 "blocked_bytes": budget.blocked_bytes,
             },
+            // Additive, and three-valued on purpose. `health` reports
+            // faults; none of these three is one, so like `daily_budget`
+            // this sits beside it rather than inside it.
+            "routing": routing,
+        })
+    }
+
+    /// The `routing` sub-object of [`Self::status_value`].
+    ///
+    /// Three states, because the two a boolean can carry are the defect:
+    /// "no proxy declared" and "declared but reading nothing" are different
+    /// situations with different answers, and only the second is worth
+    /// telling a contributor about. `has_rows` alone cannot tell them apart
+    /// -- the distinction lives in the `Option` on shared state, which is
+    /// why this reads the held instance rather than the settings blob.
+    ///
+    /// `last_refresh_at` is reported alongside because `has_rows` is a poor
+    /// health signal on its own: it says data exists, not that the proxy
+    /// answers now. A proxy that died an hour ago still has rows.
+    fn routing_value(&self) -> serde_json::Value {
+        let Some(ledger) = self.routing_ledger() else {
+            return serde_json::json!({
+                "state": ROUTING_NOT_DECLARED,
+                "last_refresh_at": serde_json::Value::Null,
+            });
+        };
+        serde_json::json!({
+            "state": if ledger.has_rows() { ROUTING_ROWS_SEEN } else { ROUTING_AWAITING_ROWS },
+            "last_refresh_at": ledger.last_refresh_at(),
         })
     }
 
@@ -1344,6 +1438,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_settings" => {
             let mut settings = shared.settings.lock().expect("settings lock");
+            // Captured before the write so the ledger is rebuilt only when
+            // the declaration actually moved. Rebuilding on every settings
+            // write would blank a warm snapshot whenever a contributor
+            // touched an unrelated slider.
+            let declared_before = settings.ironwire.clone();
             // `apply_settings_object` is the same validation
             // `tc_daemon_start_with_settings` (the C ABI's pre-start
             // settings override) uses, so there is one definition of "a
@@ -1354,6 +1453,15 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Ok(true) => {
                     if let Err(_e) = settings.save(&shared.store) {
                         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+                    }
+                    // Apply the proxy declaration to this running daemon.
+                    // Without this the contributor would have to restart the
+                    // daemon to make a port they just typed take effect,
+                    // which reads as the feature being broken. Done after
+                    // the save so a declaration that takes effect is always
+                    // one that survives a restart too.
+                    if settings.ironwire != declared_before {
+                        shared.rebuild_routing(settings.ironwire.as_ref());
                     }
                     Response::ok(req.id, redacted_settings(&settings))
                 }
@@ -3069,7 +3177,7 @@ mod tests {
     /// attempts no connection.
     #[test]
     fn no_proxy_declared_builds_no_ledger() {
-        assert!(shared().routing.is_none());
+        assert!(shared().routing_ledger().is_none());
     }
 
     /// `source_roots_with_routing` is the one insertion point: bare roots
@@ -3082,11 +3190,10 @@ mod tests {
             "no ledger held, so the roots must stay bare"
         );
 
-        let mut s = shared();
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            8463,
-            "t".to_string(),
-        )));
+        let s = shared();
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(8463, "t".to_string()),
+        ));
         assert!(
             s.source_roots_with_routing().is_routed(),
             "a held ledger must be attached"
@@ -3104,14 +3211,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let mut s = shared();
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            port,
-            "t".to_string(),
-        )));
+        let s = shared();
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
         s.refresh_routing().await;
         assert!(
-            !s.routing.as_ref().unwrap().has_rows(),
+            !s.routing_ledger().unwrap().has_rows(),
             "an unreachable proxy leaves the snapshot empty, not the daemon down"
         );
         assert!(
@@ -3186,23 +3292,22 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let mut s = shared();
+        let s = shared();
         {
             let mut settings = s.settings.lock().unwrap();
             settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
                 path: claude_root.path().to_path_buf(),
             });
         }
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            port,
-            "t".to_string(),
-        )));
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
 
         // This is the seam this task installs: refresh, then build sources
         // off the daemon's own held instance.
         s.refresh_routing().await;
         assert!(
-            s.routing.as_ref().unwrap().has_rows(),
+            s.routing_ledger().unwrap().has_rows(),
             "the mock server's row must have reached the snapshot"
         );
 
@@ -5039,11 +5144,10 @@ mod tests {
         // Before this, `ironwire` was not in `apply_settings_object`'s
         // whitelist, so the only way to declare the proxy overlay was
         // hand-editing settings.json. `set_settings` now persists the
-        // declaration the same way, but `routing` is still built once at
-        // startup (see `ipc.rs` above, near the `Shared` constructor), so
-        // the overlay itself only takes effect on the next daemon restart --
-        // this test asserts the live settings value and the persisted file,
-        // not that the overlay activates without a restart.
+        // declaration the same way. This test asserts the live settings
+        // value and the persisted file; that the overlay itself activates
+        // without a restart is
+        // `a_declaration_change_takes_effect_without_a_restart`.
         let s = shared();
         let r = handle_request(
             &s,
@@ -5888,5 +5992,250 @@ mod tests {
             METHODS.contains(&"probe_routing"),
             "a method hello does not advertise is a method no shell will call"
         );
+    }
+
+    // --- hot swap and the routing status block -------------------------
+
+    /// A declared proxy whose `control.token` is readable, so
+    /// `ironwire_ledger_for` actually builds a ledger. Returns the
+    /// directory, which must outlive the assertions.
+    fn declared_token_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(super::super::settings::IRONWIRE_TOKEN_FILE),
+            "tok\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn watch_params(port: u16, dir: &std::path::Path) -> serde_json::Value {
+        serde_json::json!({
+            "ironwire": {
+                "mode": "watch",
+                "port": port,
+                "token_dir": dir.to_string_lossy(),
+            }
+        })
+    }
+
+    /// The point of the hot swap: a contributor who declares the proxy in
+    /// the app must get enrichment on the next poll, not after a restart.
+    /// Nothing here reloads `DaemonShared`.
+    #[test]
+    fn a_declaration_change_takes_effect_without_a_restart() {
+        let dir = declared_token_dir();
+        let s = shared();
+        assert!(
+            !s.source_roots_with_routing().is_routed(),
+            "nothing declared yet, so the roots start bare"
+        );
+
+        let r = handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        assert!(
+            s.source_roots_with_routing().is_routed(),
+            "the declaration must take effect on this same daemon instance"
+        );
+        assert!(
+            s.routing_ledger().is_some(),
+            "the rebuilt instance is the one the daemon holds"
+        );
+    }
+
+    /// `null` means off, and off must actually stop reading.
+    #[test]
+    fn clearing_the_declaration_drops_the_ledger() {
+        let dir = declared_token_dir();
+        let s = shared();
+        let r = handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(s.routing_ledger().is_some(), "declared, so a ledger exists");
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"ironwire": null})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(
+            s.routing_ledger().is_none(),
+            "off must drop the instance, not just the declaration"
+        );
+        assert!(
+            !s.source_roots_with_routing().is_routed(),
+            "a dropped ledger must stop reaching the loaded transcript"
+        );
+    }
+
+    /// A settings write that does not touch the declaration must not throw
+    /// away a warm snapshot. Rebuilding on every `set_settings` would blank
+    /// the overlay whenever a contributor moved an unrelated slider.
+    #[test]
+    fn an_unrelated_settings_change_keeps_the_same_ledger() {
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        let before = s.routing_ledger().expect("declared");
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"max_uploads_per_day": 7}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let after = s.routing_ledger().expect("still declared");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "an unrelated edit must leave the live instance alone"
+        );
+    }
+
+    /// Cold start is not an error state and must not be reported as one.
+    #[test]
+    fn a_rebuilt_ledger_reports_declared_but_nothing_seen() {
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(
+            routing["state"], ROUTING_AWAITING_ROWS,
+            "a freshly rebuilt ledger is declared, not broken: {routing}"
+        );
+        assert_eq!(
+            routing["last_refresh_at"],
+            serde_json::Value::Null,
+            "nothing has refreshed yet"
+        );
+    }
+
+    /// The state `has_rows()` alone cannot express.
+    #[test]
+    fn status_reports_not_declared_when_no_proxy_is_declared() {
+        let s = shared();
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_NOT_DECLARED, "{routing}");
+        assert_eq!(routing["last_refresh_at"], serde_json::Value::Null);
+    }
+
+    /// The third state, and the one that proves `last_refresh_at` reports a
+    /// refresh that actually reached the proxy rather than one that was
+    /// merely attempted.
+    #[tokio::test]
+    async fn status_reports_rows_seen_after_a_refresh_that_reached_the_proxy() {
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "exchanges": [{
+                        "started_at": "2026-08-08T10:05:00Z",
+                        "client_session_id": "sess-1",
+                        "facade": "anthropic",
+                        "backend": "claude-sub",
+                        "rung": "same_model",
+                        "attempts": 1,
+                        "status": 200
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
+        assert_eq!(
+            s.status_value()["routing"]["state"],
+            ROUTING_AWAITING_ROWS,
+            "declared but not yet refreshed"
+        );
+
+        s.refresh_routing().await;
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_ROWS_SEEN, "{routing}");
+        assert!(
+            routing["last_refresh_at"].as_str().is_some(),
+            "a refresh that reached the proxy stamps a time: {routing}"
+        );
+    }
+
+    /// An unreachable proxy leaves `last_refresh_at` null: the timestamp
+    /// exists so a contributor can tell "the proxy answered and had nothing"
+    /// from "the proxy has not answered at all", and stamping it on a failed
+    /// attempt would erase that difference.
+    #[tokio::test]
+    async fn an_unreachable_proxy_stamps_no_refresh_time() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
+        s.refresh_routing().await;
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_AWAITING_ROWS, "{routing}");
+        assert_eq!(
+            routing["last_refresh_at"],
+            serde_json::Value::Null,
+            "an attempt that never reached the proxy is not a refresh"
+        );
+    }
+
+    /// The whole point of the block is that a shell reads it off the socket.
+    /// Unit-testing `status_value` alone would not catch a `status` method
+    /// that never returns it -- the failure mode this plan already hit once
+    /// with async dispatch.
+    #[tokio::test]
+    async fn the_routing_block_reaches_a_shell_through_the_real_dispatcher() {
+        let dir = declared_token_dir();
+        let s = shared();
+
+        let response = handle_request_async(&s, &req("status", serde_json::json!({}))).await;
+        let result = response.result.expect("status answers");
+        assert_eq!(
+            result["routing"]["state"], ROUTING_NOT_DECLARED,
+            "{result:?}"
+        );
+
+        let response =
+            handle_request_async(&s, &req("set_settings", watch_params(8463, dir.path()))).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+
+        let response = handle_request_async(&s, &req("status", serde_json::json!({}))).await;
+        let result = response.result.expect("status answers");
+        assert_eq!(
+            result["routing"]["state"], ROUTING_AWAITING_ROWS,
+            "the hot swap must be visible over the socket: {result:?}"
+        );
+    }
+
+    /// The state names are what every assertion above compares against, so a
+    /// change to one of their *values* would move the wire contract with
+    /// every one of those tests still green. These literals are the ones
+    /// written into `docs/contributor-daemon-ipc-v1_1.md`.
+    ///
+    /// They are also deliberately chosen so that none is a substring of
+    /// another: a shell (or a test) that reached for `contains` rather than
+    /// equality would still be answering the right question.
+    #[test]
+    fn the_routing_state_names_are_the_documented_wire_values() {
+        assert_eq!(ROUTING_NOT_DECLARED, "not_declared");
+        assert_eq!(ROUTING_AWAITING_ROWS, "awaiting_rows");
+        assert_eq!(ROUTING_ROWS_SEEN, "rows_seen");
+        for (a, b) in [
+            (ROUTING_NOT_DECLARED, ROUTING_AWAITING_ROWS),
+            (ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN),
+            (ROUTING_ROWS_SEEN, ROUTING_NOT_DECLARED),
+        ] {
+            assert!(!a.contains(b) && !b.contains(a), "{a} and {b} overlap");
+        }
     }
 }

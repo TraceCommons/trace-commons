@@ -50,6 +50,16 @@ pub struct IronWireLedger {
     port: u16,
     token: String,
     snapshot: Arc<RwLock<Vec<RoutedExchange>>>,
+    /// When a refresh last reached the proxy and came back with a readable
+    /// answer -- not when one was last attempted.
+    ///
+    /// The distinction is the whole value of the field: a contributor whose
+    /// snapshot is empty needs to tell "the proxy answered and this window
+    /// genuinely has nothing in it" from "nothing has answered yet", and a
+    /// timestamp stamped on a failed attempt reports the first when the
+    /// truth is the second. So it is written in exactly one place: beside
+    /// the snapshot write at the end of a completed refresh.
+    last_refresh_at: Arc<RwLock<Option<DateTime<Utc>>>>,
     /// Built once at construction, not per `refresh()` call. A fresh
     /// `reqwest::Client` builds its own TLS config and connection pool, which
     /// is wasted work on every poll tick for a client that only ever talks to
@@ -96,6 +106,7 @@ impl IronWireLedger {
             port,
             token,
             snapshot: Arc::new(RwLock::new(Vec::new())),
+            last_refresh_at: Arc::new(RwLock::new(None)),
             client: reqwest::Client::builder().build().ok(),
         }
     }
@@ -175,6 +186,9 @@ impl IronWireLedger {
         if let Ok(mut snapshot) = self.snapshot.write() {
             *snapshot = rows;
         }
+        if let Ok(mut at) = self.last_refresh_at.write() {
+            *at = Some(Utc::now());
+        }
     }
 
     /// One page of rows, or `None` when the body is not readable JSON.
@@ -207,6 +221,16 @@ impl IronWireLedger {
     #[must_use]
     pub fn has_rows(&self) -> bool {
         self.snapshot.read().is_ok_and(|rows| !rows.is_empty())
+    }
+
+    /// When a refresh last reached the proxy, or `None` if none ever has.
+    ///
+    /// `has_rows` says data exists; this says the proxy answered. A
+    /// contributor whose proxy died an hour ago still has rows, and only
+    /// this field shows that nothing has answered since.
+    #[must_use]
+    pub fn last_refresh_at(&self) -> Option<DateTime<Utc>> {
+        self.last_refresh_at.read().ok().and_then(|at| *at)
     }
 }
 
@@ -241,6 +265,7 @@ mod tests {
             port: 8463,
             token: "t".to_string(),
             snapshot: Arc::new(RwLock::new(Vec::new())),
+            last_refresh_at: Arc::new(RwLock::new(None)),
             client: None,
         };
         ledger.refresh().await;
