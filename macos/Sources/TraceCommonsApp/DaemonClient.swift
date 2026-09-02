@@ -235,6 +235,41 @@ final class DaemonClient {
         return declarations
     }
 
+    // MARK: - The local proxy
+
+    /// Writes the `ironwire` declaration, or clears it.
+    ///
+    /// The object comes from `RoutingSurface.settingsParams`, which spells
+    /// off as `null` rather than omitting the key -- absence means off with
+    /// no fallback, and a key that is not there is not a change.
+    ///
+    /// Nothing here waits on the app being started again: the daemon
+    /// rebuilds its reader from the new declaration in the same call
+    /// (`shared.rebuild_routing`), and the next poll reads it.
+    func setIronWire(_ form: RoutingForm) throws -> DaemonSettingsView {
+        try setSettings(RoutingSurface.settingsParams(form))
+    }
+
+    /// Asks whether the declared proxy answers on that port with that
+    /// credential. Answers in the three-outcome vocabulary
+    /// `RoutingProbeOutcome` reads.
+    ///
+    /// Never throws for an unreachable proxy: that is a well-formed answer,
+    /// not a failed call. What throws is the call not running at all.
+    func probeRouting(_ form: RoutingForm) throws -> RoutingProbeOutcome {
+        RoutingProbeOutcome.parse(try resultObject("probe_routing", params: RoutingSurface.probeParams(form)))
+    }
+
+    /// Asks IronWire which tools on this machine are pointed at it.
+    ///
+    /// The per-tool counterpart, and the reason it exists: declaring a proxy
+    /// in *this* app says nothing about whether Codex is configured to send
+    /// through it, so a shell that rendered one switch as three verdicts
+    /// would be inventing two of them.
+    func probeRoutedTools(_ form: RoutingForm) throws -> RoutingEvidence {
+        RoutingEvidence.parse(try resultObject("probe_routed_tools", params: RoutingSurface.probeParams(form)))
+    }
+
     /// Redeems `invite` for enrollment. Deliberately never sends
     /// `allowed_hosts` -- the contract's `enroll` entry says the daemon does
     /// not accept one from a socket caller at all (unlike the CLI's
@@ -547,6 +582,19 @@ final class DaemonClient {
     /// Issues one call and unwraps `{"id":..,"result":{..}}`, turning
     /// `{"error":{"code":..,"message":..}}` into a thrown `Failure`. The
     /// message is always a fixed label by contract, so it is safe to show.
+    /// A call's result as an object, for the two probes -- whose answers are
+    /// unions over three outcomes rather than one fixed shape, and whose
+    /// unreadable cases are defined to degrade rather than to throw. Decoded
+    /// once here so `RoutingProbeOutcome` and `RoutingEvidence` do the
+    /// degrading, in the target where it is tested.
+    private func resultObject(_ method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+        let data = try rawResult(method, params: params)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure(code: "unavailable", message: "unparseable-response")
+        }
+        return object
+    }
+
     private func rawResult(_ method: String, params: [String: Any] = [:]) throws -> Data {
         let paramsJSON: String
         if params.isEmpty {

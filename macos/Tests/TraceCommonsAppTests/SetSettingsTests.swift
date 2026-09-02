@@ -1,4 +1,5 @@
 import TCBridge
+import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
@@ -230,6 +231,8 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         "preview_cancel",
         "preview_request",
         "preview_visible",
+        "probe_routed_tools",
+        "probe_routing",
         "queue_outcome_counts",
         "refresh_history",
         "resume",
@@ -269,6 +272,10 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         try? client.cancelPreview(entryID: "e")
         _ = try? client.requestPreview(entryID: "e")
         try? client.setVisiblePreviews(entryIDs: ["e"])
+        // Both proxy-facing calls, driven through the same client. They
+        // reach a recording daemon here, never a socket and never a port.
+        _ = try? client.probeRouting(RoutingForm(on: true, port: 8463, tokenDir: ""))
+        _ = try? client.probeRoutedTools(RoutingForm(on: true, port: 8463, tokenDir: ""))
         _ = try? client.queueOutcomeCounts()
         try? client.refreshHistory()
         try? client.resume()
