@@ -1,4 +1,5 @@
 import Foundation
+import TCShellCore
 import UserNotifications
 
 /// Local notifications, with exactly two actions.
@@ -57,16 +58,42 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// The 4-hour digest. Passive, so Focus and Do Not Disturb hold it.
-    func postDigest(pendingCount: Int, projects: [String]) {
-        guard available, pendingCount > 0 else { return }
+    ///
+    /// Fires for either half: sessions waiting for review, or sessions that
+    /// were contributed without being asked about since the last one. It used
+    /// to guard on `pendingCount > 0` alone, which meant a contributor whose
+    /// projects were all armed -- nothing ever queued, nothing ever waiting --
+    /// received no digest at any point. Silence was the reward for trusting
+    /// the app most.
+    func postDigest(
+        pendingCount: Int,
+        projects: [String],
+        contributedCount: Int = 0,
+        contributedProjects: [String] = [],
+        creditPending: Double = 0
+    ) {
+        guard available, pendingCount > 0 || contributedCount > 0 else { return }
         let content = UNMutableNotificationContent()
         content.title = "Trace Commons"
-        let noun = pendingCount == 1 ? "session" : "sessions"
-        let from = projects.isEmpty ? "" : " from " + Self.joined(projects)
-        content.body = """
-        \(pendingCount) \(noun) ready\(from).
-        Nothing is sent until you review them.
-        """
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. They are about different things and
+        // a contributor acts on only one of them, so they are separate lines
+        // rather than one merged sentence.
+        var lines: [String] = []
+        if pendingCount > 0 {
+            let noun = pendingCount == 1 ? "session" : "sessions"
+            let from = projects.isEmpty ? "" : " from " + Self.joined(projects)
+            lines.append("\(pendingCount) \(noun) ready\(from).")
+            lines.append("Nothing is sent until you review them.")
+        }
+        if let contributed = DigestCopy.contributionLine(
+            count: contributedCount,
+            projects: contributedProjects,
+            creditPending: creditPending
+        ) {
+            lines.append(contributed)
+        }
+        content.body = lines.joined(separator: "\n")
         content.categoryIdentifier = Self.categoryIdentifier
         content.interruptionLevel = .passive
         let request = UNNotificationRequest(

@@ -432,24 +432,47 @@ public sealed partial class MainWindow : Window
     /// of transcript, reaches a notification.
     /// </para>
     /// </remarks>
-    private void OnDigestDue(int pending)
+    private void OnDigestDue(DigestFacts facts)
     {
-        if (!_digestCadence.TryClaim(pending, DateTimeOffset.UtcNow))
+        if (!_digestCadence.TryClaim(facts.PendingCount, facts.ContributedCount, DateTimeOffset.UtcNow))
         {
             return;
         }
 
-        var labels = new List<string>();
-        foreach (QueueEntryViewModel entry in ViewModel.Pending)
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. Separate lines because they are
+        // about different things and a contributor acts on only one of them.
+        var lines = new List<string>();
+
+        if (facts.PendingCount > 0)
         {
-            if (entry.ProjectLabel.Length > 0 && !labels.Contains(entry.ProjectLabel))
+            var labels = new List<string>();
+            foreach (QueueEntryViewModel entry in ViewModel.Pending)
             {
-                labels.Add(entry.ProjectLabel);
+                if (entry.ProjectLabel.Length > 0 && !labels.Contains(entry.ProjectLabel))
+                {
+                    labels.Add(entry.ProjectLabel);
+                }
             }
+
+            labels.Sort(StringComparer.Ordinal);
+            lines.Add(DigestText.Body(facts.PendingCount, labels));
         }
 
-        labels.Sort(StringComparer.Ordinal);
-        _tray.ShowDigest(DigestText.Body(pending, labels));
+        // The contributed labels come off the frame, not off ViewModel.Pending:
+        // an armed project's traces were never in that list.
+        if (DigestText.ContributionLine(
+                facts.ContributedCount,
+                facts.ContributedProjects,
+                facts.CreditPending) is { } contributed)
+        {
+            lines.Add(contributed);
+        }
+
+        if (lines.Count > 0)
+        {
+            _tray.ShowDigest(string.Join("\n", lines));
+        }
     }
 
     /// <summary>

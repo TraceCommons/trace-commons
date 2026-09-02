@@ -296,9 +296,22 @@ final class AppModel: ObservableObject {
             refreshHistory()
         case .statusChanged:
             refreshStatus()
-        case .digestDue(let count, _):
+        case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
             refreshQueue()
-            Notifier.shared.postDigest(pendingCount: count, projects: waitingByProject.map(\.label))
+            // A digest can now be about what went out unasked, with nothing
+            // waiting at all -- so this also refreshes history, which is the
+            // screen those numbers came from and the one a contributor opens
+            // next.
+            if contributed > 0 {
+                refreshHistory()
+            }
+            Notifier.shared.postDigest(
+                pendingCount: count,
+                projects: waitingByProject.map(\.label),
+                contributedCount: contributed,
+                contributedProjects: contributedProjects,
+                creditPending: credit
+            )
         case .resyncRequired, .lagged:
             refreshQueue()
             refreshStatus()

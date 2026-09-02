@@ -574,6 +574,62 @@ public sealed class DaemonEvent
     public int PendingCount => IntField("pending");
 
     /// <summary>
+    /// How many sessions were contributed without being asked about since the
+    /// last digest, for a <c>digest_due</c> frame.
+    /// </summary>
+    /// <remarks>
+    /// Zero on a frame that carries no count, including every frame from a
+    /// daemon predating this field. That degrades the digest to the
+    /// waiting-only one that shipped before rather than to a wrong number.
+    /// An armed project never queues anything, so this is the only count that
+    /// is ever nonzero for a contributor who armed everything.
+    /// </remarks>
+    public int ContributedCount => IntField("contributed");
+
+    /// <summary>
+    /// Pending credit carried by those contributions. Pending, never earned:
+    /// settlement is off on every deployment shipped so far.
+    /// </summary>
+    public double CreditPending =>
+        Data is { } data
+        && data.ValueKind == JsonValueKind.Object
+        && data.TryGetProperty("credit_pending", out JsonElement credit)
+        && credit.TryGetDouble(out double value)
+            ? value
+            : 0;
+
+    /// <summary>
+    /// The project labels those contributions came from. Labels only: the
+    /// daemon has already reduced them from paths, and these go straight into
+    /// notification text that Windows may persist in its notification centre.
+    /// </summary>
+    public IReadOnlyList<string> ContributedProjects
+    {
+        get
+        {
+            if (Data is not { } data
+                || data.ValueKind != JsonValueKind.Object
+                || !data.TryGetProperty("contributed_projects", out JsonElement projects)
+                || projects.ValueKind != JsonValueKind.Array)
+            {
+                return Array.Empty<string>();
+            }
+
+            var labels = new List<string>();
+            foreach (JsonElement item in projects.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String
+                    && item.GetString() is { Length: > 0 } label)
+                {
+                    labels.Add(label);
+                }
+            }
+
+            return labels;
+        }
+    }
+
+    /// <summary>
     /// The decoded payload of a <see cref="DaemonProtocol.Events.PreviewReady"/>
     /// frame, or null for any other event or a payload that does not fit.
     /// </summary>
