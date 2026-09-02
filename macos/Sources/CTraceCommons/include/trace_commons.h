@@ -430,6 +430,25 @@ char*       tc_routing_token_line(const char* token_path);
  */
 char*       tc_routing_unreachable_line(int32_t port);
 
+/* The routing surface's discovery sentence, assembled.
+ *
+ * port is what discover_routing reported, or 0 for a machine that published
+ * no pointer. A port outside 1..65535 is treated as 0 -- the sentence for
+ * "nothing was discovered", which names no port rather than naming one
+ * nothing published.
+ *
+ * A MACHINE WITH NO POINTER IS NOT AN ERROR, and neither branch of this
+ * sentence says otherwise. It is the ordinary state of a machine without
+ * IronWire, and there is nothing here for a caller to handle: both branches
+ * are a real sentence, and neither is a failure to render as one.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_discovery_line(int32_t port);
+
 /* The routing surface's "Last checked ..." sentence, assembled.
  *
  * when is the shell's own humanised time -- "an hour ago", "yesterday". That
