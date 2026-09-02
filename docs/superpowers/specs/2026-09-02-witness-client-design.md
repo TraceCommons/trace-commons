@@ -84,6 +84,19 @@ Everything below was read out of the worktree, not recalled.
   `envelope.privacy.residual_pii_risk`, in the `POST /v1/traces` body
   (`submit.rs:1285`). It is a typed field of `PrivacyMetadata`, not a header
   and not a sibling of the envelope.
+- **The server does not take the client's risk value at face value, and never
+  has.** `rescrub_trace_envelope` (`trace_contribution.rs:4246`, and `_with` at
+  `:4253`) overwrites `privacy.residual_pii_risk` before anything reads it, and
+  ingest calls it on the submission path. Because that pass sets
+  `useful_classifier_result: false` (`:4327`) -- deliberately, and the comment
+  there records that the earlier `true` was a fail-open -- it can only ever
+  **raise** the value, never lower it. The client's number is a floor, not the
+  value. That narrows what the certificate is worth, and the narrowing is
+  stated in "What the certificate is actually buying" below.
+- **That same pass mutates the envelope**: it rewrites the risk, merges
+  `redaction_counts` and adds PII labels. So the bytes the server stores are
+  not the bytes it received, and a certificate can only ever be checked
+  against the body as it arrived.
 - **`trace-commons-contributor` already has `reqwest` 0.12 with
   `rustls-tls-native-roots`, `ring`, `hex`, `serde_json` and `sha2`.** The
   transport and the randomness this design needs are already present.
@@ -129,45 +142,126 @@ raising that pre-redaction ceiling, which is a different change with a
 different reason. What this client must do instead is refuse locally at its own
 bound rather than discover the witness's, and say so by name.
 
-**Wrong: that the merged service can serve this client at all.** Two gaps, both
-in the service half, both prerequisites here.
+**Wrong: that the merged service can serve this client at all.** Three gaps,
+all in the service half, all prerequisites here. The first was raised by the
+parallel ingest-integration work and is adopted rather than re-argued: the
+certificate binds a redacted transcript string the server never holds.
 
-## The two gaps in the merged service
+**Also corrected, from the same source.** The brief said the server takes the
+client's `residual_pii_risk` at face value. It does not, and never has:
+`rescrub_trace_envelope` overwrites it on receipt and, passing
+`useful_classifier_result: false`, can only raise it. Everything in this
+document that turned on "the server trusts a self-report" has been rewritten;
+see "What the certificate is actually buying", which is a smaller and more
+accurate prize than the one this work was commissioned against.
 
-### The wire shape is text, and the client's redaction is not
+## The three gaps in the merged service
 
-`POST /v1/witness` takes `{raw_transcript: String, consent}` and returns a
-redacted `String`. The client's redaction takes a `RawTraceContribution` and
-returns a `TraceContributionEnvelope`. These are not the same operation and one
-cannot be substituted for the other:
+### The certificate binds something the server does not have
+
+`witness_service/mod.rs:124` is the whole problem in one field:
+
+```rust
+    /// The redacted artifact, byte for byte as the certificate's digest was
+    /// taken over it.
+    pub redacted_artifact: String,
+```
+
+The certificate commits to a redacted **transcript string**. The server never
+holds that string. It holds a serialised `TraceContributionEnvelope`, which is
+what `POST /v1/traces` carries. So as built there is nothing on the server that
+can be checked against the hash the certificate names, and
+`verify_witness_certificate`'s `redacted_bytes` parameter has no correct
+argument.
+
+**Ruling: the certificate binds the serialised envelope bytes.** This is the
+resolution the parallel ingest-integration plan reached, and it is adopted here
+rather than argued with.
+
+An earlier draft of this spec had the certificate bind the bytes
+`redaction_hash` already covers -- `to_vec(events) || to_vec(counts)` -- so
+that scope stamping could not disturb it. That is now rejected, and the reason
+is worth keeping because it is the same reason as the next section's: it
+requires the **server** to re-serialise `events` and `counts` out of a
+deserialised envelope in order to rebuild the digest input. A serde round trip
+is exactly the thing that must not sit between the bytes and the hash. Moving
+the fragility from the client to the server is not removing it.
+
+### The client's redaction is structured, so the witness must build the envelope
+
+`POST /v1/witness` takes `{raw_transcript: String, consent}` and redacts text.
+The client has a `RawTraceContribution` and needs a
+`TraceContributionEnvelope`. These are not the same operation:
 
 - `redact_trace` walks events individually, applies tool-payload profiles by
   tool name, canonicalizes structured payloads, computes
   `redaction_hash(events, counts)`, builds a trace card, and derives
   `residual_pii_risk` from the merged report. `redact_text` is one pass over a
-  flat string and produces none of that.
-- **A correction is deliberately not scrubbed** (`trace_contribution.rs`, the
-  S5 rule): neither rewriting pass runs over `outcome.human_correction`, and a
-  credential-shaped correction is *refused* rather than masked. A text pass
-  over a serialized `RawTraceContribution` would rewrite the correction, which
-  is a behaviour change to the one field the pipeline is careful not to touch.
-- The certificate's digest must match bytes the server holds. If the witness
-  returns a string, the client must parse it back into an envelope and
-  re-serialize, and the digest survives only if that round trip is byte-exact.
-  It is not worth depending on that.
+  flat string and produces none of it.
+- **A correction is deliberately not scrubbed** (the S5 rule): neither
+  rewriting pass runs over `outcome.human_correction`, and a
+  credential-shaped one is *refused* rather than masked. A text pass over a
+  serialized contribution would rewrite the one field the pipeline is careful
+  not to touch.
 
-**The service must accept a `RawTraceContribution` and return a
-`TraceContributionEnvelope`.** Both types are in the permissive protocol crate,
-so the AGPL witness may use them.
+Say it plainly, because it is a cross-cutting change and not a parameter swap:
+**the witness stops being a thing that redacts text and becomes the thing that
+builds the envelope.** It must be given everything an envelope needs, it emits
+the authoritative bytes, and the client becomes a courier for them. Both types
+are in the permissive protocol crate, so the AGPL witness may use them.
 
-And the digest must be taken over something the client does not subsequently
-change. It cannot be the serialized envelope as uploaded: `stamp_granted_scopes`
-rewrites the envelope after redaction, and rewrites it again on a claim re-mint
-during upload retry (`submit.rs:1259`). The stable target is the bytes
-`redaction_hash` already covers -- `serde_json::to_vec(events) ||
-serde_json::to_vec(counts)`, taken after `canonicalize_event_payloads`. Those
-are exactly the redaction-determined bytes, they are unaffected by scope
-stamping, and the server can reconstruct them from the envelope it receives.
+### Bytes as received, and everything that follows from it
+
+The submit handler must take `Bytes`, not `Json`, and digest the body exactly
+as it arrived. The mirror on this side is the constraint the rest of this
+design bends around:
+
+> **The client transmits the witness's bytes verbatim. Nothing between
+> certification and submission may deserialise, re-serialise, re-order,
+> pretty-print, or append to them.**
+
+That is not a caution. It is falsified by code that exists today, and three
+things have to move.
+
+**1. Every upload path in this client re-serialises.** `Client::call_json`
+(`operator-client/src/client.rs:68`) delegates to `call_raw` (`:102`), and
+`call_raw` does `request.json(body)` over a `Req: Serialize`. There is no
+byte-body call on the operator client at all, so a witnessed submission cannot
+use either. One must be added, setting `Content-Type: application/json` and
+passing the bytes through untouched.
+
+**2. `stamp_granted_scopes` rewrites the envelope after redaction.**
+`submit.rs:1217` applies the claim's granted scopes and uses to the finished
+envelope, and `upload_with_retry` (`:1251`) applies them *again* after a
+re-mint on a 401/403, precisely so a stale grant is not resent. Either write is
+a byte change after certification and breaks the digest.
+
+So for a witnessed submission the grants move to the front: the claim is minted
+**before** the witness call, the granted scope and use lists travel in the
+witness request, and the enclave applies them while building the envelope. The
+client stamps nothing.
+
+`apply_granted_scopes` lives at `trace-commons-contributor/src/envelope.rs:671`
+-- a permissive crate, so an AGPL witness may legally depend on it, but it must
+not: pulling `trace-commons-contributor` into the enclave image drags
+`reqwest`, `notify`, `sysinfo` and `tempfile` in with it, and the witness's
+dependency tree is named in `deploy/witness/README.md` as the largest single
+attack-surface reduction available to this deployment. **Move
+`apply_granted_scopes` to `trace-commons-protocol`** and re-export it from its
+current home so no other caller moves.
+
+**3. A re-mint cannot restamp, so it must refuse.** On a 401/403 a witnessed
+submission has three options and two are wrong: restamping breaks the digest,
+and silently re-witnessing sends the raw session a second time on the strength
+of a verification the contributor made for a different exchange. It refuses,
+with `witness_claim_expired`, and the contributor re-runs -- which re-verifies
+and re-witnesses explicitly.
+
+**And a consequence for the preview path.** `daemon/preview.rs` builds the
+envelope with no claim in hand. A witnessed preview must therefore mint one
+first, or refuse with `witness_claim_unavailable`. This is a real behaviour
+change to the desktop shells' preview and is called out in the plan rather than
+discovered during it.
 
 ### Nothing supplies Intel collateral to the client
 
@@ -241,8 +335,9 @@ re-derived:
 Every one of these refuses the **submission**, not merely the witness step.
 Falling back to local redaction when a witness was configured is not a safe
 default dressed as a cautious one: the contributor's bytes stay home, but the
-envelope then carries a self-reported `residual_pii_risk` while the contributor
-believes it carried a certificate, and the operator sees an uncertified
+envelope then carries an ordinary client-computed `residual_pii_risk` -- a
+floor the server will overwrite -- while the contributor believes it carried a
+certificate, and the operator sees an uncertified
 submission from a contributor they had enrolled as certified. Silence about a
 downgrade is the failure this whole design is aimed at.
 
@@ -261,6 +356,8 @@ downgrade is the failure this whole design is aimed at.
 | Witness refuses or is unreachable **after** verification | `witness_unavailable` | Refuse this session. |
 | Certificate signature does not verify against the pinned address | `witness_certificate_unverified` | Refuse this session. |
 | Certificate digest does not match the envelope received | `witness_certificate_mismatched` | Refuse this session. |
+| No claim can be minted before the witness call | `witness_claim_unavailable` | Refuse this session. |
+| The claim expired and a re-mint would restamp certified bytes | `witness_claim_expired` | Refuse this session. |
 
 The last two matter more than they look. The client verifies the certificate it
 is about to forward. It is the only party holding both the raw input and the
@@ -327,12 +424,51 @@ a field describing itself.
 
 During rollout both shapes are on the wire at once, and that is fine because
 the fields do not overlap: `envelope.privacy.residual_pii_risk` remains
-present, client-computed, and treated by ingest exactly as it is today. The
-certificate is additional evidence a server may choose to weigh. Whether it
-does -- and what it licenses -- is the server-side plan named in the service
-plan's "Not in this plan", and nothing in this client depends on that plan
-having run. A client emitting certificates at a server that ignores them
+present and client-computed, and ingest keeps overwriting it exactly as it does
+today. The certificate is additional evidence a server may choose to weigh.
+Whether it does -- and what it licenses -- is the server-side plan named in the
+service plan's "Not in this plan", and nothing in this client depends on that
+plan having run. A client emitting certificates at a server that ignores them
 submits successfully and loses nothing.
+
+Because the digest is over the body as it arrived, and ingest's rescrub mutates
+the envelope in place, the server must capture the received bytes and verify
+before it rescrubs. Verifying a stored envelope against a certificate will fail
+on an honest submission. That is a server-side sequencing constraint rather
+than a client one, and it is recorded here because it is a consequence of this
+client's contract.
+
+## What the certificate is actually buying
+
+The framing this design was commissioned under -- "today `residual_pii_risk` is
+trusted, and a certificate replaces that trust" -- is half right, and the half
+that is wrong changes the size of the prize.
+
+The server has never trusted the client's number. `rescrub_trace_envelope`
+overwrites it on receipt, and with `useful_classifier_result: false` that pass
+can only raise it. A client claiming `Low` on a session full of PII gets a
+`High` from the server's own deterministic sweep and is held. The self-report
+is a floor, and the floor is already enforced.
+
+What a certificate adds is therefore narrower and worth stating precisely:
+
+- **A verdict the server cannot reach on its own.** The server's synchronous
+  pass runs no classifier, which is exactly why it may only raise. A witness
+  running `full-pipeline` has run one, so its verdict carries evidence the
+  rescrub does not have. That is the only direction in which a certificate can
+  move an outcome -- it is what could license *lowering* a floor, or skipping
+  the asynchronous backstop that exists to supply the missing classifier
+  evidence.
+- **Attribution of the redaction to a known program.** Not "these bytes are
+  clean" but "a program with this measurement produced these bytes from bytes
+  it was given". The server has no way to establish that from the artifact.
+
+And what it does not buy, which no operator surface may imply: it does not
+license skipping the backstop's trailing deterministic sweep. The classifier is
+trained on prose PII and will echo a credential back into a field it rewrites,
+and that sweep is what catches it. The witness verdict is a **pass** verdict
+over the originating redaction, and the server's own residual scan may still
+find a survivor it could not see.
 
 Note also the limit that plan will have to respect and this one must not
 overstate: the witness's verdict is a **pass** verdict over the originating
@@ -373,10 +509,10 @@ worth their raw sessions.** Everything else follows.
 - They do not trust the server to check the witness for them. The server checks
   a certificate against bytes it holds; only the client can check it against
   what was sent.
-- The server continues not to trust the client. That is unchanged and is the
-  point of the exercise: today `residual_pii_risk` is authorization by
-  self-report, and a certificate replaces the contributor's word with a known
-  program's.
+- The server continues not to trust the client, and did not before this
+  design either -- see "What the certificate is actually buying". What changes
+  is that the server gains classifier evidence it cannot produce for itself,
+  attributed to a program whose measurement the contributor also pinned.
 
 ## What cannot be verified until a real instance exists
 
