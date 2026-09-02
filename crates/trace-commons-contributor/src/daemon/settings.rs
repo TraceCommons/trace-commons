@@ -753,11 +753,12 @@ mod tests {
     /// back in before the ledger has a single long-lived owner.
     #[test]
     fn source_roots_does_not_yet_attach_a_routing_overlay() {
+        let (_d, store) = temp_store();
         let s = DaemonSettings {
             ironwire: Some(IronWireDeclaration::Watch { port: 8463 }),
             ..Default::default()
         };
-        assert!(!s.source_roots().is_routed());
+        assert!(!s.source_roots(&store).is_routed());
     }
 
     /// The A2 rule, at the gate it must not join.

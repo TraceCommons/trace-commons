@@ -136,6 +136,7 @@ mod tests {
             size_bytes: 0,
             group_modified_at: None,
             group_member_count: 0,
+            declared_source: None,
         }
     }
 
