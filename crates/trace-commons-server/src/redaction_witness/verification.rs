@@ -24,8 +24,8 @@
 //! [`VerifiedWitnessCertificate`] that has no other constructor. A partial
 //! verification is not discouraged here, it is unspeakable: there is no way
 //! to obtain the verified type without having passed all three, and the
-//! fields a policy would want to act on -- the token counts, the chat id --
-//! are reachable only through it.
+//! field a policy would want to act on -- the residual-risk verdict --
+//! is reachable only through it.
 //!
 //! # Fail closed on the measurement
 //!
@@ -218,10 +218,10 @@ impl std::fmt::Debug for WitnessVerificationError {
 /// There is no public constructor and no public field. The only way to hold
 /// one is to have called [`verify_witness_certificate`] and had it succeed,
 /// which is what makes a half-done verification impossible to express: code
-/// downstream that wants the token counts or the chat id must take this type,
-/// and a bare [`WitnessCertificate`] will not do.
+/// downstream that wants the residual-risk verdict must take this type, and a
+/// bare [`WitnessCertificate`] will not do.
 ///
-/// `Debug` renders the two digests only, as on [`WitnessCertificate`].
+/// `Debug` delegates to [`WitnessCertificate`]'s, which renders every field.
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedWitnessCertificate {
     certificate: WitnessCertificate,
@@ -229,9 +229,9 @@ pub struct VerifiedWitnessCertificate {
 
 impl std::fmt::Debug for VerifiedWitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Delegates to the certificate's own hand-written Debug, which
-        // withholds `chat_id`, `model` and the token counts. Verification
-        // does not make those safe to log.
+        // Delegates to the certificate's own hand-written Debug. No field
+        // on a certificate identifies a contributor or an upstream
+        // conversation any more -- see that type's Logging note.
         formatter
             .debug_struct("VerifiedWitnessCertificate")
             .field("certificate", &self.certificate)
@@ -254,12 +254,37 @@ impl VerifiedWitnessCertificate {
     }
 }
 
-// There are deliberately no accessors for `chat_id`, `model`, the token
-// counts or the timestamp. Nothing consumes them yet, and adding a getter per
-// field would hand back exactly the unverified-read surface that making the
-// certificate's fields private just closed. They are contributor-linked, and
-// the moment something legitimately needs one is the moment to add it -- with
-// a caller in the same commit.
+// There are deliberately no accessors for `residual_risk_verdict`,
+// `redaction_policy_version` or `timestamp`. Nothing consumes them yet, and
+// adding a getter per field would hand back exactly the unverified-read
+// surface that making the certificate's fields private just closed. The
+// moment something legitimately needs one is the moment to add it -- with a
+// caller in the same commit. `residual_risk_verdict` is the one that will:
+// the PII-backstop bypass reads it, and it gets its accessor in the commit
+// that introduces that caller, not before.
+//
+// WHOEVER WRITES THAT BYPASS: read this first. A verified certificate does
+// NOT license skipping the backstop wholesale, and the reason is not
+// conservatism.
+//
+// The witness runs the ORIGINATING redaction ordering -- deterministic pass,
+// then prose classifier -- because that is what its raw input requires, and
+// matching it is what makes the certificate describe the pass ingest performs.
+// The server backstop runs a different one, and its trailing deterministic
+// sweep is not redundancy: the classifier is trained on prose PII, not
+// credential formats, so it writes a credential straight back into a field it
+// was handed. That sweep is what catches it, and per the pilot's own notes
+// that case is the whole of the quarantine backlog.
+//
+// So a `Low` verdict here is a PASS OVER THE ORIGINATING PASS. A credential
+// the classifier itself emitted survives it and is still on the artifact. A
+// bypass may therefore skip the backstop's CLASSIFIER stage on a verified
+// certificate; it must still run the trailing sweep, or it re-opens exactly
+// the hole the sweep exists to close.
+//
+// `deploy/witness/README.md` states the same limit for operators, and
+// `witness_service::mod`'s doc states it on the issuing side. It is repeated
+// here because this is the file the bypass gets written in.
 //
 // `timestamp` in particular is bound by the signature and *not* checked for
 // freshness: a certificate has no nonce and is replayable against the same
@@ -328,6 +353,7 @@ mod tests {
     use crate::redaction_witness::certificate::CertificateDetails;
     use k256::ecdsa::SigningKey;
     use sha3::Keccak256;
+    use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
     /// The artifact bytes every test verifies against, unless it is about a
     /// mismatch.
@@ -346,13 +372,10 @@ mod tests {
     /// formatter test cannot pass because two fields happened to be equal.
     fn details() -> CertificateDetails {
         CertificateDetails {
-            chat_id: "chatcmpl-secret-session".to_string(),
-            prompt_tokens: 1_204,
-            completion_tokens: 337,
-            model: "qwen3.6-27b-fp8".to_string(),
-            timestamp: 1_788_000_000,
+            residual_risk_verdict: ResidualPiiRisk::Medium,
             redaction_policy_version: "policy-v3".to_string(),
             witness_measurement: PINNED_MEASUREMENT.to_string(),
+            timestamp: 1_788_000_000,
         }
     }
 
@@ -711,14 +734,11 @@ mod tests {
                 display.contains(expected),
                 "expected {expected} in the rendered error, got {display}"
             );
-            // Nothing that identifies a contributor or their session.
-            for leak in [
-                "chatcmpl-secret-session",
-                "qwen3.6-27b-fp8",
-                "1204",
-                "337",
-                &digest_of(ARTIFACT),
-            ] {
+            // Nothing that hands back contributor content. The artifact
+            // digest is the handle on it that this module's hash-only
+            // discipline keeps out of error text, and the policy alias is a
+            // certificate field no refusal has any reason to echo.
+            for leak in ["policy-v3", &digest_of(ARTIFACT)] {
                 assert!(
                     !display.contains(leak),
                     "error text renders {leak}: {display}"
@@ -744,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn neither_formatter_renders_verified_certificate_identifiers() {
+    fn the_verified_wrapper_renders_the_certificate_it_wraps() {
         let (k, pin) = witness();
         let cert = certificate();
         let signature = sign(&k, &cert);
@@ -753,9 +773,8 @@ mod tests {
 
         // There is no Display; Debug is the path a `tracing` call would take.
         let debug = format!("{verified:?}");
-        for leak in ["chatcmpl-secret-session", "qwen3.6-27b-fp8", "1204", "337"] {
-            assert!(!debug.contains(leak), "Debug renders {leak}: {debug}");
-        }
         assert!(debug.contains(PINNED_MEASUREMENT));
+        assert!(debug.contains(&digest_of(ARTIFACT)));
+        assert!(debug.contains("Medium"));
     }
 }

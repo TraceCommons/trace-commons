@@ -2423,7 +2423,13 @@ fn merge_privacy_filter_summary(
     }
 }
 
-fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
+/// The `redaction_pipeline_version` alias ingest writes for a given
+/// classifier backend.
+///
+/// Public so a caller that runs the same pipeline out-of-band -- the
+/// redaction witness -- reports the same alias from the same function
+/// instead of assembling its own string that can drift.
+pub fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
     match backend {
         PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
         PrivacyFilterBackendTag::Sidecar => format!(
@@ -2487,6 +2493,24 @@ pub enum PrivacyFilterConfigError {
         backend: &'static str,
         feature: &'static str,
     },
+}
+
+/// One text after the full redaction pipeline, with the report that pass
+/// actually produced.
+///
+/// The report travels with the text because a caller that must state a
+/// residual-risk verdict over this redaction has no way to reconstruct it:
+/// [`PrivacyMetadata`] carries only counts and labels, not the
+/// `coverage_incomplete` / `key_finding_detected` / `blocked_secret_detected`
+/// flags [`residual_risk`] and [`residual_risk_basis`] read.
+pub struct FullyRedactedText {
+    /// The redacted text: deterministic pass, then prose classifier.
+    pub redacted: String,
+    /// The report from both stages, merged.
+    pub report: RedactionReport,
+    /// What the classifier reported, or `None` when no adapter was attached
+    /// or the adapter declined to redact.
+    pub privacy_filter_summary: Option<SafePrivacyFilterSummary>,
 }
 
 #[async_trait]
@@ -3740,6 +3764,90 @@ impl DeterministicTraceRedactor {
         Ok(redaction.redacted_text)
     }
 
+    /// One text through the **whole** redaction pipeline: the deterministic
+    /// pass, then the prose-PII classifier over its output.
+    ///
+    /// # This awaits a network call
+    ///
+    /// Under the `near-ai` and `sidecar` backends the classifier stage is an
+    /// HTTP request to another host; under `self-hosted` it is a request to a
+    /// loopback process. Only a redactor built by
+    /// [`DeterministicTraceRedactor::deterministic_only`] or `bare` has no
+    /// adapter attached and therefore makes no request. This is not a pure
+    /// function, it is not cheap, and it is cancellation-visible -- do not
+    /// call it in a loop over a large corpus without a budget.
+    ///
+    /// A configured `near-ai` or `self-hosted` backend that fails returns
+    /// `Err` (fail-closed); a `sidecar` failure degrades to the deterministic
+    /// result with `report.coverage_incomplete` set. Both behaviours come from
+    /// [`Self::apply_privacy_filter_to_text`] and are unchanged here.
+    ///
+    /// # Ordering, and why it is this one
+    ///
+    /// Deterministic first, classifier second. This is
+    /// [`TraceRedactor::redact_trace`]'s ordering -- the two share the same
+    /// private helper, so they cannot drift -- and it is the ordering for any
+    /// caller holding a *raw* transcript, for two reasons. Running the
+    /// deterministic pass first means credentials and local paths are already
+    /// masked before any text leaves the process for the classifier. And the
+    /// classifier is trained on prose PII, not credential formats, so it
+    /// cannot be relied on to catch what the deterministic pass catches.
+    ///
+    /// The server-side backstop [`rescrub_envelope_prose_pii_with`] orders
+    /// them the other way -- classifier, then a deterministic sweep over the
+    /// classifier's output -- because its input has *already* been through
+    /// this function's deterministic pass at contribution time. Its trailing
+    /// sweep exists because the classifier can echo a credential back into a
+    /// field verbatim. That sweep has no counterpart here, so a report from
+    /// this function does not cover it: a caller deriving a verdict from this
+    /// report is speaking for the originating pass, not for the backstop.
+    ///
+    /// The returned [`RedactionReport`] is what
+    /// [`residual_risk`]/[`residual_risk_basis`] consume. It is returned
+    /// rather than folded into a [`PrivacyMetadata`] precisely because
+    /// `PrivacyMetadata` cannot reconstruct it.
+    pub async fn redact_text_through_prose_filter(
+        &self,
+        input: &str,
+    ) -> Result<FullyRedactedText, TraceContributionError> {
+        let mut state = RedactionState::default();
+        let mut report = RedactionReport::default();
+        let mut privacy_filter_summary = None;
+        let redacted = self
+            .redact_text_with_state_through_prose_filter(
+                input,
+                &mut state,
+                &mut report,
+                &mut privacy_filter_summary,
+            )
+            .await?;
+        Ok(FullyRedactedText {
+            redacted,
+            report,
+            privacy_filter_summary,
+        })
+    }
+
+    /// The body of [`Self::redact_text_through_prose_filter`], threading the
+    /// placeholder state, report and filter summary a multi-field caller
+    /// carries across fields.
+    ///
+    /// `redact_trace` and the public entry point above both go through here,
+    /// so there is exactly one ordering of the two stages in this crate for a
+    /// caller starting from raw text.
+    async fn redact_text_with_state_through_prose_filter(
+        &self,
+        input: &str,
+        state: &mut RedactionState,
+        report: &mut RedactionReport,
+        privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
+    ) -> Result<String, TraceContributionError> {
+        let (redacted, child_report) = self.redact_text_with_state(input, state);
+        report.merge(child_report);
+        self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
+            .await
+    }
+
     pub fn with_known_path_prefixes(
         prefixes: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self, PrivacyFilterConfigError> {
@@ -3993,12 +4101,14 @@ impl TraceRedactor for DeterministicTraceRedactor {
         for raw_event in trace.events {
             let redacted_content = match raw_event.content {
                 Some(content) => {
-                    let (mut redacted, child_report) =
-                        self.redact_text_with_state(&content, &mut state);
-                    report.merge(child_report);
-                    redacted = self
-                        .apply_privacy_filter_to_text(
-                            redacted,
+                    // Same two stages, same order, as
+                    // `redact_text_through_prose_filter`: they share this
+                    // helper so the pipeline a witness attests cannot drift
+                    // from the one ingest runs.
+                    let redacted = self
+                        .redact_text_with_state_through_prose_filter(
+                            &content,
+                            &mut state,
                             &mut report,
                             &mut privacy_filter_summary,
                         )
@@ -7586,6 +7696,289 @@ mod tests {
         unsafe {
             std::env::remove_var("TRACE_PRIVACY_FILTER_BACKEND");
         }
+    }
+
+    /// Records what text the classifier was actually handed, and replaces a
+    /// person's name with a marker so the caller can tell the classifier's
+    /// output apart from the deterministic pass's. A name is deliberate: it
+    /// is prose PII the deterministic regex suite does not touch, so only the
+    /// classifier stage can remove it.
+    #[derive(Debug, Default)]
+    struct RecordingPrivacyFilterAdapter {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for RecordingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+        {
+            self.seen.lock().unwrap().push(text.to_string());
+            let mut report = super::RedactionReport::default();
+            report.increment("privacy_filter:person_name");
+            report.add_pii_label("person_name");
+            Ok(Some(super::SafePrivacyFilterRedaction {
+                redacted_text: text.replace(CLASSIFIER_ONLY_PII, "<CLASSIFIER_NAME>"),
+                summary: super::SafePrivacyFilterSummary {
+                    schema_version: 1,
+                    output_mode: "redacted_text_only".to_string(),
+                    span_count: 1,
+                    by_label: std::collections::BTreeMap::new(),
+                    decoded_mismatch: false,
+                    classify_policy: None,
+                    events_examined: 0,
+                    events_skipped_by_policy: 0,
+                },
+                report,
+            }))
+        }
+    }
+
+    /// A classifier whose OUTPUT contains a credential its input did not.
+    ///
+    /// Not a contrivance: this is the real hazard. The classifier is a model,
+    /// it rewrites the text it is given, and it can emit a credential -- or
+    /// echo one back -- that the deterministic pass would have caught. It is
+    /// also the only way to make the two stage orderings *observable in the
+    /// output*: with disjoint findings the orderings produce identical text,
+    /// which is exactly how an order-insensitive fixture lets a reversal pass.
+    #[derive(Debug, Default)]
+    struct CredentialEmittingPrivacyFilterAdapter;
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for CredentialEmittingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+        {
+            Ok(Some(super::SafePrivacyFilterRedaction {
+                redacted_text: text.replace(CLASSIFIER_EMITS_HERE, EMITTED_CREDENTIAL),
+                summary: super::SafePrivacyFilterSummary::default(),
+                report: super::RedactionReport::default(),
+            }))
+        }
+    }
+
+    const CLASSIFIER_EMITS_HERE: &str = "zzq-classifier-emits-here-zzq";
+    // Split so the twenty-character form never appears verbatim in the
+    // source. The value is synthetic -- a keyboard walk, not a
+    // credential -- but GitHub push protection matches the shape, and it
+    // is right to: a scanner that trusted our word about which
+    // AKIA-prefixed strings are fake would be useless. Our own detector
+    // requires the prefix, so the fixture cannot avoid it; splitting the
+    // literal is the honest way to keep both checks working.
+    const EMITTED_CREDENTIAL: &str = concat!("AKIA", "QQWERTYUIOPASDFG");
+
+    fn credential_emitting_redactor() -> super::DeterministicTraceRedactor {
+        use std::sync::Arc;
+        super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            Arc::new(CredentialEmittingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::SelfHosted,
+        )
+    }
+
+    /// Documents the ordering's known limit, and is the fixture that makes
+    /// the ordering observable at all.
+    ///
+    /// The deterministic pass runs BEFORE the classifier, so a credential the
+    /// classifier itself emits is never swept. It survives into the output.
+    /// That is not an accident of this test: it is the gap the server-side
+    /// backstop's trailing deterministic sweep exists to close, and it is
+    /// precisely what a verdict derived from this pass does NOT cover.
+    ///
+    /// If this test ever starts failing because the credential is gone, the
+    /// stage order has been reversed or a third stage has been added -- both
+    /// of which change what every caller of this function is attesting.
+    #[tokio::test]
+    async fn a_credential_the_classifier_emits_is_not_swept_by_this_pass() {
+        let result = credential_emitting_redactor()
+            .redact_text_through_prose_filter(&format!("log line {CLASSIFIER_EMITS_HERE} end"))
+            .await
+            .expect("both stages succeed");
+        assert!(
+            result.redacted.contains(EMITTED_CREDENTIAL),
+            "the deterministic pass runs first, so it cannot see what the \
+             classifier emitted after it: {}",
+            result.redacted
+        );
+    }
+
+    /// Raw text carrying both a deterministic-only finding (an AWS key,
+    /// which the prose classifier is not trained on) and a prose finding (a
+    /// person's name, which the deterministic regex suite does not remove).
+    const BOTH_STAGES_INPUT: &str =
+        "deploy failed for Alice Brannigan, the key AKIAIOSFODNN7EXAMPLE was rejected";
+    const BOTH_STAGES_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+    const CLASSIFIER_ONLY_PII: &str = "Alice Brannigan";
+
+    fn recording_redactor() -> (
+        super::DeterministicTraceRedactor,
+        std::sync::Arc<RecordingPrivacyFilterAdapter>,
+    ) {
+        use std::sync::Arc;
+        let adapter = Arc::new(RecordingPrivacyFilterAdapter::default());
+        let redactor = super::DeterministicTraceRedactor::bare()
+            .with_privacy_filter(adapter.clone(), super::PrivacyFilterBackendTag::SelfHosted);
+        (redactor, adapter)
+    }
+
+    /// The whole point of the entry point: both stages run, and the report
+    /// that comes back carries what both of them found. A caller deriving a
+    /// residual-risk verdict from this report is speaking for the redaction
+    /// that was actually performed.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_runs_both_stages_and_returns_one_report() {
+        let (redactor, _adapter) = recording_redactor();
+        let result = redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("both stages succeed");
+
+        assert!(
+            !result.redacted.contains(BOTH_STAGES_SECRET),
+            "deterministic stage did not run: {}",
+            result.redacted
+        );
+        assert!(
+            result.redacted.contains("<CLASSIFIER_NAME>"),
+            "classifier stage did not run: {}",
+            result.redacted
+        );
+        assert!(
+            result.report.blocked_secret_detected,
+            "deterministic findings missing from the merged report: {:?}",
+            result.report
+        );
+        assert!(
+            result
+                .report
+                .pii_labels_present
+                .iter()
+                .any(|label| label == "person_name"),
+            "classifier findings missing from the merged report: {:?}",
+            result.report
+        );
+        assert!(
+            result.privacy_filter_summary.is_some(),
+            "classifier summary must be returned, not dropped"
+        );
+    }
+
+    /// Ordering, asserted on the classifier's own input rather than inferred
+    /// from the output: the deterministic pass runs FIRST, so a credential is
+    /// already masked before any text leaves this process for the classifier.
+    /// Reversing the two stages would send the raw key to a network backend.
+    #[tokio::test]
+    async fn deterministic_stage_runs_before_the_classifier_sees_the_text() {
+        let (redactor, adapter) = recording_redactor();
+        redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("both stages succeed");
+
+        let seen = adapter.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "classifier must be called exactly once");
+        assert!(
+            !seen[0].contains(BOTH_STAGES_SECRET),
+            "the classifier was handed the raw credential, so the \
+             deterministic stage ran second: {}",
+            seen[0]
+        );
+        assert!(
+            seen[0].contains(CLASSIFIER_ONLY_PII),
+            "the classifier must still see the prose it is there to classify: {}",
+            seen[0]
+        );
+    }
+
+    /// The entry point must not drift from `redact_trace`. Same raw text
+    /// through both must produce the same redacted content, or a witness
+    /// would attest a pipeline ingest does not run.
+    #[tokio::test]
+    async fn entry_point_matches_redact_trace_on_the_same_text() {
+        use super::TraceRedactor;
+        // The order-sensitive fixture, deliberately. With disjoint findings
+        // the two stage orderings produce byte-identical output, so an
+        // equivalence test built on one cannot see the two paths drift --
+        // which is how a reversal of `redact_trace` alone passed this test
+        // before the fixture was changed.
+        let input = format!("log line {CLASSIFIER_EMITS_HERE} and key {BOTH_STAGES_SECRET}");
+        let direct = credential_emitting_redactor()
+            .redact_text_through_prose_filter(&input)
+            .await
+            .expect("entry point succeeds")
+            .redacted;
+        assert!(
+            direct.contains(EMITTED_CREDENTIAL)
+                && !direct.contains(&format!("key {BOTH_STAGES_SECRET}")),
+            "the fixture must distinguish the two orderings: {direct}"
+        );
+
+        let trace = raw_contribution_with_content(&input);
+        let envelope = credential_emitting_redactor()
+            .redact_trace(trace)
+            .await
+            .expect("redact_trace succeeds");
+        let through_envelope = envelope.events[0]
+            .redacted_content
+            .clone()
+            .expect("event keeps its content");
+
+        assert_eq!(
+            direct, through_envelope,
+            "the entry point and redact_trace must apply the same pipeline"
+        );
+    }
+
+    /// Fail-closed is preserved through the new entry point: a configured
+    /// self-hosted or NEAR AI backend that errors must refuse, never hand
+    /// back a deterministic-only result that a caller would attest as full.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_fails_closed_on_backend_error() {
+        use std::sync::Arc;
+        for backend in [
+            super::PrivacyFilterBackendTag::NearAi,
+            super::PrivacyFilterBackendTag::SelfHosted,
+        ] {
+            let redactor = super::DeterministicTraceRedactor::bare()
+                .with_privacy_filter(Arc::new(AlwaysFailingPrivacyFilterAdapter), backend);
+            let result = redactor
+                .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+                .await;
+            assert!(
+                result.is_err(),
+                "{backend:?} backend failure must refuse, not degrade"
+            );
+        }
+    }
+
+    /// A sidecar failure degrades rather than refusing -- but it must set
+    /// `coverage_incomplete`, which is the flag that forces High and the
+    /// reason the report has to be returned at all.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_marks_coverage_incomplete_on_sidecar_failure() {
+        use std::sync::Arc;
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::Sidecar,
+        );
+        let result = redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("sidecar failure degrades rather than refusing");
+        assert!(
+            result.report.coverage_incomplete,
+            "a sidecar failure must leave the pass unable to claim coverage: {:?}",
+            result.report
+        );
+        assert!(
+            !result.redacted.contains(BOTH_STAGES_SECRET),
+            "the deterministic stage still applies: {}",
+            result.redacted
+        );
     }
 
     #[derive(Debug)]
