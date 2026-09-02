@@ -102,6 +102,7 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
                 entry_id,
                 session_hash: "cli-preview-test-hash".into(),
                 source: "claude-code".into(),
+                declared_source: None,
                 project_key: "/Users/testuser/code/myproj".into(),
                 project_label: "myproj".into(),
                 path: session_ref.path.clone(),

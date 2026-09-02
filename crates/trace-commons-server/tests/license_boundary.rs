@@ -239,6 +239,7 @@ fn both_sides_of_the_boundary_are_populated() {
 
     for permissive in [
         "trace-commons-protocol",
+        "trace-commons-attestation",
         "trace-commons-contributor",
         "trace-commons-contributor-ffi",
         "trace-commons-contributor-gtk",

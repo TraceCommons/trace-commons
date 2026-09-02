@@ -14,7 +14,7 @@
 //! History records carry **no local path**. This is the surface most likely to
 //! be screenshotted, exported, or shared.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -284,6 +284,48 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
     r
 }
 
+/// What has gone out since `since`, for the digest's contribution line.
+///
+/// `since` is the last digest instant; `None` means there has never been one,
+/// and then everything in the cache counts. Withdrawn submissions are left
+/// out: a contributor who took something back should not be told it was
+/// contributed, and the withdrawal is the more recent fact about it.
+///
+/// The labels come back as a set because the digest names projects, not
+/// submissions, and a busy project would otherwise be listed once per trace.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContributedSince {
+    pub count: usize,
+    pub project_labels: BTreeSet<String>,
+    pub credit_pending: f32,
+}
+
+pub fn contributed_since(
+    records: &[HistoryRecord],
+    since: Option<DateTime<Utc>>,
+) -> ContributedSince {
+    let mut out = ContributedSince::default();
+    for rec in records {
+        if rec.withdrawn_at.is_some() {
+            continue;
+        }
+        // Strictly after: a record stamped at the exact instant of the last
+        // digest was already counted by it, and counting it twice is how a
+        // running total drifts upward on a quiet machine.
+        if let Some(since) = since {
+            if rec.submitted_at <= since {
+                continue;
+            }
+        }
+        out.count += 1;
+        if !rec.project_label.is_empty() {
+            out.project_labels.insert(rec.project_label.clone());
+        }
+        out.credit_pending += rec.credit_points_pending;
+    }
+    out
+}
+
 pub struct HistoryCache;
 
 impl HistoryCache {
@@ -375,6 +417,72 @@ mod tests {
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
             withdrawn_at: None,
         }
+    }
+
+    #[test]
+    fn contributed_since_counts_only_what_is_newer_than_the_last_digest() {
+        let records = vec![
+            record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z"),
+            record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z"),
+            record(STATUS_SUBMITTED, "2026-08-08T14:00:00Z"),
+        ];
+        let out = contributed_since(&records, Some(at("2026-08-08T12:00:00Z")));
+        assert_eq!(out.count, 2);
+    }
+
+    /// A record stamped at the exact instant of the last digest was already
+    /// counted by it. Counting it again is how a running total drifts upward
+    /// on a machine that is doing nothing.
+    #[test]
+    fn contributed_since_excludes_the_boundary_instant() {
+        let records = vec![record(STATUS_ACCEPTED, "2026-08-08T12:00:00Z")];
+        let out = contributed_since(&records, Some(at("2026-08-08T12:00:00Z")));
+        assert_eq!(out.count, 0);
+    }
+
+    #[test]
+    fn contributed_since_counts_everything_when_there_has_never_been_a_digest() {
+        let records = vec![
+            record(STATUS_ACCEPTED, "2020-01-01T00:00:00Z"),
+            record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z"),
+        ];
+        assert_eq!(contributed_since(&records, None).count, 2);
+    }
+
+    /// Someone who took a submission back should not then be told it was
+    /// contributed. The withdrawal is the more recent fact about it.
+    #[test]
+    fn contributed_since_leaves_out_withdrawn_submissions() {
+        let mut withdrawn = record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z");
+        withdrawn.withdrawn_at = Some(at("2026-08-08T14:00:00Z"));
+        let records = vec![withdrawn, record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z")];
+        assert_eq!(contributed_since(&records, None).count, 1);
+    }
+
+    /// The digest names projects, not submissions. A busy project would
+    /// otherwise be listed once per trace.
+    #[test]
+    fn contributed_since_collapses_projects_and_drops_blank_labels() {
+        let mut a = record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z");
+        a.project_label = "api".into();
+        let mut b = record(STATUS_ACCEPTED, "2026-08-08T13:30:00Z");
+        b.project_label = "api".into();
+        let mut blank = record(STATUS_ACCEPTED, "2026-08-08T13:40:00Z");
+        blank.project_label = String::new();
+        let out = contributed_since(&[a, b, blank], None);
+        assert_eq!(out.count, 3);
+        assert_eq!(out.project_labels.len(), 1);
+        assert!(out.project_labels.contains("api"));
+    }
+
+    #[test]
+    fn contributed_since_sums_pending_credit_over_the_window_only() {
+        let mut old = record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z");
+        old.credit_points_pending = 9.0;
+        let mut fresh = record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z");
+        fresh.credit_points_pending = 1.5;
+        let out = contributed_since(&[old, fresh], Some(at("2026-08-08T12:00:00Z")));
+        assert!((out.credit_pending - 1.5).abs() < f32::EPSILON, "{:?}", out);
     }
 
     fn labels(id: Uuid) -> BTreeMap<Uuid, String> {

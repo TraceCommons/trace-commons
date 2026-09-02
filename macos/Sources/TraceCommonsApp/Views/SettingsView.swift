@@ -51,6 +51,11 @@ struct SettingsContent: View {
     /// background refresh cannot rewrite what is being typed.
     @State private var handleDraft = ""
     @State private var bioDraft = ""
+    /// The project a contributor has asked to arm, held while the
+    /// confirmation is on screen. Nil means no sheet. It is the row and not
+    /// a bool because the sheet names the project, and a bool would leave
+    /// the name to be looked up from a selection that has already moved.
+    @State private var armingCandidate: ProjectRow?
 
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
@@ -646,22 +651,23 @@ struct SettingsContent: View {
         }
     }
 
-    // Only `ask` <-> `ignore` is offered here, same as onboarding screen 5:
-    // arming `auto_upload` outside a deliberate confirmation flow is still
-    // not built. Changing a mind about "ignore" -- set during onboarding or
-    // never revisited since -- should not require a terminal, so that half
-    // is wired to `AppModel.setProjectMode`, the same real `set_project_mode`
-    // call the onboarding screen uses.
+    // Every mode is offered here, arming included -- the Linux and Windows
+    // shells have offered it from their settings for some time, and until
+    // now a macOS contributor's only route to it was the CLI. Onboarding
+    // still withholds it, deliberately: arming before anyone has seen a
+    // single preview asks for trust they have no basis to give yet
+    // (`OnboardingProjectsView`). By the time someone is in Settings they
+    // have that basis, which is the difference between the two surfaces.
     //
-    // That call now names the project by the opaque id `list_projects` mints.
-    // It used to send `project_label` as a `project_key` and be refused with
-    // `project-key-unrecognized` for every real project, which this comment
-    // used to describe as expected; it is not expected any more.
+    // The list comes from `ProjectRow.offerableModes` rather than from
+    // `ProjectMode`'s cases, because the daemon refuses `auto_upload` for
+    // the unresolvable bucket and a control offering it there would be a
+    // choice that cannot be delivered.
     //
-    // When the arming flow IS built, it must consult `ProjectRow.canBeArmed`
-    // rather than listing every `ProjectMode`. The daemon refuses
-    // `auto_upload` for the unresolvable bucket, so a control offering it
-    // there would be a choice that cannot be delivered.
+    // `setProjectMode` names the project by the opaque id `list_projects`
+    // mints. It used to send `project_label` as a `project_key` and be
+    // refused with `project-key-unrecognized` for every real project; that
+    // is not expected any more.
     private var projects: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Projects")
@@ -682,22 +688,13 @@ struct SettingsContent: View {
                             // matching on because it is display text.
                             Text(project.displayLabel)
                             Spacer()
-                            Text(modeSentence(project.mode)).foregroundStyle(.secondary)
-                            if project.mode == .ask || project.mode == .ignore {
-                                Button(project.mode == .ignore ? "Ask again" : "Ignore") {
-                                    model.setProjectMode(
-                                        project,
-                                        mode: project.mode == .ignore ? .ask : .ignore
-                                    )
-                                }
-                                .buttonStyle(.bordered)
-                            }
+                            modePicker(project)
                         }
                         // Why this row is different, said on the row rather
-                        // than in a footnote -- and it also corrects the
-                        // section's closing sentence for this one project,
-                        // which otherwise reads as a promise that arming
-                        // becomes possible later. For this row it never does.
+                        // than in a footnote. Its picker is short one option
+                        // and that absence would otherwise be unexplained --
+                        // a contributor comparing two rows would be left to
+                        // guess whether it was a bug.
                         if project.isUnresolvedBucket {
                             Text(ProjectCopy.unresolvedBucketNote)
                                 .font(TC.Font_.caption)
@@ -707,14 +704,72 @@ struct SettingsContent: View {
                     }
                     .font(TC.Font_.body)
                 }
-                Text("""
-                Arming a project so it contributes without asking is a deliberate \
-                confirmation flow, and it is not built yet.
-                """)
-                .font(TC.Font_.caption)
-                .foregroundStyle(.secondary)
             }
         }
+        // Presented from the section rather than from each row: one sheet
+        // for the list, named by whichever row is being armed. A modifier
+        // per row would build as many dialogs as there are projects, and
+        // two of them can be presented at once.
+        .confirmationDialog(
+            armingCandidate.map { ProjectArmingCopy.confirmationTitle(project: $0.displayLabel) }
+                ?? "",
+            isPresented: Binding(
+                get: { armingCandidate != nil },
+                // Any dismissal -- the Escape key, a click outside, either
+                // button -- clears the candidate. Leaving it set would show
+                // the sheet again the next time anything else republished
+                // this view.
+                set: { if !$0 { armingCandidate = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: armingCandidate
+        ) { project in
+            // `.destructive` is the wrong role: arming destroys nothing and
+            // is reversible from this same picker. It is emphasised rather
+            // than alarmed -- the Linux shell marks it destructive, which
+            // this shell deliberately does not follow, because on macOS that
+            // role means data is about to be lost and none is.
+            Button(ProjectArmingCopy.confirm) {
+                model.setProjectMode(project, mode: .autoUpload)
+                armingCandidate = nil
+            }
+            Button(ProjectArmingCopy.cancel, role: .cancel) { armingCandidate = nil }
+        } message: { _ in
+            Text(ProjectArmingCopy.confirmationBody)
+        }
+    }
+
+    /// The mode control for one project row.
+    ///
+    /// The binding reads through to `project.mode` -- the daemon's own
+    /// answer, republished by `refreshProjects` -- and never to local state,
+    /// so a mode the daemon refuses leaves the picker showing what is
+    /// actually in force rather than what was clicked. That is also what
+    /// makes cancelling the arming sheet need no revert: nothing moved.
+    private func modePicker(_ project: ProjectRow) -> some View {
+        Picker(
+            "",
+            selection: Binding(
+                get: { project.mode },
+                set: { wanted in
+                    guard wanted != project.mode else { return }
+                    // Arming is allowed from here, but never silently.
+                    // Everything else is a direct call: changing a mind
+                    // about "ignore" should not cost a sheet.
+                    if wanted == .autoUpload {
+                        armingCandidate = project
+                    } else {
+                        model.setProjectMode(project, mode: wanted)
+                    }
+                }
+            )
+        ) {
+            ForEach(project.offerableModes, id: \.self) { mode in
+                Text(ProjectCopy.modeChoiceLabel(mode)).tag(mode)
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
     }
 
     // MARK: - The local change log
@@ -793,14 +848,6 @@ struct SettingsContent: View {
         }
         guard let project, !project.isEmpty else { return sentence }
         return "\(sentence) \(project)"
-    }
-
-    private func modeSentence(_ mode: ProjectMode) -> String {
-        switch mode {
-        case .ask: return "Asks you first"
-        case .autoUpload: return "Contributed without asking"
-        case .ignore: return "Never offered"
-        }
     }
 
     /// Spec §5.4 / §6.9: a 12pt filled green disc carrying a white tick, then

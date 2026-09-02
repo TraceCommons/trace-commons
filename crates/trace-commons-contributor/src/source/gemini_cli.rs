@@ -119,6 +119,7 @@ fn session_ref_for(path: PathBuf, cwd: Option<String>) -> Option<SessionRef> {
     let project = project_label(&project_dir, cwd.as_deref());
     Some(SessionRef {
         source: SOURCE_GEMINI_CLI,
+        declared_source: None,
         path,
         project,
         cwd,
@@ -456,6 +457,7 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
         // back-reference to a parent, so nothing is ever merged in.
         subagent_count: 0,
         subagents_dropped: 0,
+        routing: Vec::new(),
     })
 }
 

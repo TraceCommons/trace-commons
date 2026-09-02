@@ -412,7 +412,7 @@ impl App {
                 match event.name.as_str() {
                     "digest_due" => {
                         app.refresh();
-                        app.post_digest();
+                        app.post_digest(event.digest.clone().unwrap_or_default());
                     }
                     "preview_ready" => app.handle_preview_ready(event.entry_id),
                     // A missed preview_ready is exactly the gap
@@ -837,19 +837,40 @@ impl App {
         self.health_banner.set_visible(true);
     }
 
-    /// The 4-hour digest. Posted only when there is pending work, and its
-    /// actions can only ever open the window or dismiss.
-    fn post_digest(self: &Rc<Self>) {
+    /// The 4-hour digest, and its actions can only ever open the window or
+    /// dismiss.
+    ///
+    /// Posted when either half has something to say. It used to return early
+    /// on an empty pending list, which was right while every upload passed
+    /// through review -- an empty queue then meant an idle period. An armed
+    /// project queues nothing however much it sends, so that early return
+    /// meant a contributor who armed everything was never told anything at
+    /// all. The contributed half comes off the event (`DigestFacts`) because
+    /// it describes traces that were never in this shell's entry list.
+    fn post_digest(self: &Rc<Self>, facts: crate::backend::DigestFacts) {
         let entries = self.entries.borrow();
         let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
-        if pending.is_empty() {
-            return;
-        }
-        let mut labels: Vec<String> = pending.iter().map(|e| e.project_label.clone()).collect();
-        labels.sort();
-        labels.dedup();
-        let body = crate::notify::digest_body(pending.len(), &labels);
+        let waiting = (!pending.is_empty()).then(|| {
+            let mut labels: Vec<String> = pending.iter().map(|e| e.project_label.clone()).collect();
+            labels.sort();
+            labels.dedup();
+            crate::notify::digest_body(pending.len(), &labels)
+        });
         drop(entries);
+        let contributed = crate::notify::contribution_body(
+            facts.contributed,
+            &facts.contributed_projects,
+            facts.credit_pending,
+        );
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. Separate lines because they are
+        // about different things and a contributor acts on only one.
+        let body = match (waiting, contributed) {
+            (Some(w), Some(c)) => format!("{w}\n{c}"),
+            (Some(w), None) => w,
+            (None, Some(c)) => c,
+            (None, None) => return,
+        };
         self.notify(copy::APP_NAME, &body);
     }
 

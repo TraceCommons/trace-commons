@@ -422,6 +422,8 @@ fn group_session_ref(
     let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
     Some(SessionRef {
         source: SOURCE_CLAUDE_CODE,
+        // A native adapter is what it is; nothing to declare.
+        declared_source: None,
         path,
         project: discovery_project,
         cwd,
@@ -994,6 +996,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         events,
         subagent_count: kept,
         subagents_dropped: dropped,
+        routing: Vec::new(),
     })
 }
 

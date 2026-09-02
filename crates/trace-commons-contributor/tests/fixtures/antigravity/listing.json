@@ -1,0 +1,45 @@
+{
+  "trajectorySummaries": {
+    "39f32a85-508b-430a-98fb-a67e89b4e689": {
+      "summary": "Repository Overview Request",
+      "stepCount": 48,
+      "lastModifiedTime": "2026-08-31T22:41:00.878044Z",
+      "trajectoryId": "f1422752-2ec0-45ad-a5cc-0068a6b2ffd7",
+      "status": "CASCADE_RUN_STATUS_IDLE",
+      "createdTime": "2026-08-29T10:13:36.069503Z",
+      "workspaces": [
+        {
+          "workspaceFolderAbsoluteUri": "file:///Users/anonymized/code/trace-commons-server",
+          "gitRootAbsoluteUri": "file:///Users/anonymized/code/trace-commons-server",
+          "repository": {
+            "computedName": "TraceCommons/trace-commons",
+            "gitOriginUrl": "https://github.com/TraceCommons/trace-commons.git"
+          },
+          "branchName": "settlement-disabled-honest-receipt"
+        }
+      ],
+      "lastUserInputTime": "2026-08-31T22:39:28.557837Z",
+      "lastUserInputStepIndex": 23,
+      "trajectoryMetadata": {
+        "workspaces": [
+          {
+            "workspaceFolderAbsoluteUri": "file:///Users/anonymized/code/trace-commons-server",
+            "gitRootAbsoluteUri": "file:///Users/anonymized/code/trace-commons-server",
+            "repository": {
+              "computedName": "TraceCommons/trace-commons",
+              "gitOriginUrl": "https://github.com/TraceCommons/trace-commons.git"
+            },
+            "branchName": "settlement-disabled-honest-receipt"
+          }
+        ],
+        "createdAt": "2026-08-29T10:13:36.069503Z",
+        "initializationStateId": "REDACTED-INITIALIZATIONSTATEID",
+        "rootConversationId": "REDACTED-ROOTCONVERSATIONID",
+        "workspaceUris": [
+          "file:///Users/anonymized/code/trace-commons-server"
+        ]
+      },
+      "trajectoryType": "CORTEX_TRAJECTORY_TYPE_CASCADE"
+    }
+  }
+}
