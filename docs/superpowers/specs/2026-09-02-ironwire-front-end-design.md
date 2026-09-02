@@ -179,11 +179,21 @@ Three things follow:
   turns an invisible failure into a fixable one.
 - A path field belongs beside the port, defaulted to the conventional location
   and only needed by contributors whose install is elsewhere.
-- **Confirm the fallback behaviour before implementing.** I could not verify
-  from the patch set what happens when `$IRONWIRE_HOME` is unset -- whether it
-  falls back to a conventional directory or simply fails. The implementer must
-  read `ironwire_ledger_for()` and design to what it does, not to this
-  paragraph.
+**Resolved, and the answer makes this a required change rather than a nicety.**
+`ironwire_ledger_for` on `main` reads `IRONWIRE_HOME`, falling back to
+`~/.ironwire`, then reads `control.token` there. A GUI-launched daemon never
+sees the variable, so it *always* takes the fallback. If the contributor's
+IronWire lives anywhere else, the daemon reads nothing and reports it as off.
+
+The environment variable is therefore not a configuration mechanism for the
+desktop apps at all. It works for a CLI started from a shell and never for the
+apps this spec is about.
+
+So the declaration gains an **optional token directory**, stored in settings
+where the app can actually write it, and `ironwire_ledger_for` resolves in this
+order: the declared path, then `IRONWIRE_HOME`, then `~/.ironwire`. Settings
+first, because settings are the only one of the three a GUI contributor can
+set. The env var stays supported so nothing breaks for CLI users.
 
 ### 4. A status surface
 
