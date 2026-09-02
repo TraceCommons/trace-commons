@@ -56,6 +56,12 @@ fn read_claim(field: MeasurementField, claim: &UnverifiedJsonMeasurements) -> Op
         MeasurementField::Rtmr1 => Some(&claim.rtmr1),
         MeasurementField::Rtmr2 => Some(&claim.rtmr2),
         MeasurementField::Rtmr3 => Some(&claim.rtmr3),
+        // Deliberate, not an oversight: NEAR AI's `info.tcb_info` carries
+        // mrtd and rtmr0..3, so there is no claimed mrconfigid to disagree
+        // with. If a report ever starts claiming one, this arm must start
+        // comparing it -- and because an uncompared field breaks no build,
+        // unlike adding a `MeasurementField`, the assumption is pinned by
+        // `tests::a_report_that_claims_mrconfigid_must_not_pass_unnoticed`.
         MeasurementField::MrConfigId => None,
     }
 }
@@ -272,6 +278,72 @@ mod tests {
             ],
             "every claimed register lies and must be reported; mrconfigid is \
              not claimed and must not be"
+        );
+    }
+
+    /// Does this report's `info.tcb_info` name MRCONFIGID, under any of the
+    /// spellings a producer might plausibly emit?
+    ///
+    /// Normalising away case and `_`/`-` is the point: matching the literal
+    /// `mrconfigid` would miss `mr_config_id`, which is the spelling this
+    /// workspace's own `VerifiedQuote` uses for the same register.
+    fn tcb_info_names_mrconfigid(report_json: &str) -> bool {
+        let parsed: serde_json::Value =
+            serde_json::from_str(report_json).expect("report JSON parses");
+        parsed["info"]["tcb_info"]
+            .as_object()
+            .expect("info.tcb_info is an object")
+            .keys()
+            .any(|k| k.to_ascii_lowercase().replace(['_', '-'], "") == "mrconfigid")
+    }
+
+    #[test]
+    fn a_report_that_claims_mrconfigid_must_not_pass_unnoticed() {
+        // `read_claim` returns None for MrConfigId, which is right only while
+        // no report claims the register. Adding a `MeasurementField` fails to
+        // compile until every arm is updated; a report that *starts* carrying
+        // mrconfigid breaks nothing at all -- the arm just keeps not
+        // comparing a field that now has both sides. Nothing in the type
+        // system catches that, so this does.
+        //
+        // Read the guarantee narrowly. The checked-in fixture is TRIMMED (see
+        // its `_fixture_note`): tcb_info keys other than mrtd/rtmr0-3 were
+        // removed when it was captured, so this does not establish that NEAR
+        // AI's untrimmed response omits mrconfigid -- that is currently
+        // unverified. What it does catch is the case that matters for
+        // maintenance: a re-captured fixture whose tcb_info is preserved and
+        // carries the register. Then the fix is to add the field to
+        // `UnverifiedJsonMeasurements` and make the arm compare it, not to
+        // relax this assertion.
+        assert!(
+            !tcb_info_names_mrconfigid(FIXTURE),
+            "the captured report's tcb_info now names mrconfigid; read_claim's \
+             `MeasurementField::MrConfigId => None` arm no longer holds"
+        );
+
+        // The detector must be able to say yes, or the assertion above is
+        // vacuous -- a matcher that can never match passes forever.
+        let claiming = FIXTURE.replace(
+            "\"tcb_info\": {",
+            "\"tcb_info\": {\n      \"mr_config_id\": \"00\",",
+        );
+        assert_ne!(claiming, FIXTURE, "the fixture's tcb_info key moved");
+        assert!(
+            tcb_info_names_mrconfigid(&claiming),
+            "the detector missed an mrconfigid claim it was handed"
+        );
+
+        // And the omission really is one-sided: the quote supplies the
+        // register, so it is only the claimed half that is absent.
+        let v = verified();
+        assert_eq!(
+            MeasurementField::MrConfigId.read(&v),
+            v.mr_config_id,
+            "mrconfigid is verified; only the claimed side is missing"
+        );
+        assert!(
+            !v.mr_config_id.is_empty(),
+            "an empty verified value would make the comparison above vacuous"
         );
     }
 
