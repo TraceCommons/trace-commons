@@ -47,28 +47,44 @@ final class RoutingSurfaceTests: XCTestCase {
         return copy
     }
 
-    /// Sentences that report which one was asked for and what argument it
-    /// got. The real ones are assembled in Rust and cross the ABI; this
-    /// target does not link it.
-    private func sentences() -> RoutingSentences {
-        RoutingSentences(
+    /// Calls that report which one was asked for and what arguments it got.
+    /// The real ones live in Rust and cross the ABI; this target does not
+    /// link it.
+    ///
+    /// The word and tone fakes are echoes and **not** a Swift copy of the
+    /// Rust's branch table -- the tone one deliberately keys off a different
+    /// wiring state than the real rule does. What this target can honestly
+    /// assert is that each row asks with its own mode and its own wiring;
+    /// which word and which tone those two produce is the Rust's decision,
+    /// and `RoutingSurfaceExportTests` pins it against the real dylib.
+    private func calls() -> RoutingCalls {
+        RoutingCalls(
             tokenLine: { path in path.map { "L-TOKEN:\($0)" } ?? "L-TOKEN:none" },
-            unreachableLine: { port in port.map { "L-UNREACHABLE:\($0)" } ?? "L-UNREACHABLE:none" }
+            unreachableLine: { port in port.map { "L-UNREACHABLE:\($0)" } ?? "L-UNREACHABLE:none" },
+            toolWord: { mode, wiring in "W:\(mode):\(wiring)" },
+            toolTone: { _, wiring in wiring == RoutingToolWiring.notWired.abiValue ? 1 : 0 },
+            stateLine: { state in "S:\(state)" }
         )
     }
 
-    /// Sentences the ABI refused to produce. Nil is a real answer from the
-    /// bridge -- it is what a caught panic looks like -- and this surface has
-    /// to have somewhere to go when it happens.
-    private func silentSentences() -> RoutingSentences {
-        RoutingSentences(tokenLine: { _ in nil }, unreachableLine: { _ in nil })
+    /// Calls the ABI refused to answer. Nil is a real answer from the bridge
+    /// -- it is what a caught panic looks like -- and this surface has to
+    /// have somewhere to go when it happens.
+    private func silentCalls() -> RoutingCalls {
+        RoutingCalls(
+            tokenLine: { _ in nil },
+            unreachableLine: { _ in nil },
+            toolWord: { _, _ in nil },
+            toolTone: { _, _ in 0 },
+            stateLine: { _ in nil }
+        )
     }
 
     // MARK: - The probe result: three outcomes, three strings
 
     func testAReachableProbeSaysTheProbeReachedIt() {
         XCTAssertEqual(
-            RoutingSurface.probeLine(.reachable, copy: copy(), sentences: sentences()),
+            RoutingSurface.probeLine(.reachable, copy: copy(), calls: calls()),
             copy().probeReachable
         )
     }
@@ -80,7 +96,7 @@ final class RoutingSurfaceTests: XCTestCase {
     func testAnUnusableTokenNamesTheAbsolutePathTheDaemonReported() {
         let path = "/Users/someone/.ironwire/control.token"
         let line = RoutingSurface.probeLine(
-            .tokenUnusable(path: path), copy: copy(), sentences: sentences()
+            .tokenUnusable(path: path), copy: copy(), calls: calls()
         )
         XCTAssertTrue(line.contains(path), "the reported path did not survive: \(line)")
     }
@@ -91,10 +107,10 @@ final class RoutingSurfaceTests: XCTestCase {
     func testAnUnusableTokenWithNoPathIsItsOwnSentence() {
         let named = RoutingSurface.probeLine(
             .tokenUnusable(path: "/Users/someone/.ironwire/control.token"),
-            copy: copy(), sentences: sentences()
+            copy: copy(), calls: calls()
         )
         let unnamed = RoutingSurface.probeLine(
-            .tokenUnusable(path: nil), copy: copy(), sentences: sentences()
+            .tokenUnusable(path: nil), copy: copy(), calls: calls()
         )
         XCTAssertNotEqual(named, unnamed)
         XCTAssertEqual(unnamed, "L-TOKEN:none")
@@ -103,7 +119,7 @@ final class RoutingSurfaceTests: XCTestCase {
     func testAnUnreachableProbeNamesThePortThatWasTried() {
         XCTAssertEqual(
             RoutingSurface.probeLine(
-                .unreachable(port: 8463), copy: copy(), sentences: sentences()
+                .unreachable(port: 8463), copy: copy(), calls: calls()
             ),
             "L-UNREACHABLE:8463"
         )
@@ -113,7 +129,7 @@ final class RoutingSurfaceTests: XCTestCase {
     /// sentinel, and the daemon refuses it outright.
     func testNoPortTriedIsNotRenderedAsPortZero() {
         let line = RoutingSurface.probeLine(
-            .unreachable(port: nil), copy: copy(), sentences: sentences()
+            .unreachable(port: nil), copy: copy(), calls: calls()
         )
         XCTAssertEqual(line, "L-UNREACHABLE:none")
         XCTAssertFalse(line.contains("0"), line)
@@ -124,7 +140,7 @@ final class RoutingSurfaceTests: XCTestCase {
     /// that is fine.
     func testAnUnreadableOutcomeSaysTheCheckCouldNotBeRun() {
         XCTAssertEqual(
-            RoutingSurface.probeLine(.unknown, copy: copy(), sentences: sentences()),
+            RoutingSurface.probeLine(.unknown, copy: copy(), calls: calls()),
             copy().checkUnavailable
         )
     }
@@ -140,7 +156,7 @@ final class RoutingSurfaceTests: XCTestCase {
             .unreachable(port: nil),
         ] {
             XCTAssertEqual(
-                RoutingSurface.probeLine(outcome, copy: copy(), sentences: silentSentences()),
+                RoutingSurface.probeLine(outcome, copy: copy(), calls: silentCalls()),
                 copy().checkUnavailable,
                 "\(outcome)"
             )
@@ -189,17 +205,27 @@ final class RoutingSurfaceTests: XCTestCase {
 
     // MARK: - The status line: three states
 
-    func testTheThreeDaemonStatesEachHaveTheirOwnLine() {
-        XCTAssertEqual(RoutingSurface.stateLine("not_declared", copy: copy()), copy().stateOff)
-        XCTAssertEqual(RoutingSurface.stateLine("awaiting_rows", copy: copy()), copy().stateWaiting)
-        XCTAssertEqual(RoutingSurface.stateLine("rows_seen", copy: copy()), copy().stateReading)
+    /// The state reaches the shared table verbatim, and what comes back is
+    /// what is shown. Which sentence each state maps to is the Rust's
+    /// decision, pinned against the real dylib in `RoutingSurfaceExportTests`.
+    func testTheStateIsPassedToTheSharedTableAndItsAnswerIsShown() {
+        for state in ["not_declared", "awaiting_rows", "rows_seen", "some_new_state", ""] {
+            XCTAssertEqual(
+                RoutingSurface.stateLine(state, copy: copy(), calls: calls()),
+                "S:\(state)",
+                state
+            )
+        }
     }
 
-    /// A state a later daemon grows says what the off state says: it claims
-    /// nothing.
-    func testAStateThisBuildDoesNotKnowClaimsNothing() {
-        XCTAssertEqual(RoutingSurface.stateLine("some_new_state", copy: copy()), copy().stateOff)
-        XCTAssertEqual(RoutingSurface.stateLine("", copy: copy()), copy().stateOff)
+    /// A line the ABI would not produce falls back to the off line, which
+    /// claims nothing -- never to a half-sentence and never to either "on"
+    /// sentence.
+    func testAStateLineTheAbiRefusedFallsBackToTheLineThatClaimsNothing() {
+        let line = RoutingSurface.stateLine("rows_seen", copy: copy(), calls: silentCalls())
+        XCTAssertEqual(line, copy().stateOff)
+        XCTAssertNotEqual(line, copy().stateReading)
+        XCTAssertNotEqual(line, copy().stateWaiting)
     }
 
     /// `awaiting_rows` is not a fault. A reader built a moment ago starts
@@ -208,10 +234,6 @@ final class RoutingSurfaceTests: XCTestCase {
     /// would accuse a working proxy of being broken at that exact moment.
     func testWaitingForRowsIsNotAFault() {
         XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows"), .held)
-        let line = RoutingSurface.stateLine("awaiting_rows", copy: copy())
-        XCTAssertNotEqual(line, copy().checkUnavailable)
-        XCTAssertNotEqual(line, copy().stateOff)
-        XCTAssertEqual(line, copy().stateWaiting)
     }
 
     func testTheOtherTwoStatesKeepTheirOwnTone() {
@@ -240,142 +262,190 @@ final class RoutingSurfaceTests: XCTestCase {
         RoutingEvidence(outcome: outcome, tools: tools)
     }
 
-    func testAToolIronWireCallsWiredGetsTheWiredWord() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
-            evidence: evidence(tools: ["claude": RoutingToolRow(installed: true, wired: true)]),
-            copy: copy()
+    private func rows(
+        claude: String = "watch",
+        codex: String = "watch",
+        gemini: String = "watch",
+        evidence: RoutingEvidence?
+    ) -> [RoutingToolWord] {
+        RoutingSurface.toolRows(
+            sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini),
+            evidence: evidence,
+            copy: copy(),
+            calls: calls()
         )
-        XCTAssertEqual(rows.first?.name, copy().toolClaude)
-        XCTAssertEqual(rows.first?.word, copy().wordPrivate)
     }
 
-    func testAToolIronWireListsButDoesNotCallWiredGetsTheNotWiredWord() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
-            evidence: evidence(tools: ["codex": RoutingToolRow(installed: true, wired: false)]),
-            copy: copy()
-        )
-        XCTAssertEqual(rows[1].word, copy().wordDirect)
-    }
-
-    /// The whole reason this surface reads the tools answer. Declaring
-    /// IronWire in this app says nothing about whether Codex is configured
-    /// to send through it, and a shell that rendered one switch as three
-    /// verdicts would be inventing two of them.
-    func testTheDeclarationIsNotAnInputToAnyToolWord() {
-        // Every tool in use, IronWire declared and reachable, and an answer
-        // that listed nothing. Every word must still be "not known".
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "unset", gemini: "watch"),
-            evidence: evidence(tools: [:]),
-            copy: copy()
-        )
-        for row in rows {
-            XCTAssertEqual(row.word, copy().wordUnknown, row.name)
-        }
-    }
-
-    /// Gemini CLI has no row upstream at all -- neither built-in nor in
-    /// IronWire's catalogue -- so it legitimately reads unknown on a machine
-    /// where it is installed and in daily use. This is the case the old
-    /// single-switch word got confidently wrong.
-    func testGeminiReadsUnknownEvenWhenItIsInstalledAndInUse() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
+    /// Each row asks the shared table with **that tool's** mode and **that
+    /// tool's** wiring. This is the whole of what this target decides; the
+    /// mapping from the pair to a word is the Rust's.
+    func testEachRowAsksWithItsOwnModeAndItsOwnWiring() {
+        let rendered = rows(
+            claude: "watch",
+            codex: "unset",
+            gemini: "off",
             evidence: evidence(tools: [
                 "claude": RoutingToolRow(installed: true, wired: true),
-                "codex": RoutingToolRow(installed: true, wired: true),
-            ]),
-            copy: copy()
+                "codex": RoutingToolRow(installed: true, wired: false),
+            ])
         )
-        XCTAssertEqual(rows[2].name, copy().toolGemini)
-        XCTAssertEqual(rows[2].word, copy().wordUnknown)
-        // And not because the row went missing: the two IronWire did answer
-        // about are still verdicts.
-        XCTAssertEqual(rows[0].word, copy().wordPrivate)
-        XCTAssertEqual(rows[1].word, copy().wordPrivate)
+        XCTAssertEqual(rendered[0].word, "W:watch:\(RoutingToolWiring.wired.abiValue)")
+        XCTAssertEqual(rendered[1].word, "W:unset:\(RoutingToolWiring.notWired.abiValue)")
+        // Gemini has no row upstream at all, so it asks with the unknown
+        // state rather than with a guess.
+        XCTAssertEqual(rendered[2].word, "W:off:\(RoutingToolWiring.unknown.abiValue)")
+    }
+
+    /// The declaration switch is not among those two inputs. Declaring
+    /// IronWire in this app says nothing about whether Codex is configured to
+    /// send through it, and a shell that rendered one switch as three
+    /// verdicts would be inventing two of them.
+    func testTheDeclarationIsNotAnInputToAnyToolWord() {
+        for row in rows(claude: "watch", codex: "unset", gemini: "watch", evidence: evidence()) {
+            XCTAssertTrue(
+                row.word.hasSuffix(":\(RoutingToolWiring.unknown.abiValue)"),
+                "\(row.name) asked with \(row.word)"
+            )
+        }
     }
 
     /// Nothing answered is a stable state -- a port nothing listens on, a
     /// credential that is refused -- so a word built on it would keep
-    /// asserting while the card underneath says nothing answered.
+    /// asserting while the card underneath says nothing answered. The rows
+    /// must ask with the unknown state whatever the payload carried.
     func testNothingAnsweredLeavesEveryToolUnknownWhateverWasCached() {
         for outcome: RoutingProbeOutcome in [
             .unreachable(port: 8463), .tokenUnusable(path: "/Users/x/.ironwire/control.token"),
             .unknown,
         ] {
-            let rows = RoutingSurface.toolRows(
-                sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
+            let rendered = rows(
                 evidence: evidence(
                     outcome: outcome,
                     tools: ["claude": RoutingToolRow(installed: true, wired: true)]
-                ),
-                copy: copy()
+                )
             )
-            XCTAssertEqual(rows[0].word, copy().wordUnknown, "\(outcome)")
+            XCTAssertEqual(
+                rendered[0].word,
+                "W:watch:\(RoutingToolWiring.unknown.abiValue)",
+                "\(outcome)"
+            )
         }
     }
 
     /// No answer held at all is not a verdict either.
     func testNoEvidenceAtAllLeavesEveryToolUnknown() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
-            evidence: nil,
-            copy: copy()
-        )
-        for row in rows {
-            XCTAssertEqual(row.word, copy().wordUnknown, row.name)
+        for row in rows(evidence: nil) {
+            XCTAssertTrue(
+                row.word.hasSuffix(":\(RoutingToolWiring.unknown.abiValue)"),
+                row.name
+            )
         }
-    }
-
-    /// Only `off` means not used. `unset` watches the conventional location,
-    /// which is a tool in use.
-    func testOnlyAnOffSourceReadsAsNotUsed() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "off", codex: "unset", gemini: "off"),
-            evidence: evidence(tools: [
-                "claude": RoutingToolRow(installed: true, wired: true),
-                "codex": RoutingToolRow(installed: true, wired: false),
-            ]),
-            copy: copy()
-        )
-        XCTAssertEqual(rows[0].word, copy().wordNotUsed)
-        XCTAssertEqual(rows[1].word, copy().wordDirect)
-        XCTAssertEqual(rows[2].word, copy().wordNotUsed)
     }
 
     /// IronWire saying a tool is not installed, while this app is watching
     /// that tool's sessions, is two detectors disagreeing about one machine.
     /// That is not evidence for a verdict.
     func testAToolIronWireSaysIsNotInstalledGetsNoVerdict() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
-            evidence: evidence(tools: ["claude": RoutingToolRow(installed: false, wired: false)]),
-            copy: copy()
+        let rendered = rows(
+            evidence: evidence(tools: ["claude": RoutingToolRow(installed: false, wired: false)])
         )
-        XCTAssertEqual(rows[0].word, copy().wordUnknown)
+        XCTAssertEqual(rendered[0].word, "W:watch:\(RoutingToolWiring.unknown.abiValue)")
+    }
+
+    /// A word the ABI would not produce falls back to the one that claims
+    /// nothing -- never to a blank, and never to a word chosen here.
+    func testAWordTheAbiRefusedFallsBackToTheWordThatClaimsNothing() {
+        let rendered = RoutingSurface.toolRows(
+            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
+            evidence: evidence(tools: ["claude": RoutingToolRow(installed: true, wired: true)]),
+            copy: copy(),
+            calls: silentCalls()
+        )
+        for row in rendered {
+            XCTAssertEqual(row.word, copy().wordUnknown, row.name)
+            XCTAssertNotEqual(row.word, copy().wordPrivate, row.name)
+        }
     }
 
     /// The three rows are always all three, in one order, so a missing
     /// answer is a word rather than a vanished row.
     func testTheSurfaceAlwaysNamesAllThreeToolsInOneOrder() {
-        let rows = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "off", codex: "off", gemini: "off"),
-            evidence: nil,
-            copy: copy()
+        XCTAssertEqual(
+            rows(claude: "off", codex: "off", gemini: "off", evidence: nil).map(\.name),
+            [copy().toolClaude, copy().toolCodex, copy().toolGemini]
         )
-        XCTAssertEqual(rows.map(\.name), [copy().toolClaude, copy().toolCodex, copy().toolGemini])
     }
 
-    /// Only the wired word is painted as reassurance. Every other word is
-    /// neutral -- including "not used", which is a preference and not an
-    /// achievement.
-    func testOnlyTheWiredWordIsPaintedAsReassurance() {
-        XCTAssertEqual(RoutingSurface.tone(forWord: copy().wordPrivate, copy: copy()), .clear)
-        for word in [copy().wordDirect, copy().wordUnknown, copy().wordNotUsed] {
-            XCTAssertEqual(RoutingSurface.tone(forWord: word, copy: copy()), .neutral, word)
+    /// The tone on a row is the shared table's answer for that row's own two
+    /// inputs, and nothing here reads the rendered word to reach it.
+    ///
+    /// The fake keys its tone off the *not-wired* state, which is not the
+    /// real rule. A mapping that had quietly kept comparing the word against
+    /// the private one could not produce this result.
+    func testTheToneOnEachRowIsTheSharedTablesAnswerAndNotAReadingOfTheWord() {
+        let rendered = rows(
+            evidence: evidence(tools: [
+                "claude": RoutingToolRow(installed: true, wired: true),
+                "codex": RoutingToolRow(installed: true, wired: false),
+            ])
+        )
+        XCTAssertEqual(rendered[0].tone, .neutral)
+        XCTAssertEqual(rendered[1].tone, .clear)
+        XCTAssertEqual(rendered[2].tone, .neutral)
+    }
+
+    /// A tone value this build has never heard of claims nothing.
+    func testAToneTheAbiDoesNotDefineClaimsNothing() {
+        XCTAssertEqual(RoutingTone.fromToolToneABI(1), .clear)
+        XCTAssertEqual(RoutingTone.fromToolToneABI(0), .neutral)
+        XCTAssertEqual(RoutingTone.fromToolToneABI(2), .neutral)
+        XCTAssertEqual(RoutingTone.fromToolToneABI(-1), .neutral)
+    }
+
+    /// The wiring numbering is the ABI's, not this enum's declaration order
+    /// by accident. A renumbering would send "wired" across as "not wired" --
+    /// a wrong verdict on a privacy claim, not a crash.
+    func testTheWiringNumberingIsTheOneTheAbiSpells() {
+        XCTAssertEqual(RoutingToolWiring.wired.abiValue, 0)
+        XCTAssertEqual(RoutingToolWiring.notWired.abiValue, 1)
+        XCTAssertEqual(RoutingToolWiring.unknown.abiValue, 2)
+    }
+
+    /// No styling decision on this surface reads the rendered word.
+    ///
+    /// Asserted on the source, because "this does not compare a string" is a
+    /// fact a later edit reintroduces silently. `Private` is a substring of
+    /// the denial that must never come back, and a comparison against a
+    /// privacy claim is the same shape that once let `contains("reachable")`
+    /// match `"unreachable"` on this surface.
+    func testNoStylingDecisionReadsTheRenderedWord() {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCShellCore/RoutingSurface.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            XCTFail("the surface's source was not found at \(source.path)")
+            return
         }
+        // Comments quote the rule; nothing in one is executed.
+        let code = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        for comparison in [
+            "wordPrivate", "word ==", "word !=", "word.contains", "word.hasPrefix",
+        ] {
+            XCTAssertFalse(
+                code.contains(comparison),
+                "a styling decision reads the rendered word: \(comparison)"
+            )
+        }
+        XCTAssertTrue(
+            code.contains("calls.toolTone(sourceMode, wiring.abiValue)"),
+            "the tone must come from the shared branch table"
+        )
     }
 
     // MARK: - Reading the tools answer

@@ -1144,10 +1144,15 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 /// <remarks>
 /// Both strings come from the shared source across the C ABI; nothing here
 /// composes wording, and no property here derives a second verdict from the
-/// word. The four words are styled identically, deliberately: the wired word
-/// is a substring of a denial that must never come back, and any test of the
-/// word's text to decide how to paint it is one <c>Contains</c> away from the
-/// bug that matched "unreachable" as "reachable" on this same surface.
+/// word.
+///
+/// The wired row is toned, matching the GTK shell. The tone arrives on
+/// <see cref="RoutingToolRow"/>, decided by the same shared branch table that
+/// chose the word, and NOTHING here reads <see cref="Word"/> to reach it: the
+/// wired word is a substring of a denial that must never come back, and a
+/// test of the word's text to decide how to paint it is one <c>Contains</c>
+/// away from the bug that matched "unreachable" as "reachable" on this same
+/// surface.
 /// </remarks>
 public sealed class RoutingToolRowViewModel
 {
@@ -1156,12 +1161,30 @@ public sealed class RoutingToolRowViewModel
         ArgumentNullException.ThrowIfNull(row);
         Name = row.Name;
         Word = row.Word;
+        Tone = row.Tone;
         AccessibleLabel = row.AccessibleLabel;
     }
 
     public string Name { get; }
 
     public string Word { get; }
+
+    /// <summary>
+    /// How the word is painted, straight from the shared table.
+    /// </summary>
+    public RoutingTone Tone { get; }
+
+    /// <summary>
+    /// The XAML projection of <see cref="Tone"/>, and only that.
+    ///
+    /// Two visibilities rather than one bound brush because the tone colours
+    /// live in a theme dictionary and only <c>ThemeResource</c> resolves them
+    /// correctly in both themes. Both read the enum; neither reads the word.
+    /// </summary>
+    public bool ShowsClearWord => Tone == RoutingTone.Clear;
+
+    /// <summary>The other half of <see cref="ShowsClearWord"/>.</summary>
+    public bool ShowsNeutralWord => Tone != RoutingTone.Clear;
 
     /// <summary>The row read as one statement, for a screen reader.</summary>
     public string AccessibleLabel { get; }

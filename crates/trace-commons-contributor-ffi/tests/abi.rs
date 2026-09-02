@@ -12,7 +12,8 @@ use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
-    tc_routing_copy, tc_routing_last_checked, tc_routing_token_line, tc_routing_unreachable_line,
+    tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_token_line,
+    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
     tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
@@ -2017,6 +2018,113 @@ fn the_routing_sentences_cross_assembled_and_never_as_a_template() {
             );
         }
     }
+}
+
+/// The C ABI's spelling of the three wiring states, pinned here so a
+/// renumbering has to be a deliberate edit in two places.
+const WIRED: i32 = 0;
+const NOT_WIRED: i32 = 1;
+const UNKNOWN: i32 = 2;
+const TONE_NEUTRAL: i32 = 0;
+const TONE_CLEAR: i32 = 1;
+
+fn tool_word(mode: &str, wiring: i32) -> String {
+    let mode = cstr_str(mode);
+    take_owned(unsafe { tc_routing_tool_word(mode.as_ptr(), wiring) })
+}
+
+fn state_line(state: &str) -> String {
+    let state = cstr_str(state);
+    take_owned(unsafe { tc_routing_state_line(state.as_ptr()) })
+}
+
+#[test]
+fn the_word_branch_table_crosses_the_abi_and_is_the_one_in_the_rust() {
+    // Compared against the Rust's own function rather than against literals:
+    // this asserts that the export IS the shared branch table, which is the
+    // whole reason the shells stopped writing their own.
+    use trace_commons_contributor::routing_copy as copy;
+    for mode in ["off", "watch", "unset", "", "something_new"] {
+        for (abi, wiring) in [
+            (WIRED, copy::ToolWiring::Wired),
+            (NOT_WIRED, copy::ToolWiring::NotWired),
+            (UNKNOWN, copy::ToolWiring::Unknown),
+        ] {
+            assert_eq!(
+                tool_word(mode, abi),
+                copy::tool_word(mode, wiring),
+                "{mode:?}/{abi}"
+            );
+        }
+    }
+
+    // A wiring value this build has never heard of claims nothing rather
+    // than falling through to a verdict.
+    assert_eq!(tool_word("watch", 99), copy::TOOL_UNKNOWN);
+    assert_eq!(tool_word("watch", -1), copy::TOOL_UNKNOWN);
+    // Only "off" means not used; "unset" is a tool in use.
+    assert_eq!(tool_word("off", WIRED), copy::TOOL_NOT_USED);
+    assert_eq!(tool_word("unset", WIRED), copy::TOOL_PRIVATE);
+}
+
+#[test]
+fn a_tool_word_call_with_no_source_mode_is_an_error_and_not_a_guess() {
+    // A shell that cannot say what the contributor declared gets no word.
+    // Named error, not merely "some failure".
+    let out = unsafe { tc_routing_tool_word(std::ptr::null(), WIRED) };
+    assert!(out.is_null());
+    let msg = unsafe { CStr::from_ptr(tc_last_error()) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(msg, "null-pointer");
+}
+
+#[test]
+fn the_reassuring_tone_crosses_the_abi_and_falls_on_the_private_word_alone() {
+    // The styling decision crosses too, so no shell has to recover it by
+    // comparing a rendered privacy claim against a substring.
+    use trace_commons_contributor::routing_copy as copy;
+    for mode in ["off", "watch", "unset", "", "something_new"] {
+        for wiring in [WIRED, NOT_WIRED, UNKNOWN, 99] {
+            let mode_c = cstr_str(mode);
+            let tone = unsafe { tc_routing_tool_tone(mode_c.as_ptr(), wiring) };
+            assert!(
+                tone == TONE_NEUTRAL || tone == TONE_CLEAR,
+                "{mode:?}/{wiring} answered {tone}"
+            );
+            assert_eq!(
+                tone == TONE_CLEAR,
+                tool_word(mode, wiring) == copy::TOOL_PRIVATE,
+                "{mode:?}/{wiring}"
+            );
+        }
+    }
+
+    // No error value: an unreadable source mode gets the tone that claims
+    // nothing, because a styling call that failed would leave a shell
+    // choosing for itself.
+    assert_eq!(
+        unsafe { tc_routing_tool_tone(std::ptr::null(), WIRED) },
+        TONE_NEUTRAL
+    );
+}
+
+#[test]
+fn the_state_branch_table_crosses_the_abi_and_an_unknown_state_claims_nothing() {
+    use trace_commons_contributor::routing_copy as copy;
+    assert_eq!(state_line("awaiting_rows"), copy::IRONWIRE_STATE_WAITING);
+    assert_eq!(state_line("rows_seen"), copy::IRONWIRE_STATE_READING);
+    assert_eq!(state_line("not_declared"), copy::IRONWIRE_STATE_OFF);
+
+    // A state a later daemon grows, an empty one, and no pointer at all all
+    // read as the off line. None of them falls through to either "on"
+    // sentence -- named here rather than asserted as "not waiting".
+    assert_eq!(state_line("something_new"), copy::IRONWIRE_STATE_OFF);
+    assert_eq!(state_line(""), copy::IRONWIRE_STATE_OFF);
+    assert_eq!(
+        take_owned(unsafe { tc_routing_state_line(std::ptr::null()) }),
+        copy::IRONWIRE_STATE_OFF
+    );
 }
 
 #[test]

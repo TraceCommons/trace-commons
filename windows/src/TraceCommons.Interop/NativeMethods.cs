@@ -258,6 +258,54 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? when);
 
     /// <summary>
+    /// One tool's word, from the contributor's per-source mode and what
+    /// IronWire said about that tool.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Without this call this
+    /// shell would decide which of the four words a tool gets, and three
+    /// native copies of that decision can drift apart silently while every
+    /// string stays identical. <paramref name="wiring"/> is
+    /// <c>(int)ToolWiring</c>; anything the Rust does not know is the unknown
+    /// state, which claims nothing.
+    ///
+    /// NULL, with an error recorded, for a NULL or non-UTF-8 source mode.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_tool_word(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode,
+        int wiring);
+
+    /// <summary>
+    /// How the word <see cref="tc_routing_tool_word"/> returned is painted:
+    /// <c>(int)RoutingTone</c>'s neutral or clear.
+    ///
+    /// Takes the same two inputs as the word, so the two cannot drift apart.
+    /// This shell must NOT recover the tone by comparing the rendered word
+    /// against the private one: that is a text comparison against a privacy
+    /// claim, and "Private" is a substring of "Not private".
+    ///
+    /// Never fails -- anything unreadable answers the neutral tone, which
+    /// claims nothing.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_routing_tool_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode,
+        int wiring);
+
+    /// <summary>
+    /// The daemon's routing state, in words. A state this build has never
+    /// heard of -- and a NULL one -- reads as the off line, which claims
+    /// nothing; it never falls through to either "on" sentence.
+    ///
+    /// Exported for the reason <see cref="tc_routing_tool_word"/> is: three
+    /// copies of a branch can disagree while three copies of a string cannot.
+    /// NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>

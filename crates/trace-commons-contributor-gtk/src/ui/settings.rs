@@ -1015,7 +1015,8 @@ fn render_tool_rows(app: &Rc<App>) {
         (copy::TOOL_CODEX, &modes.codex, IRONWIRE_TOOL_CODEX),
         (copy::TOOL_GEMINI, &modes.gemini, IRONWIRE_TOOL_GEMINI),
     ] {
-        let word = copy::tool_word(mode, tool_wiring(evidence.as_ref(), id));
+        let wiring = tool_wiring(evidence.as_ref(), id);
+        let word = copy::tool_word(mode, wiring);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         let label = gtk::Label::builder()
             .label(name)
@@ -1024,10 +1025,14 @@ fn render_tool_rows(app: &Rc<App>) {
             .build();
         label.add_css_class("tc-body");
         row.append(&label);
-        let tone = if word == copy::TOOL_PRIVATE {
-            Tone::Clear
-        } else {
-            Tone::Neutral
+        // From the wiring, never from the word. A styling decision that
+        // compared the rendered string against the private word would be a
+        // text match against a privacy claim, and `Private` is a substring
+        // of the denial that must never come back -- the same shape that
+        // once let `contains("reachable")` match `"unreachable"` here.
+        let tone = match copy::tool_tone(mode, wiring) {
+            copy::ToolTone::Clear => Tone::Clear,
+            copy::ToolTone::Neutral => Tone::Neutral,
         };
         row.append(&style::tag(word, tone));
         // Read as one statement, not as a name and a stray word.
@@ -2701,6 +2706,58 @@ mod tests {
             let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
             assert_eq!(word, copy::TOOL_UNKNOWN, "{dead}");
             assert_ne!(word, copy::TOOL_PRIVATE, "{dead}");
+        }
+    }
+
+    /// No styling decision on a tool row reads the rendered word.
+    ///
+    /// The chip's tone comes from [`copy::tool_tone`], which takes what the
+    /// word takes. Asserted on the source of the one painter, because "this
+    /// does not compare a string" is a fact a later edit reintroduces
+    /// silently: `Private` is a substring of the denial that must never come
+    /// back, and a `contains` against a privacy claim is the same shape that
+    /// once matched `"unreachable"` as `"reachable"` on this surface.
+    #[test]
+    fn no_tool_row_styling_decision_reads_the_rendered_word() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn render_tool_rows(")
+            .expect("the row painter exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("copy::tool_tone(mode, wiring)"),
+            "the row painter must take its tone from the shared branch table"
+        );
+        for comparison in [
+            "TOOL_PRIVATE",
+            "word ==",
+            "word !=",
+            "word.contains",
+            "word.starts_with",
+            "word.eq",
+        ] {
+            assert!(
+                !body.contains(comparison),
+                "a styling decision reads the rendered word: {comparison}"
+            );
+        }
+
+        // And the tone is the one the shared table chose, over every pair.
+        for mode in ["off", "watch", "unset", ""] {
+            for wiring in [
+                copy::ToolWiring::Wired,
+                copy::ToolWiring::NotWired,
+                copy::ToolWiring::Unknown,
+            ] {
+                let clear = copy::tool_tone(mode, wiring) == copy::ToolTone::Clear;
+                assert_eq!(
+                    clear,
+                    copy::tool_word(mode, wiring) == copy::TOOL_PRIVATE,
+                    "{mode:?}/{wiring:?}"
+                );
+            }
         }
     }
 

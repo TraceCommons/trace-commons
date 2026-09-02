@@ -189,6 +189,40 @@ pub fn tool_word(source_mode: &str, wiring: ToolWiring) -> &'static str {
     }
 }
 
+/// How one tool's word is painted.
+///
+/// Two values and not a `bool`. A boolean meaning "this is the privacy
+/// word" is one refactor away from a shell recovering it by comparing the
+/// rendered word against `TOOL_PRIVATE` -- and `Private` is a substring of
+/// the denial that must never come back, which is the same shape that once
+/// let `contains("reachable")` match `"unreachable"` on this surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolTone {
+    /// Says nothing either way. Every word but the wired one gets this,
+    /// "not used" included: that is a preference, not an outcome.
+    Neutral,
+    /// The reassuring reading. Only the wired word gets it.
+    Clear,
+}
+
+/// The tone [`tool_word`]'s answer is painted in, from the same two inputs.
+///
+/// ONE BRANCH TABLE, NOT TWO. This takes what [`tool_word`] takes, so the
+/// two stay in step by construction. A shell must call this rather than
+/// test the rendered word: the word is a string that three shells print and
+/// the tone is a styling decision, and a styling decision that reads a
+/// rendered privacy claim is a substring match waiting to happen.
+#[must_use]
+pub fn tool_tone(source_mode: &str, wiring: ToolWiring) -> ToolTone {
+    if source_mode == "off" {
+        return ToolTone::Neutral;
+    }
+    match wiring {
+        ToolWiring::Wired => ToolTone::Clear,
+        ToolWiring::NotWired | ToolWiring::Unknown => ToolTone::Neutral,
+    }
+}
+
 /// The file could not be used: either it is not there, or IronWire would
 /// not accept what was in it.
 ///
@@ -411,6 +445,31 @@ mod tests {
             tool_word("watch", ToolWiring::NotWired),
             tool_word("watch", ToolWiring::Unknown)
         );
+    }
+
+    /// The tone and the word are one decision, asserted over every input
+    /// pair rather than on the three a screenshot would show.
+    ///
+    /// This is what lets all three shells style from [`tool_tone`] and
+    /// never from the rendered string: if the two branch tables ever
+    /// disagree, they disagree here first.
+    #[test]
+    fn the_reassuring_tone_falls_exactly_on_the_word_that_claims_privacy() {
+        for mode in ["off", "watch", "unset", "", "OFF", "something_new"] {
+            for wiring in [ToolWiring::Wired, ToolWiring::NotWired, ToolWiring::Unknown] {
+                let word = tool_word(mode, wiring);
+                let tone = tool_tone(mode, wiring);
+                assert_eq!(
+                    tone == ToolTone::Clear,
+                    word == TOOL_PRIVATE,
+                    "{mode:?}/{wiring:?} rendered {word:?} with {tone:?}"
+                );
+            }
+        }
+        // Named rather than left to the loop: the two cases a reader of the
+        // screen would check.
+        assert_eq!(tool_tone("watch", ToolWiring::Wired), ToolTone::Clear);
+        assert_eq!(tool_tone("off", ToolWiring::Wired), ToolTone::Neutral);
     }
 
     /// The failure a real contributor hits, and the one fact that fixes

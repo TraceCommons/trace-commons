@@ -1819,8 +1819,8 @@ pub use trace_commons_contributor::routing_copy::{
     IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO, IRONWIRE_PORT_NOTE,
     IRONWIRE_PORT_TITLE, IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING,
     IRONWIRE_STATE_WAITING, IRONWIRE_TOGGLE, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT, TOOL_GEMINI,
-    TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolWiring, ironwire_state_line,
-    ironwire_token_line, ironwire_unreachable_line, tool_word,
+    TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring,
+    ironwire_state_line, ironwire_token_line, ironwire_unreachable_line, tool_tone, tool_word,
 };
 
 /// When the daemon last got an answer, or nothing.

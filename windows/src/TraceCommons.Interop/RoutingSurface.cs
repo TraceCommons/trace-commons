@@ -63,6 +63,46 @@ public static class RoutingSurface
     }
 
     /// <summary>
+    /// One tool's word, decided by the shared branch table rather than by
+    /// this shell.
+    ///
+    /// Null when the ABI would produce no word, which is what a caught panic
+    /// or an unreadable source mode looks like from here. The caller decides
+    /// what to show; this method never invents one.
+    /// </summary>
+    public static string? ToolWord(string? sourceMode, ToolWiring wiring) =>
+        NativeMethods.TakeOwnedString(
+            NativeMethods.tc_routing_tool_word(sourceMode, (int)wiring));
+
+    /// <summary>
+    /// How that word is painted, from the same two inputs.
+    ///
+    /// Never null and never a failure: anything the ABI cannot read answers
+    /// the neutral tone, which claims nothing. A styling call that could fail
+    /// would leave this shell choosing a tone for itself, which is exactly
+    /// what crossing the boundary is meant to stop.
+    /// </summary>
+    public static RoutingTone ToolTone(string? sourceMode, ToolWiring wiring) =>
+        NativeMethods.tc_routing_tool_tone(sourceMode, (int)wiring) == AbiToneClear
+            ? RoutingTone.Clear
+            : RoutingTone.Neutral;
+
+    /// <summary>
+    /// <c>TC_TOOL_TONE_CLEAR</c>. Spelled out rather than cast from
+    /// <see cref="RoutingTone"/>, whose Clear is 2 because it carries a third
+    /// value the tool words never take. The two numberings are unrelated and
+    /// a cast between them would be silently wrong.
+    /// </summary>
+    private const int AbiToneClear = 1;
+
+    /// <summary>
+    /// The daemon's routing state, in words, decided by the shared branch
+    /// table. Null only when the ABI produced nothing.
+    /// </summary>
+    public static string? StateLine(string? state) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_routing_state_line(state));
+
+    /// <summary>
     /// "That file could not be used", assembled on the Rust side.
     /// <paramref name="tokenPath"/> is null when nothing resolved at all,
     /// which is a different sentence and not an error.

@@ -688,14 +688,18 @@ struct SettingsContent: View {
                     RoutingSurface.toolRows(
                         sourceModes: model.daemonSettings?.routingSourceModes ?? .unset,
                         evidence: model.routingEvidence,
-                        copy: copy
+                        copy: copy,
+                        calls: model.routingCalls
                     ),
                     id: \.name
                 ) { row in
                     HStack {
                         Text(row.name).font(TC.Font_.body)
                         Spacer()
-                        TCTag(text: row.word, tone: tone(RoutingSurface.tone(forWord: row.word, copy: copy)))
+                        // The tone rides on the row, decided by the same
+                        // shared table that chose the word. Nothing here
+                        // reads the word to paint it.
+                        TCTag(text: row.word, tone: tone(row.tone))
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(row.name): \(row.word)")
@@ -807,7 +811,7 @@ struct SettingsContent: View {
     private func routingState(copy: RoutingCopy) -> some View {
         let state = model.status.routing.state
         VStack(alignment: .leading, spacing: TC.Space.xxs) {
-            Text(RoutingSurface.stateLine(state, copy: copy))
+            Text(RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls))
                 .font(TC.Font_.body)
                 .fixedSize(horizontal: false, vertical: true)
             // "Last checked" is a stamp on the running daemon -- never an

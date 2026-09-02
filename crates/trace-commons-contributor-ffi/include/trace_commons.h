@@ -296,6 +296,81 @@ char*       tc_discover_sources(void);
  */
 char*       tc_routing_copy(void);
 
+/* IronWire's answer about one tool, as tc_routing_tool_word and
+ * tc_routing_tool_tone take it.
+ *
+ * Three states and not a boolean. The missing third state is the whole
+ * defect this surface was rebuilt to remove: a dead proxy and a tool
+ * IronWire has never heard of both used to render as a confident verdict.
+ *
+ * Any other value is TC_TOOL_WIRING_UNKNOWN, which claims nothing.
+ */
+#define TC_TOOL_WIRING_WIRED     0
+#define TC_TOOL_WIRING_NOT_WIRED 1
+#define TC_TOOL_WIRING_UNKNOWN   2
+
+/* How a tool's word is painted. tc_routing_tool_tone answers one of these. */
+#define TC_TOOL_TONE_NEUTRAL 0
+#define TC_TOOL_TONE_CLEAR   1
+
+/* One tool's word, from what the contributor said about that tool's sessions
+ * and what IronWire said about that tool.
+ *
+ * source_mode is get_settings's *_source_mode -- "off", "watch" or "unset".
+ * Only "off" means the tool is not used: "unset" watches the conventional
+ * location, which is a tool in use. wiring is one of TC_TOOL_WIRING_*.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. tc_routing_copy hands a shell
+ * four words; without this call each shell also decides which of the four a
+ * tool gets, and three native copies of that decision can drift apart
+ * silently while every string stays identical. Do not reimplement this
+ * mapping natively.
+ *
+ * The declaration switch is NOT an input. It was the only input before, and
+ * that is what let a contributor read the wired word on the same card as
+ * "Nothing answered on port 8463".
+ *
+ * Pair every call with tc_routing_tool_tone rather than comparing the word
+ * this returns against the private one: "Private" is a substring of the
+ * denial that must never come back.
+ *
+ * Returns an owned string; free it with tc_string_free. Returns NULL for a
+ * NULL or non-UTF-8 source_mode, recording "null-pointer" or "invalid-utf8"
+ * for tc_last_error.
+ */
+char*       tc_routing_tool_word(const char* source_mode, int32_t wiring);
+
+/* How the word tc_routing_tool_word returned is painted: TC_TOOL_TONE_NEUTRAL
+ * or TC_TOOL_TONE_CLEAR.
+ *
+ * Takes the same two inputs as the word, so the two stay in step by
+ * construction. A shell must NOT recover this by comparing the rendered word
+ * against the private one -- that is a text comparison against a privacy
+ * claim, and "Private" is a substring of "Not private".
+ *
+ * Never fails: a NULL or non-UTF-8 source_mode, and a caught panic, all
+ * answer TC_TOOL_TONE_NEUTRAL, the tone that claims nothing. There is no
+ * error value, because a styling call that returned one would leave a shell
+ * choosing a tone for itself.
+ */
+int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
+
+/* The daemon's routing state, in words.
+ *
+ * Exported for the same reason tc_routing_tool_word is: the sentences were
+ * already shared, but the mapping from "awaiting_rows" / "rows_seen" /
+ * anything-else onto them was written out again in each shell, and three
+ * copies of a branch can disagree while three copies of a string cannot.
+ *
+ * A state this build has never heard of -- and a NULL or non-UTF-8 state --
+ * reads as the off line, which claims nothing. It never falls through to
+ * either "on" sentence.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_state_line(const char* state);
+
 /* The routing surface's "that file could not be used" sentence, assembled.
  *
  * token_path may be NULL, which is the case where nothing resolved at all;

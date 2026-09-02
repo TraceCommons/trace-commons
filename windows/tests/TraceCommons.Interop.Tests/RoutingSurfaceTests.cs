@@ -712,6 +712,157 @@ public class RoutingSurfaceTests
     }
 
     /// <summary>
+    /// This shell no longer owns the branch table: which of the four words a
+    /// tool gets is decided in <c>routing_copy.rs</c> and crosses the ABI.
+    ///
+    /// Asserted on the source, because a C# reimplementation that happened to
+    /// agree with the Rust today would pass every behavioural test here and
+    /// then drift the first time only one of the two was edited -- which is
+    /// the failure this removes, not a hypothetical one.
+    /// </summary>
+    [Fact]
+    public void TheWordAndToneBranchTablesAreNotReimplementedInThisShell()
+    {
+        string source = ImplementationSource();
+
+        Assert.Contains("RoutingSurface.ToolWord(sourceMode, wiring)", source, StringComparison.Ordinal);
+        Assert.Contains("RoutingSurface.ToolTone(sourceMode, wiring)", source, StringComparison.Ordinal);
+        Assert.Contains("RoutingSurface.StateLine(state)", source, StringComparison.Ordinal);
+
+        // The words may be reached only as the fallback for a call the ABI
+        // refused, never as the arms of a table. WordUnknown and StateOff are
+        // those fallbacks; the rest would mean a word is still chosen here.
+        foreach (string field in new[]
+                 {
+                     "WordPrivate", "WordDirect", "WordNotUsed", "StateWaiting", "StateReading",
+                 })
+        {
+            Assert.False(
+                source.Contains(field, StringComparison.Ordinal),
+                $"copy.{field} is reached in RoutingTools.cs, so a word is still chosen here");
+        }
+    }
+
+    /// <summary>
+    /// No styling decision on this surface reads the rendered word.
+    ///
+    /// The tone comes from <see cref="ToolWiring"/> through the same shared
+    /// table that chose the word. A bool meaning "this is the privacy word"
+    /// would invite a text comparison later, and "Private" is a substring of
+    /// the denial that must never come back -- the same shape that once let
+    /// <c>Contains("reachable")</c> match "unreachable" here.
+    /// </summary>
+    [Fact]
+    public void NoStylingDecisionReadsTheRenderedWord()
+    {
+        string source = ImplementationSource();
+        foreach (string comparison in new[]
+                 {
+                     "Word ==", "Word !=", "Word.Contains", "Word.StartsWith", "Word.Equals",
+                     "word ==", "word !=", "word.Contains", "word.Equals",
+                 })
+        {
+            Assert.False(
+                source.Contains(comparison, StringComparison.Ordinal),
+                $"a styling decision reads the rendered word: {comparison}");
+        }
+    }
+
+    /// <summary>
+    /// The reassuring tone falls on exactly the word that claims privacy, over
+    /// every input pair rather than the three a screenshot would show.
+    /// </summary>
+    [Fact]
+    public void TheReassuringToneFallsOnThePrivateWordAlone()
+    {
+        RoutingCopy copy = Copy();
+        foreach (string mode in new[] { "off", "watch", "unset", "", "something_new" })
+        {
+            foreach (ToolWiring wiring in new[] { ToolWiring.Wired, ToolWiring.NotWired, ToolWiring.Unknown })
+            {
+                string word = RoutingTools.ToolWord(copy, mode, wiring);
+                RoutingTone tone = RoutingTools.ToolTone(mode, wiring);
+                Assert.Equal(word == copy.WordPrivate, tone == RoutingTone.Clear);
+                Assert.True(
+                    tone == RoutingTone.Clear || tone == RoutingTone.Neutral,
+                    $"{mode}/{wiring} painted {tone}");
+            }
+        }
+
+        // The rows carry it, so a view never has to work it out.
+        RoutingEvidence evidence = Reachable(
+            """
+            {"outcome":"reachable","tools":[
+              {"id":"claude","installed":true,"wired":true},
+              {"id":"codex","installed":true,"wired":false}
+            ]}
+            """);
+        IReadOnlyList<RoutingToolRow> rows = RoutingTools.Rows(copy, AllWatched(), evidence);
+        Assert.Equal(RoutingTone.Clear, rows[0].Tone);
+        Assert.Equal(RoutingTone.Neutral, rows[1].Tone);
+        Assert.Equal(RoutingTone.Neutral, rows[2].Tone);
+
+        // "Not used" is a preference, not an achievement.
+        RoutingToolRow unused = RoutingTools.Rows(
+            copy,
+            new RoutingModes { Claude = "off", Codex = "off", Gemini = "off" },
+            evidence)[0];
+        Assert.Equal(copy.WordNotUsed, unused.Word);
+        Assert.Equal(RoutingTone.Neutral, unused.Tone);
+    }
+
+    /// <summary>
+    /// <see cref="ToolWiring"/>'s numbering is the ABI's <c>TC_TOOL_WIRING_*</c>.
+    ///
+    /// The cast in <see cref="RoutingSurface.ToolWord"/> relies on it, and a
+    /// reordered enum would send "wired" across as "not wired" -- a wrong
+    /// verdict on a privacy claim, not a crash.
+    /// </summary>
+    [Fact]
+    public void TheWiringEnumIsNumberedAsTheAbiSpellsIt()
+    {
+        Assert.Equal(0, (int)ToolWiring.Wired);
+        Assert.Equal(1, (int)ToolWiring.NotWired);
+        Assert.Equal(2, (int)ToolWiring.Unknown);
+
+        RoutingCopy copy = Copy();
+        Assert.Equal(copy.WordPrivate, RoutingSurface.ToolWord("watch", ToolWiring.Wired));
+        Assert.Equal(copy.WordDirect, RoutingSurface.ToolWord("watch", ToolWiring.NotWired));
+        Assert.Equal(copy.WordUnknown, RoutingSurface.ToolWord("watch", ToolWiring.Unknown));
+    }
+
+    /// <summary>
+    /// A state this build has never heard of claims nothing: it reads as the
+    /// off line and never falls through to either "on" sentence.
+    /// </summary>
+    [Fact]
+    public void AnUnknownStateReadsAsTheOffLineAcrossTheAbi()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(copy.StateOff, RoutingSurface.StateLine("a_state_from_a_later_daemon"));
+        Assert.Equal(copy.StateOff, RoutingSurface.StateLine(""));
+        Assert.Equal(copy.StateOff, RoutingSurface.StateLine(null));
+        Assert.Equal(copy.StateWaiting, RoutingSurface.StateLine(RoutingTools.AwaitingRows));
+        Assert.Equal(copy.StateReading, RoutingSurface.StateLine(RoutingTools.RowsSeen));
+    }
+
+    /// <summary>
+    /// <c>RoutingTools.cs</c> with its comments stripped: prose about the wire
+    /// may quote it, and nothing in a comment is ever rendered or executed.
+    /// </summary>
+    private static string ImplementationSource()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "RoutingTools.cs.txt");
+        Assert.True(File.Exists(path), $"the implementation source was not copied to {path}");
+        return string.Join(
+            "\n",
+            File.ReadAllText(path)
+                .Split('\n')
+                .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal))
+                .Where(line => !line.TrimStart().StartsWith("///", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
     /// This shell authors no wording on this surface.
     ///
     /// Read from the implementation's own source rather than asserted about

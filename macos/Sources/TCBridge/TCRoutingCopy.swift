@@ -24,6 +24,41 @@ public enum TCRoutingCopy {
         return String(cString: raw)
     }
 
+    /// One tool's word, chosen by the shared branch table.
+    ///
+    /// `wiring` is `TC_TOOL_WIRING_*`; `RoutingToolWiring.abiValue` in
+    /// `TCShellCore` is what produces it. Nil when the ABI would produce no
+    /// word -- a caught panic, or a source mode it could not read.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Reimplementing this
+    /// `switch` in Swift is what let the branching drift in three places
+    /// while every string it returned stayed identical.
+    public static func toolWord(sourceMode: String, wiring: Int32) -> String? {
+        guard let raw = sourceMode.withCString({ tc_routing_tool_word($0, wiring) }) else {
+            return nil
+        }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// How that word is painted, from the same two inputs: `TC_TOOL_TONE_*`.
+    ///
+    /// Never fails. A styling call that could fail would leave this shell
+    /// choosing a tone for itself, which is what crossing the boundary is
+    /// meant to stop. Do not recover this by comparing the rendered word
+    /// against the private one.
+    public static func toolTone(sourceMode: String, wiring: Int32) -> Int32 {
+        sourceMode.withCString { tc_routing_tool_tone($0, wiring) }
+    }
+
+    /// The daemon's routing state, in words. Nil only on a caught panic; a
+    /// state this build has never heard of reads as the off line.
+    public static func stateLine(state: String) -> String? {
+        guard let raw = state.withCString({ tc_routing_state_line($0) }) else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// "That file could not be used", assembled on the Rust side.
     ///
     /// `path` is nil when nothing resolved at all, which is a different

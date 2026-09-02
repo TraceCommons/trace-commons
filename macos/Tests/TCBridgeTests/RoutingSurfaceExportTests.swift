@@ -24,10 +24,15 @@ final class RoutingSurfaceExportTests: XCTestCase {
         return copy
     }
 
-    /// The sentences as the app wires them: straight through the ABI.
-    private let sentences = RoutingSentences(
+    /// Every Rust-side call as the app wires them: straight through the ABI.
+    /// Nothing below is a Swift branch table -- that is the point of this
+    /// file.
+    private let calls = RoutingCalls(
         tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
-        unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) }
+        unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+        toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
+        toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
+        stateLine: { TCRoutingCopy.stateLine(state: $0) }
     )
 
     private func rows(
@@ -40,7 +45,8 @@ final class RoutingSurfaceExportTests: XCTestCase {
         RoutingSurface.toolRows(
             sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini),
             evidence: evidence,
-            copy: copy
+            copy: copy,
+            calls: calls
         )
     }
 
@@ -75,6 +81,94 @@ final class RoutingSurfaceExportTests: XCTestCase {
         XCTAssertEqual(unused[0].word, "Not used")
     }
 
+    /// The branch table itself crosses, not only the words.
+    ///
+    /// The four literals above are reached through the export, so a rename in
+    /// the Rust fails there. This is the other half: change which word a
+    /// *state* maps to in `routing_copy.rs` -- without touching a single
+    /// string -- and this goes red. Before the export existed it could not,
+    /// because the mapping was a `switch` in Swift and only the words were
+    /// shared.
+    func testTheWordEachWiringStateGetsIsTheRustsChoiceAndNotThisShells() {
+        guard let copy = copy() else { return }
+        for mode in ["watch", "unset"] {
+            XCTAssertEqual(
+                TCRoutingCopy.toolWord(sourceMode: mode, wiring: RoutingToolWiring.wired.abiValue),
+                copy.wordPrivate
+            )
+            XCTAssertEqual(
+                TCRoutingCopy.toolWord(
+                    sourceMode: mode, wiring: RoutingToolWiring.notWired.abiValue
+                ),
+                copy.wordDirect
+            )
+            XCTAssertEqual(
+                TCRoutingCopy.toolWord(
+                    sourceMode: mode, wiring: RoutingToolWiring.unknown.abiValue
+                ),
+                copy.wordUnknown
+            )
+        }
+        // Only "off" means not used; "unset" watches the conventional
+        // location, which is a tool in use.
+        XCTAssertEqual(
+            TCRoutingCopy.toolWord(sourceMode: "off", wiring: RoutingToolWiring.wired.abiValue),
+            copy.wordNotUsed
+        )
+        // A wiring value this build has never heard of claims nothing.
+        XCTAssertEqual(TCRoutingCopy.toolWord(sourceMode: "watch", wiring: 99), copy.wordUnknown)
+    }
+
+    /// The reassuring tone falls on exactly the word that claims privacy,
+    /// over every input pair -- and both come from the same shared table, so
+    /// no styling decision anywhere reads the rendered string.
+    func testTheReassuringToneFallsOnThePrivateWordAloneThroughTheRealAbi() {
+        guard let copy = copy() else { return }
+        for mode in ["off", "watch", "unset", "", "something_new"] {
+            for wiring in [
+                RoutingToolWiring.wired, .notWired, .unknown,
+            ] {
+                let word = RoutingSurface.toolWord(
+                    sourceMode: mode, wiring: wiring, copy: copy, calls: calls
+                )
+                let tone = RoutingSurface.toolTone(sourceMode: mode, wiring: wiring, calls: calls)
+                XCTAssertEqual(
+                    tone == .clear, word == copy.wordPrivate, "\(mode)/\(wiring) -> \(word)"
+                )
+                XCTAssertNotEqual(
+                    tone, RoutingTone.held, "a tool word may not take the daemon's held tone"
+                )
+            }
+        }
+
+        // And it arrives on the row, so the view never works it out.
+        let rendered = rows(
+            evidence: RoutingEvidence(
+                outcome: .reachable,
+                tools: [
+                    "claude": RoutingToolRow(installed: true, wired: true),
+                    "codex": RoutingToolRow(installed: true, wired: false),
+                ]
+            ),
+            copy: copy
+        )
+        XCTAssertEqual(rendered[0].tone, .clear)
+        XCTAssertEqual(rendered[1].tone, .neutral)
+        XCTAssertEqual(rendered[2].tone, .neutral)
+    }
+
+    /// A state this build has never heard of claims nothing: it reads as the
+    /// off line and never falls through to either "on" sentence.
+    func testAStateThisBuildHasNeverHeardOfReadsAsTheOffLine() {
+        guard let copy = copy() else { return }
+        for state in ["a_state_from_a_later_daemon", "", "ROWS_SEEN"] {
+            let line = RoutingSurface.stateLine(state, copy: copy, calls: calls)
+            XCTAssertEqual(line, copy.stateOff, state)
+            XCTAssertNotEqual(line, copy.stateReading, state)
+            XCTAssertNotEqual(line, copy.stateWaiting, state)
+        }
+    }
+
     /// The tool names on the rows are the shared ones too.
     func testTheToolNamesAreTheOnesTheRustExports() {
         guard let copy = copy() else { return }
@@ -107,9 +201,9 @@ final class RoutingSurfaceExportTests: XCTestCase {
     /// The three status states, rendered through the real payload.
     func testTheStatusStatesRenderTheRustsSentences() {
         guard let copy = copy() else { return }
-        XCTAssertEqual(RoutingSurface.stateLine("not_declared", copy: copy), copy.stateOff)
-        XCTAssertEqual(RoutingSurface.stateLine("awaiting_rows", copy: copy), copy.stateWaiting)
-        XCTAssertEqual(RoutingSurface.stateLine("rows_seen", copy: copy), copy.stateReading)
+        XCTAssertEqual(RoutingSurface.stateLine("not_declared", copy: copy, calls: calls), copy.stateOff)
+        XCTAssertEqual(RoutingSurface.stateLine("awaiting_rows", copy: copy, calls: calls), copy.stateWaiting)
+        XCTAssertEqual(RoutingSurface.stateLine("rows_seen", copy: copy, calls: calls), copy.stateReading)
         XCTAssertTrue(copy.stateReading.hasPrefix("On"), copy.stateReading)
     }
 
@@ -121,7 +215,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
         guard let copy = copy() else { return }
         let path = "/Users/someone/.ironwire/control.token"
         let line = RoutingSurface.probeLine(
-            .tokenUnusable(path: path), copy: copy, sentences: sentences
+            .tokenUnusable(path: path), copy: copy, calls: calls
         )
         XCTAssertTrue(line.contains(path), line)
         XCTAssertNotEqual(line, copy.checkUnavailable)
@@ -130,7 +224,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
     func testTheUnreachableLineNamesThePortThroughTheRealSentence() {
         guard let copy = copy() else { return }
         let line = RoutingSurface.probeLine(
-            .unreachable(port: 8463), copy: copy, sentences: sentences
+            .unreachable(port: 8463), copy: copy, calls: calls
         )
         XCTAssertTrue(line.contains("8463"), line)
     }
@@ -142,7 +236,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
     /// restart, relaunch or quit would be describing a product this is not.
     func testNothingOnThisSurfaceAsksAnybodyToRestartAnything() {
         guard let copy = copy() else { return }
-        for text in Self.everySentence(copy: copy, sentences: sentences) {
+        for text in Self.everySentence(copy: copy, calls: calls) {
             for banned in ["restart", "relaunch", "reopen", "quit", "reboot", "start it again"] {
                 XCTAssertFalse(
                     text.lowercased().contains(banned),
@@ -157,7 +251,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
     /// pitch on a privacy screen -- and greying one out is still saying it.
     func testNothingOnThisSurfaceMentionsCorporaCreditsOrMoney() {
         guard let copy = copy() else { return }
-        for text in Self.everySentence(copy: copy, sentences: sentences) {
+        for text in Self.everySentence(copy: copy, calls: calls) {
             for banned in [
                 "corpus", "corpora", "credit", "reward", "earn", "payment", "paid", "money",
                 "ownership", "contribute", "contribution", "invite", "sign up", "account",
@@ -189,7 +283,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
     /// Every fixed string on the payload, plus every sentence that
     /// interpolates, in both of each one's shapes.
     private static func everySentence(
-        copy: RoutingCopy, sentences: RoutingSentences
+        copy: RoutingCopy, calls: RoutingCalls
     ) -> [String] {
         var texts: [String] = []
         for child in Mirror(reflecting: copy).children {
@@ -201,7 +295,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
             .tokenUnusable(path: nil),
             .unreachable(port: 8463), .unreachable(port: nil),
         ] {
-            texts.append(RoutingSurface.probeLine(outcome, copy: copy, sentences: sentences))
+            texts.append(RoutingSurface.probeLine(outcome, copy: copy, calls: calls))
         }
         texts.append(contentsOf: [
             TCRoutingCopy.lastChecked(when: "an hour ago") ?? "",
