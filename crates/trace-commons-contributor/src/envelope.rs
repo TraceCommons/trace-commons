@@ -1032,6 +1032,116 @@ mod tests {
         }
     }
 
+    /// The contributor's serialised envelope is not sensitive to
+    /// `serde_json::Map` ordering, so gaining `trace-commons-attestation` --
+    /// and with it `dcap-qvl`, whose mandatory `std` feature turns on
+    /// `serde_json/preserve_order` -- moves no digest.
+    ///
+    /// # Why this was checked, and why it is not a blocker
+    ///
+    /// `preserve_order` swaps `serde_json::Map` from a `BTreeMap` to an
+    /// insertion-ordered `IndexMap`, and cargo unifies features across a
+    /// build, so one dependency anywhere can silently reorder every
+    /// `Value::Object` in every crate. That is not hypothetical: adding
+    /// `dcap-qvl` on a branch enabled it and moved a golden envelope digest in
+    /// a crate the branch never touched.
+    ///
+    /// It is not a blocker here, for a reason worth recording so the next
+    /// person does not have to re-derive it. **The feature was already on in
+    /// this crate's graph before the witness work**, reached through the
+    /// existing `cfg(not(windows))` dev-dependency on `trace-commons-server`
+    /// and from there `dcap-qvl` -- `cargo tree -p trace-commons-contributor
+    /// -e features -i serde_json` shows it. So this crate's suite, including
+    /// everything downstream of `redaction_hash`, has been running under an
+    /// `IndexMap` and passing all along. The only build graph the new
+    /// dependency changes is the standalone `--no-default-features` one, which
+    /// is a `cargo check` job rather than a test job, and
+    /// `trace_commons_protocol::canonical_json` plus the
+    /// `serde_json preserve_order guard` CI job exist for exactly that case.
+    ///
+    /// What this test pins is the invariant those rest on: every path whose
+    /// bytes are hashed routes through `canonicalize`, so the ordering of the
+    /// backing map cannot be observed in a digest. Under a `BTreeMap` the
+    /// assertion is true for free; under `preserve_order` it is real work, and
+    /// it is the version that runs in this crate's graph.
+    #[tokio::test]
+    async fn an_envelope_serialises_key_sorted_whatever_map_backs_this_build() {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceContributionEvent, TraceContributionEventType,
+        };
+
+        let transcript = fixture_transcript();
+        let cfg = test_config();
+        let mut raw = build_raw_contribution(&transcript, &cfg, chrono::Utc::now());
+        // Keys deliberately out of sorted order in the source. Under an
+        // `IndexMap` an uncanonicalized payload would serialise in exactly
+        // this order.
+        raw.events.push(RawTraceContributionEvent {
+            event_id: uuid::Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: chrono::Utc::now(),
+            content: None,
+            structured_payload: serde_json::json!({
+                "zeta": 1,
+                "alpha": {"omega": 2, "beta": 3},
+                "middle": "value",
+            }),
+            tool_name: Some("Bash".to_string()),
+            tool_call_id: Some("call-1".to_string()),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+        });
+
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::new(vec![
+                "/Users/testuser".into(),
+            ])
+            .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let rendered = String::from_utf8(bytes.clone()).unwrap();
+
+        // Sorted order, not insertion order. Positions rather than a
+        // substring match, so the assertion cannot pass on a payload that
+        // happens to contain the keys somewhere.
+        let alpha = rendered.find("\"alpha\"").expect("the payload survived");
+        let middle = rendered.find("\"middle\"").expect("the payload survived");
+        let zeta = rendered.find("\"zeta\"").expect("the payload survived");
+        assert!(
+            alpha < middle && middle < zeta,
+            "an event payload reached the wire in insertion order, so a digest \
+             over it depends on which map backs the build"
+        );
+        // And nested objects too -- `canonicalize` recurses, and a shallow
+        // sort would leave a nested map ordering-dependent.
+        let beta = rendered
+            .find("\"beta\"")
+            .expect("the nested payload survived");
+        let omega = rendered
+            .find("\"omega\"")
+            .expect("the nested payload survived");
+        assert!(beta < omega, "a nested payload was not canonicalized");
+
+        // The digest the envelope carries is over those same canonical bytes,
+        // so it is stable across backing maps. Re-serialising and re-hashing
+        // must reproduce it exactly.
+        let reparsed: trace_commons_protocol::trace_contribution::TraceContributionEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&reparsed).unwrap(),
+            bytes,
+            "a round trip moved bytes, so the digest depends on the backing map"
+        );
+        assert_eq!(
+            reparsed.privacy.redaction_hash,
+            envelope.privacy.redaction_hash
+        );
+    }
+
     #[tokio::test]
     async fn envelope_has_schema_version_and_no_local_paths_or_secrets() {
         let t = fixture_transcript();

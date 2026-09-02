@@ -3771,6 +3771,245 @@ mod tests {
             "the fixture cannot tell a claim grant from a config request"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Task 7: what reaches POST /v1/traces.
+    // -----------------------------------------------------------------
+
+    use axum::response::IntoResponse as _;
+    use sha2::Digest as _;
+
+    /// One captured submission: the raw body bytes and the headers.
+    #[derive(Clone, Default)]
+    struct CapturedUpload {
+        bodies: Vec<Vec<u8>>,
+        headers: Vec<axum::http::HeaderMap>,
+    }
+
+    /// An ingest stub that keeps the body as **bytes**.
+    ///
+    /// `stub_ingest` parses into a `serde_json::Value`, which is exactly the
+    /// comparison that would pass over the bug this task exists to prevent: a
+    /// re-serialised envelope still parses to the same value. Byte capture is
+    /// what makes the digest assertion real.
+    fn stub_ingest_raw(captured: Arc<Mutex<CapturedUpload>>, first_status: u16) -> Router {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Router::new().route(
+            "/v1/traces",
+            post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let captured = captured.clone();
+                    let calls = calls.clone();
+                    async move {
+                        {
+                            let mut captured = captured.lock().unwrap();
+                            captured.bodies.push(body.to_vec());
+                            captured.headers.push(headers);
+                        }
+                        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if n == 0 && first_status != 200 {
+                            return (
+                                axum::http::StatusCode::from_u16(first_status).unwrap(),
+                                Json(serde_json::json!({"error": "claim expired"})),
+                            )
+                                .into_response();
+                        }
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                        .into_response()
+                    }
+                },
+            ),
+        )
+    }
+
+    fn stub_claim(now: DateTime<Utc>) -> ClaimToken {
+        ClaimToken {
+            access_token: "stub-claim-jwt".into(),
+            expires_at: now + chrono::Duration::hours(1),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            allowed_uses: vec!["debugging".into()],
+        }
+    }
+
+    /// A witnessed response over `bytes`, with a certificate that is not
+    /// checked here -- `upload_with_retry` forwards it, it does not verify it.
+    /// Verification is `witness::transport`'s job and is tested there.
+    fn witnessed_over(bytes: &[u8]) -> WitnessedEnvelope {
+        WitnessedEnvelope {
+            envelope_bytes: bytes.to_vec(),
+            certificate_json: serde_json::json!({
+                "redacted_sha256": hex::encode(sha2::Sha256::digest(bytes)),
+                "residual_risk_verdict": "low",
+                "redaction_policy_version": "deterministic-v1",
+                "witness_measurement": "aa".repeat(48),
+                "timestamp": 1_788_264_000i64,
+            })
+            .to_string(),
+            signature_hex: format!("0x{}", "ab".repeat(65)),
+        }
+    }
+
+    /// Envelope bytes whose compact re-serialisation is a DIFFERENT string, so
+    /// a `call_json` on this path would be caught rather than passing because
+    /// the fixture was already canonical.
+    ///
+    /// Not a real envelope: `upload_with_retry` never parses the witnessed
+    /// body, which is the property under test.
+    const UNCANONICAL_ENVELOPE: &[u8] = br#"{"zeta":1,"alpha": "two","gamma":1.50}"#;
+
+    async fn upload_once(
+        witnessed: Option<&WitnessedEnvelope>,
+        first_status: u16,
+    ) -> (
+        std::result::Result<TraceSubmissionReceipt, String>,
+        CapturedUpload,
+    ) {
+        let captured = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer_url = spawn(stub_issuer()).await;
+        let ingest_url = spawn(stub_ingest_raw(captured.clone(), first_status)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer_url, &ingest_url, &device.device_key_id);
+        let issuer = IssuerClient::new(allowlist_for(None)).unwrap();
+
+        let now = Utc::now();
+        let mut claim = Some(stub_claim(now));
+        let mut envelope = baseline_envelope(&cfg).await;
+
+        let result = upload_with_retry(
+            &cfg,
+            &issuer,
+            &device,
+            &mut claim,
+            &mut envelope,
+            &cfg,
+            witnessed,
+        )
+        .await;
+        let captured = captured.lock().unwrap().clone();
+        (result, captured)
+    }
+
+    async fn baseline_envelope(cfg: &ContributorConfig) -> TraceContributionEnvelope {
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+        let transcript = source.load(session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
+        redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_submission_carries_the_certificate_in_headers_and_not_in_the_body() {
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 200).await;
+        result.expect("the stub accepted the submission");
+
+        let headers = &captured.headers[0];
+        assert!(headers.contains_key(WITNESS_CERTIFICATE_HEADER));
+        assert!(headers.contains_key(WITNESS_SIGNATURE_HEADER));
+
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(
+            body.get("witness_certificate").is_none(),
+            "the envelope grew a field it is hashed over"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bytes_on_the_wire_are_the_bytes_the_certificate_covers() {
+        // The test that catches a re-serialisation. Compares the captured
+        // request body against the witness's bytes BYTE FOR BYTE -- not field
+        // by field, and not by parsing both sides, which is the comparison
+        // that would pass over exactly the bug being hunted.
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 200).await;
+        result.expect("the stub accepted the submission");
+
+        assert_eq!(captured.bodies[0], witnessed.envelope_bytes);
+        let certificate: serde_json::Value = serde_json::from_str(
+            captured.headers[0][WITNESS_CERTIFICATE_HEADER]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            certificate["redacted_sha256"].as_str().unwrap(),
+            hex::encode(sha2::Sha256::digest(&captured.bodies[0])),
+        );
+        // The fixture must be one a re-serialisation would move, or the
+        // assertion above cannot fail.
+        let round_tripped = serde_json::to_vec(
+            &serde_json::from_slice::<serde_json::Value>(UNCANONICAL_ENVELOPE).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            round_tripped, UNCANONICAL_ENVELOPE,
+            "the fixture cannot detect a re-serialisation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwitnessed_submission_sends_its_envelope_and_no_new_headers() {
+        let (result, captured) = upload_once(None, 200).await;
+        result.expect("the stub accepted the submission");
+
+        assert!(
+            !captured.headers[0]
+                .keys()
+                .any(|k| k.as_str().starts_with("x-trace-witness")),
+            "an unwitnessed submission grew witness headers"
+        );
+        // And the body is the envelope, as it always was.
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(body.get("schema_version").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_re_mint_refuses_rather_than_restamping_certified_bytes() {
+        // upload_with_retry restamps granted scopes after a 401 re-mint,
+        // deliberately, so a stale grant is not resent. On a witnessed
+        // submission that write breaks the digest, and silently re-witnessing
+        // would send the raw session a second time on the strength of a
+        // verification made for a different exchange.
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 401).await;
+        assert_eq!(result.unwrap_err(), "witness_claim_expired");
+        assert_eq!(
+            captured.bodies.len(),
+            1,
+            "the witnessed session was offered a second time after a re-mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwitnessed_submission_still_retries_after_a_re_mint() {
+        // The positive control for the refusal above: without it, a
+        // upload_with_retry that refused every 401 would satisfy that test.
+        let (result, captured) = upload_once(None, 401).await;
+        result.expect("an unwitnessed submission re-mints and retries");
+        assert_eq!(captured.bodies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_residual_risk_field_is_unchanged_by_witnessing() {
+        // Both shapes are on the wire at once during the rollout, and the
+        // fields do not overlap: ingest reads privacy.residual_pii_risk
+        // exactly as it does today and the certificate is additional
+        // evidence. A server that ignores the headers accepts the submission
+        // unchanged.
+        let (_, captured) = upload_once(None, 200).await;
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(
+            body["privacy"]["residual_pii_risk"].is_string(),
+            "the client-computed residual risk left the envelope"
+        );
+    }
 }
 
 /// Machine-readable form of a submit run, for callers driving this CLI
