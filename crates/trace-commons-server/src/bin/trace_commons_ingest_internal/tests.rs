@@ -89188,3 +89188,142 @@ fn a_configured_near_attestation_check_cannot_be_opted_out_of_by_failing() {
     assert!(summary.not_applicable_checks.is_empty());
     assert_eq!(summary.evidence_status, "failed_rehearsal_evidence");
 }
+
+// ---------------------------------------------------------------------------
+// POST /v1/attestation-collateral
+// ---------------------------------------------------------------------------
+
+/// Build a collateral request against the real routing table.
+///
+/// Two routers are exercised below. `app(state)` is what says the route is
+/// actually wired into the deployed surface, outside every auth layer;
+/// `attestation_collateral_routes()` is what lets the refusal tests run
+/// without an `AppState`. A handler can be correct and unreachable, so the
+/// reachability assertion is the one that goes through `app`.
+fn collateral_request(body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/attestation-collateral")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+async fn collateral_response(
+    request: axum::http::Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(request)
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// A contributor needs collateral *before* they have decided to trust
+/// anything, so requiring a claim to obtain it would make verifying an enclave
+/// depend on already being enrolled with the operator whose enclave it is.
+#[tokio::test]
+async fn the_collateral_route_is_reachable_without_authentication() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the collateral route ended up behind an auth layer"
+    );
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the collateral route is not wired into app()"
+    );
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn a_malformed_quote_is_refused_by_name_and_echoes_nothing() {
+    // A distinctive marker, so "the refusal echoed the input" cannot pass by
+    // coincidence.
+    const MARKER: &str = "zzq-collateral-marker-zzq";
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": format!("nothex{MARKER}") }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+    assert!(
+        !body.to_string().contains(MARKER),
+        "the refusal echoed the caller's input"
+    );
+    // And no offset or length, which would tell a prober how far its guess got.
+    assert_eq!(
+        body.as_object().map(|map| map.len()),
+        Some(1),
+        "the refusal body grew a field beyond its label"
+    );
+}
+
+/// `hex::decode("")` succeeds, so an empty quote would otherwise reach the
+/// fetch with nothing to fetch collateral for.
+#[tokio::test]
+async fn an_empty_quote_is_refused_rather_than_decoding_to_nothing() {
+    let (status, body) =
+        collateral_response(collateral_request(serde_json::json!({ "quote_hex": "" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+/// Odd-length hex is not hex, and a route that truncated it would fetch
+/// collateral for bytes the caller never sent.
+#[tokio::test]
+async fn an_odd_length_quote_is_refused_rather_than_truncated() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "abc" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+#[tokio::test]
+async fn an_unknown_field_on_the_collateral_request_is_refused() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff", "tenant": "someone" }),
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a field this route does not understand was accepted and ignored"
+    );
+}
+
+/// The missing-control path. Never a 200 with an empty body: a client
+/// checking only the status could not tell that from real collateral, and a
+/// client verifying against empty collateral verifies nothing at all.
+///
+/// Compiled only without the feature, because with it this binary really can
+/// fetch collateral and the assertion would be about a network call.
+#[cfg(not(feature = "near-attestation-collateral"))]
+#[tokio::test]
+async fn a_build_without_the_collateral_client_refuses_by_missing_control() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body["error"],
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+        "the refusal must name the control an operator turns on, not a generic failure"
+    );
+}
