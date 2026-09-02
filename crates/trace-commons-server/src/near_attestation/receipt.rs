@@ -208,7 +208,10 @@ fn eip191_digest(message: &[u8]) -> [u8; 32] {
 
 /// Recover the 20-byte Ethereum address that produced `signature_hex` over
 /// `message` under EIP-191.
-fn recover_eip191_signer(message: &[u8], signature_hex: &str) -> Result<[u8; 20], ReceiptError> {
+pub(crate) fn recover_eip191_signer(
+    message: &[u8],
+    signature_hex: &str,
+) -> Result<[u8; 20], ReceiptError> {
     let raw = hex::decode(strip_0x(signature_hex)).map_err(|_| ReceiptError::SignatureMalformed)?;
     if raw.len() != 65 {
         return Err(ReceiptError::SignatureMalformed);
@@ -257,7 +260,7 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
 }
 
 /// Decode a `0x`-prefixed 20-byte hex address, in either case.
-fn decode_address(s: &str) -> Option<[u8; 20]> {
+pub(crate) fn decode_address(s: &str) -> Option<[u8; 20]> {
     let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     if body.len() != 40 {
         return None;

@@ -85,23 +85,42 @@ does not. No surface may describe a witnessed trace as "verified clean".
 
 ## The certificate
 
+**And a labelled placeholder is not a verified claim.** Replacements are
+constrained to `[REDACTED]` or `[REDACTED:<label>]` so that applying spans can
+only remove information and stamp a marker -- without that rule, an arbitrary
+replacement is an insertion channel and the artifact no longer derives from raw
+*by redaction alone*. But the grammar constrains what a span may **say**, not
+whether it is honest. A span may claim `[REDACTED:private_name]` over a phone
+number, or over text that was never PII.
+
+That is sufficiency again, and already disclaimed -- but a *labelled*
+placeholder reads like a statement about the content it replaced, and a later
+surface could easily treat it as one. It is not. Any surface that displays or
+aggregates these labels must say they are the client's assertion, not a
+witnessed fact.
+
 On success the witness signs:
 
 ```
 H(redacted_artifact)
 chat_id
-account_pseudonym          <- stable per-account, opaque; see Deployment
 prompt_tokens, completion_tokens
 model
 timestamp
 redaction_policy_version
-witness_enclave_measurement
+witness_measurement
 ```
 
-`account_pseudonym` is the field that makes the per-contributor cap bind. It is
-available only because NEAR AI hosts the witness and therefore already knows the
-account; it is opaque and must never be a name, an email, or anything resolvable
-to a person. We hash it on arrival regardless.
+**There is deliberately no `account_pseudonym` field.** An earlier draft carried
+one, from when NEAR AI was to host the witness and would therefore already know
+which account paid. **We host it**, so the witness has no way to learn that --
+and a signed field that can never be populated is worse than an absent one: it
+reads as a guarantee and delivers nothing.
+
+If NEAR AI later adds a stable per-account pseudonym to the *receipt*, the
+witness verifies that receipt and can relay the value faithfully. That is a
+certificate format version bump when it happens, and an honest one. Adding a
+field we cannot fill today, in anticipation, is not.
 
 The server verifies the signature against the witness's own attestation, then
 checks `H(redacted_artifact)` against the bytes it holds. Raw never reaches the
@@ -273,7 +292,22 @@ quote — unlike Confidential Space, which is token-based — but that is not th
 same as confirming dstack-cloud presents it through the endpoint and layout we
 verified against NEAR AI.
 
-**Confirm this before choosing the GCP path.** If it diverges we would be
+**ASSUMED WORKING (Zaki, 2026-09-01), not verified.** The decision is to plan
+against dstack's attestation being the same wherever it runs, including
+`dstack-cloud` on a GCP Confidential VM, rather than block on confirming it.
+
+Recorded as an assumption because it is load-bearing and cheap to be wrong
+about: if the quote shape diverges, the client-side verifier has to be written
+twice, which is the cost the dstack choice exists to avoid. Twice on 2026-09-01
+a documented behaviour turned out wrong when probed -- the receipt hashed the
+whole response body rather than `message.content`, and `report_data`'s layout
+contradicted NEAR AI's own README. Both would have shipped as defects.
+
+The cheap check remains available at any point: stand up a trial dstack app and
+fetch its attestation. Phala Cloud needs no such check -- it is the
+configuration verified live.
+
+**Original guidance, superseded:** If it diverges we would be
 writing a second verifier, which is the cost the dstack decision exists to
 avoid. Phala Cloud is the safe default precisely because it is the configuration
 we have already verified against, live.
