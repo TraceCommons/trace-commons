@@ -109,6 +109,23 @@ pub enum SessionEventKind {
     Opaque,
 }
 
+/// The provider's complete usage report for one step, minus the input and
+/// output counts that [`SessionEvent::token_counts`] already carries.
+///
+/// `model` is the id the provider itself named for this step, not the
+/// session's declared model: a session can be served by more than one model
+/// (a cheaper one for a side task), and pricing one step at another step's
+/// rate is exactly the confidently wrong number this must never produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedBy {
+    pub model: String,
+    pub cache_read_tokens: u32,
+    /// Cache writes are split by cache duration because they are priced
+    /// differently -- see [`crate::pricing::TokenUsage`].
+    pub cache_write_5m_tokens: u32,
+    pub cache_write_1h_tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionEvent {
     pub kind: SessionEventKind,
@@ -117,6 +134,19 @@ pub struct SessionEvent {
     pub structured: serde_json::Value, // Value::Null when absent
     pub tool_name: Option<String>,
     pub token_counts: Option<(u32, u32)>, // (input, output)
+    /// What the provider said served this step, where the transcript records
+    /// it completely enough to price. Together with `token_counts` this is
+    /// what [`crate::pricing`] needs; on its own it is not enough, and
+    /// neither is `token_counts` on its own.
+    ///
+    /// Setting this is a claim by the adapter that it read the provider's
+    /// whole usage report for the step -- every count below is a figure the
+    /// transcript stated, not a zero stood in for a field that was missing.
+    /// An adapter that cannot make that claim leaves this `None`, and the
+    /// step goes unpriced rather than underpriced.
+    ///
+    /// Nothing here is serialized into an envelope. The price it yields is.
+    pub served_by: Option<ServedBy>,
     /// The harness's own id for the call: `tool_use.id` in Claude Code,
     /// `call_id` in Codex, `id`/`tool_call_id` in a trajectory file. Set on
     /// both halves of a call so a result can be paired with the call it

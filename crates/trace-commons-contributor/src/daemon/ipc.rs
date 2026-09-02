@@ -98,7 +98,7 @@
 //!   here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(unix)]
 use anyhow::bail;
@@ -236,6 +236,7 @@ pub const METHODS: &[&str] = &[
     "cancel",
     "clear_public_profile",
     "consent_options",
+    "discover_routing",
     "dismiss",
     "arming_suggestion",
     "decline_arming",
@@ -255,6 +256,8 @@ pub const METHODS: &[&str] = &[
     "preview_request",
     "preview_turns",
     "preview_visible",
+    "probe_routed_tools",
+    "probe_routing",
     "queue_outcome_counts",
     "quiesce",
     "refresh_history",
@@ -386,21 +389,49 @@ pub struct DaemonShared {
     /// this handle -- the pool must not hold an `Arc<DaemonShared>` through
     /// the scheduler, or the two would keep each other alive forever.
     pub previews: Arc<PreviewScheduler>,
-    /// The routing overlay's one long-lived instance, built once from the
+    /// The routing overlay's one long-lived instance, built from the
     /// declaration in settings and refreshed on the poll tick.
     ///
-    /// `None` is the majority case -- no proxy declared -- and stays `None`
-    /// for the daemon's whole lifetime; nothing here rebuilds it. Settings
-    /// keep describing the *declaration* (`DaemonSettings::source_roots`
-    /// stays bare); this is the single place the *instance* lives, because
-    /// a ledger built per call would hand every caller a cold, empty
-    /// snapshot -- see [`Self::source_roots_with_routing`].
-    pub routing: Option<Arc<crate::routing::ironwire::IronWireLedger>>,
+    /// `None` is the majority case -- no proxy declared. Settings keep
+    /// describing the *declaration* (`DaemonSettings::source_roots` stays
+    /// bare); this is the single place the *instance* lives, because a
+    /// ledger built per call would hand every caller a cold, empty snapshot
+    /// -- see [`Self::source_roots_with_routing`].
+    ///
+    /// Behind an `RwLock` because the declaration can change while the
+    /// daemon runs: `set_settings` rebuilds this in place (see
+    /// [`Self::rebuild_routing`]). Telling a contributor to restart the
+    /// daemon because they typed a port number is the friction that makes a
+    /// feature feel broken. Readers take the lock only long enough to clone
+    /// the `Arc` out -- nothing holds it across an await, and nothing holds
+    /// it while doing I/O.
+    routing: RwLock<Option<Arc<crate::routing::ironwire::IronWireLedger>>>,
     /// Whether the last state this daemon reported for `routing` was
     /// "has rows". Compared against on every refresh so a transition is
     /// reported once, not on every poll -- see [`Self::routing_transition`].
     routing_had_rows: AtomicBool,
 }
+
+/// `status.routing.state`: the contributor never declared a proxy.
+///
+/// The state `IronWireLedger::has_rows` cannot express. A daemon holding no
+/// ledger and a daemon holding a ledger that has read nothing both report
+/// "no rows", and collapsing them tells a contributor who declared a proxy
+/// that everything is fine when the declaration never took.
+pub const ROUTING_NOT_DECLARED: &str = "not_declared";
+
+/// `status.routing.state`: a proxy is declared and the daemon holds a
+/// ledger, but no row has arrived yet.
+///
+/// **Not an error.** A proxy installed this morning reports this, and so
+/// does one whose declaration was changed a second ago -- a rebuilt ledger
+/// starts cold by construction. A shell that renders this as a fault will
+/// be wrong on both. `routing.last_refresh_at` is what separates "the proxy
+/// answered and had nothing" from "nothing has answered yet".
+pub const ROUTING_AWAITING_ROWS: &str = "awaiting_rows";
+
+/// `status.routing.state`: a proxy is declared and rows have been read.
+pub const ROUTING_ROWS_SEEN: &str = "rows_seen";
 
 impl DaemonShared {
     pub fn load(store: ConfigStore) -> Result<Self> {
@@ -446,11 +477,12 @@ impl DaemonShared {
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load(&store)?;
-        // Built once, here, from the declaration this settings file carries
-        // at startup. A settings edit that changes the declaration takes
-        // effect on the next daemon restart, same as every other setting
-        // this constructor reads once.
-        let routing = super::settings::ironwire_ledger_for(settings.ironwire.as_ref());
+        // Built here from the declaration this settings file carries at
+        // startup. A later edit does not wait for a restart:
+        // `set_settings` rebuilds the instance in place.
+        let routing = RwLock::new(super::settings::ironwire_ledger_for(
+            settings.ironwire.as_ref(),
+        ));
         let (events, _) = broadcast::channel(256);
         let paused = state.paused;
         Ok(Self {
@@ -483,10 +515,47 @@ impl DaemonShared {
             s.source_roots(&self.store)
         };
         let ledger = self
-            .routing
-            .clone()
+            .routing_ledger()
             .map(|l| l as Arc<dyn crate::routing::RoutingLedger>);
         roots.with_routing(ledger)
+    }
+
+    /// The routing ledger the daemon currently holds, if any.
+    ///
+    /// Every reader goes through here rather than touching the lock, so the
+    /// guard is never held for longer than the clone -- in particular never
+    /// across the await in [`Self::refresh_routing`], where holding it would
+    /// block `set_settings` for the length of a network call.
+    /// A poisoned lock reads as no ledger, and never as a panic. Before the
+    /// hot-swap this was a plain `Option` that could not fail, and the
+    /// promise made of the submission path -- which reaches here through
+    /// `source_roots_with_routing` -- was that it cannot. Absence is
+    /// already the state every caller handles, and it is the state a
+    /// vanished proxy produces, so the one answer costs a trace nothing.
+    pub(crate) fn routing_ledger(&self) -> Option<Arc<crate::routing::ironwire::IronWireLedger>> {
+        self.routing
+            .read()
+            .ok()
+            .and_then(|held| held.as_ref().map(Arc::clone))
+    }
+
+    /// Rebuild the held ledger from a declaration, replacing whatever was
+    /// there.
+    ///
+    /// The rebuilt instance starts **cold** -- an empty snapshot until the
+    /// next refresh. That is correct and it is not an error: it is exactly
+    /// the "declared, nothing seen yet" state `status_value` reports, and
+    /// the same state a machine whose proxy was installed this morning is
+    /// in. It also resets the transition state, so the first refresh after
+    /// a declaration change logs the new ledger's data state rather than
+    /// comparing it against the old one's.
+    pub(crate) fn rebuild_routing(
+        &self,
+        declaration: Option<&super::settings::IronWireDeclaration>,
+    ) {
+        let rebuilt = super::settings::ironwire_ledger_for(declaration);
+        *self.routing.write().expect("routing lock") = rebuilt;
+        self.routing_had_rows.store(false, Ordering::Relaxed);
     }
 
     /// Refresh the routing ledger, if the contributor declared one, and
@@ -496,7 +565,7 @@ impl DaemonShared {
     /// an error and carries its own short timeout, so awaiting it here
     /// cannot fail or stall the poll tick that calls this.
     pub(crate) async fn refresh_routing(&self) {
-        let Some(ledger) = self.routing.clone() else {
+        let Some(ledger) = self.routing_ledger() else {
             return;
         };
         ledger.refresh().await;
@@ -596,6 +665,10 @@ impl DaemonShared {
         // Taken before the queue lock below, and released with it, because
         // `daily_budget` takes the queue, state, and settings locks itself.
         let budget = self.daily_budget(now);
+        // Taken before the locks below for the same reason as `budget`:
+        // this reads the routing lock, and taking locks in one order
+        // everywhere is what keeps that safe.
+        let routing = self.routing_value();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -626,6 +699,35 @@ impl DaemonShared {
                 "blocked_entries": budget.blocked_entries,
                 "blocked_bytes": budget.blocked_bytes,
             },
+            // Additive, and three-valued on purpose. `health` reports
+            // faults; none of these three is one, so like `daily_budget`
+            // this sits beside it rather than inside it.
+            "routing": routing,
+        })
+    }
+
+    /// The `routing` sub-object of [`Self::status_value`].
+    ///
+    /// Three states, because the two a boolean can carry are the defect:
+    /// "no proxy declared" and "declared but reading nothing" are different
+    /// situations with different answers, and only the second is worth
+    /// telling a contributor about. `has_rows` alone cannot tell them apart
+    /// -- the distinction lives in the `Option` on shared state, which is
+    /// why this reads the held instance rather than the settings blob.
+    ///
+    /// `last_refresh_at` is reported alongside because `has_rows` is a poor
+    /// health signal on its own: it says data exists, not that the proxy
+    /// answers now. A proxy that died an hour ago still has rows.
+    fn routing_value(&self) -> serde_json::Value {
+        let Some(ledger) = self.routing_ledger() else {
+            return serde_json::json!({
+                "state": ROUTING_NOT_DECLARED,
+                "last_refresh_at": serde_json::Value::Null,
+            });
+        };
+        serde_json::json!({
+            "state": if ledger.has_rows() { ROUTING_ROWS_SEEN } else { ROUTING_AWAITING_ROWS },
+            "last_refresh_at": ledger.last_refresh_at(),
         })
     }
 
@@ -1145,6 +1247,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // The turn index is resolved from the same envelope as the body, by
         // the same async path, so it refuses here for the same reason.
         "preview_turns" => Response::err(req.id, ERR_UNAVAILABLE, "preview-turns-requires-async"),
+        // The probe opens a loopback connection to the proxy, which the
+        // synchronous dispatcher cannot do. It refuses rather than
+        // reporting a state it never checked -- a probe that answered
+        // without asking would be exactly the silence this method exists
+        // to end.
+        "probe_routing" => Response::err(req.id, ERR_UNAVAILABLE, "probe-routing-requires-async"),
+        // Same reason: it asks the proxy, over loopback, for the tool list.
+        "probe_routed_tools" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "probe-routed-tools-requires-async")
+        }
+        // Unlike the probe, discovery opens no connection: it reads one
+        // small file the proxy left on disk. So it answers here, on the
+        // synchronous path, and a shell can call it before it has anything
+        // to declare.
+        "discover_routing" => handle_discover_routing(req),
         "pause" => {
             // An optional timed pause, persisted so it survives a restart of
             // either the daemon or the app that requested it -- an app-side
@@ -1395,6 +1512,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_settings" => {
             let mut settings = shared.settings.lock().expect("settings lock");
+            // Captured before the write so the ledger is rebuilt only when
+            // the declaration actually moved. Rebuilding on every settings
+            // write would blank a warm snapshot whenever a contributor
+            // touched an unrelated slider.
+            let declared_before = settings.ironwire.clone();
             // `apply_settings_object` is the same validation
             // `tc_daemon_start_with_settings` (the C ABI's pre-start
             // settings override) uses, so there is one definition of "a
@@ -1405,6 +1527,15 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Ok(true) => {
                     if let Err(_e) = settings.save(&shared.store) {
                         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
+                    }
+                    // Apply the proxy declaration to this running daemon.
+                    // Without this the contributor would have to restart the
+                    // daemon to make a port they just typed take effect,
+                    // which reads as the feature being broken. Done after
+                    // the save so a declaration that takes effect is always
+                    // one that survives a restart too.
+                    if settings.ironwire != declared_before {
+                        shared.rebuild_routing(settings.ironwire.as_ref());
                     }
                     Response::ok(req.id, redacted_settings(&settings))
                 }
@@ -1440,7 +1571,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 /// The complete dispatcher: answers the async methods (`"approve"`,
-/// `"preview"`, `"preview_body"`, `"preview_turns"`, `"quiesce"`, `"enroll"`,
+/// `"preview"`, `"preview_body"`, `"preview_turns"`, `"probe_routing"`,
+/// `"probe_routed_tools"`,
+/// `"quiesce"`, `"enroll"`,
 /// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
 /// `"clear_public_profile"`) for real and delegates every other method,
 /// unchanged, to the synchronous `handle_request`. See the module doc's
@@ -1455,6 +1588,8 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "probe_routing" => handle_probe_routing(req).await,
+        "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
@@ -2967,6 +3102,367 @@ fn block_on_ipc(shared: &DaemonShared, req: &Request) -> Response {
     })
 }
 
+/// How long a probe waits for the proxy before calling it unreachable.
+///
+/// A loopback call to a process on the same machine, and one a human is
+/// waiting on with a settings dialog open. Short for both reasons.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `probe_routing`: the proxy answered and the token was accepted.
+pub const PROBE_REACHABLE: &str = "reachable";
+/// `probe_routing`: the token could not be used. Carries `token_path`, the
+/// absolute path that was tried -- never the token.
+///
+/// Covers both halves of the same contributor-fixable mistake: no readable
+/// `control.token` at the resolved path, and a proxy that answered and
+/// refused the one that was there. A GUI daemon never sees `IRONWIRE_HOME`,
+/// so it reads `~/.ironwire/control.token` whatever the contributor set in
+/// a shell -- which produces a missing file on one machine and a stale
+/// token on another. Both are fixed by naming the directory, so both name
+/// the path.
+pub const PROBE_TOKEN_UNREADABLE: &str = "token_unreadable";
+/// `probe_routing`: nothing usable answered on the port. Carries `port`.
+///
+/// Also the answer when something answered but did not serve the ledger --
+/// a 404 or a 500. The contributor's actionable fact there is still the
+/// port: the usual cause is a number naming some other local service.
+pub const PROBE_UNREACHABLE: &str = "unreachable";
+
+/// Ask the declared proxy whether it is there, and say what was found.
+///
+/// The counterpart to the rule `routing/mod.rs` lives by. On the submission
+/// path absence and failure are deliberately the same state, because a
+/// proxy that vanished must never cost anyone a trace. **Declaring is the
+/// other path, and it must answer**: as `main` stood, a contributor could
+/// name a wrong port or an unreachable token, get no error and no
+/// indicator, and have every trace silently carry no routing data.
+///
+/// Nothing here touches daemon state and nothing here can affect a
+/// submission: it takes no `DaemonShared`, it runs only when a human asks,
+/// and its whole effect is the answer it returns.
+///
+/// Three outcomes, each distinguishable by the caller, and **none of them
+/// ever carries the token**. `IronWireLedger`'s hand-written `Debug` keeps
+/// the token out of logs because it is a credential for an API that can
+/// rewrite the contributor's agent configuration; the same reasoning holds
+/// at the IPC boundary, where the answer crosses a socket to a shell.
+///
+/// The token *directory* is a different thing and is the point: the path is
+/// what makes the failure fixable.
+/// Answer what a running IronWire says about itself, so the app does not
+/// have to ask a contributor for it.
+///
+/// The declaring flow's counterpart to `probe_routing`. The probe checks a
+/// port and a token the contributor already named; this reports the port
+/// and token path a *running* proxy published, before there is anything
+/// declared to check.
+///
+/// Result shape, and the reason for it:
+///
+/// ```json
+/// { "found": true, "port": 8463, "token_path": "/home/x/.ironwire/control.token" }
+/// { "found": false }
+/// ```
+///
+/// A boolean rather than a named outcome. There is exactly one distinction
+/// to draw here -- a pointer was read, or it was not -- and every reason it
+/// was not (never installed, not running, a version that does not publish,
+/// a file this reader will not act on) is the same fact to the caller and
+/// the same next step for the contributor: type the port. A vocabulary of
+/// outcome strings would invite a caller to match on one, and a string that
+/// is a prefix of another is how a shell comes to treat "unreachable" as
+/// "reachable".
+///
+/// **Never carries a token.** `token_path` is a path, for display beside
+/// the port; the daemon opens it itself, at call time, when it builds a
+/// reader. Discovery is advisory throughout: nothing here writes settings,
+/// touches daemon state, or can affect a submission.
+fn handle_discover_routing(req: &Request) -> Response {
+    let Some(pointer) = super::ironwire_pointer::read_pointer() else {
+        return Response::ok(req.id, serde_json::json!({ "found": false }));
+    };
+    let mut result = serde_json::Map::new();
+    result.insert("found".to_string(), serde_json::Value::Bool(true));
+    result.insert("port".to_string(), serde_json::json!(pointer.port));
+    if let Some(token_path) = pointer.token_path.as_ref() {
+        result.insert(
+            "token_path".to_string(),
+            serde_json::json!(token_path.to_string_lossy()),
+        );
+    }
+    Response::ok(req.id, serde_json::Value::Object(result))
+}
+
+/// `token_unreadable`, naming the path when one resolved.
+///
+/// **Absent, not null**, when nothing resolved at all: there is no path to
+/// name, and an empty string would send a contributor to look at "".
+fn token_unreadable(req: &Request, token_path: Option<&std::path::Path>) -> Response {
+    match token_path {
+        Some(path) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "outcome": PROBE_TOKEN_UNREADABLE,
+                "token_path": path.to_string_lossy(),
+            }),
+        ),
+        None => Response::ok(
+            req.id,
+            serde_json::json!({ "outcome": PROBE_TOKEN_UNREADABLE }),
+        ),
+    }
+}
+
+/// The port, the credential, and the path it came from: everything both
+/// proxy-facing calls need before they can open a connection.
+///
+/// Extracted so `probe_routing` and `probe_routed_tools` cannot drift into
+/// two answers about one machine. Every refusal here is already a
+/// well-formed answer to either caller -- a bad-params error, or
+/// `token_unreadable` naming the path -- so it is returned whole rather
+/// than re-derived per call site.
+///
+/// **Never returns the token to a caller.** It is handed back so the
+/// request can carry it; nothing in either handler's result contains it.
+/// The refusal is boxed: a `Response` is large, and an unboxed one on
+/// the error side of every call trips `result_large_err`, which the
+/// clippy gate fails the build on.
+fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), Box<Response>> {
+    let port = match req.params.get("port").and_then(serde_json::Value::as_u64) {
+        // Port 0 is not a port a proxy listens on; it is the ask-the-kernel
+        // sentinel, and accepting it would probe whatever it resolved to.
+        Some(port) if port > 0 && port <= u64::from(u16::MAX) => port as u16,
+        _ => {
+            return Err(Box::new(Response::err(
+                req.id,
+                ERR_BAD_PARAMS,
+                "port-invalid",
+            )));
+        }
+    };
+    let token_dir = match req.params.get("token_dir") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_str() {
+            // An empty string is not a directory. Refused rather than
+            // treated as absent, because falling through to the
+            // environment would answer about a path the caller did not ask
+            // about.
+            Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
+            _ => {
+                return Err(Box::new(Response::err(
+                    req.id,
+                    ERR_BAD_PARAMS,
+                    "token-dir-invalid",
+                )));
+            }
+        },
+    };
+
+    // The same resolution the reader uses, through the same function, so a
+    // probe cannot send a contributor to fix a file nothing reads.
+    let Some(path) = super::settings::ironwire_token_path(token_dir.as_deref()) else {
+        // Nothing resolved at all: no declared directory, no
+        // `IRONWIRE_HOME`, no discoverable home. There is no path to name.
+        return Err(Box::new(token_unreadable(req, None)));
+    };
+    // Lexical, not a canonicalization: `std::path::absolute` touches no
+    // filesystem and resolves a relative path against the same working
+    // directory `fs::read_to_string` would, so what is reported and what is
+    // read stay the same file.
+    let reported = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+
+    let token = match std::fs::read_to_string(&path) {
+        Ok(token) => token.trim().to_string(),
+        Err(_) => return Err(Box::new(token_unreadable(req, Some(&reported)))),
+    };
+    if token.is_empty() {
+        // A file that exists with nothing in it. There is no credential to
+        // send, so this is the same fixable state as no file at all.
+        return Err(Box::new(token_unreadable(req, Some(&reported))));
+    }
+    Ok((port, token, reported))
+}
+
+async fn handle_probe_routing(req: &Request) -> Response {
+    let (port, token, reported) = match probe_credential(req) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+
+    let Ok(client) = reqwest::Client::builder().build() else {
+        // The platform trust store would not load. Not a fact about the
+        // proxy, and saying "unreachable" would send the contributor to
+        // check a port that is fine.
+        return Response::err(req.id, ERR_UNAVAILABLE, "probe-client-unavailable");
+    };
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/_ironwire/log?limit=1"))
+        .timeout(PROBE_TIMEOUT)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return Response::ok(
+            req.id,
+            serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": port }),
+        );
+    };
+    let status = response.status();
+    if status.is_success() {
+        return Response::ok(req.id, serde_json::json!({ "outcome": PROBE_REACHABLE }));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return token_unreadable(req, Some(&reported));
+    }
+    Response::ok(
+        req.id,
+        serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": port }),
+    )
+}
+
+/// The largest `/_ironwire/settings` body this reader will accumulate.
+///
+/// Another process's output, arriving from a port anything on the machine
+/// can bind. The real body is a few kilobytes; the bound is here so a
+/// process that streams forever cannot make a settings dialog eat the
+/// machine's memory while a human waits on it.
+const ROUTED_TOOLS_BODY_LIMIT: usize = 64 * 1024;
+
+/// The most tool rows echoed back to a shell. Same reasoning, one layer up.
+const ROUTED_TOOLS_LIMIT: usize = 64;
+
+/// Ask the declared proxy which tools on this machine are pointed at it.
+///
+/// The per-tool counterpart to `probe_routing`, and the reason it exists:
+/// declaring a proxy in *this* app says nothing about whether Codex or
+/// Gemini CLI are configured to send through it, so a shell that renders
+/// one switch as three tool verdicts is inventing two of them. IronWire
+/// answers the question itself -- `ironwire connect` is what edits those
+/// config files, so a second detector here would be a second answer on one
+/// machine, and ours would be the wrong one.
+///
+/// Result shape:
+///
+/// ```json
+/// { "outcome": "reachable", "tools": [ { "id": "claude", "installed": true, "wired": true } ] }
+/// { "outcome": "unreachable", "port": 8463 }
+/// { "outcome": "token_unreadable", "token_path": "/home/x/.ironwire/control.token" }
+/// ```
+///
+/// The outcome vocabulary is `probe_routing`'s, deliberately: it is the
+/// same connection to the same proxy with the same credential, and a
+/// caller that already reads one must not have to learn a second set of
+/// words for the identical three states.
+///
+/// **What `wired` does and does not evidence.** It is true for any loopback
+/// host on any port whose path is `/anthropic` -- deliberately upstream, so
+/// that `connect` can follow a port change -- and nothing on the response
+/// carries a port or a URL. So it evidences the *local hop* and not the
+/// destination: "IronWire is handling this tool" is supportable, "this
+/// tool's work is private" is not. Copy built on this must say the first.
+///
+/// An answer that arrives but cannot be read reports `reachable` with no
+/// tools rather than `unreachable`. The proxy did answer -- sending a
+/// contributor to check a port that is fine would be the wrong next step --
+/// and an empty list is exactly the right amount of evidence about every
+/// tool: none.
+///
+/// Only `id`, `installed` and `wired` cross the socket. `config_path` and
+/// `connect_command` are a path and a shell command from another process,
+/// and nothing here renders either.
+async fn handle_probe_routed_tools(req: &Request) -> Response {
+    let (port, token, reported) = match probe_credential(req) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+
+    let Ok(client) = reqwest::Client::builder().build() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "probe-client-unavailable");
+    };
+    let unreachable = || {
+        Response::ok(
+            req.id,
+            serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": port }),
+        )
+    };
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/_ironwire/settings"))
+        .timeout(PROBE_TIMEOUT)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await;
+    let Ok(mut response) = response else {
+        return unreachable();
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return token_unreadable(req, Some(&reported));
+    }
+    if !status.is_success() {
+        return unreachable();
+    }
+
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > ROUTED_TOOLS_BODY_LIMIT {
+                    // Over the bound. The proxy answered, so this is not an
+                    // unreachable port; it is an answer nothing can read.
+                    return Response::ok(
+                        req.id,
+                        serde_json::json!({ "outcome": PROBE_REACHABLE, "tools": [] }),
+                    );
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return unreachable(),
+        }
+    }
+
+    Response::ok(
+        req.id,
+        serde_json::json!({ "outcome": PROBE_REACHABLE, "tools": routed_tools(&body) }),
+    )
+}
+
+/// The tool rows in a `/_ironwire/settings` body, or none.
+///
+/// Every unreadable shape yields an empty list rather than an error: a body
+/// this build cannot parse is the same fact to a shell as a proxy that
+/// listed nothing -- no evidence about any tool -- and the shell must
+/// render that as "not known", never as a verdict.
+fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(tools) = parsed.get("tools").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let id = tool.get("id").and_then(serde_json::Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "id": id,
+                "installed": tool
+                    .get("installed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                "wired": tool
+                    .get("wired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            }))
+        })
+        .take(ROUTED_TOOLS_LIMIT)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2985,7 +3481,7 @@ mod tests {
     /// attempts no connection.
     #[test]
     fn no_proxy_declared_builds_no_ledger() {
-        assert!(shared().routing.is_none());
+        assert!(shared().routing_ledger().is_none());
     }
 
     /// `source_roots_with_routing` is the one insertion point: bare roots
@@ -2998,11 +3494,10 @@ mod tests {
             "no ledger held, so the roots must stay bare"
         );
 
-        let mut s = shared();
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            8463,
-            "t".to_string(),
-        )));
+        let s = shared();
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(8463, "t".to_string()),
+        ));
         assert!(
             s.source_roots_with_routing().is_routed(),
             "a held ledger must be attached"
@@ -3020,14 +3515,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let mut s = shared();
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            port,
-            "t".to_string(),
-        )));
+        let s = shared();
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
         s.refresh_routing().await;
         assert!(
-            !s.routing.as_ref().unwrap().has_rows(),
+            !s.routing_ledger().unwrap().has_rows(),
             "an unreachable proxy leaves the snapshot empty, not the daemon down"
         );
         assert!(
@@ -3102,23 +3596,22 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let mut s = shared();
+        let s = shared();
         {
             let mut settings = s.settings.lock().unwrap();
             settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
                 path: claude_root.path().to_path_buf(),
             });
         }
-        s.routing = Some(Arc::new(crate::routing::ironwire::IronWireLedger::new(
-            port,
-            "t".to_string(),
-        )));
+        *s.routing.write().unwrap() = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
 
         // This is the seam this task installs: refresh, then build sources
         // off the daemon's own held instance.
         s.refresh_routing().await;
         assert!(
-            s.routing.as_ref().unwrap().has_rows(),
+            s.routing_ledger().unwrap().has_rows(),
             "the mock server's row must have reached the snapshot"
         );
 
@@ -5065,11 +5558,10 @@ mod tests {
         // Before this, `ironwire` was not in `apply_settings_object`'s
         // whitelist, so the only way to declare the proxy overlay was
         // hand-editing settings.json. `set_settings` now persists the
-        // declaration the same way, but `routing` is still built once at
-        // startup (see `ipc.rs` above, near the `Shared` constructor), so
-        // the overlay itself only takes effect on the next daemon restart --
-        // this test asserts the live settings value and the persisted file,
-        // not that the overlay activates without a restart.
+        // declaration the same way. This test asserts the live settings
+        // value and the persisted file; that the overlay itself activates
+        // without a restart is
+        // `a_declaration_change_takes_effect_without_a_restart`.
         let s = shared();
         let r = handle_request(
             &s,
@@ -5081,14 +5573,20 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(
             s.settings.lock().unwrap().ironwire,
-            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+            Some(super::super::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None
+            })
         );
 
         // Persisted: a restart must see the same declaration.
         let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
         assert_eq!(
             reloaded.ironwire,
-            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+            Some(super::super::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None
+            })
         );
 
         // null turns it back off.
@@ -5586,5 +6084,907 @@ mod tests {
         assert_eq!(clamp_quiesce_timeout(None), DEFAULT_QUIESCE_TIMEOUT_SECS);
         assert_eq!(clamp_quiesce_timeout(Some(0)), DEFAULT_QUIESCE_TIMEOUT_SECS);
         assert_eq!(clamp_quiesce_timeout(Some(5)), 5);
+    }
+
+    // --- probe_routing -------------------------------------------------
+
+    /// A `probe_routing` request naming `port`, and a token directory when
+    /// the test needs the answer to be hermetic.
+    ///
+    /// Every probe test passes one: with `token_dir` absent the resolution
+    /// falls through to `IRONWIRE_HOME` and then `~/.ironwire`, so a test
+    /// that omitted it would read whatever the machine running it happens
+    /// to have and would pass or fail for reasons that are not about this
+    /// code.
+    fn probe_request(port: u16, token_dir: Option<&std::path::Path>) -> Request {
+        let mut params = serde_json::Map::new();
+        params.insert("port".to_string(), serde_json::json!(port));
+        if let Some(dir) = token_dir {
+            params.insert(
+                "token_dir".to_string(),
+                serde_json::json!(dir.to_string_lossy()),
+            );
+        }
+        Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::Value::Object(params),
+        }
+    }
+
+    /// A directory holding a `control.token` with this exact content.
+    fn token_dir_holding(token: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("control.token"), token).expect("write token");
+        dir
+    }
+
+    /// Serve `router` on a free loopback port and return the port.
+    async fn serve_on_loopback(router: axum::Router) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_probe_against_a_dead_port_reports_unreachable_with_the_port() {
+        // Bind and drop, so the port is real and definitely closed. The
+        // token is readable, so nothing but the connection can explain the
+        // answer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+
+        let dir = token_dir_holding("a-readable-token");
+        let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
+
+        let result = response
+            .result
+            .expect("a probe answers with a result, never an IPC error");
+        assert_eq!(result["outcome"], PROBE_UNREACHABLE);
+        assert_eq!(
+            result["port"],
+            serde_json::json!(port),
+            "the port that was tried is the actionable fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_cannot_read_the_token_names_the_path_it_tried() {
+        // An empty directory: the resolution succeeds, the read does not.
+        // This is the failure a GUI contributor actually hits, and today it
+        // is silently identical to "off".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = dir.path().join("control.token");
+        assert!(
+            !expected.exists(),
+            "the fixture must not accidentally hold a token"
+        );
+
+        // A live proxy on the port, so "unreachable" cannot be the answer
+        // and the outcome can only be about the token.
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async { r#"{"enabled":true,"exchanges":[]}"# }),
+        ))
+        .await;
+
+        let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
+        let result = response
+            .result
+            .expect("a probe answers with a result, never an IPC error");
+        assert_eq!(result["outcome"], PROBE_TOKEN_UNREADABLE);
+        let reported = result["token_path"]
+            .as_str()
+            .expect("the path that was tried is carried, not merely the failure");
+        assert!(
+            std::path::Path::new(reported).is_absolute(),
+            "a relative path is not something a contributor can act on: {reported}"
+        );
+        assert_eq!(
+            std::path::Path::new(reported),
+            expected,
+            "the reported path must be the file the reader would actually read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_never_returns_the_token() {
+        // A reachable proxy that accepts the token: the outcome that has
+        // most reason to echo it back.
+        const SECRET: &str = "c0ntrol-token-that-must-never-be-echoed";
+        let dir = token_dir_holding(SECRET);
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async { r#"{"enabled":true,"exchanges":[]}"# }),
+        ))
+        .await;
+
+        let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
+        let wire = serde_json::to_string(&response).expect("a response serializes");
+        assert!(
+            !wire.contains(SECRET),
+            "the token is a credential for an API that can rewrite agent configs: {wire}"
+        );
+        // Field equality, not a substring of the frame: "unreachable"
+        // contains "reachable", so a substring check here would call a
+        // failed probe a successful one and quietly stop testing the
+        // outcome this test claims to cover.
+        assert_eq!(
+            response
+                .result
+                .expect("a result, never an IPC error")
+                .get("outcome")
+                .and_then(serde_json::Value::as_str),
+            Some(PROBE_REACHABLE),
+            "the test must have exercised the outcome it claims to: {wire}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_probe_reports_reachable() {
+        const TOKEN: &str = "the-right-token";
+        let dir = token_dir_holding(TOKEN);
+        // The proxy checks the header, so "reachable" also means the token
+        // was accepted rather than merely that something answered.
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|req: axum::extract::Request| async move {
+                let authorized = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    == Some(concat!("Bearer ", "the-right-token"));
+                if authorized {
+                    axum::response::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(r#"{"enabled":true,"exchanges":[]}"#))
+                        .expect("response builds")
+                } else {
+                    axum::response::Response::builder()
+                        .status(401)
+                        .body(axum::body::Body::empty())
+                        .expect("response builds")
+                }
+            }),
+        ))
+        .await;
+
+        let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
+        let result = response
+            .result
+            .expect("a probe answers with a result, never an IPC error");
+        assert_eq!(result["outcome"], PROBE_REACHABLE);
+        assert_eq!(
+            result.get("token_path"),
+            None,
+            "nothing about the token belongs in a successful answer"
+        );
+    }
+
+    /// A proxy that answers but rejects the token is the *likely* GUI
+    /// failure: a daemon that never saw `IRONWIRE_HOME` read a stale
+    /// `~/.ironwire/control.token` and got a live proxy's 401. The
+    /// contributor fixes it by naming the directory, so the answer carries
+    /// the path, not the port.
+    #[tokio::test]
+    async fn a_proxy_that_refuses_the_token_reports_it_unreadable_with_the_path() {
+        const STALE: &str = "a-stale-token";
+        let dir = token_dir_holding(STALE);
+        let expected = dir.path().join("control.token");
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async {
+                axum::response::Response::builder()
+                    .status(401)
+                    .body(axum::body::Body::empty())
+                    .expect("response builds")
+            }),
+        ))
+        .await;
+
+        let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
+        let wire = serde_json::to_string(&response).expect("a response serializes");
+        assert!(!wire.contains(STALE), "the refused token is still a token");
+        let result = response.result.expect("a result, never an IPC error");
+        assert_eq!(result["outcome"], PROBE_TOKEN_UNREADABLE);
+        assert_eq!(
+            result["token_path"].as_str().map(std::path::Path::new),
+            Some(expected.as_path())
+        );
+    }
+
+    /// An empty `control.token` is unreadable in the only sense that
+    /// matters: there is no credential in it to send.
+    #[tokio::test]
+    async fn an_empty_token_file_is_treated_as_unreadable() {
+        let dir = token_dir_holding("   \n");
+        let response = handle_probe_routing(&probe_request(9, Some(dir.path()))).await;
+        let result = response.result.expect("a result, never an IPC error");
+        assert_eq!(result["outcome"], PROBE_TOKEN_UNREADABLE);
+        assert_eq!(
+            result["token_path"].as_str().map(std::path::Path::new),
+            Some(dir.path().join("control.token").as_path())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_without_a_usable_port_is_refused() {
+        let dir = token_dir_holding("t");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"port": 0}),
+            serde_json::json!({"port": 70000}),
+            serde_json::json!({"port": "8463"}),
+        ] {
+            let req = Request {
+                id: 7,
+                method: "probe_routing".to_string(),
+                params,
+            };
+            let error = handle_probe_routing(&req)
+                .await
+                .error
+                .expect("a probe with no usable port is refused");
+            assert_eq!(error.code, ERR_BAD_PARAMS);
+            assert_eq!(error.message, "port-invalid");
+        }
+        // And a token_dir that is not a string is refused rather than
+        // silently falling through to the environment.
+        let req = Request {
+            id: 7,
+            method: "probe_routing".to_string(),
+            params: serde_json::json!({"port": 8463, "token_dir": 5}),
+        };
+        let error = handle_probe_routing(&req)
+            .await
+            .error
+            .expect("a non-string token_dir is refused");
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, "token-dir-invalid");
+        drop(dir);
+    }
+
+    /// The probe does network I/O, so the synchronous dispatcher says so
+    /// rather than answering something it did not perform -- the same
+    /// pattern `quiesce` and `preview_body` follow.
+    #[test]
+    fn the_sync_dispatcher_refuses_probe_routing_as_async_only() {
+        let response = handle_request(&shared(), &probe_request(8463, None));
+        let error = response.error.expect("the sync path cannot answer a probe");
+        assert_eq!(error.code, ERR_UNAVAILABLE);
+        assert_eq!(error.message, "probe-routing-requires-async");
+    }
+
+    /// The wiring, not the handler. Without the entry in
+    /// `handle_request_async` every test above still passes and the method
+    /// is dead on the socket -- the async dispatcher is the only path a
+    /// real client's request takes, so it is the one that has to answer.
+    #[tokio::test]
+    async fn the_async_dispatcher_answers_a_probe_for_real() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let response =
+            handle_request_async(&shared(), &probe_request(8463, Some(dir.path()))).await;
+        assert!(
+            response.error.is_none(),
+            "the async dispatcher must answer rather than refuse: {:?}",
+            response.error
+        );
+        assert_eq!(
+            response
+                .result
+                .expect("a real answer")
+                .get("outcome")
+                .and_then(serde_json::Value::as_str),
+            Some(PROBE_TOKEN_UNREADABLE),
+            "an empty token directory is the outcome a real dispatch must reach"
+        );
+    }
+
+    /// The constants are what the tests above compare against, so a change
+    /// to one of their *values* would move the wire contract and every one
+    /// of those tests would still pass. These literals are the ones written
+    /// into `docs/contributor-daemon-ipc-v1_1.md`, which is what a shell is
+    /// built against.
+    #[test]
+    fn the_probe_outcome_names_are_the_documented_wire_values() {
+        assert_eq!(PROBE_REACHABLE, "reachable");
+        assert_eq!(PROBE_TOKEN_UNREADABLE, "token_unreadable");
+        assert_eq!(PROBE_UNREACHABLE, "unreachable");
+    }
+
+    #[test]
+    fn probe_routing_is_advertised() {
+        assert!(
+            METHODS.contains(&"probe_routing"),
+            "a method hello does not advertise is a method no shell will call"
+        );
+    }
+
+    /// A poisoned routing lock reads as no ledger, and never as a panic.
+    ///
+    /// Before the ledger could be hot-swapped this was a plain `Option`
+    /// that could not fail, and the promise made of the submission path --
+    /// which reaches `routing_ledger` through `source_roots_with_routing`
+    /// -- was that it cannot. Poisoning is near-unreachable, which is
+    /// exactly why nothing would have caught the regression.
+    #[test]
+    fn a_poisoned_routing_lock_costs_a_trace_nothing() {
+        let (_dir, store) = temp_store();
+        let shared = Arc::new(DaemonShared::load(store).expect("load"));
+
+        let poisoner = Arc::clone(&shared);
+        let panicked = std::thread::spawn(move || {
+            let _held = poisoner.routing.write().expect("first write succeeds");
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread must have panicked");
+        assert!(
+            shared.routing.read().is_err(),
+            "the lock must actually be poisoned, or this proves nothing"
+        );
+
+        // Absence is the state every caller already handles, and the state
+        // a vanished proxy produces.
+        assert!(shared.routing_ledger().is_none());
+        // And the submission path's own reader still answers.
+        let _roots = shared.source_roots_with_routing();
+    }
+
+    // --- probe_routed_tools --------------------------------------------
+
+    /// The same request shape as the probe, against the tool-list method.
+    fn routed_tools_request(port: u16, token_dir: Option<&std::path::Path>) -> Request {
+        let mut req = probe_request(port, token_dir);
+        req.method = "probe_routed_tools".to_string();
+        req
+    }
+
+    /// The whole point of the method: three tools, three different answers,
+    /// from one declaration. A shell rendering one switch as three verdicts
+    /// would get two of these wrong.
+    #[tokio::test]
+    async fn the_tool_list_is_per_tool_and_not_one_switch() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "tools": [
+                        { "id": "claude", "name": "Claude Code", "installed": true, "wired": true },
+                        { "id": "codex", "name": "Codex", "installed": true, "wired": false },
+                    ]
+                }))
+            }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("an answer, never an IPC error");
+
+        assert_eq!(result["outcome"], PROBE_REACHABLE);
+        let tools = result["tools"].as_array().expect("a list");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["id"], "claude");
+        assert_eq!(tools[0]["wired"], true);
+        assert_eq!(tools[1]["id"], "codex");
+        assert_eq!(
+            tools[1]["wired"], false,
+            "the second tool must be able to differ from the first"
+        );
+        // Gemini CLI is absent upstream entirely, which is the state a
+        // shell has to render as "not known" rather than as a verdict.
+        assert!(
+            !tools.iter().any(|tool| tool["id"] == "gemini"),
+            "nothing may invent a row the proxy did not send"
+        );
+    }
+
+    /// Neither a path nor a shell command crosses the socket.
+    #[tokio::test]
+    async fn the_tool_list_carries_no_path_and_no_command() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "tools": [ {
+                        "id": "claude",
+                        "config_path": "/home/x/.claude/settings.json",
+                        "connect_command": "ironwire connect claude",
+                        "installed": true,
+                        "wired": true,
+                    } ]
+                }))
+            }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let rendered = serde_json::to_string(&response.result.expect("a result")).expect("json");
+        for leaked in [
+            "config_path",
+            "connect_command",
+            ".claude",
+            "ironwire connect",
+        ] {
+            assert!(!rendered.contains(leaked), "{leaked} in: {rendered}");
+        }
+        assert!(!rendered.contains("a-readable-token"), "{rendered}");
+    }
+
+    /// A dead port is `unreachable`, with the port, exactly as the probe
+    /// reports it. One vocabulary for one connection.
+    #[tokio::test]
+    async fn a_tool_list_against_a_dead_port_reports_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_UNREACHABLE);
+        assert_eq!(result["port"], serde_json::json!(port));
+        assert!(result.get("tools").is_none(), "no tools without an answer");
+    }
+
+    /// A refused credential is the token state, naming the path, and never
+    /// an empty tool list that a shell could read as "nothing is wired".
+    #[tokio::test]
+    async fn a_refused_credential_is_a_token_answer_and_not_an_empty_list() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-stale-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_TOKEN_UNREADABLE);
+        assert!(
+            result["token_path"]
+                .as_str()
+                .expect("a path")
+                .ends_with("control.token"),
+            "{result}"
+        );
+        assert!(result.get("tools").is_none());
+    }
+
+    /// An answer that arrives but cannot be read is `reachable` with no
+    /// tools: the proxy did answer, so nobody is sent to check a port that
+    /// is fine, and no tool gets a verdict off a body nothing parsed.
+    #[tokio::test]
+    async fn an_unreadable_body_yields_no_tools_rather_than_a_wrong_port() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async { "this is not the json you are looking for" }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_REACHABLE);
+        assert_eq!(result["tools"], serde_json::json!([]));
+    }
+
+    /// Bounds, on a body written by another process on this machine.
+    #[test]
+    fn the_tool_list_is_bounded_and_ignores_shapes_it_cannot_read() {
+        assert!(routed_tools(b"").is_empty());
+        assert!(routed_tools(b"{}").is_empty());
+        assert!(routed_tools(br#"{"tools":{}}"#).is_empty());
+        // No id, or an empty one, is not a tool.
+        assert!(routed_tools(br#"{"tools":[{"wired":true},{"id":"","wired":true}]}"#).is_empty());
+        // Missing booleans read as false rather than as a claim.
+        let one = routed_tools(br#"{"tools":[{"id":"claude"}]}"#);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0]["installed"], false);
+        assert_eq!(one[0]["wired"], false);
+
+        let many: Vec<String> = (0..ROUTED_TOOLS_LIMIT + 40)
+            .map(|n| format!(r#"{{"id":"t{n}"}}"#))
+            .collect();
+        let body = format!(r#"{{"tools":[{}]}}"#, many.join(","));
+        assert_eq!(routed_tools(body.as_bytes()).len(), ROUTED_TOOLS_LIMIT);
+    }
+
+    /// Advertised, and refused on the synchronous path rather than answered
+    /// without asking.
+    #[test]
+    fn the_tool_list_is_advertised_and_is_async_only() {
+        assert!(METHODS.contains(&"probe_routed_tools"), "{METHODS:?}");
+        let (_dir, store) = temp_store();
+        let shared = DaemonShared::load(store).expect("load");
+        let response = handle_request(
+            &shared,
+            &Request {
+                id: 1,
+                method: "probe_routed_tools".to_string(),
+                params: serde_json::json!({ "port": 8463 }),
+            },
+        );
+        assert_eq!(
+            response.error.expect("the sync path refuses").code,
+            ERR_UNAVAILABLE
+        );
+    }
+
+    // --- discover_routing ----------------------------------------------
+
+    fn discover_request() -> Request {
+        Request {
+            id: 11,
+            method: "discover_routing".to_string(),
+            params: serde_json::Value::Null,
+        }
+    }
+
+    /// A pointer on disk naming a token file that holds `token`. Returns the
+    /// tempdir, which must outlive the assertions.
+    fn pointer_dir(port: u16, token: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("control.token");
+        std::fs::write(&token_path, token).expect("write token");
+        // Built with serde, not by interpolation: a Windows temp path is
+        // full of backslashes, which are invalid JSON escapes, so a
+        // hand-formatted document parses on Unix and fails on Windows --
+        // and the failure looks exactly like "no proxy is running".
+        std::fs::write(
+            dir.path().join("endpoint.json"),
+            serde_json::to_string(&serde_json::json!({
+                "control_url": format!("http://127.0.0.1:{port}"),
+                "token_path": token_path,
+            }))
+            .expect("pointer serialises"),
+        )
+        .expect("write pointer");
+        dir
+    }
+
+    #[test]
+    fn discovery_reports_what_a_running_proxy_published() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let result = handle_discover_routing(&discover_request())
+            .result
+            .expect("discovery answers with a result, never an IPC error");
+
+        assert_eq!(result["found"], serde_json::json!(true));
+        assert_eq!(result["port"], serde_json::json!(9143));
+        assert_eq!(
+            result["token_path"],
+            serde_json::json!(dir.path().join("control.token").to_string_lossy()),
+        );
+    }
+
+    /// The rule the whole feature hangs on. A machine without IronWire is
+    /// the ordinary case, and it must answer -- not error -- so the app can
+    /// fall back to asking.
+    #[test]
+    fn no_pointer_is_answered_as_not_found_rather_than_as_an_error() {
+        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+
+        let response = handle_discover_routing(&discover_request());
+
+        assert!(
+            response.error.is_none(),
+            "a machine without IronWire is not an error: {:?}",
+            response.error
+        );
+        let result = response.result.expect("a real answer");
+        assert_eq!(result["found"], serde_json::json!(false));
+        assert!(
+            result.get("port").is_none(),
+            "there is no port to report, and reporting one would be invented"
+        );
+    }
+
+    /// The pointer names a token path; the answer must carry the path and
+    /// never the credential at it. This answer crosses a socket to a shell.
+    #[test]
+    fn discovery_never_carries_the_token() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let response = handle_discover_routing(&discover_request());
+        let wire = serde_json::to_string(&response.result.expect("a result")).unwrap();
+
+        assert!(
+            !wire.contains("a-secret-token"),
+            "the token must not appear anywhere in the answer: {wire}"
+        );
+    }
+
+    /// Answered by the synchronous dispatcher, which is the path a shell's
+    /// request actually takes for a method that opens no connection.
+    #[test]
+    fn the_sync_dispatcher_answers_discovery_for_real() {
+        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+
+        let response = handle_request(&shared(), &discover_request());
+
+        assert!(
+            response.error.is_none(),
+            "discovery must answer on the sync path: {:?}",
+            response.error
+        );
+        assert_eq!(response.result.expect("a result")["found"], false);
+    }
+
+    #[test]
+    fn discover_routing_is_advertised() {
+        assert!(
+            METHODS.contains(&"discover_routing"),
+            "a method hello does not advertise is a method no shell will call"
+        );
+    }
+
+    // --- hot swap and the routing status block -------------------------
+
+    /// A declared proxy whose `control.token` is readable, so
+    /// `ironwire_ledger_for` actually builds a ledger. Returns the
+    /// directory, which must outlive the assertions.
+    fn declared_token_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(super::super::settings::IRONWIRE_TOKEN_FILE),
+            "tok\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn watch_params(port: u16, dir: &std::path::Path) -> serde_json::Value {
+        serde_json::json!({
+            "ironwire": {
+                "mode": "watch",
+                "port": port,
+                "token_dir": dir.to_string_lossy(),
+            }
+        })
+    }
+
+    /// The point of the hot swap: a contributor who declares the proxy in
+    /// the app must get enrichment on the next poll, not after a restart.
+    /// Nothing here reloads `DaemonShared`.
+    #[test]
+    fn a_declaration_change_takes_effect_without_a_restart() {
+        let dir = declared_token_dir();
+        let s = shared();
+        assert!(
+            !s.source_roots_with_routing().is_routed(),
+            "nothing declared yet, so the roots start bare"
+        );
+
+        let r = handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        assert!(
+            s.source_roots_with_routing().is_routed(),
+            "the declaration must take effect on this same daemon instance"
+        );
+        assert!(
+            s.routing_ledger().is_some(),
+            "the rebuilt instance is the one the daemon holds"
+        );
+    }
+
+    /// `null` means off, and off must actually stop reading.
+    #[test]
+    fn clearing_the_declaration_drops_the_ledger() {
+        let dir = declared_token_dir();
+        let s = shared();
+        let r = handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(s.routing_ledger().is_some(), "declared, so a ledger exists");
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"ironwire": null})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(
+            s.routing_ledger().is_none(),
+            "off must drop the instance, not just the declaration"
+        );
+        assert!(
+            !s.source_roots_with_routing().is_routed(),
+            "a dropped ledger must stop reaching the loaded transcript"
+        );
+    }
+
+    /// A settings write that does not touch the declaration must not throw
+    /// away a warm snapshot. Rebuilding on every `set_settings` would blank
+    /// the overlay whenever a contributor moved an unrelated slider.
+    #[test]
+    fn an_unrelated_settings_change_keeps_the_same_ledger() {
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        let before = s.routing_ledger().expect("declared");
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                serde_json::json!({"max_uploads_per_day": 7}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let after = s.routing_ledger().expect("still declared");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "an unrelated edit must leave the live instance alone"
+        );
+    }
+
+    /// Cold start is not an error state and must not be reported as one.
+    #[test]
+    fn a_rebuilt_ledger_reports_declared_but_nothing_seen() {
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(
+            routing["state"], ROUTING_AWAITING_ROWS,
+            "a freshly rebuilt ledger is declared, not broken: {routing}"
+        );
+        assert_eq!(
+            routing["last_refresh_at"],
+            serde_json::Value::Null,
+            "nothing has refreshed yet"
+        );
+    }
+
+    /// The state `has_rows()` alone cannot express.
+    #[test]
+    fn status_reports_not_declared_when_no_proxy_is_declared() {
+        let s = shared();
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_NOT_DECLARED, "{routing}");
+        assert_eq!(routing["last_refresh_at"], serde_json::Value::Null);
+    }
+
+    /// The third state, and the one that proves `last_refresh_at` reports a
+    /// refresh that actually reached the proxy rather than one that was
+    /// merely attempted.
+    #[tokio::test]
+    async fn status_reports_rows_seen_after_a_refresh_that_reached_the_proxy() {
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "exchanges": [{
+                        "started_at": "2026-08-08T10:05:00Z",
+                        "client_session_id": "sess-1",
+                        "facade": "anthropic",
+                        "backend": "claude-sub",
+                        "rung": "same_model",
+                        "attempts": 1,
+                        "status": 200
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
+        assert_eq!(
+            s.status_value()["routing"]["state"],
+            ROUTING_AWAITING_ROWS,
+            "declared but not yet refreshed"
+        );
+
+        s.refresh_routing().await;
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_ROWS_SEEN, "{routing}");
+        assert!(
+            routing["last_refresh_at"].as_str().is_some(),
+            "a refresh that reached the proxy stamps a time: {routing}"
+        );
+    }
+
+    /// An unreachable proxy leaves `last_refresh_at` null: the timestamp
+    /// exists so a contributor can tell "the proxy answered and had nothing"
+    /// from "the proxy has not answered at all", and stamping it on a failed
+    /// attempt would erase that difference.
+    #[tokio::test]
+    async fn an_unreachable_proxy_stamps_no_refresh_time() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = declared_token_dir();
+        let s = shared();
+        handle_request(&s, &req("set_settings", watch_params(port, dir.path())));
+        s.refresh_routing().await;
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(routing["state"], ROUTING_AWAITING_ROWS, "{routing}");
+        assert_eq!(
+            routing["last_refresh_at"],
+            serde_json::Value::Null,
+            "an attempt that never reached the proxy is not a refresh"
+        );
+    }
+
+    /// The whole point of the block is that a shell reads it off the socket.
+    /// Unit-testing `status_value` alone would not catch a `status` method
+    /// that never returns it -- the failure mode this plan already hit once
+    /// with async dispatch.
+    #[tokio::test]
+    async fn the_routing_block_reaches_a_shell_through_the_real_dispatcher() {
+        let dir = declared_token_dir();
+        let s = shared();
+
+        let response = handle_request_async(&s, &req("status", serde_json::json!({}))).await;
+        let result = response.result.expect("status answers");
+        assert_eq!(
+            result["routing"]["state"], ROUTING_NOT_DECLARED,
+            "{result:?}"
+        );
+
+        let response =
+            handle_request_async(&s, &req("set_settings", watch_params(8463, dir.path()))).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+
+        let response = handle_request_async(&s, &req("status", serde_json::json!({}))).await;
+        let result = response.result.expect("status answers");
+        assert_eq!(
+            result["routing"]["state"], ROUTING_AWAITING_ROWS,
+            "the hot swap must be visible over the socket: {result:?}"
+        );
+    }
+
+    /// The state names are what every assertion above compares against, so a
+    /// change to one of their *values* would move the wire contract with
+    /// every one of those tests still green. These literals are the ones
+    /// written into `docs/contributor-daemon-ipc-v1_1.md`.
+    ///
+    /// They are also deliberately chosen so that none is a substring of
+    /// another: a shell (or a test) that reached for `contains` rather than
+    /// equality would still be answering the right question.
+    #[test]
+    fn the_routing_state_names_are_the_documented_wire_values() {
+        assert_eq!(ROUTING_NOT_DECLARED, "not_declared");
+        assert_eq!(ROUTING_AWAITING_ROWS, "awaiting_rows");
+        assert_eq!(ROUTING_ROWS_SEEN, "rows_seen");
+        for (a, b) in [
+            (ROUTING_NOT_DECLARED, ROUTING_AWAITING_ROWS),
+            (ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN),
+            (ROUTING_ROWS_SEEN, ROUTING_NOT_DECLARED),
+        ] {
+            assert!(!a.contains(b) && !b.contains(a), "{a} and {b} overlap");
+        }
     }
 }

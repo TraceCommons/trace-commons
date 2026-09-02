@@ -30,6 +30,7 @@ pub mod health;
 pub mod history;
 pub mod install;
 pub mod ipc;
+pub mod ironwire_pointer;
 pub mod notify;
 pub mod policy;
 pub mod preview;
