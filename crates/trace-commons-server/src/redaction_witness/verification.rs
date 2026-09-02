@@ -95,6 +95,21 @@ impl std::fmt::Debug for WitnessPinError {
 /// Values are operator configuration -- an Ethereum-style address and public
 /// image identifiers -- so `Debug` is derived. No contributor content reaches
 /// this type.
+///
+/// # Why the derived `Debug` is safe here, as an exception
+///
+/// This repo does not log signing addresses, and rendering one is normally
+/// wrong. This is the exception, deliberately: a witness signing address is
+/// a *public verification key's* address, published in the enclave's own
+/// attestation report, and it is operator config rather than a credential.
+/// Nothing is authorised by holding it. The rule exists for addresses whose
+/// exposure links a payer or reveals a key an operator controls, and neither
+/// applies.
+///
+/// Stated because an unexplained exception gets "fixed" in the wrong
+/// direction: someone will either strip this `Debug` and lose the one
+/// rendering that helps diagnose a pin, or read it as licence to render
+/// addresses elsewhere. Neither follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitnessPin {
     signing_address: String,
@@ -109,6 +124,10 @@ impl WitnessPin {
     /// spellings, so a case-folding comparison could only conflate two
     /// distinct pins; a case difference against an honest witness fails
     /// closed and is diagnosable from the reported value.
+    ///
+    /// Surrounding whitespace is trimmed off each entry before it is pinned.
+    /// It is the one difference an operator cannot see in their own config,
+    /// and a pinned `" abc "` would silently match nothing.
     pub fn new(
         signing_address: &str,
         measurements: impl IntoIterator<Item = String>,
@@ -118,10 +137,11 @@ impl WitnessPin {
         }
         let mut pinned = BTreeSet::new();
         for measurement in measurements {
-            if measurement.trim().is_empty() {
+            let measurement = measurement.trim();
+            if measurement.is_empty() {
                 return Err(WitnessPinError::MeasurementBlank);
             }
-            pinned.insert(measurement);
+            pinned.insert(measurement.to_string());
         }
         if pinned.is_empty() {
             return Err(WitnessPinError::NoMeasurements);
@@ -249,9 +269,10 @@ impl VerifiedWitnessCertificate {
 /// Verify a witness certificate against the artifact the server holds.
 ///
 /// All three checks or none: the signature against the pinned address, the
-/// certificate's digest against `redacted_bytes`, and the reported
-/// measurement against the pinned set. There is no way to run a subset, and
-/// the successful return value cannot be produced any other way.
+/// reported measurement against the pinned set, and the certificate's digest
+/// against `redacted_bytes` -- in that order, which a test pins. There is no
+/// way to run a subset, and the successful return value cannot be produced
+/// any other way.
 ///
 /// The order is fail-closed first. `pin: None` refuses before anything is
 /// examined, and the signature is checked before any certificate field is
@@ -610,6 +631,20 @@ mod tests {
                 .expect("a pinned measurement verifies");
             assert_eq!(verified.witness_measurement(), measurement);
         }
+    }
+
+    #[test]
+    fn a_pin_trims_the_measurement_it_stores() {
+        // Padding is invisible in an operator's own config file, and a
+        // pinned " abc " matches no honest witness.
+        let k = key("witness enclave signing key");
+        let pin = WitnessPin::new(&address_of_key(&k), [format!("  {PINNED_MEASUREMENT}  ")])
+            .expect("pin is well formed");
+        let cert = certificate();
+        let signature = sign(&k, &cert);
+
+        verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
+            .expect("the trimmed value is what got pinned");
     }
 
     #[test]

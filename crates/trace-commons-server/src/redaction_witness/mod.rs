@@ -17,6 +17,16 @@
 //! does, a verified certificate says the artifact derives from raw text the
 //! witness saw, not that anybody paid for that inference.
 //!
+//! **One correspondence check must not mint N certificates.** Nothing here
+//! bounds that: an empty span list is legal, so a proof over an artifact
+//! costs one call, and `CorrespondenceProof` not being `Clone` buys one
+//! certificate per proof and nothing beyond it. Inside the attested enclave
+//! that costs nothing today, because the enclave is the only thing holding
+//! raw bytes. It becomes load-bearing at the service slice, where the
+//! certificate-to-receipt binding lands: N certificates against N receipts
+//! for one check is the shape to refuse there, and it has to be refused
+//! there, because this module cannot see a receipt.
+//!
 //! **The artifact must reach the witness byte for byte.** The certificate's
 //! digest is over exactly the bytes `check_correspondence` compared, and
 //! verification hashes exactly the bytes the server holds. Any re-encoding,

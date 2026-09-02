@@ -180,10 +180,30 @@ impl WitnessCertificate {
     /// Build a certificate from a correspondence proof and what the witness
     /// reports.
     ///
-    /// The proof is consumed by value, so `redacted_sha256` provably came out
-    /// of [`check_correspondence`](super::correspondence::check_correspondence)
-    /// and cannot be a digest somebody typed. Everything else is witness
+    /// The proof is consumed by value, so `redacted_sha256` came out of
+    /// [`check_correspondence`](super::correspondence::check_correspondence)
+    /// rather than being typed by the caller. Everything else is witness
     /// self-report and is passed in as such.
+    ///
+    /// # What the proof attests, exactly
+    ///
+    /// That the digest is of bytes a correspondence check ran over, and that
+    /// those bytes are the raw text with the caller's spans applied. Nothing
+    /// more. In particular it does **not** attest that:
+    ///
+    /// - the redaction was non-trivial -- `check_correspondence(x, x, &[])`
+    ///   succeeds, an empty span list being legal, so anyone holding the
+    ///   artifact can mint a proof over it in one line;
+    /// - the raw text was ever seen by anything but the caller. That the
+    ///   caller is an attested enclave holding bytes the contributor sent is
+    ///   a deployment property, not a type-system one;
+    /// - this certificate is the only one for that check. `CorrespondenceProof`
+    ///   is not `Clone`, so one proof yields one certificate, but a caller can
+    ///   re-run the check freely.
+    ///
+    /// The private fields stop a *typed* digest. They do not make the digest
+    /// evidence of a witnessed redaction, and a service binding certificates
+    /// to receipts must not treat them as such.
     ///
     /// The digest is over the exact bytes `check_correspondence` compared. A
     /// server verifying this certificate hashes the artifact bytes it holds,

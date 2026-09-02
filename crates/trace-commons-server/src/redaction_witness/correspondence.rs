@@ -222,7 +222,25 @@ pub fn apply_spans(raw: &str, spans: &[RedactionSpan]) -> Result<String, Corresp
 /// certificate construction, where everything it holds becomes a candidate
 /// for logging, so it holds only what the certificate binds. Adding the text,
 /// the span count or a label here would put contributor content on that path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Not `Clone`, and what that does not buy
+///
+/// One proof, one certificate: [`WitnessCertificate::from_proof`] consumes
+/// this by value, and without `Clone` a single check cannot be spread across
+/// several certificates with divergent claims.
+///
+/// That is honesty about what the type means, **not** a bound on how many
+/// certificates exist. Anyone holding the artifact can call
+/// [`check_correspondence`] again and get another proof -- it is not a
+/// scarce resource and nothing here makes it one. Nor does a proof say the
+/// redaction was non-trivial: `check_correspondence(x, x, &[])` succeeds.
+///
+/// So a caller that must not mint two certificates for one inference has to
+/// enforce that itself, against a receipt. Reading the missing `Clone` as
+/// that enforcement would be exactly the overclaim it exists to avoid.
+///
+/// [`WitnessCertificate::from_proof`]: super::certificate::WitnessCertificate::from_proof
+#[derive(Debug, PartialEq, Eq)]
 pub struct CorrespondenceProof {
     redacted_sha256: String,
 }
@@ -253,6 +271,26 @@ impl CorrespondenceProof {
 ///
 /// Neither argument nor the span list may be logged by the caller: all three
 /// are contributor content.
+///
+/// # Visibility, and why narrowing it is not the fix
+///
+/// This is `pub`, and minting a proof is therefore available to anyone who
+/// holds an artifact: an empty span list is legal, so
+/// `check_correspondence(x, x, &[])` costs one call. A proof is not scarce
+/// and nothing here makes it so.
+///
+/// `pub(crate)` was tried and reverted. Nothing calls this function at all
+/// yet, so narrowing it turns it into dead code and CI's `-D warnings`
+/// refuses the build; the only way to keep it narrow today is an
+/// `#[allow(dead_code)]`, which suppresses a real signal for as long as the
+/// witness service is unwritten. Revisit the visibility when there is a
+/// caller -- this crate is not a published library, so widening it again is
+/// a one-word in-repo change either way.
+///
+/// Either way visibility is the wrong lever. A proof becomes scarce only
+/// when minting one requires an *input the caller cannot manufacture* -- a
+/// verified inference receipt. That is the shape the witness service has to
+/// build, and no access modifier substitutes for it.
 pub fn check_correspondence(
     raw: &str,
     redacted: &str,
