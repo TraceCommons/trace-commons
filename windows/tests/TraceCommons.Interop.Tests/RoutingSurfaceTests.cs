@@ -437,16 +437,27 @@ public class RoutingSurfaceTests
     }
 
     /// <summary>
-    /// Off is <c>null</c>, not an object with a mode. There is no
-    /// conventional fallback for a local service, so absence is the off
-    /// state.
+    /// Off is <c>null</c>, and the key is still there.
     /// </summary>
+    /// <remarks>
+    /// Two distinct assertions. Off is not an object with a mode: there is no
+    /// conventional fallback for a local service, so absence of a declaration
+    /// is the off state. But the KEY must still be written, because
+    /// <c>set_settings</c> changes only the keys it is given -- an object with
+    /// no <c>ironwire</c> key reads as "never asked" and leaves whatever was
+    /// declared before in place, so a contributor turning the switch off would
+    /// have nothing happen. The macOS shell pins the same pair in
+    /// <c>testTurningItOffWritesNullAndNotAnAbsentKey</c>.
+    /// </remarks>
     [Fact]
-    public void TurningItOffWritesNull()
+    public void TurningItOffWritesNullAndNotAnAbsentKey()
     {
         using JsonDocument doc = JsonDocument.Parse(
             RoutingTools.SerializeDeclaration(false, 8463, @"C:\ironwire"));
-        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("ironwire").ValueKind);
+        Assert.True(
+            doc.RootElement.TryGetProperty("ironwire", out JsonElement declaration),
+            "off must write the key, not omit it: an omitted key leaves the old declaration standing");
+        Assert.Equal(JsonValueKind.Null, declaration.ValueKind);
     }
 
     /// <summary>
