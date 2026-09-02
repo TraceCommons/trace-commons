@@ -658,6 +658,10 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         "entry_id": e.entry_id,
         "session_hash": e.session_hash,
         "source": e.source,
+        // Beside `source`, never replacing it: a consumer uses the adapter
+        // name to ask for the same session again, while this is what the
+        // conversation says it came from. See `QueueEntry::declared_source`.
+        "declared_source": e.declared_source,
         "project_id": project_id_for(&e.project_key),
         "project_label": e.project_label,
         "size_bytes": e.size_bytes,
@@ -1896,7 +1900,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     let cfg = shared.store.load_config().ok().flatten();
     let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        (s.near_ai.clone(), s.source_roots(&shared.store))
     };
     let sources = crate::source::all_sources(&source_roots);
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
@@ -2101,7 +2105,7 @@ async fn build_and_pin_preview(
 > {
     let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        (s.near_ai.clone(), s.source_roots(&shared.store))
     };
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
@@ -2978,6 +2982,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: work_api.clone(),
                         project_label: "api".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3081,6 +3086,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3129,6 +3135,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3189,6 +3196,7 @@ mod tests {
                             entry_id: uuid::Uuid::new_v4(),
                             session_hash: format!("sha256:seed{n}"),
                             source: "claude-code".to_string(),
+                            declared_source: None,
                             project_key: "/tmp/p".to_string(),
                             project_label: "p".to_string(),
                             path: std::path::PathBuf::from(format!("/tmp/seed{n}.jsonl")),
@@ -3247,6 +3255,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3302,6 +3311,7 @@ mod tests {
                     entry_id,
                     session_hash: format!("sha256:{entry_id}"),
                     source: "claude-code".to_string(),
+                    declared_source: None,
                     project_key: "/tmp/p".to_string(),
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3503,6 +3513,7 @@ mod tests {
                     entry_id,
                     session_hash: format!("sha256:{entry_id}"),
                     source: "claude-code".to_string(),
+                    declared_source: None,
                     project_key: project_key.to_string(),
                     project_label: super::super::policy::project_label_for(project_key),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -3971,6 +3982,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4051,6 +4063,7 @@ mod tests {
                         entry_id: uuid::Uuid::new_v4(),
                         session_hash: "sha256:known".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: gone.to_string(),
                         project_label: "oldproj".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4173,6 +4186,7 @@ mod tests {
             entry_id: uuid::Uuid::new_v4(),
             session_hash: format!("sha256:{n:04x}"),
             source: "claude-code".to_string(),
+            declared_source: None,
             project_key: "/tmp/p".to_string(),
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
@@ -4375,6 +4389,7 @@ mod tests {
             entry_id: entry_id_for("sha256:aa"),
             session_hash: "sha256:aa".into(),
             source: "claude-code".into(),
+            declared_source: None,
             project_key: "/Users/z/code/secret-client-project".into(),
             project_label: "secret-client-project".into(),
             path: "/Users/z/.claude/projects/x/s.jsonl".into(),
@@ -4420,6 +4435,7 @@ mod tests {
                 entry_id: super::super::queue::entry_id_for(hash),
                 session_hash: hash.to_string(),
                 source: "claude-code".to_string(),
+                declared_source: None,
                 project_key: "/tmp/p".to_string(),
                 project_label: "p".to_string(),
                 path: std::path::PathBuf::from(path),
@@ -4500,16 +4516,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_queue_card_reports_how_many_delegated_transcripts_it_covers() {
-        // A card standing for a hundred delegated transcripts has to say so:
-        // the extent of what is being sent is part of the consent decision,
-        // not decoration. No ordinal is exposed -- nothing in the format
-        // supplies one.
-        let e = super::super::queue::QueueEntry {
+    /// One pending queue card, for the `entry_value` tests below.
+    fn card_entry() -> super::super::queue::QueueEntry {
+        super::super::queue::QueueEntry {
             entry_id: uuid::Uuid::new_v4(),
             session_hash: "sha256:aa".to_string(),
             source: "claude-code".to_string(),
+            declared_source: None,
             project_key: "/tmp/p".to_string(),
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
@@ -4529,7 +4542,47 @@ mod tests {
             subagent_count: 114,
             subagents_dropped: 2,
             observed_modified_at: None,
-        };
+        }
+    }
+
+    /// The origin has to cross the IPC boundary, not merely exist on the ref.
+    ///
+    /// The desktop apps read this JSON and nothing else. An equivalent
+    /// hand-off is exactly what broke while `declared_source` was being
+    /// added to `SessionRef`, so it is asserted at the boundary rather than
+    /// one layer below it.
+    #[test]
+    fn an_entry_reports_both_its_adapter_and_its_declared_origin() {
+        let mut e = card_entry();
+        e.source = "trajectory".to_string();
+        e.declared_source = Some("antigravity".to_string());
+
+        let v = entry_value(&e);
+        assert_eq!(
+            v["source"], "trajectory",
+            "the adapter that loads it must stay reportable"
+        );
+        assert_eq!(v["declared_source"], "antigravity");
+    }
+
+    /// A native session declares nothing and must not grow an empty label.
+    #[test]
+    fn an_entry_with_no_declared_origin_reports_null() {
+        let v = entry_value(&card_entry());
+        assert_eq!(v["source"], "claude-code");
+        assert!(
+            v["declared_source"].is_null(),
+            "absent must serialize as null, not as an empty string"
+        );
+    }
+
+    #[test]
+    fn the_queue_card_reports_how_many_delegated_transcripts_it_covers() {
+        // A card standing for a hundred delegated transcripts has to say so:
+        // the extent of what is being sent is part of the consent decision,
+        // not decoration. No ordinal is exposed -- nothing in the format
+        // supplies one.
+        let e = card_entry();
         let v = entry_value(&e);
         assert_eq!(v["subagent_count"], 114);
         assert_eq!(v["subagents_dropped"], 2);
@@ -4635,6 +4688,7 @@ mod tests {
                     entry_id,
                     session_hash: format!("sha256:{entry_id}"),
                     source: "claude-code".to_string(),
+                    declared_source: None,
                     project_key: "/tmp/p".to_string(),
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4981,6 +5035,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -5027,6 +5082,7 @@ mod tests {
                         entry_id,
                         session_hash: "sha256:seed".to_string(),
                         source: "claude-code".to_string(),
+                        declared_source: None,
                         project_key: "/tmp/p".to_string(),
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),

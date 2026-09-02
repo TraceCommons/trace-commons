@@ -261,6 +261,14 @@ remove that too if you are uninstalling.
   afterwards to redact and upload them. Staged files are discovered without
   `--trajectory`, so a later bare `submit` offers them: an import is not
   inert, and a run that fails partway still reports what it staged.
+  Imported conversations also reach the desktop apps, which read the same
+  staging folder through the daemon. Three things are worth knowing there:
+  they appear on the daemon's next sweep rather than immediately, so an app
+  opened straight after an import may show nothing for a poll interval; they
+  always arrive needing approval, even in a project set to auto-upload,
+  because arming a watched source is not the same as consenting to an import
+  you may not remember running; and they are listed as `Antigravity` rather
+  than by the trajectory format they are stored in.
 
 `trace-commons-contributor daemon` — the CLI's watcher — watches Claude Code,
 Codex and Gemini CLI's conventional stores by default, with no declaration

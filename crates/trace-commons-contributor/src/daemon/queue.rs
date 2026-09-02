@@ -52,6 +52,22 @@ pub struct QueueEntry {
     pub entry_id: Uuid,
     pub session_hash: String,
     pub source: String,
+    /// What the transcript declares itself to be, when discovery knew it.
+    /// Display only, and never a substitute for `source`.
+    ///
+    /// `source` is the ADAPTER, and has to stay that way -- it is how an
+    /// entry is paired back to something that can load it. But the adapter
+    /// is not always what a contributor is looking at: an imported
+    /// Antigravity conversation is stored as a trajectory file and read by
+    /// the `trajectory` adapter, so `source` says `trajectory`. That is a
+    /// word for how it is stored, not where it came from, and not the word
+    /// the contributor typed to collect it.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub declared_source: Option<String>,
     /// The full local working directory. Local-only, like `path`.
     pub project_key: String,
     /// What consumers display.
@@ -1127,6 +1143,7 @@ mod tests {
             entry_id: entry_id_for(hash),
             session_hash: hash.into(),
             source: "claude-code".into(),
+            declared_source: None,
             project_key: "/Users/z/code/proj".into(),
             project_label: "proj".into(),
             path: PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),
@@ -1177,6 +1194,34 @@ mod tests {
 
     fn the_path() -> PathBuf {
         PathBuf::from("/Users/z/.claude/projects/x/s.jsonl")
+    }
+
+    /// A queue file written before `declared_source` existed must still load.
+    ///
+    /// `daemon-queue.jsonl` is persisted state on every contributor's
+    /// machine. A new required field would make the daemon refuse its own
+    /// queue on the first run after an upgrade -- losing every pending
+    /// entry a contributor had not yet decided on.
+    ///
+    /// Built by serializing and removing the key rather than pasting a
+    /// literal: a hand-written line would pin field names that have
+    /// nothing to do with what this asserts, and would rot the next time
+    /// one changed.
+    #[test]
+    fn a_queue_entry_written_before_declared_source_still_loads() {
+        let e = entry("sha256:x", "2026-09-02T00:00:00Z");
+        let mut v = serde_json::to_value(&e).unwrap();
+        assert!(
+            v.as_object_mut()
+                .unwrap()
+                .remove("declared_source")
+                .is_some(),
+            "the field must be serialized, or this test proves nothing"
+        );
+
+        let back: QueueEntry =
+            serde_json::from_value(v).expect("a queue entry without the field must still load");
+        assert_eq!(back.declared_source, None);
     }
 
     #[test]

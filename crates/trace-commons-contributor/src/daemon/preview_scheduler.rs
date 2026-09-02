@@ -626,7 +626,7 @@ impl PreviewJobRunner for DaemonPreviewRunner {
             // still cannot send bytes they were never shown.
             let (near_ai, source_roots) = {
                 let s = shared.settings.lock().expect("settings lock");
-                (s.near_ai.clone(), s.source_roots())
+                (s.near_ai.clone(), s.source_roots(&shared.store))
             };
             let sources = crate::source::all_sources(&source_roots);
             let Some((source, session_ref)) = super::find_session(&sources, &entry) else {

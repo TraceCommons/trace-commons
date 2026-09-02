@@ -137,13 +137,19 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// naming the same thing three ways. An unrecognised token is tidied
     /// rather than replaced: the daemon may name an agent this build has
     /// never heard of, and printing it is more useful than hiding it.
+    ///
+    /// What the transcript DECLARES wins over the adapter that stores it.
+    /// An imported Antigravity conversation is a trajectory file, and
+    /// calling it "Letta trajectory" names the format rather than the tool
+    /// the contributor used.
     /// </summary>
-    public string Source => _entry.Source switch
+    public string Source => (_entry.DeclaredSource ?? _entry.Source) switch
     {
         null or "" => "—",
         "claude-code" or "claude_code" => "Claude Code",
         "codex" => "Codex",
         "gemini-cli" or "gemini_cli" => "Gemini CLI",
+        "antigravity" => "Antigravity",
         "trajectory" or "letta_trajectory" => "Letta trajectory",
         string other when string.IsNullOrWhiteSpace(other) => "—",
         string other => CultureInfo.CurrentCulture.TextInfo.ToTitleCase(
