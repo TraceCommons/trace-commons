@@ -16,20 +16,40 @@
 # when a feature is added. Measured 2026-09-01: licences and sources pass on
 # every graph individually and on the union.
 #
-# Advisories run on the default graph only, where `arguments: ''` overrides
-# cargo-deny-action's own `--all-features` default. Advisories do NOT pass
-# on the union: six RUSTSEC findings sit in optional trees, none triaged --
-# rustls-pemfile under gcp-kms, hickory-proto under
-# near-attestation-collateral, and crossbeam-epoch / lru / paste / fxhash
-# under near-ai-scorer and local-gpu-models. See
-# docs/superpowers/reports/2026-09-01-cargo-deny-all-features-advisories.md.
-# Gating on them today would land a permanently red required check.
+# Advisories run under `--all-features` too, for the same reason: the graph
+# production ships is not the default graph, and a named list of feature
+# sets drifts. cloudbuild.yaml builds ingest with
+# `--features gcs-client,gcp-kms,near-ai-scorer` and deploy/pilot-gcp adds
+# near-attestation-collateral, so advisories on the default graph said
+# nothing about the code that actually serves requests.
+#
+# Two of the findings that gap was hiding were bumped away rather than
+# ignored (crossbeam-epoch 0.9.18 -> 0.9.20 for RUSTSEC-2026-0204, lru
+# 0.18.0 -> 0.18.3 for RUSTSEC-2026-0253, an unsound use-after-free in a
+# direct dependency of trace-commons-gate-enclave). The five that remain
+# are in deny.toml's ignore list, each with the reason no upgrade reaches
+# it from this tree. Read that list rather than trusting this comment's
+# count: it is the thing that has to stay true.
+#
+# One of those five, RUSTSEC-2026-0118, is a live remote-input
+# vulnerability (an unbounded loop in hickory-proto's NSEC3 validation,
+# reachable when the ingest host resolves NEAR AI endpoints). It is carried
+# because hickory-proto is pinned by hickory-resolver 0.25.x, which reqwest
+# 0.13.3 requires by semver -- the fix needs a reqwest release, not a
+# lockfile bump. It is the first thing to re-check when reqwest moves.
 #
 # `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
 # and configures no deny/skip list, so the check is a standing no-op today.
 #
-# cargo-deny-action's v2 tag pins cargo-deny 0.20.2 in its own Dockerfile,
-# the version these jobs were verified with locally.
+# Action pinning (last reviewed 2026-09-02): cargo-deny-action's v2 tag
+# pins cargo-deny 0.20.2 in its own Dockerfile, the version these jobs were
+# verified with locally. `v2` is mutable, so treat a bump of it as a
+# re-verify rather than a rubber stamp.
+#
+# A red advisories job on a PR that touches no dependency usually means a
+# new advisory landed upstream: `check advisories` clones the RustSec
+# database at run time, on purpose, so the gate reflects today rather than
+# the day it was written.
 
 name: cargo-deny
 
@@ -60,8 +80,8 @@ jobs:
           arguments: --all-features
           command-arguments: licenses sources
 
-  cargo-deny-default-advisories:
-    name: cargo deny advisories (default features)
+  cargo-deny-advisories:
+    name: cargo deny advisories (all features)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -69,5 +89,5 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: info
-          arguments: ''
+          arguments: --all-features
           command-arguments: advisories

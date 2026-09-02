@@ -156,8 +156,8 @@ it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
 those pull in different trees. A new dependency must be combinable into an
 AGPL-3.0 work: GPL-2.0-only, SSPL, or proprietary is a hard conflict. CI now
 covers all three at once by running `check licenses` and `check sources`
-under `--all-features`, and runs `check advisories` on the default graph, so
-the manual run above is a pre-flight, not the only enforcement.
+under `--all-features`, and runs `check advisories` under `--all-features`
+too, so the manual run above is a pre-flight, not the only enforcement.
 
 If the boundary test fails, remove the dependency. Do not edit the expected sets
 in `license_boundary.rs` to match your diff -- those sets are the specification.

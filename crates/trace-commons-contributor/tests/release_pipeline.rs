@@ -2082,24 +2082,22 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
          loading the dependency graph once"
     );
 
-    let advisories = extract_job(&workflow, "cargo-deny-default-advisories");
+    let advisories = extract_job(&workflow, "cargo-deny-advisories");
     assert!(
         advisories.contains("uses: EmbarkStudios/cargo-deny-action"),
-        "cargo-deny-default-advisories must actually run cargo-deny-action"
+        "cargo-deny-advisories must actually run cargo-deny-action"
     );
     assert!(
-        has_line(advisories, "arguments: ''"),
-        "cargo-deny-default-advisories must override cargo-deny-action's \
-         own `--all-features` default with `arguments: ''`, or it checks a \
-         union graph carrying six untriaged findings and is permanently red"
-    );
-    assert!(
-        !advisories.contains("--all-features"),
-        "cargo-deny-default-advisories must not name --all-features"
+        has_line(advisories, "arguments: --all-features"),
+        "cargo-deny-advisories must check the union graph. On the default \
+         graph it said nothing about the features production ships -- \
+         cloudbuild.yaml builds ingest with gcs-client, gcp-kms and \
+         near-ai-scorer -- and that gap hid an unsound use-after-free in a \
+         direct dependency of trace-commons-gate-enclave"
     );
     assert!(
         has_line(advisories, "command-arguments: advisories"),
-        "cargo-deny-default-advisories must run the advisories check"
+        "cargo-deny-advisories must run the advisories check"
     );
 
     // `check bans` must not run anywhere: deny.toml's [bans] section sets

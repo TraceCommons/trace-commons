@@ -34,11 +34,11 @@ adds `near-attestation-collateral`.
 | `--all-features` | pass | pass | **fail** |
 
 Licences and sources pass everywhere, which is why CI runs them once under
-`--all-features`. Advisories run on the default graph only.
+`--all-features`. Advisories now run there too -- see Status below.
 
 ## Findings
 
-Six RUSTSEC advisories, none present in the default-feature graph.
+Seven RUSTSEC advisories, none present in the default-feature graph.
 Attributed to the graph that actually pulls each one in, measured per
 feature rather than inferred from the union:
 
@@ -75,20 +75,35 @@ feature rather than inferred from the union:
 
 ## Status
 
-Not cleared, not ignored, not triaged for severity or reachability. This
-report exists so the gap is visible and assignable rather than silently
-absent: the PR that wires `cargo-deny` into CI deliberately does not add
-an `--all-features check advisories` job while these seven are
-outstanding -- a permanently red required check is worse than the
-coverage gap it would close. The default-graph advisories check (bundled
-into `cargo-deny-default`) stays as the only advisories gate for now.
+Resolved 2026-09-02. Advisories now run under `--all-features` alongside
+licences and sources, so the graph production ships is gated rather than
+only the default graph.
 
-## Recommendation
+Two of the seven were fixed rather than carried:
 
-Triage each of the seven for actual reachability in a `local-gpu-models`
-or `gcp-kms` build -- an advisory two dependency hops from an optional
-build-time-only tool is a different risk than one on the request-handling
-path -- then either fix (four have safe upgrades: crossbeam-epoch,
-hickory-proto x2, lru) or add explicit `deny.toml` `ignore` entries for
-the three that do not (fxhash, paste, rustls-pemfile), before adding an
-`--all-features check advisories` job to CI.
+- **RUSTSEC-2026-0204** (crossbeam-epoch) -- bumped 0.9.18 -> 0.9.20.
+- **RUSTSEC-2026-0253** (lru) -- bumped 0.18.0 -> 0.18.3. This one was an
+  unsound use-after-free in a **direct** dependency of
+  `trace-commons-gate-enclave`, not a transitive leaf.
+
+The lockfile diff is those two packages and nothing else.
+
+The remaining five are `deny.toml` `ignore` entries, each carrying the
+reason no upgrade reaches it from this tree. Two corrections to the
+Recommendation this section replaces:
+
+- **hickory-proto x2 do not have a reachable safe upgrade.** The fix is in
+  0.26.1, but hickory-proto is pinned by `hickory-resolver` 0.25.x, which
+  `reqwest 0.13.3` requires by semver. Reaching 0.26 needs a reqwest
+  release, not a lockfile bump. The earlier claim that four had safe
+  upgrades counted these two; only two did.
+- **RUSTSEC-2026-0118 is the one to watch.** It is a genuine remote-input
+  vulnerability -- an unbounded loop, OOM in release builds, on a crafted
+  NSEC3 cross-zone response -- and it is reached when the ingest host
+  resolves NEAR AI endpoints, so a hostile or hijacked DNS response is the
+  trigger. It is carried because nothing in this tree can fix it today,
+  not because it was judged low-risk. Re-check it the moment reqwest moves
+  to hickory-resolver 0.26.
+
+The other three (fxhash, paste, rustls-pemfile) are unmaintained-crate
+advisories with no vulnerability and no upgrade path we control.

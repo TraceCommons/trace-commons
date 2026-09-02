@@ -52,8 +52,20 @@ version = 2
 # hf-hub is not feature-gated, so this reaches every cargo-deny job
 # (default, near-ai-scorer, local-gpu-models) alike. Also revisit if
 # number_prefix itself ships a fix for RUSTSEC-2025-0119.
+#
+# The four below are reached only through optional features, and are what
+# stands between the production-graph advisories job and a green check.
+# Each is here because no upgrade reaches it from this tree today -- not
+# because it was judged unimportant. RUSTSEC-2026-0118 in particular is a
+# real remote-input vulnerability we are choosing to carry, so it should be
+# the first thing re-checked when reqwest moves.
 ignore = [
     { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained with no fixed release, pulled in via indicatif via hf-hub, a direct unconditional dependency of trace-commons-server. Revisit when hf-hub is upgraded past 0.4.x -- hf-hub 1.0 has no indicatif/number_prefix dependency at all (verified via `cargo tree`) -- but that is a breaking rewrite, not a lockfile bump, so it is out of scope here." },
+    { id = "RUSTSEC-2026-0118", reason = "hickory-proto 0.25.2: NSEC3 closest-encloser proof validation enters an unbounded loop on a crafted cross-zone response. Fixed in 0.26.1, which this tree cannot reach: hickory-proto is pinned by hickory-resolver 0.25.x, which reqwest 0.13.3 requires by semver, so the fix needs a reqwest release depending on hickory-resolver 0.26 -- not a lockfile bump. Reached under near-attestation-collateral (dcap-qvl) and near-ai-scorer, i.e. when the ingest host resolves NEAR AI endpoints, so a hostile or hijacked DNS response is the trigger. This is the one ignore here with a live attack path; drop it the moment reqwest moves." },
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto 0.25.2: O(n^2) name compression during message encoding, CPU exhaustion. Same crate, same 0.26.1 fix, same reqwest 0.13.3 pin as RUSTSEC-2026-0118 -- these two lift together." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained with no fixed release and no successor named by the advisory. A proc-macro crate that expands at compile time and ships no runtime code, reached via the ML stack under near-ai-scorer and local-gpu-models. Revisit if its dependents drop it." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no fixed release. A non-cryptographic hash function with no known vulnerability, reached only under local-gpu-models-cuda via the ML stack, which production does not build. Revisit if its dependents move to rustc-hash." },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2.0 is unmaintained; the advisory states no safe upgrade is available. Reached only under gcp-kms, via tonic 0.12.3 via google-cloud-kms 0.6.0. The migration target is rustls-pki-types' PemObject trait, which is tonic's call to make, not ours. Revisit when google-cloud-kms moves to a tonic release that has migrated." },
 ]
 
 [sources]
