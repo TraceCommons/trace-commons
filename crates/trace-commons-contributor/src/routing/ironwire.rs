@@ -77,6 +77,19 @@ impl std::fmt::Debug for IronWireLedger {
 }
 
 impl IronWireLedger {
+    /// The token this ledger was built with.
+    ///
+    /// Test-only, and deliberately so: `Debug` omits the token because it is
+    /// a credential for an API that can rewrite the contributor's agent
+    /// configuration, and weakening `Debug` to make it assertable would put
+    /// it in every log line that ever formats a ledger. A `#[cfg(test)]`
+    /// accessor is visible to the crate's own tests and to nothing shipped.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn token_for_test(&self) -> &str {
+        &self.token
+    }
+
     #[must_use]
     pub fn new(port: u16, token: String) -> Self {
         Self {

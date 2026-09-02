@@ -215,7 +215,22 @@ impl SourceDeclaration {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum IronWireDeclaration {
     /// Read the proxy's ledger on this loopback port.
-    Watch { port: u16 },
+    Watch {
+        port: u16,
+        /// Where the proxy writes `control.token`, when the contributor
+        /// said. Absent means fall back to `IRONWIRE_HOME` and then
+        /// `~/.ironwire`; see [`ironwire_ledger_for`].
+        ///
+        /// The *directory*, never the token. The token is a credential for
+        /// an API that can rewrite the contributor's agent configuration; it
+        /// is read at call time and never enters our settings file.
+        ///
+        /// `#[serde(default)]` because every settings file already on disk
+        /// was written before this field existed, and `skip_serializing_if`
+        /// so a file rewritten by this version does not grow a null key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_dir: Option<PathBuf>,
+    },
     /// The contributor said they do not use it. Nothing is read.
     Off,
 }
@@ -225,7 +240,16 @@ impl IronWireDeclaration {
     #[must_use]
     pub fn port(&self) -> Option<u16> {
         match self {
-            IronWireDeclaration::Watch { port } => Some(*port),
+            IronWireDeclaration::Watch { port, .. } => Some(*port),
+            IronWireDeclaration::Off => None,
+        }
+    }
+
+    /// The declared directory holding `control.token`, when there is one.
+    #[must_use]
+    pub fn token_dir(&self) -> Option<&std::path::Path> {
+        match self {
+            IronWireDeclaration::Watch { token_dir, .. } => token_dir.as_deref(),
             IronWireDeclaration::Off => None,
         }
     }
@@ -233,16 +257,34 @@ impl IronWireDeclaration {
 
 /// Build a routing ledger for a declaration, or nothing.
 ///
-/// The token is read from `$IRONWIRE_HOME/control.token` at build time and
-/// never copied into our settings file. An unreadable token yields no reader:
-/// absence and failure are the same state.
+/// The directory holding `control.token` resolves in this order:
+///
+/// 1. the directory declared in settings,
+/// 2. `$IRONWIRE_HOME`,
+/// 3. `~/.ironwire`.
+///
+/// Settings come first because they are the only one of the three a GUI
+/// contributor can actually set: an app launched from Finder, the Dock or a
+/// desktop entry inherits the session manager's environment, not a shell
+/// profile's, so `IRONWIRE_HOME` is not a configuration mechanism for the
+/// desktop applications at all. It stays supported, second, so a CLI started
+/// from a shell keeps working.
+///
+/// The token itself is read here at build time and never copied into our
+/// settings file. An unreadable token yields no reader: absence and failure
+/// are the same state at this layer, and a declared directory that turns out
+/// to hold no token does *not* fall through to the environment -- falling
+/// through would enrich the contributor from a proxy they did not name.
 #[must_use]
 pub fn ironwire_ledger_for(
     declaration: Option<&IronWireDeclaration>,
 ) -> Option<std::sync::Arc<crate::routing::ironwire::IronWireLedger>> {
-    let port = declaration?.port()?;
-    let home = std::env::var_os("IRONWIRE_HOME")
+    let declaration = declaration?;
+    let port = declaration.port()?;
+    let home = declaration
+        .token_dir()
         .map(PathBuf::from)
+        .or_else(|| std::env::var_os("IRONWIRE_HOME").map(PathBuf::from))
         .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
     let token = std::fs::read_to_string(home.join("control.token")).ok()?;
     Some(std::sync::Arc::new(
@@ -733,6 +775,9 @@ mod tests {
         assert!(ironwire_ledger_for(settings.ironwire.as_ref()).is_none());
     }
 
+    /// Also the back-compatibility case: every settings file already on disk
+    /// was written before `token_dir` existed, and this JSON has no such
+    /// key. It must load with no declared directory rather than fail.
     #[test]
     fn a_watched_proxy_round_trips_its_port() {
         let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
@@ -740,7 +785,141 @@ mod tests {
         let settings: DaemonSettings = serde_json::from_value(v).expect("loads");
         assert_eq!(
             settings.ironwire,
-            Some(IronWireDeclaration::Watch { port: 8463 })
+            Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None
+            })
+        );
+    }
+
+    /// `IRONWIRE_HOME` for the life of the guard, restored on drop.
+    ///
+    /// Serialized on a mutex because the process environment is shared by
+    /// every test in this binary and the harness runs them on threads.
+    /// `set_var` is `unsafe` in edition 2024 for exactly that reason.
+    struct IronWireHomeEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    static IRONWIRE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl IronWireHomeEnv {
+        fn set(value: &std::path::Path) -> Self {
+            // A poisoned lock means some other test panicked while holding
+            // it; the environment was still restored by its guard's drop,
+            // so there is nothing here to refuse over.
+            let lock = IRONWIRE_HOME_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = std::env::var_os("IRONWIRE_HOME");
+            unsafe { std::env::set_var("IRONWIRE_HOME", value) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IronWireHomeEnv {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => unsafe { std::env::set_var("IRONWIRE_HOME", v) },
+                None => unsafe { std::env::remove_var("IRONWIRE_HOME") },
+            }
+        }
+    }
+
+    /// A directory holding a `control.token` with exactly this text.
+    fn token_dir_holding(token: &str) -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join("control.token"), format!("{token}\n")).expect("write token");
+        d
+    }
+
+    /// The whole point of the task: a GUI-launched app has no shell
+    /// environment, so the declared path is the only one of the three a
+    /// contributor could have set. It must therefore win.
+    ///
+    /// Asserts *which* token the ledger was built with. "A ledger was built"
+    /// would pass under either precedence and prove nothing.
+    #[test]
+    fn a_declared_token_directory_wins_over_the_environment() {
+        let declared = token_dir_holding("token-from-settings");
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+
+        let declaration = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: Some(declared.path().to_path_buf()),
+        };
+        let ledger = ironwire_ledger_for(Some(&declaration))
+            .expect("a declared directory holding a token builds a reader");
+
+        assert_eq!(
+            ledger.token_for_test(),
+            "token-from-settings",
+            "the declared directory must win over IRONWIRE_HOME"
+        );
+    }
+
+    /// The CLI case. `IRONWIRE_HOME` stays supported so an install that
+    /// already relies on it keeps working.
+    #[test]
+    fn the_environment_is_still_honoured_when_no_path_is_declared() {
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+
+        let declaration = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: None,
+        };
+        let ledger = ironwire_ledger_for(Some(&declaration))
+            .expect("IRONWIRE_HOME must still build a reader when nothing is declared");
+
+        assert_eq!(ledger.token_for_test(), "token-from-environment");
+    }
+
+    /// Absence and failure stay the same state at this layer -- and a
+    /// declared directory that turned out to be wrong must NOT silently fall
+    /// through to the environment, or the contributor is enriched from a
+    /// proxy they did not name. The difference between "off" and "declared
+    /// but unreadable" is reported by the probe in Task 2, not here.
+    #[test]
+    fn a_declared_directory_with_no_token_yields_no_reader() {
+        let declared = tempfile::tempdir().expect("tempdir");
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+
+        let declaration = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: Some(declared.path().to_path_buf()),
+        };
+
+        assert!(
+            ironwire_ledger_for(Some(&declaration)).is_none(),
+            "a declared directory with no token yields no reader, and never \
+             falls back to the environment"
+        );
+    }
+
+    #[test]
+    fn a_declared_token_directory_round_trips_through_the_settings_file() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings {
+            ironwire: Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: Some(PathBuf::from("/declared/ironwire")),
+            }),
+            ..Default::default()
+        };
+        s.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().ironwire,
+            Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: Some(PathBuf::from("/declared/ironwire"))
+            })
         );
     }
 
@@ -755,7 +934,10 @@ mod tests {
     fn source_roots_does_not_yet_attach_a_routing_overlay() {
         let (_d, store) = temp_store();
         let s = DaemonSettings {
-            ironwire: Some(IronWireDeclaration::Watch { port: 8463 }),
+            ironwire: Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            }),
             ..Default::default()
         };
         assert!(!s.source_roots(&store).is_routed());

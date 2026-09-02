@@ -4913,14 +4913,20 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(
             s.settings.lock().unwrap().ironwire,
-            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+            Some(super::super::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None
+            })
         );
 
         // Persisted: a restart must see the same declaration.
         let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
         assert_eq!(
             reloaded.ironwire,
-            Some(super::super::settings::IronWireDeclaration::Watch { port: 8463 })
+            Some(super::super::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None
+            })
         );
 
         // null turns it back off.
