@@ -455,3 +455,336 @@ pub fn parse_witnessed_envelope(
     serde_json::from_slice(&response.envelope_bytes)
         .map_err(|_| WitnessTrustError::WitnessResponseMalformed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::extract::{Query, Request};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// What a local witness saw.
+    ///
+    /// Assertions are about what reached the wire, not about what the client
+    /// believes it sent -- which is the only way to state "nothing was
+    /// contacted" as a fact rather than as an inference from a check
+    /// existing.
+    #[derive(Default)]
+    struct Seen {
+        /// Route names in the order they were requested.
+        routes: Vec<String>,
+        /// The `nonce` query parameter, as received.
+        nonces: Vec<String>,
+        /// Bodies posted to `/v1/witness`, as received.
+        witness_bodies: Vec<Vec<u8>>,
+        /// Bodies posted to the collateral route, as received.
+        collateral_bodies: Vec<Vec<u8>>,
+    }
+
+    /// What a local witness should answer with. `None` on any field makes
+    /// that route 503, which is how the unreachable-route tests are driven.
+    #[derive(Default, Clone)]
+    struct Answers {
+        attestation: Option<serde_json::Value>,
+        collateral: Option<String>,
+        witness: Option<(String, String, Vec<u8>)>,
+    }
+
+    struct LocalWitness {
+        base: String,
+        seen: Arc<Mutex<Seen>>,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    impl LocalWitness {
+        fn routes(&self) -> Vec<String> {
+            self.seen.lock().unwrap().routes.clone()
+        }
+        fn nonces(&self) -> Vec<String> {
+            self.seen.lock().unwrap().nonces.clone()
+        }
+        fn collateral_bodies(&self) -> Vec<Vec<u8>> {
+            self.seen.lock().unwrap().collateral_bodies.clone()
+        }
+    }
+
+    /// Spawn a witness on an ephemeral port.
+    ///
+    /// A real socket rather than a mock: the thing under test is the
+    /// transport -- which URL it composes, which query parameter it sets, and
+    /// whether a body reached the wire at all.
+    async fn local_witness(answers: Answers) -> LocalWitness {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+
+        let attestation_seen = seen.clone();
+        let attestation = answers.attestation.clone();
+        let collateral_seen = seen.clone();
+        let collateral = answers.collateral.clone();
+        let witness_seen = seen.clone();
+        let witness = answers.witness.clone();
+
+        let app = Router::new()
+            .route(
+                "/v1/attestation",
+                get(move |Query(query): Query<HashMap<String, String>>| {
+                    let seen = attestation_seen.clone();
+                    let body = attestation.clone();
+                    async move {
+                        {
+                            let mut seen = seen.lock().unwrap();
+                            seen.routes.push("attestation".to_string());
+                            if let Some(nonce) = query.get("nonce") {
+                                seen.nonces.push(nonce.clone());
+                            }
+                        }
+                        match body {
+                            Some(body) => axum::Json(body).into_response(),
+                            None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/attestation-collateral",
+                post(move |request: Request| {
+                    let seen = collateral_seen.clone();
+                    let body = collateral.clone();
+                    async move {
+                        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+                            .await
+                            .unwrap_or_default();
+                        {
+                            let mut seen = seen.lock().unwrap();
+                            seen.routes.push("collateral".to_string());
+                            seen.collateral_bodies.push(bytes.to_vec());
+                        }
+                        match body {
+                            Some(body) => body.into_response(),
+                            None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness",
+                post(move |request: Request| {
+                    let seen = witness_seen.clone();
+                    let answer = witness.clone();
+                    async move {
+                        let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
+                            .await
+                            .unwrap_or_default();
+                        {
+                            let mut seen = seen.lock().unwrap();
+                            seen.routes.push("witness".to_string());
+                            seen.witness_bodies.push(bytes.to_vec());
+                        }
+                        witness_answer(answer)
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        LocalWitness {
+            base,
+            seen,
+            _shutdown: tx,
+        }
+    }
+
+    fn witness_answer(answer: Option<(String, String, Vec<u8>)>) -> Response {
+        let Some((certificate, signature, envelope)) = answer else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            WITNESS_CERTIFICATE_HEADER,
+            HeaderValue::from_str(&certificate).expect("a test certificate header"),
+        );
+        headers.insert(
+            WITNESS_SIGNATURE_HEADER,
+            HeaderValue::from_str(&signature).expect("a test signature header"),
+        );
+        (headers, envelope).into_response()
+    }
+
+    fn transport_for(base: &str, allowlist: HostAllowlist) -> HttpWitnessTransport {
+        HttpWitnessTransport::new(
+            base.to_string(),
+            base.to_string(),
+            Arc::new(allowlist),
+            Duration::from_secs(5),
+        )
+        .expect("the transport builds")
+    }
+
+    fn permissive() -> HostAllowlist {
+        HostAllowlist::permissive()
+    }
+
+    #[tokio::test]
+    async fn the_nonce_on_the_wire_is_the_one_we_will_check_against() {
+        let server = local_witness(Answers {
+            attestation: Some(serde_json::json!({
+                "quote_hex": "00ff",
+                "signing_address": "0x1111111111111111111111111111111111111111",
+            })),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+
+        let nonce = WitnessNonce::fresh().expect("the system CSPRNG is available");
+        let evidence = transport.attestation(&nonce).await.expect("evidence");
+
+        assert_eq!(server.nonces(), vec![nonce.to_hex()]);
+        // Bare hex, no `0x`: the witness surface accepts that encoding and
+        // only that one, and a prefixed nonce would be refused as malformed.
+        assert!(!nonce.to_hex().starts_with("0x"));
+        assert_eq!(nonce.to_hex().len(), WITNESS_NONCE_LEN * 2);
+        assert_eq!(evidence.quote_hex, "00ff");
+    }
+
+    #[tokio::test]
+    async fn two_verifications_never_reuse_a_nonce() {
+        // A reused nonce turns a replayed quote into an accepted one for as
+        // long as the reuse lasts, and the reuse is invisible at the response
+        // boundary because a replayed quote verifies perfectly.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let nonce = WitnessNonce::fresh().expect("the system CSPRNG is available");
+            assert!(
+                seen.insert(nonce.to_hex()),
+                "WitnessNonce::fresh repeated a value"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_outside_the_allowlist_is_refused_before_any_request() {
+        let server = local_witness(Answers {
+            attestation: Some(serde_json::json!({
+                "quote_hex": "00ff",
+                "signing_address": "0x1111111111111111111111111111111111111111",
+            })),
+            ..Answers::default()
+        })
+        .await;
+        // An allowlist naming somebody else. The transport still points at the
+        // live server, so if the gate were applied after the request the
+        // server would record it.
+        let transport = transport_for(&server.base, HostAllowlist::from_csv("allowed.example"));
+
+        let err = transport
+            .attestation(&WitnessNonce::fresh().unwrap())
+            .await
+            .expect_err("a host outside the allowlist is refused");
+        assert_eq!(err, WitnessTrustError::WitnessHostNotAllowed);
+        assert!(
+            server.routes().is_empty(),
+            "a refused host was still contacted: {:?}",
+            server.routes()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_attestation_route_refuses_by_name() {
+        let server = local_witness(Answers::default()).await;
+        let transport = transport_for(&server.base, permissive());
+        assert_eq!(
+            transport
+                .attestation(&WitnessNonce::fresh().unwrap())
+                .await
+                .unwrap_err(),
+            WitnessTrustError::WitnessAttestationUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attestation_response_missing_a_field_refuses_rather_than_defaulting() {
+        // A response that parses as JSON but names no quote. Defaulting to an
+        // empty quote here would send an empty string into `verify_quote`,
+        // which would fail -- but under the wrong error, telling a contributor
+        // the quote did not verify when the witness never sent one.
+        let server = local_witness(Answers {
+            attestation: Some(serde_json::json!({ "signing_address": "0x11" })),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        assert_eq!(
+            transport
+                .attestation(&WitnessNonce::fresh().unwrap())
+                .await
+                .unwrap_err(),
+            WitnessTrustError::WitnessAttestationUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_collateral_refuses_rather_than_verifying_without_it() {
+        let server = local_witness(Answers::default()).await;
+        let transport = transport_for(&server.base, permissive());
+        assert_eq!(
+            transport.collateral(b"quote").await.unwrap_err(),
+            WitnessTrustError::WitnessCollateralUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_collateral_refuses_rather_than_being_used() {
+        let server = local_witness(Answers {
+            collateral: Some("not collateral".to_string()),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        assert_eq!(
+            transport.collateral(b"quote").await.unwrap_err(),
+            WitnessTrustError::WitnessCollateralUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn the_collateral_request_names_the_quote_it_is_for() {
+        let server = local_witness(Answers {
+            collateral: Some("{}".to_string()),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let _ = transport.collateral(b"\x01\x02\xab").await;
+
+        assert_eq!(server.routes(), vec!["collateral".to_string()]);
+        let sent: serde_json::Value =
+            serde_json::from_slice(&server.collateral_bodies()[0]).expect("the body is JSON");
+        // Collateral for the wrong quote verifies nothing, and the failure
+        // would look like a bad quote rather than a bad request.
+        assert_eq!(sent["quote_hex"], "0102ab");
+    }
+
+    #[tokio::test]
+    async fn a_nonce_debug_renders_the_nonce_and_nothing_else() {
+        let nonce = WitnessNonce::from_bytes([0x01u8; WITNESS_NONCE_LEN]);
+        let rendered = format!("{nonce:?}");
+        assert!(rendered.contains(&hex::encode([0x01u8; WITNESS_NONCE_LEN])));
+        assert!(rendered.starts_with("WitnessNonce("));
+    }
+}
