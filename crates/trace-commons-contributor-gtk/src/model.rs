@@ -37,6 +37,27 @@ pub struct Status {
     /// spent budget came to be indistinguishable from a broken app.
     #[serde(default)]
     pub daily_budget: DailyBudget,
+    /// What the daemon is seeing from the local proxy it was told about.
+    ///
+    /// Absent on a daemon older than the block, and `RoutingStatus`'s
+    /// default is the state that claims nothing.
+    #[serde(default)]
+    pub routing: RoutingStatus,
+}
+
+/// `status.routing`. Three states and one per-process timestamp; nothing
+/// identifying, no port and no path.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RoutingStatus {
+    /// `not_declared`, `awaiting_rows` or `rows_seen`. Empty when the
+    /// daemon did not report the block at all, which reads as the first.
+    #[serde(default)]
+    pub state: String,
+    /// When the daemon last got an answer. **Per-process**: it starts
+    /// empty again every time the daemon comes back up, so it is a "last
+    /// checked" and never a date this install began.
+    #[serde(default)]
+    pub last_refresh_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `status.daily_budget`. Counts and one timestamp; nothing identifying.
@@ -487,6 +508,36 @@ pub struct Settings {
     pub claude_root_configured: bool,
     #[serde(default)]
     pub codex_root_configured: bool,
+    /// `watch`, `off` or `unset`, per source. `*_root_configured` above
+    /// cannot carry the distinction the Tools surface needs: it is false
+    /// both for a source pointed at the conventional location and for one
+    /// the contributor said they do not use, and only the second of those
+    /// reads "Not used".
+    #[serde(default)]
+    pub claude_source_mode: String,
+    #[serde(default)]
+    pub codex_source_mode: String,
+    #[serde(default)]
+    pub gemini_source_mode: String,
+    /// The local proxy declaration as the daemon holds it. Absent means
+    /// off -- there is no conventional fallback for a local service, so
+    /// unlike a source root there is no third state.
+    ///
+    /// Carries the declared *folder*, never a token: the daemon reads the
+    /// credential at call time and it never enters settings.
+    #[serde(default)]
+    pub ironwire: Option<RoutingDeclaration>,
+}
+
+/// `get_settings`'s `ironwire` block.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingDeclaration {
+    /// `watch` or `off`.
+    pub mode: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub token_dir: Option<String>,
 }
 
 /// `consent_options`.

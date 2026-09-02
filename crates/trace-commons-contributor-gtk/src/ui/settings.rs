@@ -106,6 +106,25 @@ pub struct SettingsView {
     /// the moment one lands. See `PublicProfile`.
     public_profile: RefCell<Option<PublicProfile>>,
     audit: gtk::Box,
+    /// One row per tool, rebuilt on each render: a name and one word.
+    routing_tools: gtk::Box,
+    /// The declaration. Built once and only ever refilled, for the same
+    /// reason the knobs are -- a refresh runs on every daemon event, and
+    /// rebuilding these would take the port field out from under whoever
+    /// is typing into it.
+    routing_switch: gtk::Switch,
+    routing_port: gtk::SpinButton,
+    routing_token_dir: gtk::Entry,
+    routing_apply: gtk::Button,
+    /// The answer to the last check, shown only once one has been run.
+    /// Never filled from a guess: it says what the daemon reported.
+    routing_probe: gtk::Label,
+    /// The daemon's own three-state view, rebuilt on each status event.
+    routing_status: gtk::Box,
+    /// Set while `render_routing` is writing the daemon's own declaration
+    /// into the controls, so the signals that fires are not mistaken for a
+    /// contributor declaring something and echoed straight back.
+    filling_routing: std::cell::Cell<bool>,
 }
 
 impl Default for SettingsView {
@@ -154,6 +173,92 @@ impl SettingsView {
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+
+        // The Tools card. It is deliberately one concept: whether what a
+        // tool sends is kept private on this machine. The port and the
+        // folder underneath are the override for an unusual install, not
+        // the front door -- the conventional port is already in the field
+        // and the folder box is empty, so the common case is one switch
+        // and nothing to fill in.
+        content.append(&style::section(copy::TOOLS_HEADING));
+        let routing_card = style::card(gtk::Orientation::Vertical, space::M);
+        let routing_tools = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+        routing_card.append(&routing_tools);
+        let routing_intro = gtk::Label::builder()
+            .label(copy::IRONWIRE_INTRO)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        routing_intro.add_css_class("tc-body");
+        routing_card.append(&routing_intro);
+        let routing_row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let routing_switch_label = gtk::Label::builder()
+            .label(copy::IRONWIRE_TOGGLE)
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .build();
+        routing_switch_label.add_css_class("tc-body");
+        let routing_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        routing_switch.set_valign(gtk::Align::Center);
+        routing_switch.update_property(&[gtk::accessible::Property::Label(copy::IRONWIRE_TOGGLE)]);
+        routing_row.append(&routing_switch_label);
+        routing_row.append(&routing_switch);
+        routing_card.append(&routing_row);
+        let routing_status = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        routing_card.append(&routing_status);
+        // 1 rather than 0: port 0 is the ask-the-kernel sentinel, and the
+        // daemon refuses it outright, so it is not a number this control
+        // may produce.
+        let routing_port = knob_row(
+            &routing_card,
+            copy::IRONWIRE_PORT_TITLE,
+            "",
+            1.0,
+            f64::from(u16::MAX),
+        );
+        routing_port.set_value(f64::from(DEFAULT_IRONWIRE_PORT));
+        let routing_port_note = gtk::Label::builder()
+            .label(copy::IRONWIRE_PORT_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        routing_port_note.add_css_class("tc-caveat");
+        routing_card.append(&routing_port_note);
+        routing_card.append(&style::eyebrow(copy::IRONWIRE_FOLDER_TITLE));
+        let routing_token_dir = gtk::Entry::new();
+        routing_token_dir.update_property(&[gtk::accessible::Property::Label(
+            copy::IRONWIRE_FOLDER_TITLE,
+        )]);
+        routing_card.append(&routing_token_dir);
+        let routing_folder_note = gtk::Label::builder()
+            .label(copy::IRONWIRE_FOLDER_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        routing_folder_note.add_css_class("tc-caveat");
+        routing_card.append(&routing_folder_note);
+        let routing_apply = gtk::Button::with_label(copy::IRONWIRE_APPLY);
+        routing_apply.add_css_class("tc-quiet");
+        routing_apply.set_halign(gtk::Align::Start);
+        routing_card.append(&routing_apply);
+        let routing_probe = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
+            .build();
+        routing_probe.add_css_class("tc-meta");
+        routing_card.append(&routing_probe);
+        // Nothing here waits on the app being started again: the daemon
+        // swaps the reader when the declaration lands.
+        let routing_applies = gtk::Label::builder()
+            .label(copy::IRONWIRE_APPLIES_AT_ONCE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        routing_applies.add_css_class("tc-caveat");
+        routing_card.append(&routing_applies);
+        content.append(&routing_card);
 
         content.append(&style::section("Projects"));
         let projects = style::card(gtk::Orientation::Vertical, space::M);
@@ -322,6 +427,14 @@ impl SettingsView {
             public,
             public_profile: RefCell::new(None),
             audit,
+            routing_tools,
+            routing_switch,
+            routing_port,
+            routing_token_dir,
+            routing_apply,
+            routing_probe,
+            routing_status,
+            filling_routing: std::cell::Cell::new(false),
         }
     }
 }
@@ -380,6 +493,28 @@ pub fn wire(app: &Rc<App>) {
         "max_bytes_per_day",
         1_048_576,
     );
+
+    // The declaration. The switch writes on its own -- turning it on IS
+    // the contributor acting, and the conventional port is already in the
+    // field -- and the button re-writes it after an edit to either field.
+    let a = Rc::clone(app);
+    app.settings
+        .routing_switch
+        .connect_active_notify(move |sw| {
+            if a.settings.filling_routing.get() {
+                return;
+            }
+            let on = sw.is_active();
+            set_routing_sensitivity(&a, on);
+            send_routing(&a, on);
+        });
+    let a = Rc::clone(app);
+    app.settings.routing_apply.connect_clicked(move |_| {
+        if !a.settings.routing_switch.is_active() {
+            return;
+        }
+        send_routing(&a, true);
+    });
 
     render_autostart(app);
     render_public(app);
@@ -542,6 +677,8 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     } else {
         style::tag(copy::NOT_CONNECTED, Tone::Attention)
     });
+
+    render_routing_status(app, status);
 }
 
 /// §5.4's three check rows. Every one of them is a configured-or-not fact
@@ -593,11 +730,21 @@ fn render_connection_checks(app: &Rc<App>, settings: &Settings) {
 /// consequence underneath. Not a control -- §6.9 calls these "not
 /// interactive" -- so it is a label, not a disabled checkbox.
 fn check_row(label: &str, satisfied: bool, note: Option<&str>) -> gtk::Box {
-    let tone = if satisfied {
-        Tone::Clear
-    } else {
-        Tone::Neutral
-    };
+    tone_row(
+        label,
+        if satisfied {
+            Tone::Clear
+        } else {
+            Tone::Neutral
+        },
+        note,
+    )
+}
+
+/// The same row, for a state that is neither satisfied nor unsatisfied.
+/// "Declared, nothing seen yet" is the case a boolean cannot carry: it is
+/// not good standing and it is not a fault.
+fn tone_row(label: &str, tone: Tone, note: Option<&str>) -> gtk::Box {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
     let glyph = gtk::Label::new(Some(tone.glyph()));
@@ -628,6 +775,279 @@ fn check_row(label: &str, satisfied: bool, note: Option<&str>) -> gtk::Box {
     column
 }
 
+// --- Tools: the local proxy declaration --------------------------------
+
+/// IronWire's conventional port, shown in the field so nobody has to know
+/// it. **Shown is not declared**: nothing is written until the contributor
+/// turns the switch on, because `None` means off with no fallback and a
+/// displayed default that wrote itself would have this window announce a
+/// local service nobody mentioned.
+const DEFAULT_IRONWIRE_PORT: u16 = 8463;
+
+/// The `set_settings` key. That call refuses an object holding a key it
+/// does not recognise, so a drift here is a silent no-write rather than an
+/// error -- which is why a test checks this against the daemon's own
+/// serialization rather than against a second copy of the literal.
+const ROUTING_SETTINGS_KEY: &str = "ironwire";
+
+/// What `probe_routing` answered, in the three shapes it can answer in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// The proxy answered and the credential was accepted.
+    Reachable,
+    /// The file could not be read, or was read and refused. Carries the
+    /// path the daemon reported -- **absent, not null**, when nothing
+    /// resolved at all, so this is an `Option` and never an unwrap.
+    TokenUnusable(Option<String>),
+    /// Nothing usable answered. Carries the port that was tried.
+    Unreachable(Option<u16>),
+    /// An answer this build cannot read. Claims nothing about the proxy in
+    /// either direction.
+    Unknown,
+}
+
+/// The declaration as `set_settings` takes it, or `null` for off.
+///
+/// `token_dir` is left out when the box is empty rather than sent as an
+/// empty string: the daemon refuses an empty string outright, and absence
+/// is what falls back to the conventional location.
+fn routing_param(on: bool, port: u16, token_dir: &str) -> serde_json::Value {
+    if !on {
+        return serde_json::Value::Null;
+    }
+    let mut declaration = serde_json::Map::new();
+    declaration.insert("mode".to_string(), serde_json::json!("watch"));
+    declaration.insert("port".to_string(), serde_json::json!(port));
+    let dir = token_dir.trim();
+    if !dir.is_empty() {
+        declaration.insert("token_dir".to_string(), serde_json::json!(dir));
+    }
+    serde_json::Value::Object(declaration)
+}
+
+/// The one-key object `set_settings` is called with.
+fn routing_settings_params(on: bool, port: u16, token_dir: &str) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    params.insert(
+        ROUTING_SETTINGS_KEY.to_string(),
+        routing_param(on, port, token_dir),
+    );
+    serde_json::Value::Object(params)
+}
+
+/// What `probe_routing` is asked. Same rule about the empty box.
+fn probe_params(port: u16, token_dir: &str) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    params.insert("port".to_string(), serde_json::json!(port));
+    let dir = token_dir.trim();
+    if !dir.is_empty() {
+        params.insert("token_dir".to_string(), serde_json::json!(dir));
+    }
+    serde_json::Value::Object(params)
+}
+
+/// Read the daemon's answer, using the daemon's own constants.
+fn parse_probe(value: &serde_json::Value) -> ProbeOutcome {
+    use trace_commons_contributor::daemon::ipc::{
+        PROBE_REACHABLE, PROBE_TOKEN_UNREADABLE, PROBE_UNREACHABLE,
+    };
+    match value.get("outcome").and_then(serde_json::Value::as_str) {
+        Some(PROBE_REACHABLE) => ProbeOutcome::Reachable,
+        Some(PROBE_TOKEN_UNREADABLE) => ProbeOutcome::TokenUnusable(
+            value
+                .get("token_path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        ),
+        Some(PROBE_UNREACHABLE) => ProbeOutcome::Unreachable(
+            value
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok()),
+        ),
+        _ => ProbeOutcome::Unknown,
+    }
+}
+
+/// One outcome, one sentence.
+fn probe_line(outcome: &ProbeOutcome) -> String {
+    match outcome {
+        ProbeOutcome::Reachable => copy::IRONWIRE_PROBE_REACHABLE.to_string(),
+        ProbeOutcome::TokenUnusable(path) => copy::ironwire_token_line(path.as_deref()),
+        ProbeOutcome::Unreachable(port) => copy::ironwire_unreachable_line(*port),
+        ProbeOutcome::Unknown => copy::IRONWIRE_CHECK_UNAVAILABLE.to_string(),
+    }
+}
+
+/// The tone of the daemon's three states.
+///
+/// `awaiting_rows` is `Held` and not `Attention`: a reader built a moment
+/// ago starts cold by construction, so this is the state a contributor
+/// sees immediately after touching anything on this card. Painting it as a
+/// fault would accuse a working proxy of being broken at exactly that
+/// moment.
+fn routing_tone(state: &str) -> Tone {
+    use trace_commons_contributor::daemon::ipc::{ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN};
+    match state {
+        ROUTING_AWAITING_ROWS => Tone::Held,
+        ROUTING_ROWS_SEEN => Tone::Clear,
+        _ => Tone::Neutral,
+    }
+}
+
+/// Fill the declaration controls from the daemon's own answer, and say one
+/// word about each tool.
+fn render_routing(app: &Rc<App>, settings: &Settings) {
+    let declared = settings
+        .ironwire
+        .as_ref()
+        .is_some_and(|d| d.mode == "watch");
+
+    let view = &app.settings.routing_tools;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    for (name, mode) in [
+        (copy::TOOL_CLAUDE, settings.claude_source_mode.as_str()),
+        (copy::TOOL_CODEX, settings.codex_source_mode.as_str()),
+        (copy::TOOL_GEMINI, settings.gemini_source_mode.as_str()),
+    ] {
+        let word = copy::tool_word(mode, declared);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let label = gtk::Label::builder()
+            .label(name)
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        label.add_css_class("tc-body");
+        row.append(&label);
+        let tone = if word == copy::TOOL_PRIVATE {
+            Tone::Clear
+        } else {
+            Tone::Neutral
+        };
+        row.append(&style::tag(word, tone));
+        // Read as one statement, not as a name and a stray word.
+        row.update_property(&[gtk::accessible::Property::Label(&format!("{name}: {word}"))]);
+        view.append(&row);
+    }
+
+    app.settings.filling_routing.set(true);
+    app.settings.routing_switch.set_active(declared);
+    // Neither field is refilled while the contributor is in it. Unlike the
+    // knobs above, these two are not written on every change -- they are
+    // written when Apply is pressed -- so a refresh (which runs on every
+    // daemon event) landing mid-edit would otherwise replace a half-typed
+    // port with the declared one.
+    if let Some(port) = settings.ironwire.as_ref().and_then(|d| d.port) {
+        if !app.settings.routing_port.has_focus() {
+            app.settings.routing_port.set_value(f64::from(port));
+        }
+    }
+    let token_dir = settings
+        .ironwire
+        .as_ref()
+        .and_then(|d| d.token_dir.clone())
+        .unwrap_or_default();
+    if !app.settings.routing_token_dir.has_focus()
+        && app.settings.routing_token_dir.text() != token_dir
+    {
+        app.settings.routing_token_dir.set_text(&token_dir);
+    }
+    app.settings.filling_routing.set(false);
+    set_routing_sensitivity(app, declared);
+}
+
+/// The port and folder fields are the override, and they are live only
+/// while the switch is on.
+fn set_routing_sensitivity(app: &Rc<App>, on: bool) {
+    app.settings.routing_port.set_sensitive(on);
+    app.settings.routing_token_dir.set_sensitive(on);
+    app.settings.routing_apply.set_sensitive(on);
+}
+
+/// The daemon's three-state view of what it is seeing, plus when it last
+/// got an answer.
+fn render_routing_status(app: &Rc<App>, status: &Status) {
+    let view = &app.settings.routing_status;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    let state = status.routing.state.as_str();
+    view.append(&tone_row(
+        copy::ironwire_state_line(state),
+        routing_tone(state),
+        // The stamp lives in the running daemon and means "last answered",
+        // so it is only shown where it says something: never on a state
+        // that has had no answer at all.
+        copy::ironwire_last_checked(status.routing.last_refresh_at)
+            .as_deref()
+            .filter(|_| routing_tone(state) != Tone::Neutral),
+    ));
+}
+
+/// Write the declaration, then -- when it is on -- ask the daemon what it
+/// found and say so.
+///
+/// The probe runs only from here: a human pressing a switch or a button.
+/// Nothing on the submission path calls it.
+fn send_routing(app: &Rc<App>, on: bool) {
+    let port = routing_port_value(app);
+    let token_dir = app.settings.routing_token_dir.text().to_string();
+    if on {
+        app.settings.routing_probe.set_text(copy::IRONWIRE_CHECKING);
+        app.settings.routing_probe.set_visible(true);
+    } else {
+        app.settings.routing_probe.set_visible(false);
+    }
+    app.call(
+        "set_settings",
+        routing_settings_params(on, port, &token_dir),
+        move |app, result| {
+            match result {
+                Ok(_) if on => check_routing(app, port, token_dir),
+                Ok(_) => app.settings.routing_probe.set_visible(false),
+                // The error label is a fixed one by contract and is not a
+                // sentence anybody can act on. What matters is that
+                // nothing changed.
+                Err(_) => {
+                    app.settings.routing_probe.set_visible(false);
+                    app.toast(copy::KNOB_NOT_CHANGED);
+                }
+            }
+            refresh(app);
+        },
+    );
+}
+
+/// Ask the daemon whether the proxy is there, and print what it answered.
+fn check_routing(app: &Rc<App>, port: u16, token_dir: String) {
+    app.call(
+        "probe_routing",
+        probe_params(port, &token_dir),
+        |app, result| {
+            let line = match result {
+                Ok(value) => probe_line(&parse_probe(&value)),
+                // The check itself did not run. Not a fact about the
+                // proxy, so it does not send anybody to look at a port.
+                Err(_) => copy::IRONWIRE_CHECK_UNAVAILABLE.to_string(),
+            };
+            app.settings.routing_probe.set_text(&line);
+            app.settings.routing_probe.set_visible(true);
+        },
+    );
+}
+
+/// The port field, as a port. Clamped rather than cast: the control cannot
+/// produce a value outside the range today, and this is why it cannot
+/// start to.
+fn routing_port_value(app: &Rc<App>) -> u16 {
+    app.settings
+        .routing_port
+        .value_as_int()
+        .clamp(1, i32::from(u16::MAX)) as u16
+}
+
 pub fn refresh(app: &Rc<App>) {
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let projects: Vec<Project> = result
@@ -643,6 +1063,7 @@ pub fn refresh(app: &Rc<App>) {
         };
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
+        render_routing(app, &settings);
     });
     // The roster state, from the daemon rather than from what this window
     // last did. A failure -- `not-logged-in` on a device that has never
@@ -1786,5 +2207,177 @@ mod tests {
         // row must resolve against its own list.
         assert_eq!(mode_choices(true)[1].1, "ignore");
         assert_eq!(mode_choices(false)[1].1, "auto_upload");
+    }
+
+    /// Nothing is written until the contributor acts.
+    ///
+    /// The port field shows IronWire's conventional number so nobody has
+    /// to know it, and a shown default that became a declaration would
+    /// have this window announce a local service the contributor never
+    /// mentioned. Off is `null`, which the daemon reads as off with no
+    /// fallback.
+    #[test]
+    fn a_shown_default_is_not_a_declaration() {
+        assert_eq!(
+            routing_param(false, DEFAULT_IRONWIRE_PORT, ""),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            routing_param(false, DEFAULT_IRONWIRE_PORT, "/home/x/.ironwire"),
+            serde_json::Value::Null
+        );
+    }
+
+    /// Ground truth from outside this window: the value it sends is parsed
+    /// back by the daemon's own type, so a shape this shell invented could
+    /// not pass.
+    #[test]
+    fn the_declaration_round_trips_into_the_daemons_own_type() {
+        use trace_commons_contributor::daemon::settings::IronWireDeclaration;
+        let declared: IronWireDeclaration =
+            serde_json::from_value(routing_param(true, 8463, "/home/x/iw")).expect("parses");
+        assert_eq!(
+            declared,
+            IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: Some(std::path::PathBuf::from("/home/x/iw")),
+            }
+        );
+    }
+
+    /// An empty box is "I did not say", not "the empty directory". The
+    /// daemon refuses an empty string outright, and absence is what falls
+    /// back to the conventional location.
+    #[test]
+    fn an_empty_folder_box_is_sent_as_no_folder() {
+        for shown in ["", "   ", "\t"] {
+            let param = routing_param(true, 8463, shown);
+            assert!(
+                param.get("token_dir").is_none(),
+                "{shown:?} became a declared folder: {param}"
+            );
+        }
+        // And a folder that was typed is sent trimmed, not verbatim.
+        assert_eq!(
+            routing_param(true, 8463, "  /home/x/iw  ")["token_dir"],
+            serde_json::json!("/home/x/iw")
+        );
+    }
+
+    /// The key `set_settings` takes, checked against the daemon's own
+    /// serialization rather than against a literal repeated here.
+    /// `set_settings` refuses unknown keys, so a drift is a silent
+    /// no-write.
+    #[test]
+    fn the_settings_key_is_the_one_the_daemon_serializes() {
+        use trace_commons_contributor::daemon::settings::{DaemonSettings, IronWireDeclaration};
+        let settings = DaemonSettings {
+            ironwire: Some(IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            }),
+            ..DaemonSettings::default()
+        };
+        let value = serde_json::to_value(&settings).expect("settings serialize");
+        assert!(
+            value.get(ROUTING_SETTINGS_KEY).is_some(),
+            "no {ROUTING_SETTINGS_KEY} in {value}"
+        );
+    }
+
+    /// The three answers `probe_routing` can give, read off the daemon's
+    /// own constants.
+    #[test]
+    fn each_probe_answer_maps_to_its_own_outcome() {
+        use trace_commons_contributor::daemon::ipc::{
+            PROBE_REACHABLE, PROBE_TOKEN_UNREADABLE, PROBE_UNREACHABLE,
+        };
+        assert_eq!(
+            parse_probe(&serde_json::json!({ "outcome": PROBE_REACHABLE })),
+            ProbeOutcome::Reachable
+        );
+        assert_eq!(
+            parse_probe(&serde_json::json!({
+                "outcome": PROBE_TOKEN_UNREADABLE,
+                "token_path": "/home/x/.ironwire/control.token",
+            })),
+            ProbeOutcome::TokenUnusable(Some("/home/x/.ironwire/control.token".to_string()))
+        );
+        // Absent, not null: the daemon omits the key when nothing
+        // resolved at all, and unwrapping it here would panic.
+        assert_eq!(
+            parse_probe(&serde_json::json!({ "outcome": PROBE_TOKEN_UNREADABLE })),
+            ProbeOutcome::TokenUnusable(None)
+        );
+        assert_eq!(
+            parse_probe(&serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": 8463 })),
+            ProbeOutcome::Unreachable(Some(8463))
+        );
+        // An answer this build cannot read claims nothing about the
+        // proxy either way.
+        assert_eq!(
+            parse_probe(&serde_json::json!({ "outcome": "something_new" })),
+            ProbeOutcome::Unknown
+        );
+        assert_eq!(parse_probe(&serde_json::json!({})), ProbeOutcome::Unknown);
+    }
+
+    /// Three outcomes, three sentences, none of them the same sentence.
+    #[test]
+    fn the_three_outcomes_never_repeat_a_sentence() {
+        let lines = [
+            probe_line(&ProbeOutcome::Reachable),
+            probe_line(&ProbeOutcome::TokenUnusable(Some(
+                "/home/x/.ironwire/control.token".to_string(),
+            ))),
+            probe_line(&ProbeOutcome::TokenUnusable(None)),
+            probe_line(&ProbeOutcome::Unreachable(Some(8463))),
+            probe_line(&ProbeOutcome::Unknown),
+        ];
+        for (i, a) in lines.iter().enumerate() {
+            assert!(!a.is_empty(), "outcome {i} says nothing");
+            for (j, b) in lines.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "outcomes {i} and {j} say the same thing");
+                }
+            }
+        }
+        // The one fact that fixes the failure a real contributor hits.
+        assert!(
+            lines[1].contains("/home/x/.ironwire/control.token"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[3].contains("8463"), "{}", lines[3]);
+    }
+
+    /// "Declared, nothing seen yet" is not a fault. A rebuilt ledger
+    /// starts cold, so a contributor who just changed a setting sees this
+    /// state -- and a window that painted it as a fault would accuse a
+    /// working proxy of being broken at the moment they touched it.
+    #[test]
+    fn nothing_seen_yet_is_not_toned_as_a_fault() {
+        use trace_commons_contributor::daemon::ipc::{
+            ROUTING_AWAITING_ROWS, ROUTING_NOT_DECLARED, ROUTING_ROWS_SEEN,
+        };
+        let waiting = routing_tone(ROUTING_AWAITING_ROWS);
+        assert_eq!(waiting, Tone::Held);
+        assert_ne!(waiting, Tone::Attention);
+        assert_ne!(waiting, Tone::Refused);
+        assert_eq!(routing_tone(ROUTING_ROWS_SEEN), Tone::Clear);
+        assert_eq!(routing_tone(ROUTING_NOT_DECLARED), Tone::Neutral);
+        // A state this build cannot read is not a fault either.
+        assert_eq!(routing_tone("something_new"), Tone::Neutral);
+    }
+
+    /// The probe is asked in the parameter names the daemon reads, and an
+    /// empty folder box is left out rather than sent as an empty string,
+    /// which `probe_routing` refuses outright.
+    #[test]
+    fn the_probe_is_asked_in_the_daemons_own_parameter_names() {
+        let params = probe_params(8463, "/home/x/iw");
+        assert_eq!(params["port"], serde_json::json!(8463));
+        assert_eq!(params["token_dir"], serde_json::json!("/home/x/iw"));
+        assert!(probe_params(8463, "  ").get("token_dir").is_none());
     }
 }

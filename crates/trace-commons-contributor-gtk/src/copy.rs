@@ -1773,6 +1773,147 @@ mod daily_cap_tests {
     }
 }
 
+// --- Tools -------------------------------------------------------------
+//
+// One tool, one word.
+//
+// A contributor running IronWire has one concept to hold: whether what a
+// tool sends is kept private on this machine. "Destination", "backend",
+// "route" and "proxy" are our vocabulary for the mechanism, and none of
+// them is a thing this person has to learn to answer the question. The
+// three words below are the whole of it, and the controls underneath them
+// are the exception rather than the front door: the conventional port is
+// already filled in and the folder box is for an unusual install.
+
+pub const TOOLS_HEADING: &str = "Tools";
+
+/// This tool's work is kept private on this machine.
+///
+/// NOTE: this is a substring of [`TOOL_NOT_PRIVATE`]. No assertion about
+/// these words may use `contains` -- that is the shape that let
+/// `contains("reachable")` match "unreachable" earlier on this work.
+pub const TOOL_PRIVATE: &str = "Private";
+/// This tool is watched, and nothing is keeping what it sends private.
+pub const TOOL_NOT_PRIVATE: &str = "Not private";
+/// The contributor said they do not use this tool. Nothing is read from
+/// it, so there is nothing to keep private either way.
+pub const TOOL_NOT_USED: &str = "Not used";
+
+/// The tools this window has a word for. Short names, because the word
+/// beside them is doing the work.
+pub const TOOL_CLAUDE: &str = "Claude Code";
+pub const TOOL_CODEX: &str = "Codex";
+pub const TOOL_GEMINI: &str = "Gemini CLI";
+
+pub const IRONWIRE_INTRO: &str = "IronWire runs on this machine and keeps what your tools send to a model private. With it \
+     on, Trace Commons reads its local record so this page can tell you which of your tools \
+     are covered. Nothing here leaves your computer.";
+
+pub const IRONWIRE_TOGGLE: &str = "Use IronWire on this machine";
+
+/// Said out loud because the obvious worry is that it is not true.
+/// Nothing here waits on the app being started again.
+pub const IRONWIRE_APPLIES_AT_ONCE: &str = "Changes here apply straight away.";
+
+pub const IRONWIRE_PORT_TITLE: &str = "Port";
+pub const IRONWIRE_PORT_NOTE: &str = "Already set to the number IronWire normally uses. Change it only if you changed \
+     IronWire's own.";
+
+pub const IRONWIRE_FOLDER_TITLE: &str = "IronWire folder";
+pub const IRONWIRE_FOLDER_NOTE: &str =
+    "Leave this empty unless IronWire keeps its files somewhere other than ~/.ironwire.";
+
+pub const IRONWIRE_APPLY: &str = "Apply and check";
+pub const IRONWIRE_CHECKING: &str = "Checking...";
+
+/// The check itself could not be run -- not a fact about IronWire, so it
+/// must not send anybody to look at a port or a file that is fine.
+pub const IRONWIRE_CHECK_UNAVAILABLE: &str =
+    "That check couldn't be run just now. Nothing changed.";
+
+pub const IRONWIRE_PROBE_REACHABLE: &str =
+    "IronWire answered, and Trace Commons can read its local record.";
+
+pub const IRONWIRE_STATE_OFF: &str = "Off. Trace Commons is reading nothing from IronWire.";
+/// Not a fault, and the copy has to say so. A record read from a
+/// freshly-built reader starts empty by construction, so a contributor who
+/// just turned this on -- or just changed the port -- sees this state.
+pub const IRONWIRE_STATE_WAITING: &str = "On. Nothing recorded yet, which is normal just after you turn this on or change something \
+     here.";
+pub const IRONWIRE_STATE_READING: &str = "On, and Trace Commons is reading what IronWire records.";
+
+/// One tool's word, from what the contributor said about that tool's
+/// sessions and whether IronWire is declared.
+///
+/// `source_mode` is `get_settings`'s `*_source_mode`: `off`, `watch` or
+/// `unset`. Only `off` means the tool is not used -- `unset` watches the
+/// conventional location, which is a tool in use.
+#[must_use]
+pub fn tool_word(source_mode: &str, ironwire_on: bool) -> &'static str {
+    if source_mode == "off" {
+        return TOOL_NOT_USED;
+    }
+    if ironwire_on {
+        TOOL_PRIVATE
+    } else {
+        TOOL_NOT_PRIVATE
+    }
+}
+
+/// The file could not be used: either it is not there, or IronWire would
+/// not accept what was in it.
+///
+/// Names the file, because that is the one fact that makes this fixable,
+/// and it is the failure a real contributor hits: a GUI never sees
+/// `IRONWIRE_HOME`, so it reads `~/.ironwire` whatever a shell profile
+/// says. The path is absent, not empty, when nothing resolved at all.
+#[must_use]
+pub fn ironwire_token_line(token_path: Option<&str>) -> String {
+    match token_path {
+        Some(path) => format!(
+            "Trace Commons could not use the file at {path}. Either it is not there, or \
+             IronWire no longer accepts it. Point the folder below at where IronWire keeps its \
+             files."
+        ),
+        None => "Trace Commons could not work out where IronWire keeps its files. Name the \
+                 folder below."
+            .to_string(),
+    }
+}
+
+/// Nothing usable answered. Names the port that was tried.
+#[must_use]
+pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!(
+            "Nothing answered on port {port}. Check that IronWire is running and that this is \
+             the number it uses."
+        ),
+        None => "Nothing answered. Check that IronWire is running.".to_string(),
+    }
+}
+
+/// The daemon's three states, in words. A state this build does not know
+/// says what the off state says: it claims nothing.
+#[must_use]
+pub fn ironwire_state_line(state: &str) -> &'static str {
+    match state {
+        "awaiting_rows" => IRONWIRE_STATE_WAITING,
+        "rows_seen" => IRONWIRE_STATE_READING,
+        _ => IRONWIRE_STATE_OFF,
+    }
+}
+
+/// When the daemon last got an answer, or nothing.
+///
+/// "Last checked", never "connected since" and never a date this install
+/// began: the stamp lives in the running daemon and starts empty again
+/// every time that process comes back up.
+#[must_use]
+pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    at.map(|at| format!("Last checked {}", crate::model::human_when(Some(at))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2590,5 +2731,153 @@ mod tests {
     #[test]
     fn the_ignore_title_names_the_project() {
         assert_eq!(ignore_project_title("api"), "Ignore api?");
+    }
+
+    /// The one-word vocabulary, and the trap inside it.
+    ///
+    /// "Private" is a substring of "Not private", which is the exact shape
+    /// that made `contains("reachable")` match "unreachable" earlier on
+    /// this plan. Nothing about these three words may be asserted with
+    /// `contains`; this test exists to say so where the next person
+    /// writing an assertion will read it.
+    #[test]
+    fn private_is_a_substring_of_not_private_so_nothing_here_asserts_with_contains() {
+        assert!(TOOL_NOT_PRIVATE.contains(TOOL_PRIVATE.to_lowercase().as_str()));
+        assert_ne!(TOOL_PRIVATE, TOOL_NOT_PRIVATE);
+        assert_ne!(TOOL_PRIVATE, TOOL_NOT_USED);
+        assert_ne!(TOOL_NOT_PRIVATE, TOOL_NOT_USED);
+    }
+
+    /// One tool, one word. A tool the contributor said they do not use
+    /// reads "Not used" whatever the proxy declaration says -- there is
+    /// nothing of theirs to keep private either way.
+    #[test]
+    fn each_tool_reads_exactly_one_of_three_words() {
+        assert_eq!(tool_word("off", true), TOOL_NOT_USED);
+        assert_eq!(tool_word("off", false), TOOL_NOT_USED);
+        assert_eq!(tool_word("watch", true), TOOL_PRIVATE);
+        assert_eq!(tool_word("watch", false), TOOL_NOT_PRIVATE);
+        // "unset" means the conventional location is watched, which is a
+        // tool in use.
+        assert_eq!(tool_word("unset", true), TOOL_PRIVATE);
+        assert_eq!(tool_word("unset", false), TOOL_NOT_PRIVATE);
+        // A mode this build has never heard of is still a tool in use.
+        assert_eq!(tool_word("", false), TOOL_NOT_PRIVATE);
+    }
+
+    /// The failure a real contributor hits, and the one fact that fixes
+    /// it. A generic "check your configuration" would be useless here.
+    #[test]
+    fn the_unusable_file_line_names_the_file() {
+        let line = ironwire_token_line(Some("/home/x/.ironwire/control.token"));
+        assert!(line.contains("/home/x/.ironwire/control.token"), "{line}");
+    }
+
+    /// `probe_routing` omits `token_path` entirely when nothing resolved,
+    /// so this line must stand on its own rather than print a hole.
+    #[test]
+    fn a_check_that_resolved_no_file_at_all_still_says_what_to_do() {
+        let line = ironwire_token_line(None);
+        assert!(!line.contains("None"), "{line}");
+        assert!(!line.is_empty());
+        assert_ne!(
+            line,
+            ironwire_token_line(Some("/home/x/.ironwire/control.token"))
+        );
+    }
+
+    #[test]
+    fn a_check_that_reached_nothing_names_the_port_it_tried() {
+        let line = ironwire_unreachable_line(Some(8463));
+        assert!(line.contains("8463"), "{line}");
+        let nameless = ironwire_unreachable_line(None);
+        assert!(!nameless.contains("None"), "{nameless}");
+        assert_ne!(line, nameless);
+    }
+
+    /// Three states, three sentences, and the middle one is not a fault.
+    #[test]
+    fn declared_but_nothing_seen_yet_does_not_read_as_a_failure() {
+        let waiting = ironwire_state_line("awaiting_rows");
+        let lower = waiting.to_lowercase();
+        for word in ["error", "failed", "problem", "wrong", "not working"] {
+            assert!(!lower.contains(word), "{word} in: {waiting}");
+        }
+        assert!(lower.contains("normal"), "{waiting}");
+        assert_ne!(waiting, ironwire_state_line("rows_seen"));
+        assert_ne!(waiting, ironwire_state_line("not_declared"));
+    }
+
+    /// A state string this build does not know claims nothing. It must not
+    /// fall through to either of the two "on" sentences.
+    #[test]
+    fn an_unreadable_state_says_nothing_rather_than_guessing() {
+        assert_eq!(
+            ironwire_state_line("something_new"),
+            ironwire_state_line("not_declared")
+        );
+        assert_eq!(ironwire_state_line(""), ironwire_state_line("not_declared"));
+    }
+
+    /// `last_refresh_at` is per-process: it resets when the daemon
+    /// restarts, so it is a "last checked" and never a "connected since"
+    /// or an install date.
+    #[test]
+    fn the_last_check_is_never_shown_as_a_date_this_install_began() {
+        assert_eq!(ironwire_last_checked(None), None);
+        let line = ironwire_last_checked(Some(chrono::Utc::now())).expect("a stamp is shown");
+        assert!(line.starts_with("Last checked"), "{line}");
+        let lower = line.to_lowercase();
+        for word in ["since", "installed", "connected"] {
+            assert!(!lower.contains(word), "{word} in: {line}");
+        }
+    }
+
+    /// The rule that governs this whole surface, asserted rather than
+    /// promised. This app's user has no invite: they cannot reach a
+    /// corpus, credits, ownership or contribution, and a locked door
+    /// advertised is worse than no door. Nor may any of it name a restart,
+    /// which Task 3 removed the need for.
+    #[test]
+    fn the_tools_surface_says_nothing_it_should_not() {
+        let mut strings: Vec<String> = vec![
+            TOOLS_HEADING.to_string(),
+            TOOL_PRIVATE.to_string(),
+            TOOL_NOT_PRIVATE.to_string(),
+            TOOL_NOT_USED.to_string(),
+            TOOL_CLAUDE.to_string(),
+            TOOL_CODEX.to_string(),
+            TOOL_GEMINI.to_string(),
+            IRONWIRE_INTRO.to_string(),
+            IRONWIRE_TOGGLE.to_string(),
+            IRONWIRE_APPLIES_AT_ONCE.to_string(),
+            IRONWIRE_PORT_TITLE.to_string(),
+            IRONWIRE_PORT_NOTE.to_string(),
+            IRONWIRE_FOLDER_TITLE.to_string(),
+            IRONWIRE_FOLDER_NOTE.to_string(),
+            IRONWIRE_APPLY.to_string(),
+            IRONWIRE_CHECKING.to_string(),
+            IRONWIRE_CHECK_UNAVAILABLE.to_string(),
+            IRONWIRE_PROBE_REACHABLE.to_string(),
+            ironwire_token_line(Some("/home/x/.ironwire/control.token")),
+            ironwire_token_line(None),
+            ironwire_unreachable_line(Some(8463)),
+            ironwire_unreachable_line(None),
+            ironwire_last_checked(Some(chrono::Utc::now())).unwrap(),
+        ];
+        for state in ["not_declared", "awaiting_rows", "rows_seen", "unknown"] {
+            strings.push(ironwire_state_line(state).to_string());
+        }
+        for word in [
+            "restart", "spent", "cost", "route", "backend", "proxy", "corpus", "share", "earn",
+            "credit",
+        ] {
+            for text in &strings {
+                assert!(
+                    !text.to_lowercase().contains(word),
+                    "{word:?} appears in: {text}"
+                );
+            }
+        }
     }
 }
