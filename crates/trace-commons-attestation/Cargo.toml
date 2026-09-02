@@ -30,14 +30,27 @@ dcap-qvl = { version = "0.6", default-features = false, features = [
 # same. Every version here matches what the server and protocol crates already
 # pin, so the trees stay unified.
 hex = "0.4"
-k256 = "0.13"
+k256 = { version = "0.13", optional = true }
 serde_json = "1"
 sha2 = "0.10"
-sha3 = "0.10"
+sha3 = { version = "0.10", optional = true }
 thiserror = "2"
 
 [features]
 default = []
+# NEAR AI receipt verification and EIP-191 signer recovery. Off by default
+# because `k256` and `sha3` are the only dependencies here that quote
+# verification does not need, and measured against
+# `cargo tree -p trace-commons-contributor` they bring nineteen packages new to
+# that crate. Quote verification -- the thing a contributor does before it
+# hands an enclave a raw session -- needs none of them.
+#
+# Enabling this is what a caller does when it must recover a signer, which
+# includes verifying a redaction-witness certificate as well as a NEAR AI
+# receipt. `address::decode_address` stays outside the feature: comparing a
+# pinned address against the one a quote's report data names is hex, not a
+# curve.
+receipt = ["dep:k256", "dep:sha3"]
 # `dcap-qvl`'s collateral client, which the hosted server's attestation drill
 # reaches through `trace-commons-server/near-attestation-collateral`. Nothing
 # in this crate uses it; it exists only so the server can turn the feature on

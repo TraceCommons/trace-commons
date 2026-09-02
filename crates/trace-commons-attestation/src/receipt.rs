@@ -257,15 +257,12 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// Decode a `0x`-prefixed 20-byte hex address, in either case.
-pub fn decode_address(s: &str) -> Option<[u8; 20]> {
-    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if body.len() != 40 {
-        return None;
-    }
-    let bytes = hex::decode(body).ok()?;
-    bytes.try_into().ok()
-}
+/// Re-exported from [`crate::address`], which is outside this feature.
+///
+/// Decoding an address is hex; recovering one is a curve. Callers that only
+/// need the former must not have to enable `receipt` to get it, so the
+/// function lives there and is re-exported here for every existing caller.
+pub use crate::address::decode_address;
 
 #[cfg(test)]
 mod tests {
