@@ -213,6 +213,115 @@ internal static class NativeMethods
     internal static extern IntPtr tc_scrub_detector_names();
 
     /// <summary>
+    /// Every fixed word on the routing surface, as an owned JSON object; free
+    /// it with <see cref="tc_string_free"/>, which
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    ///
+    /// ONE CALL, NOT ONE PER STRING. This is a whole screen's wording and it
+    /// arrives as a set, so this shell cannot take four of the words and
+    /// hand-write the fifth. Exactly one of them claims privacy; a
+    /// hand-written copy of that claim would stop matching the other two
+    /// shells the day the claim changed, and nothing would notice.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_routing_copy();
+
+    /// <summary>
+    /// The routing surface's "that file could not be used" sentence, already
+    /// assembled. <paramref name="tokenPath"/> may be NULL, which is the
+    /// "nothing resolved at all" case and a different sentence, not an error.
+    ///
+    /// ASSEMBLED ON THE RUST SIDE. This ABI exports no template with a hole in
+    /// it, because a template this shell fills in is another place the wording
+    /// lives. Do not rebuild these sentences from parts.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_token_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? tokenPath);
+
+    /// <summary>
+    /// The routing surface's "nothing answered" sentence, already assembled.
+    /// A port outside 1..65535 -- including the 0 for "no port was tried" --
+    /// produces the sentence that names no port.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_routing_unreachable_line(int port);
+
+    /// <summary>
+    /// The routing surface's "Last checked ..." sentence, assembled around
+    /// this shell's own humanised time. NULL, with an error recorded, for a
+    /// NULL or non-UTF-8 argument: "Last checked " with nothing after it is
+    /// worse than no line at all.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_last_checked(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? when);
+
+    /// <summary>
+    /// One tool's word, from the contributor's per-source mode and what
+    /// IronWire said about that tool.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. Without this call this
+    /// shell would decide which of the four words a tool gets, and three
+    /// native copies of that decision can drift apart silently while every
+    /// string stays identical. <paramref name="wiring"/> is
+    /// <c>(int)ToolWiring</c>; anything the Rust does not know is the unknown
+    /// state, which claims nothing.
+    ///
+    /// NULL, with an error recorded, for a NULL or non-UTF-8 source mode.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_tool_word(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode,
+        int wiring);
+
+    /// <summary>
+    /// How the word <see cref="tc_routing_tool_word"/> returned is painted:
+    /// <c>(int)RoutingTone</c>'s neutral or clear.
+    ///
+    /// Takes the same two inputs as the word, so the two cannot drift apart.
+    /// This shell must NOT recover the tone by comparing the rendered word
+    /// against the private one: that is a text comparison against a privacy
+    /// claim, and "Private" is a substring of "Not private".
+    ///
+    /// Never fails -- anything unreadable answers the neutral tone, which
+    /// claims nothing.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_routing_tool_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode,
+        int wiring);
+
+    /// <summary>
+    /// The daemon's routing state, in words. A state this build has never
+    /// heard of -- and a NULL one -- reads as the off line, which claims
+    /// nothing; it never falls through to either "on" sentence.
+    ///
+    /// Exported for the reason <see cref="tc_routing_tool_word"/> is: three
+    /// copies of a branch can disagree while three copies of a string cannot.
+    /// NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_state_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// How firmly the sentence <see cref="tc_routing_state_line"/> returned
+    /// reads: <c>TC_ROUTING_TONE_*</c>.
+    ///
+    /// The last routing branch table that was still written out natively in
+    /// each shell. <c>awaiting_rows</c> is held and never a fault: a reader
+    /// built a moment ago starts cold by construction.
+    ///
+    /// Never fails -- a state this build has never heard of, and a NULL one,
+    /// both answer the neutral tone, exactly as their sentence claims
+    /// nothing.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_routing_state_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>
