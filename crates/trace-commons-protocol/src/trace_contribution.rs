@@ -3516,6 +3516,22 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                 // observed true positive and drops the identifier class
                 // whole. Sharing the tail was tried and measured; it is not
                 // an option here.
+                // Provenance: `crsr_` followed by a long lowercase hex body,
+                // confirmed against a real key rather than inferred from a
+                // naming convention. Worth recording, because a prefix
+                // detector is worth exactly as much as its prefix: get it
+                // wrong and this never fires while every shell goes on
+                // telling Cursor users their keys are found and replaced.
+                // That failure is silent -- no test can catch a prefix that
+                // is merely the wrong string -- so re-check this against an
+                // observed key before trusting it again, and treat a change
+                // in Cursor's format as a change to a coverage claim we have
+                // published.
+                //
+                // `{40,}` is a floor, not the observed length. The body is
+                // matched case-insensitively so an uppercase-hex spelling
+                // cannot slip past; that widens the class slightly and the
+                // 40-character minimum is what keeps it off ordinary text.
                 name: "cursor_api_key",
                 severity: SecretLeakSeverity::Critical,
                 regex: Regex::new(r"(?i)\bcrsr_[0-9a-f]{40,}")
