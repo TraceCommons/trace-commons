@@ -172,6 +172,26 @@ pub fn check_quote(
     })
 }
 
+/// A `VerifiedWitness` for tests in sibling modules.
+///
+/// `#[cfg(test)]`, so it exists in no shipped artifact. It is here rather than
+/// absent because the alternative is worse: `witness_contribution` cannot be
+/// tested at all without one, DCAP verification cannot be satisfied without a
+/// real Intel-signed quote, and an untested send path is not a safer trade
+/// than a test-only constructor.
+///
+/// `there_is_no_way_to_build_a_verified_witness_but_verification` counts
+/// constructors in the production half of this file only, and asserts that the
+/// split kept both public functions -- so this cannot grow into a production
+/// back door without that test failing.
+#[cfg(test)]
+pub(crate) fn verified_witness_for_test(url: &str, signing_address: &str) -> VerifiedWitness {
+    VerifiedWitness {
+        url: url.to_string(),
+        signing_address: signing_address.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,9 +458,22 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map(|(before, _)| before)
             .expect("this file has a test module");
+        // Both public functions must be on the production side, or the split
+        // cut early and the count below would be vacuous. `check_quote` is
+        // declared after `verify_witness` and before the `#[cfg(test)]`
+        // constructor, so requiring both pins the split point.
         assert!(
             production.contains("pub fn verify_witness"),
             "the split found no production code, so the count below is vacuous"
+        );
+        assert!(
+            production.contains("pub fn check_quote"),
+            "the split cut before check_quote, so the count below is vacuous"
+        );
+        // And the test-only constructor must really be test-only.
+        assert!(
+            !production.contains("verified_witness_for_test"),
+            "the test-only constructor escaped into production code"
         );
         // `struct VerifiedWitness {` is the definition and `impl ...
         // VerifiedWitness {` opens a block; neither builds a value. Anything

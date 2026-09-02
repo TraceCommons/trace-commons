@@ -229,3 +229,59 @@ impl WitnessTrustError {
         }
     }
 }
+
+/// Verify a witness, then hand it a raw session. In that order, always.
+///
+/// The whole client path in one function, so there is one place where the
+/// order is written down and no caller assembles it themselves.
+///
+/// # The order, and why each step is where it is
+///
+/// 1. **Refuse an unpinned client**, before anything reaches the network. A
+///    client with no pin cannot judge any quote it receives, so fetching one
+///    would be spending a round trip to learn nothing -- and would put the
+///    witness URL on the wire for a submission that was always going to be
+///    refused.
+/// 2. **Refuse an oversized contribution**, also before the network. The
+///    client already refuses these in `raw_contribution_size_ok`; what matters
+///    here is that it happens before anything is offered, because on this path
+///    finding out late means the session was already transmitted.
+/// 3. **A fresh nonce**, then the quote, then the collateral.
+/// 4. **Verify.** [`verify::verify_witness`] is the only producer of a
+///    [`verify::VerifiedWitness`].
+/// 5. **Send**, and check what comes back.
+///
+/// Steps 1 and 2 are the reason this returns before `transport` is touched in
+/// the refusal cases, which `a_witness_url_without_a_pin_never_reaches_the_network`
+/// asserts against a recording transport.
+pub async fn witness_session(
+    transport: &dyn transport::WitnessTransport,
+    url: &str,
+    trust: &WitnessTrust,
+    now_unix: u64,
+    raw: trace_commons_protocol::trace_contribution::RawTraceContribution,
+    granted: &transport::GrantedConsent,
+) -> Result<transport::WitnessedEnvelope, WitnessTrustError> {
+    if !trust.is_pinned() {
+        // Never a fall back to local redaction. See the module docs: the
+        // contributor's bytes would stay home, but the envelope would carry a
+        // self-reported risk while the contributor believed it carried a
+        // certificate.
+        return Err(WitnessTrustError::WitnessMeasurementUnpinned {
+            control: WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+            reported: None,
+        });
+    }
+    crate::envelope::raw_contribution_size_ok(&raw)
+        .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+
+    let nonce = transport::WitnessNonce::fresh()?;
+    let evidence = transport.attestation(&nonce).await?;
+    let quote = hex::decode(evidence.quote_hex.trim())
+        .map_err(|_| WitnessTrustError::WitnessQuoteUnverified)?;
+    let collateral = transport.collateral(&quote).await?;
+
+    let verified = verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)?;
+
+    transport::witness_contribution(transport, &verified, raw, granted).await
+}

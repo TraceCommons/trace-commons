@@ -74,6 +74,12 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 axum = "0.8"
+# Signing test certificates, so the certificate-verification tests exercise
+# real secp256k1/EIP-191 rather than a fixture nobody can regenerate. Both are
+# already in this crate's graph through trace-commons-attestation, so they add
+# no packages.
+k256 = "0.13"
+sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["net"] }
 

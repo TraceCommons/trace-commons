@@ -507,6 +507,9 @@ mod tests {
         fn nonces(&self) -> Vec<String> {
             self.seen.lock().unwrap().nonces.clone()
         }
+        fn witness_bodies(&self) -> Vec<Vec<u8>> {
+            self.seen.lock().unwrap().witness_bodies.clone()
+        }
         fn collateral_bodies(&self) -> Vec<Vec<u8>> {
             self.seen.lock().unwrap().collateral_bodies.clone()
         }
@@ -786,5 +789,356 @@ mod tests {
         let rendered = format!("{nonce:?}");
         assert!(rendered.contains(&hex::encode([0x01u8; WITNESS_NONCE_LEN])));
         assert!(rendered.starts_with("WitnessNonce("));
+    }
+
+    // -----------------------------------------------------------------
+    // Task 5: the ordering property, and what comes back.
+    // -----------------------------------------------------------------
+
+    /// A secret the assertions look for in what reached the wire. Distinctive
+    /// enough that a match cannot be a coincidence.
+    const SECRET: &str = "zzq-raw-session-secret-zzq";
+
+    /// Real Intel collateral, shared with `trace-commons-attestation`'s own
+    /// suite.
+    ///
+    /// Real so that `parse_collateral` succeeds and the refusal below lands
+    /// where the test says it does -- at `verify_quote`, on a quote that is
+    /// not Intel-signed. With placeholder collateral the run would refuse one
+    /// step earlier, at the collateral parse, and the test would be asserting
+    /// that a malformed fixture is malformed rather than that an unverifiable
+    /// quote is refused.
+    const COLLATERAL: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+    );
+
+    fn test_signer(seed: &str) -> k256::ecdsa::SigningKey {
+        use sha3::Digest as _;
+        k256::ecdsa::SigningKey::from_slice(&sha3::Keccak256::digest(seed.as_bytes()))
+            .expect("the seed is a valid scalar")
+    }
+
+    fn address_of(key: &k256::ecdsa::SigningKey) -> String {
+        use sha3::Digest as _;
+        let point = key.verifying_key().to_encoded_point(false);
+        let digest = sha3::Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    fn sign_eip191(key: &k256::ecdsa::SigningKey, message: &[u8]) -> String {
+        use sha3::Digest as _;
+        let mut hasher = sha3::Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(message);
+        let digest: [u8; 32] = hasher.finalize().into();
+        let (signature, recovery_id) = key
+            .sign_prehash_recoverable(&digest)
+            .expect("the digest is 32 bytes");
+        let mut raw = signature.to_bytes().to_vec();
+        raw.push(recovery_id.to_byte() + 27);
+        format!("0x{}", hex::encode(raw))
+    }
+
+    /// The envelope bytes a witness returns in these tests. Not a real
+    /// envelope -- nothing here parses it -- but real bytes, which is what the
+    /// digest is over.
+    fn envelope_bytes() -> Vec<u8> {
+        br#"{"schema_version":"test","zeta":1,"alpha":"two"}"#.to_vec()
+    }
+
+    fn certificate_json_for(digest_over: &[u8]) -> String {
+        use sha2::Digest as _;
+        serde_json::json!({
+            "redacted_sha256": hex::encode(sha2::Sha256::digest(digest_over)),
+            "residual_risk_verdict": "low",
+            "redaction_policy_version": "deterministic-v1",
+            "witness_measurement": "aa".repeat(48),
+            "timestamp": 1_788_264_000i64,
+        })
+        .to_string()
+    }
+
+    /// A witness answer whose certificate covers `digest_over` and is signed
+    /// by `signer`.
+    fn signed_answer(
+        signer: &k256::ecdsa::SigningKey,
+        digest_over: &[u8],
+    ) -> (String, String, Vec<u8>) {
+        let certificate = certificate_json_for(digest_over);
+        let parsed: serde_json::Value = serde_json::from_str(&certificate).unwrap();
+        let signing_bytes =
+            certificate_signing_bytes(&parsed).expect("the fixture certificate is well formed");
+        let signature = sign_eip191(signer, &signing_bytes);
+        (certificate, signature, envelope_bytes())
+    }
+
+    fn raw_with_secret() -> RawTraceContribution {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceCaptureTurn, RecordedTraceContributionOptions,
+        };
+        let started = chrono::Utc::now();
+        RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: format!("deploy with {SECRET}"),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        )
+    }
+
+    fn granted() -> GrantedConsent {
+        GrantedConsent {
+            scopes: vec![ConsentScope::DebuggingEvaluation],
+            uses: vec![TraceAllowedUse::Debugging],
+        }
+    }
+
+    fn unpinnable_trust(address: &str) -> crate::witness::WitnessTrust {
+        use trace_commons_attestation::measurements::ExpectedMeasurements;
+        crate::witness::WitnessTrust {
+            signing_address: address.to_string(),
+            measurements: vec![
+                ExpectedMeasurements::from_env_value(Some(&format!("mrtd={}", "aa".repeat(48))))
+                    .unwrap()
+                    .unwrap(),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_raw_is_sent_before_the_attestation_is_verified() {
+        // Ordering observed at a recording transport, not inferred from a
+        // check existing. The quote here is not a real Intel-signed quote, so
+        // verification fails -- which is exactly the case that matters: the
+        // raw session must not have been offered by the time it does.
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            attestation: Some(serde_json::json!({
+                "quote_hex": "00ff",
+                "signing_address": address_of(&signer),
+            })),
+            collateral: Some(COLLATERAL.to_string()),
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+
+        let result = crate::witness::witness_session(
+            &transport,
+            &server.base,
+            &unpinnable_trust(&address_of(&signer)),
+            1_788_264_000,
+            raw_with_secret(),
+            &granted(),
+        )
+        .await;
+        assert!(result.is_err(), "an unverifiable quote must not be trusted");
+
+        let routes = server.routes();
+        let attested = routes.iter().position(|route| route == "attestation");
+        let sent = routes.iter().position(|route| route == "witness");
+        assert!(
+            attested.is_some(),
+            "the attestation was never fetched: {routes:?}"
+        );
+        assert!(
+            sent.map(|sent| attested.unwrap() < sent).unwrap_or(true),
+            "raw bytes were offered before the enclave was verified: {routes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_verification_sends_nothing_at_all() {
+        // The assertion the test above cannot make on its own: not merely
+        // "the send came second" but "the send never happened, and the
+        // transcript is not on the wire anywhere".
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            attestation: Some(serde_json::json!({
+                "quote_hex": "00ff",
+                "signing_address": address_of(&signer),
+            })),
+            collateral: Some(COLLATERAL.to_string()),
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+
+        let err = crate::witness::witness_session(
+            &transport,
+            &server.base,
+            &unpinnable_trust(&address_of(&signer)),
+            1_788_264_000,
+            raw_with_secret(),
+            &granted(),
+        )
+        .await
+        .expect_err("an unverifiable quote is refused");
+        assert_eq!(err, WitnessTrustError::WitnessQuoteUnverified);
+
+        assert!(
+            !server.routes().iter().any(|route| route == "witness"),
+            "a refused verification still reached the witness route"
+        );
+        let everything: Vec<u8> = server
+            .witness_bodies()
+            .into_iter()
+            .chain(server.collateral_bodies())
+            .flatten()
+            .collect();
+        assert!(
+            !String::from_utf8_lossy(&everything).contains(SECRET),
+            "a refusal still disclosed the transcript, which is the failure this design prevents"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_witness_url_without_a_pin_never_reaches_the_network() {
+        let server = local_witness(Answers::default()).await;
+        let transport = transport_for(&server.base, permissive());
+        let unpinned = crate::witness::WitnessTrust {
+            signing_address: address_of(&test_signer("witness")),
+            measurements: Vec::new(),
+        };
+
+        let err = crate::witness::witness_session(
+            &transport,
+            &server.base,
+            &unpinned,
+            1_788_264_000,
+            raw_with_secret(),
+            &granted(),
+        )
+        .await
+        .expect_err("an unpinned witness must refuse, never quietly redact locally");
+        assert_eq!(err.refusal_label(), "witness_expected_measurement");
+        assert!(
+            server.routes().is_empty(),
+            "an unpinned client still contacted the witness: {:?}",
+            server.routes()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_the_certificate_does_not_cover_is_refused() {
+        // Only the client can catch this. The server would check the same
+        // certificate against the bytes it holds, find them consistent, and
+        // never have seen what was sent.
+        let signer = test_signer("witness");
+        // A certificate over OTHER bytes, returned alongside `envelope_bytes`.
+        let (certificate, signature, _) = signed_answer(&signer, b"some other artifact entirely");
+        let server = local_witness(Answers {
+            witness: Some((certificate, signature, envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+            .await
+            .expect_err("only the client can catch this; the server cannot");
+        assert_eq!(err, WitnessTrustError::WitnessCertificateMismatched);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_signed_by_another_key_is_refused() {
+        let witness_key = test_signer("witness");
+        let impostor = test_signer("impostor");
+        assert_ne!(address_of(&witness_key), address_of(&impostor));
+
+        // A certificate that covers the returned bytes perfectly -- so the
+        // digest check passes -- but is signed by somebody else.
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&impostor, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness = crate::witness::verify::verified_witness_for_test(
+            &server.base,
+            &address_of(&witness_key),
+        );
+
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+            .await
+            .expect_err("a certificate from an unpinned key is worth nothing");
+        assert_eq!(err, WitnessTrustError::WitnessCertificateUnverified);
+    }
+
+    #[tokio::test]
+    async fn a_correctly_signed_certificate_over_the_returned_bytes_is_accepted() {
+        // The positive control. Without it, every refusal above would pass on
+        // a `verify_certificate` that refused unconditionally.
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let response = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+            .await
+            .expect("a certificate over these bytes from the pinned key is accepted");
+        // And what comes back is the bytes as received, byte for byte.
+        assert_eq!(response.envelope_bytes, envelope_bytes());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_contribution_is_refused_locally_and_never_offered() {
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let mut oversized = raw_with_secret();
+        oversized.events[0].content = Some("x".repeat(MAX_ENVELOPE_BYTES + 1));
+
+        let err = witness_contribution(&transport, &witness, oversized, &granted())
+            .await
+            .expect_err("an oversized contribution is refused before it is offered");
+        assert_eq!(err, WitnessTrustError::WitnessPayloadTooLarge);
+        assert!(
+            server.witness_bodies().is_empty(),
+            "an oversized contribution was offered anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_error_never_renders_the_transcript() {
+        let signer = test_signer("witness");
+        let (certificate, signature, _) = signed_answer(&signer, b"other bytes");
+        let server = local_witness(Answers {
+            witness: Some((certificate, signature, envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+            .await
+            .unwrap_err();
+        for rendering in [format!("{err}"), format!("{err:?}")] {
+            assert!(!rendering.contains(SECRET));
+            assert!(!rendering.contains(&server.base));
+        }
     }
 }
