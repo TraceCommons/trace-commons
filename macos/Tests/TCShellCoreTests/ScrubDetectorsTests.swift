@@ -25,6 +25,9 @@ final class ScrubDetectorsTests: XCTestCase {
             ScrubDetectors.label(for: "provider_token"),
             "Stripe, GitLab and Slack tokens"
         )
+        // Cursor is its own detector rather than a fold into the line above,
+        // so a Cursor user can find their own key in the list.
+        XCTAssertEqual(ScrubDetectors.label(for: "cursor_api_key"), "Cursor API keys")
     }
 
     /// The property that matters most: a detector added upstream must still
