@@ -373,6 +373,12 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
             }
             _ = ticker.tick() => {
                 let now = Utc::now();
+                // Ahead of `watcher::tick` so the sources it builds via
+                // `source_roots_with_routing` see this pass's snapshot
+                // rather than the previous one. A no-op when nothing was
+                // declared; otherwise bounded by the ledger's own short
+                // timeout, so this cannot stall the tick.
+                shared.refresh_routing().await;
                 // Fixed labels, never `error = %e`. These errors are
                 // `anyhow::Error`s whose outermost context routinely embeds
                 // a filesystem path -- `write_atomic_0600`'s "creating temp
@@ -486,10 +492,11 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    let (near_ai, source_roots) = {
+    let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        s.near_ai.clone()
     };
+    let source_roots = shared.source_roots_with_routing();
     // These options are envelope-determining and are NOT covered by
     // `preview::input_fingerprint`, which fingerprints the config. They are
     // safe only because every one of them is a constant here.
@@ -1070,13 +1077,69 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     }
 
     let last_digest_at = shared.state.lock().expect("state lock").last_digest_at;
-    if notify::digest_due(last_digest_at, now, digest_interval_secs, pending_count) {
+    // What went out unasked since the last digest. An armed project never
+    // queues anything, so without this an armed contributor is told nothing
+    // ever -- see `notify::digest_due`. A cache that cannot be read is not a
+    // reason to skip the digest: it degrades to the queue-only digest that
+    // shipped before, rather than to silence.
+    //
+    // Behind the interval check, because this runs on every poll tick and the
+    // poll is far more frequent than the digest interval. No contribution
+    // count can make a digest fire early, so reading and parsing the history
+    // file before the clock is even close is work whose result is discarded.
+    // `interval_elapsed` is the same expression `digest_due` applies, not a
+    // second opinion about it.
+    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+        history::contributed_since(
+            &history::HistoryCache::load(&shared.store).unwrap_or_default(),
+            last_digest_at,
+        )
+    } else {
+        // Only reachable when `digest_due` is about to be false anyway: the
+        // interval has not elapsed, so neither half of the digest can fire.
+        history::ContributedSince::default()
+    };
+    if notify::digest_due(
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        pending_count,
+        contributed.count,
+    ) {
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. Joined rather than merged because
+        // they are about different things and a contributor acts on only one
+        // of them.
+        let contribution = (contributed.count > 0).then(|| {
+            notify::contribution_text(
+                contributed.count,
+                &contributed.project_labels,
+                contributed.credit_pending,
+            )
+        });
+        let body = match (pending_count > 0, contribution.as_deref()) {
+            (true, Some(c)) => format!("{digest}\n{c}"),
+            (true, None) => digest.clone(),
+            (false, Some(c)) => c.to_string(),
+            // `digest_due` cannot return true here, but a body built by
+            // exhaustion cannot be wrong later if it can.
+            (false, None) => digest.clone(),
+        };
         shared.publish(
             ipc::EVENT_DIGEST_DUE,
-            serde_json::json!({ "pending": pending_count, "text": digest }),
+            serde_json::json!({
+                "pending": pending_count,
+                "contributed": contributed.count,
+                // Labels, never keys. A shell composes its own sentence from
+                // these (each platform's notification centre words things
+                // differently), so it needs the names and not just the count.
+                "contributed_projects": contributed.project_labels,
+                "credit_pending": contributed.credit_pending,
+                "text": body,
+            }),
         );
         if local_notifications {
-            notify::emit_local(&digest);
+            notify::emit_local(&body);
         }
         let mut state = shared.state.lock().expect("state lock");
         state.last_digest_at = Some(now);

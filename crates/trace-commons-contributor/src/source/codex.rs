@@ -169,6 +169,7 @@ fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef>
         .map(|s| s.to_string());
     Some(SessionRef {
         source: SOURCE_CODEX,
+        declared_source: None,
         path,
         project,
         cwd,
@@ -478,6 +479,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         events,
         subagent_count: 0,
         subagents_dropped: 0,
+        routing: Vec::new(),
     })
 }
 

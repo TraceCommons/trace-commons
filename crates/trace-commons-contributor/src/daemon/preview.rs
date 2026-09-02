@@ -58,6 +58,7 @@ use crate::envelope::{
     redact_to_envelope,
 };
 use crate::source::{SessionRef, TraceSource};
+use trace_commons_protocol::canonical_json;
 use trace_commons_protocol::trace_contribution::{
     TraceContributionEnvelope, TraceContributionEventType,
 };
@@ -122,8 +123,17 @@ pub fn envelope_digest(envelope: &TraceContributionEnvelope) -> Result<String> {
     let mut value = serde_json::to_value(envelope)
         .map_err(|_| anyhow::anyhow!("envelope-digest-serialize-failed"))?;
     strip_volatile(&mut value);
-    // `serde_json::Value`'s map is a `BTreeMap` under this crate's feature
-    // set, so serialization is key-ordered and the digest is stable.
+    // Sort every object's keys before serializing. This is what makes the
+    // digest stable: `serde_json::Value`'s map is key-ordered only while it
+    // is a `BTreeMap`, and `serde_json/preserve_order` swaps it for an
+    // insertion-ordered map. `dcap-qvl` enables that feature, and this
+    // crate's cfg(not(windows)) dev-dependency on trace-commons-server pulls
+    // it in, so `a_known_envelope_pins_a_known_digest` below runs against an
+    // IndexMap and fails if this call is removed -- measured, not assumed.
+    // Under a `BTreeMap` the call changes nothing, which is why it could be
+    // adopted without moving that pinned digest. See
+    // `trace_commons_protocol::canonical_json`.
+    canonical_json::canonicalize(&mut value);
     //
     // The canonical bytes are hashed as the serializer produces them rather
     // than collected into a `Vec<u8>` first: `HashingWriter` feeds each
@@ -1259,9 +1269,13 @@ mod tests {
         // still passes, which is what says this was a wording change and not
         // a redaction or classification change. That ordering is the point of
         // asserting the tier before the digest.
+        //
+        // Moved again by `routing_metadata_included`: a new consent field
+        // serializes into the envelope, so the digest changes while the
+        // classification does not.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:ce2d6dadbfcabd7594475d5f43a70afbd1fec35a8bc2524c6e1dcd71bdec74af",
+            "sha256:8d9b9d0b2f1c78be8875d79435cc21397da4a1366139df38d59dff046930d27c",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

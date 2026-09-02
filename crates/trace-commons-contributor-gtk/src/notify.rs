@@ -92,9 +92,117 @@ pub fn digest_body(pending: usize, project_labels: &[String]) -> String {
     )
 }
 
+/// The contribution half of the digest: what went out unasked since the last
+/// one.
+///
+/// `None` when nothing did -- the caller then has only the waiting half, or
+/// nothing to say at all. A line reading "0 sessions contributed" is worse
+/// than no line.
+///
+/// The daemon composes the same sentence for its own local notifier
+/// (`trace_commons_contributor::daemon::notify::contribution_text`) and the
+/// macOS shell composes it in `DigestCopy.contributionLine`. All three follow
+/// the same rules and are tested against them separately, because each
+/// platform's notification centre words the surrounding text differently and
+/// a shared string would not survive that.
+pub fn contribution_body(
+    contributed: usize,
+    project_labels: &[String],
+    credit_pending: f32,
+) -> Option<String> {
+    if contributed == 0 {
+        return None;
+    }
+    let sessions = if contributed == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    let named: Vec<&str> = project_labels
+        .iter()
+        .filter(|l| !l.is_empty())
+        .map(String::as_str)
+        .collect();
+    let head: Vec<&str> = named.iter().take(3).copied().collect();
+    let more = named.len().saturating_sub(head.len());
+    let projects = match (head.as_slice(), more) {
+        ([], _) => String::new(),
+        (h, m) if m > 0 => format!(" from {} and {m} more", h.join(", ")),
+        ([one], _) => format!(" from {one}"),
+        ([a, b], _) => format!(" from {a} and {b}"),
+        ([rest @ .., last], _) => format!(" from {} and {last}", rest.join(", ")),
+    };
+    let mut line = format!("{contributed} {sessions} contributed{projects}.");
+    // Only when there is some: "0 credit pending" reads as a failure rather
+    // than as a fresh start. Always "pending", never "earned" -- settlement
+    // is off on every deployment shipped so far.
+    if credit_pending > 0.0 {
+        // Rounded half away from zero before formatting, matching the daemon
+        // and the other two shells. Left to `{:.1}` alone this rounds half to
+        // even and Windows rounds half away from zero, so 4.25 would read as
+        // 4.2 here and 4.3 there for the same contribution.
+        let rounded = (credit_pending * 10.0).round() / 10.0;
+        line.push_str(&format!(" {rounded:.1} credit pending."));
+    }
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_contributed_produces_no_line() {
+        assert_eq!(contribution_body(0, &[], 0.0), None);
+    }
+
+    #[test]
+    fn the_contribution_line_names_projects_and_never_a_path() {
+        let line = contribution_body(
+            3,
+            &["trace-commons-server".to_string(), "dotfiles".to_string()],
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "3 sessions contributed from trace-commons-server and dotfiles."
+        );
+        assert!(!line.contains('/'), "{line}");
+    }
+
+    #[test]
+    fn one_contributed_session_is_singular() {
+        let line = contribution_body(1, &["a".to_string()], 0.0).unwrap();
+        assert!(line.starts_with("1 session contributed from a."), "{line}");
+    }
+
+    #[test]
+    fn many_contributed_projects_are_summarised() {
+        let labels: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let line = contribution_body(9, &labels, 0.0).unwrap();
+        assert!(line.contains("and 2 more"), "{line}");
+    }
+
+    #[test]
+    fn credit_is_stated_only_when_there_is_some() {
+        let with = contribution_body(2, &["a".to_string()], 4.25).unwrap();
+        assert!(with.ends_with("4.3 credit pending."), "{with}");
+        let without = contribution_body(2, &["a".to_string()], 0.0).unwrap();
+        assert!(!without.contains("credit"), "{without}");
+    }
+
+    #[test]
+    fn pending_credit_is_never_called_earned() {
+        let line = contribution_body(2, &["a".to_string()], 4.25).unwrap();
+        assert!(line.contains("pending"), "{line}");
+        for word in ["earned", "paid", "settled", "worth"] {
+            assert!(!line.contains(word), "must not say {word}: {line}");
+        }
+    }
 
     #[test]
     fn the_digest_reads_as_the_shared_spec_writes_it() {

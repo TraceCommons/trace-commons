@@ -84,9 +84,17 @@ pub struct QueueEntry {
     pub entry_id: String,
     #[serde(default)]
     pub session_hash: String,
-    /// `claude-code`, `codex`, or `trajectory`: which agent produced this.
+    /// `claude-code`, `codex`, or `trajectory`: which ADAPTER produced this.
     #[serde(default)]
     pub source: String,
+    /// What the transcript declares itself to be, when the daemon knew it.
+    ///
+    /// An imported Antigravity conversation is stored as a trajectory file,
+    /// so `source` says `trajectory` -- the storage format, not the tool the
+    /// contributor used. Absent for every native adapter, and for a
+    /// trajectory the daemon was handed by name rather than discovered.
+    #[serde(default)]
+    pub declared_source: Option<String>,
     #[serde(default)]
     pub project_id: String,
     #[serde(default)]
@@ -123,13 +131,27 @@ pub struct QueueEntry {
 impl QueueEntry {
     /// The agent that produced the session, in the words a contributor uses
     /// for it.
+    ///
+    /// Prefers what the transcript declares over the adapter that stores it.
+    /// An imported Antigravity conversation reads as "Antigravity", not as
+    /// the trajectory file it happens to be kept in.
+    ///
+    /// The fallback arm returns `self.source` rather than the declared
+    /// value: an unrecognised declaration is untrusted text out of a file,
+    /// and putting it on screen unmapped is a different decision from
+    /// mapping a slug this build knows.
     pub fn agent_label(&self) -> &str {
-        match self.source.as_str() {
+        match self
+            .declared_source
+            .as_deref()
+            .unwrap_or(self.source.as_str())
+        {
             "claude-code" => "Claude Code",
             "codex" => "Codex",
             "gemini-cli" => "Gemini CLI",
+            "antigravity" => "Antigravity",
             "trajectory" => "Trajectory",
-            other => other,
+            _ => self.source.as_str(),
         }
     }
 }
@@ -676,5 +698,48 @@ mod tests {
             enrolled: true,
         };
         assert_eq!(s.scrubbed_line(), "scrubbed: 2 secrets, 1 email address");
+    }
+
+    /// The queue names what a trace came FROM, not how it is stored.
+    ///
+    /// An imported Antigravity conversation is staged as a trajectory file
+    /// and read by the trajectory adapter, so the adapter name alone would
+    /// label it "Trajectory" -- the storage format, and not the word the
+    /// contributor typed to collect it.
+    #[test]
+    fn an_imported_conversation_is_labelled_by_what_it_declares() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e1",
+            "source": "trajectory",
+            "declared_source": "antigravity",
+        }))
+        .unwrap();
+        assert_eq!(entry.agent_label(), "Antigravity");
+    }
+
+    /// A native session declares nothing and still reads correctly, which
+    /// is what stops this from being a one-source special case.
+    #[test]
+    fn a_session_that_declares_nothing_falls_back_to_its_adapter() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e2",
+            "source": "claude-code",
+        }))
+        .unwrap();
+        assert_eq!(entry.declared_source, None);
+        assert_eq!(entry.agent_label(), "Claude Code");
+    }
+
+    /// An unrecognised declaration is untrusted text from a file. It must
+    /// not reach the screen unmapped -- the adapter is shown instead.
+    #[test]
+    fn an_unknown_declaration_does_not_reach_the_screen() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e3",
+            "source": "trajectory",
+            "declared_source": "something-this-build-has-never-heard-of",
+        }))
+        .unwrap();
+        assert_eq!(entry.agent_label(), "trajectory");
     }
 }

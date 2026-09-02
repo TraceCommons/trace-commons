@@ -6,10 +6,24 @@ run. Each drill emits hash-only audit rows on success and contributes to
 
 All drills:
 - Require an admin bearer token.
-- Are `POST` with empty body.
-- Return HTTP 200 with `success: true` on pass.
+- Are `POST` with a JSON body and `Content-Type: application/json`. The
+  body is a required extractor, so a body-less POST is rejected before
+  the handler runs. Eleven of the fifteen accept `{}`; the four in the
+  table below marked "needs input" have at least one required field.
+- Return HTTP 200 with `ready: true` on pass, and a label-only
+  `blocking_gaps` list naming what is missing otherwise. There is no
+  `success` field on any drill response.
 - Are idempotent — re-running has no side effects beyond a fresh audit
   row.
+
+## Drills that need a request body
+
+| Drill | Required fields | Also needed to reach `ready` |
+|---|---|---|
+| Revocation effects | `submission_id` | must name a canary trace that has actually been revoked; the drill checks drained propagation items |
+| Canary read | `submission_id` | `isolation_tenant_id`; without it `tenant_canary_isolated` is false and the drill reports `tenant_canary_not_isolated` |
+| Object primary read | `submission_id` | `fallback_tenant_id`; without it the drill reports `fallback_tenant_object_primary_enabled_or_missing` |
+| Credit settlement | `policy_version` | the version must be listed in `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`; add `issuer_approval_evidence_hash` when the server requires issuer approval |
 
 | Drill | Path | Validates | Required for promotion? | Recommended cadence |
 |---|---|---|---|---|
@@ -28,6 +42,7 @@ All drills:
 | Object store migration | `/v1/admin/object-store-migration-drill` | Migration steps (if any) idempotent | nice-to-have | Before promotions |
 | Rollback | `/v1/admin/rollback-drill` | Rollback path documented + dry-run executable | yes | Before each deploy |
 | Credit settlement | `/v1/admin/credit-settlement-drill` | Settlement scheduler can resolve allowed policy version + issuer approval, can build a settlement event without committing | yes | Daily; before each settlement cycle |
+| NEAR AI attestation | `/v1/admin/near-attestation-drill` | The inference endpoint is a TDX enclave running a pinned image, and the key signing its receipts is the key that enclave attests. See [`near-attestation-drill.md`](near-attestation-drill.md) | yes, **when a NEAR AI endpoint is configured**; reported not-applicable otherwise | Daily. **Costs one minimal paid completion per run** |
 
 ## Failure modes feeding `rollout-smoke/evidence`
 

@@ -1498,7 +1498,11 @@ pub const ROOTS_BODY: &str = "Trace Commons reads coding-session transcripts. It
 /// Says the consequence, per the copy rules. Without this sentence "skip it"
 /// reads as safe, and it is the opposite of safe: an unanswered source is
 /// the one that falls back to the real location.
-pub const ROOTS_BOTH: &str = "Answer for both. Leaving one blank is not the same as skipping it -- an unanswered folder \
+///
+/// Says "each" rather than naming how many rows there are: the screen has
+/// grown as adapters were added, and a count here would need updating every
+/// time another one is.
+pub const ROOTS_BOTH: &str = "Answer for each. Leaving one blank is not the same as skipping it -- an unanswered folder \
      falls back to the standard location, which is probably your real work.";
 pub const ROOTS_CLAUDE: &str = "Claude Code sessions";
 pub const ROOTS_CODEX: &str = "Codex sessions";

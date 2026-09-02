@@ -1,0 +1,47 @@
+[package]
+name = "trace-commons-attestation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Intel DCAP quote verification, for NEAR AI's TDX attestation reports.
+# Not the default feature set: `report` pulls a second async HTTP stack for
+# fetching collateral, and `rustcrypto` a second crypto backend, where `ring`
+# is already a dependency here. `danger-allow-tcb-override` must stay off --
+# it does exactly what its name says.
+#
+# One consequence of it living in a permissive crate now: `dcap-qvl`'s
+# mandatory `std` feature turns on `serde_json/preserve_order`, so any crate
+# that comes to depend on this one inherits an insertion-ordered
+# `serde_json::Map` in its own standalone build graph. That is fine and is
+# already true of the server, but see `trace_commons_protocol::canonical_json`
+# before wiring this crate into a contributor crate -- canonical JSON must not
+# be sensitive to it.
+dcap-qvl = { version = "0.6", default-features = false, features = [
+    "std",
+    "ring",
+    "default-x509",
+] }
+# `hex` and `thiserror` are used through fully-qualified paths and a derive
+# attribute, so they do not appear in any `use` line but are required all the
+# same. Every version here matches what the server and protocol crates already
+# pin, so the trees stay unified.
+hex = "0.4"
+k256 = "0.13"
+serde_json = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+thiserror = "2"
+
+[features]
+default = []
+# `dcap-qvl`'s collateral client, which the hosted server's attestation drill
+# reaches through `trace-commons-server/near-attestation-collateral`. Nothing
+# in this crate uses it; it exists only so the server can turn the feature on
+# now that `dcap-qvl` is declared here rather than there. It pulls a second
+# async HTTP stack (reqwest 0.13) plus `futures` into the build, which is why
+# it is off by default.
+collateral-client = ["dcap-qvl/report"]

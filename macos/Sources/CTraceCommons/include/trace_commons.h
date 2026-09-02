@@ -54,6 +54,12 @@
  * or a receipt. Preview content fails outright, rather than being silently
  * edited, if it cannot be represented as a NUL-terminated C string.
  *
+ * Opening a preview also stores the redacted envelope it built in the
+ * contributor's own private state directory (0600, one file per previewed
+ * entry, deleted when the entry resolves and on logout), so the upload can
+ * send exactly the bytes that were shown. Those stored bytes never come
+ * back across this ABI.
+ *
  * Every free function (tc_handle_free, tc_preview_free, tc_string_free)
  * detects a double free or a pointer of the wrong kind (e.g. a tc_handle*
  * passed to tc_preview_free) and refuses rather than acting on it --
@@ -71,6 +77,19 @@
  * tc_preview allocation will pass it. Do not free a tc_preview* while
  * another thread is inside an accessor for it; the check narrows accidental
  * misuse to a clean error, it does not replace ownership discipline.
+ *
+ * The six functions that borrow rather than free a tc_handle* --
+ * tc_daemon_stop, tc_call, tc_subscribe, tc_unsubscribe, tc_preview_open,
+ * and tc_preview_turns_json -- run the same shape of check on handle
+ * before they dereference it: a pointer that is not currently a live
+ * tc_handle* (already freed by tc_handle_free, or a tc_preview* passed
+ * here by mistake) is refused with the fixed tc_last_error label
+ * "invalid-handle-pointer", using whichever failure return that function
+ * already had for a NULL handle -- see each function's own comment below
+ * for the exact value. The same limits apply: keyed on the pointer VALUE,
+ * not on shared ownership; it cannot make a concurrent tc_handle_free
+ * safe, and a freed address later reused by a new tc_daemon_start will
+ * pass it.
  *
  * SUBSCRIPTION LIFETIME: tc_daemon_stop does NOT end a subscription and is
  * NOT a synchronization point for one -- it only sets a flag a
@@ -178,38 +197,41 @@ typedef struct tc_preview tc_preview;
  */
 tc_handle*  tc_daemon_start(const char* config_dir, char** err);
 
-/* As tc_daemon_start, but applies settings BEFORE the watcher's first tick.
- *
+/* Like tc_daemon_start, but applies settings_json -- a JSON object of
+ * DaemonSettings fields -- BEFORE starting the daemon, so its first
+ * supervisor tick (which fires immediately on start, not after the first
+ * poll interval) already observes it. This is the ONLY way through this
+ * ABI to set claude_root / codex_root before the daemon has already scanned
+ * the previously-persisted (or default per-user) session roots once:
  * tc_call(handle, "set_settings", ...) only works on an already-running
- * daemon, by which point the first pass has already scanned whatever was on
- * disk. A host that needs the watcher to scan a non-default location from the
- * very first pass -- a native app watching a relocated session store, or a
- * test harness that must never scan the real ~/.claude / ~/.codex -- cannot
- * express that through tc_daemon_start.
+ * daemon, by which point that first scan has already happened.
  *
- * settings_json accepts exactly the fields "set_settings" does --
- * quiescence_secs, digest_interval_secs, approval_hold_secs,
+ * settings_json accepts exactly the fields tc_call(handle, "set_settings",
+ * ...) does: quiescence_secs, digest_interval_secs, approval_hold_secs,
  * local_notifications, claude_root, codex_root, max_uploads_per_day,
- * max_bytes_per_day -- validated by the same
- * function, so there is one definition of a valid settings object rather than
- * two that can drift. An unrecognized top-level key, or a recognized key
- * holding the wrong JSON type, is REJECTED with a fixed label rather than
- * silently ignored: a misspelled claude_root that was ignored would leave the
- * daemon watching the wrong directory with no signal to the host.
+ * max_bytes_per_day -- one shared validation, so there is one
+ * definition of "a valid settings object" for both entry points. An
+ * unrecognized top-level key, or a recognized key holding the wrong JSON
+ * type, is rejected with a fixed error label rather than silently ignored
+ * -- silently ignoring a misspelled claude_root would leave the daemon
+ * watching the wrong directory with no signal that anything was wrong.
  *
- * settings_json may be NULL, or empty after trimming ASCII whitespace,
+ * settings_json may be NULL, or empty (after trimming ASCII whitespace),
  * meaning "use whatever is currently persisted" -- identical to
- * tc_daemon_start.
+ * tc_daemon_start. It is not otherwise optional: malformed JSON is a fixed
+ * error label, never a panic.
  *
- * Returns NULL and sets *err (if non-NULL) on failure; *err is owned, free it
- * with tc_string_free. A settings_json problem reports a fixed, content-free
- * label and deliberately NEVER settings_json's own text -- it is the one
- * input here that may itself contain a filesystem path, which is exactly what
- * this boundary must not echo back. Any other failure reports the same opaque
- * "daemon-start-failed" tc_daemon_start does.
+ * Returns NULL and sets *err (if err is non-NULL) on failure, exactly like
+ * tc_daemon_start -- *err, on failure, is an owned string; free it with
+ * tc_string_free. A settings_json problem reports one of its own fixed
+ * labels (never settings_json's own text, since it is the one input here
+ * that may itself contain a filesystem path); any other failure (a bad
+ * config_dir, another daemon already holding the lock) reports the same
+ * opaque "daemon-start-failed" tc_daemon_start does.
  *
- * The returned handle is exactly a tc_daemon_start handle: same lifetime,
- * same teardown, freed by tc_handle_free after tc_daemon_stop.
+ * The returned handle, on success, is exactly a tc_daemon_start handle --
+ * every rule above about tc_daemon_start's return value, and everything
+ * below about tc_daemon_stop / tc_handle_free, applies to it unchanged.
  *
  * FAILS CLOSED ON UNDECLARED SESSION ROOTS, on the same rule and with the
  * same "roots-not-declared" label as tc_daemon_start -- but evaluated AFTER
@@ -219,9 +241,7 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  * use to turn "the contributor just named two folders" into a running
  * daemon. Declaring only one root here is refused exactly as it is above.
  */
-tc_handle*  tc_daemon_start_with_settings(const char* config_dir,
-                                          const char* settings_json,
-                                          char** err);
+tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* settings_json, char** err);
 
 /* Describe the session stores on this machine, so a roots screen can ask the
  * contributor about something specific rather than showing an empty field.
@@ -283,6 +303,11 @@ char*       tc_scrub_detector_names(void);
  *
  * Is NOT a synchronization point for tc_subscribe callbacks -- see
  * SUBSCRIPTION LIFETIME above and tc_unsubscribe below.
+ *
+ * A handle that is not currently a live tc_handle* -- already freed by
+ * tc_handle_free, or a tc_preview* passed here by mistake -- is refused
+ * before any dereference: returns immediately, recording the fixed
+ * tc_last_error label "invalid-handle-pointer".
  */
 void        tc_daemon_stop(tc_handle*);
 
@@ -305,6 +330,11 @@ void        tc_handle_free(tc_handle*);
  * returns NULL: a bad handle, method, or params_json produces a JSON error
  * frame (`{"error":{"code":"bad_params",...}}`) rather than a null pointer.
  *
+ * A non-NULL handle that is not a live tc_handle* -- already freed, or a
+ * tc_preview* passed here by mistake -- is refused the same way: a JSON
+ * error frame (bad_params / "invalid-handle-pointer") rather than a
+ * dereference of a pointer whose type cannot be trusted.
+ *
  * tc_call(h, "shutdown", "{}") stops the daemon loop. It is equivalent to
  * tc_daemon_stop for the daemon's own state -- afterwards every call on
  * this handle reports `{"error":{"code":"unavailable","message":
@@ -326,9 +356,13 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * reported to cb as a synthetic `{"event":"lagged","data":{"skipped":N}}`
  * frame rather than silently dropped.
  *
- * Returns 0 on failure (NULL handle, NULL cb, or a stopped daemon) -- 0 is
- * never a valid token. On success, returns a nonzero token for
- * tc_unsubscribe.
+ * Returns 0 on failure -- 0 is never a valid token. On success, returns
+ * a nonzero token for tc_unsubscribe.
+ *
+ * Every zero return records a fixed tc_last_error label, so "token == 0,
+ * read tc_last_error" is a total contract: "null-handle",
+ * "invalid-handle-pointer" (not a live tc_handle*), "null-callback", or
+ * "daemon-not-running".
  */
 uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
 
@@ -336,6 +370,11 @@ uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ct
  * subscription's callback is guaranteed to no longer fire before
  * returning -- see SUBSCRIPTION LIFETIME above; this is the only function
  * with that guarantee. A no-op if token is 0 or unknown.
+ *
+ * Also a no-op, recording the fixed tc_last_error label
+ * "invalid-handle-pointer", if handle is non-null but not a live
+ * tc_handle* -- refused before any dereference, the same as every other
+ * entry point in this file.
  *
  * MUST be called from a plain thread that is not inside any tokio runtime
  * context -- in particular, never from a subscription's own callback
@@ -367,6 +406,10 @@ void        tc_unsubscribe(tc_handle*, uint64_t token);
  * redacted body that cannot be represented as a NUL-terminated C string.
  * On success, everything returned by the tc_preview_* accessors below is
  * borrowed and valid until tc_preview_free.
+ *
+ * A non-NULL handle that is not a live tc_handle* is refused the same
+ * way, before any dereference: NULL plus *err set to the fixed label
+ * "invalid-handle-pointer".
  *
  * Safe to call from inside a tc_subscribe callback -- the natural flow of
  * receiving queue_changed and opening the preview for what changed. It
@@ -409,6 +452,10 @@ int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matc
  *
  * Returns an OWNED JSON string; free with tc_string_free. Returns NULL and
  * sets *err (owned; also freed with tc_string_free) on failure.
+ *
+ * A non-NULL handle that is not a live tc_handle* is refused the same
+ * way, before any dereference: NULL plus *err set to the fixed label
+ * "invalid-handle-pointer".
  */
 char*       tc_preview_turns_json(tc_handle*, const char* entry_id,
                                   const char* body_digest, char** err);

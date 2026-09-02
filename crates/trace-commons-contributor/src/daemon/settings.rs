@@ -138,6 +138,11 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub gemini_source: Option<SourceDeclaration>,
 
+    /// A local inference proxy, when the contributor declared one. Absent
+    /// means off: see [`IronWireDeclaration`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironwire: Option<IronWireDeclaration>,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -196,6 +201,55 @@ impl SourceDeclaration {
     }
 }
 
+/// What the contributor said about a local inference proxy.
+///
+/// Deliberately NOT the same tri-state semantics as [`SourceDeclaration`].
+/// There, `None` means "never asked" and falls back to the conventional
+/// per-user location. Here `None` means **off**, with no fallback.
+///
+/// A session root has a conventional location to fall back to. A local service
+/// does not: connecting to `127.0.0.1:8463` because nobody said otherwise is a
+/// probe of a service the contributor never mentioned, which is exactly the
+/// error the source tri-state was introduced to stop making about their files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum IronWireDeclaration {
+    /// Read the proxy's ledger on this loopback port.
+    Watch { port: u16 },
+    /// The contributor said they do not use it. Nothing is read.
+    Off,
+}
+
+impl IronWireDeclaration {
+    /// The port to read, or `None` when the proxy is off.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        match self {
+            IronWireDeclaration::Watch { port } => Some(*port),
+            IronWireDeclaration::Off => None,
+        }
+    }
+}
+
+/// Build a routing ledger for a declaration, or nothing.
+///
+/// The token is read from `$IRONWIRE_HOME/control.token` at build time and
+/// never copied into our settings file. An unreadable token yields no reader:
+/// absence and failure are the same state.
+#[must_use]
+pub fn ironwire_ledger_for(
+    declaration: Option<&IronWireDeclaration>,
+) -> Option<std::sync::Arc<crate::routing::ironwire::IronWireLedger>> {
+    let port = declaration?.port()?;
+    let home = std::env::var_os("IRONWIRE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
+    let token = std::fs::read_to_string(home.join("control.token")).ok()?;
+    Some(std::sync::Arc::new(
+        crate::routing::ironwire::IronWireLedger::new(port, token.trim().to_string()),
+    ))
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -227,6 +281,7 @@ impl Default for DaemonSettings {
             claude_source: None,
             codex_source: None,
             gemini_source: None,
+            ironwire: None,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -282,11 +337,30 @@ impl DaemonSettings {
     /// built from them here, in one place, so adding an adapter does not
     /// touch the daemon, the watcher, the preview scheduler or the CLI.
     ///
-    /// No trajectory selection: a daemon's working directory is whatever a
-    /// service manager handed it, so auto-discovery would mean nothing
-    /// there. Callers that want one add it with
-    /// [`crate::source::SourceRoots::with_trajectory`].
-    pub fn source_roots(&self) -> crate::source::SourceRoots {
+    /// No WORKING-DIRECTORY trajectory scope: a daemon's working directory
+    /// is whatever a service manager handed it, so auto-discovery would
+    /// mean nothing there.
+    ///
+    /// The STAGING directory is a different thing and is included. It is a
+    /// fixed path under the contributor's own state directory, resolved
+    /// through `ConfigStore`, created 0700 and cleared by `logout`, holding
+    /// only what `import-antigravity` put there on an explicit command.
+    ///
+    /// That distinction was previously collapsed: this method took neither,
+    /// under one reason that covers only the first. The cost was that every
+    /// imported conversation was invisible to all three desktop apps -- no
+    /// entry, no error, no empty state naming it -- while the CLI, which
+    /// builds its own roots, could see them the whole time.
+    ///
+    /// No routing overlay either, and deliberately not yet: settings
+    /// describe the IronWire *declaration*, not the ledger *instance*.
+    /// [`ironwire_ledger_for`] builds a fresh, cold `IronWireLedger` on every
+    /// call, so wiring it in here would hand every caller its own
+    /// never-refreshed snapshot -- the overlay would compile but never
+    /// produce a row. The instance needs a single long-lived owner that
+    /// refreshes it on a schedule, which is a separate, reviewed piece of
+    /// work; see [`crate::source::SourceRoots::with_routing`].
+    pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
         crate::source::SourceRoots::new()
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
@@ -294,6 +368,10 @@ impl DaemonSettings {
             )
             .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
+            .with_trajectory(crate::source::TrajectorySelection::Auto {
+                working_dir: None,
+                staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
+            })
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -471,6 +549,13 @@ pub fn apply_settings_object(
             "gemini_source" => {
                 settings.gemini_source = parse_source_declaration(value)?;
             }
+            // Unlike the source roots above, `null` here means **off**, not
+            // "never asked" -- see `IronWireDeclaration`'s doc comment for
+            // why the tri-state does not apply to a local service with no
+            // conventional fallback location.
+            "ironwire" => {
+                settings.ironwire = parse_ironwire_declaration(value)?;
+            }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
         changed = true;
@@ -513,6 +598,22 @@ fn parse_optional_root(
     }
 }
 
+/// `{"mode":"watch","port":8463}` or null to turn it off. `{"mode":"off"}`
+/// is also accepted since it round-trips `IronWireDeclaration::Off`, but null
+/// is the documented way to reach the same state over IPC. Never formats
+/// `value` into the error -- see `apply_settings_object`'s doc.
+fn parse_ironwire_declaration(
+    value: &serde_json::Value,
+) -> std::result::Result<Option<IronWireDeclaration>, &'static str> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(_) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
+        _ => Err(ERR_SETTINGS_INVALID_VALUE),
+    }
+}
+
 /// `{"mode":"watch","path":"..."}`, `{"mode":"off"}`, or null to clear the
 /// declaration back to never-asked. Never formats `value` into the error --
 /// see `apply_settings_object`'s doc; a declaration carries a path.
@@ -533,6 +634,62 @@ mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
 
+    /// The daemon reads the staging directory `import-antigravity` writes to.
+    ///
+    /// It did not, and the reason given covered only half of what it
+    /// excluded: a service manager's working directory means nothing to a
+    /// daemon, which says nothing about a fixed path under the
+    /// contributor's own 0700 state directory. A contributor who imported
+    /// and then opened a desktop app saw nothing at all -- no entry, no
+    /// error, no empty state naming Antigravity.
+    #[test]
+    fn the_daemon_reads_the_trajectory_staging_directory() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::default();
+
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots(&store))
+            .iter()
+            .map(|s| s.name())
+            .collect();
+        assert!(
+            names.contains(&crate::source::SOURCE_TRAJECTORY),
+            "the daemon must construct a trajectory source; got {names:?}"
+        );
+    }
+
+    /// And ONLY the staging directory. The working-directory half of
+    /// `TrajectorySelection::Auto` stays off, which is what the original
+    /// exclusion was actually about: a daemon's working directory is
+    /// whatever a service manager handed it.
+    #[test]
+    fn the_daemon_does_not_read_its_own_working_directory() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::default();
+        let roots = s.source_roots(&store);
+
+        match roots.trajectory_selection() {
+            crate::source::TrajectorySelection::Auto {
+                working_dir,
+                staging_dir,
+            } => {
+                assert!(
+                    working_dir.is_none(),
+                    "the daemon must not scan its own working directory"
+                );
+                assert_eq!(
+                    staging_dir.as_deref(),
+                    Some(
+                        store
+                            .dir()
+                            .join(crate::source::TRAJECTORY_STAGING_SUBDIR)
+                            .as_path()
+                    )
+                );
+            }
+            other => panic!("expected an Auto staging selection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn settings_round_trip_through_the_store() {
         let (_d, store) = temp_store();
@@ -542,6 +699,66 @@ mod tests {
         };
         s.save(&store).unwrap();
         assert_eq!(DaemonSettings::load(&store).unwrap().quiescence_secs, 60);
+    }
+
+    // `DaemonSettings::schema_version` has no `#[serde(default)]`, so a bare
+    // `{}` does not exercise the field under test -- it fails to parse at
+    // all, for an unrelated reason. Every case below starts from a full
+    // `DaemonSettings::default()` value and edits just the `ironwire` key,
+    // matching the pattern `a_settings_file_written_before_gemini_existed_
+    // loads_with_it_absent` already uses for the same reason.
+
+    #[test]
+    fn a_contributor_who_never_mentioned_the_proxy_is_not_probed() {
+        // The divergence from SourceDeclaration, and the reason for it. For a
+        // session root, `None` falls back to the conventional location. There is
+        // no conventional location for a local service: connecting to 127.0.0.1
+        // unasked is a probe of something the contributor never mentioned, which
+        // is the same mistake the source tri-state exists to have fixed.
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("ironwire");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.ironwire.is_none());
+        assert!(
+            ironwire_ledger_for(settings.ironwire.as_ref()).is_none(),
+            "no declaration means no reader is built at all"
+        );
+    }
+
+    #[test]
+    fn a_proxy_declared_off_builds_no_reader() {
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["ironwire"] = serde_json::json!({"mode": "off"});
+        let settings: DaemonSettings = serde_json::from_value(v).expect("loads");
+        assert!(ironwire_ledger_for(settings.ironwire.as_ref()).is_none());
+    }
+
+    #[test]
+    fn a_watched_proxy_round_trips_its_port() {
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["ironwire"] = serde_json::json!({"mode": "watch", "port": 8463});
+        let settings: DaemonSettings = serde_json::from_value(v).expect("loads");
+        assert_eq!(
+            settings.ironwire,
+            Some(IronWireDeclaration::Watch { port: 8463 })
+        );
+    }
+
+    /// `ironwire_ledger_for` and `SourceRoots::with_routing` are correct and
+    /// are what a future task wires up. Neither is called from
+    /// `source_roots` yet: `ironwire_ledger_for` builds a fresh, cold
+    /// `IronWireLedger` on every call, so attaching one here would hand
+    /// every caller its own never-refreshed snapshot -- it would compile and
+    /// silently enrich nothing. Pinned so that regression does not sneak
+    /// back in before the ledger has a single long-lived owner.
+    #[test]
+    fn source_roots_does_not_yet_attach_a_routing_overlay() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings {
+            ironwire: Some(IronWireDeclaration::Watch { port: 8463 }),
+            ..Default::default()
+        };
+        assert!(!s.source_roots(&store).is_routed());
     }
 
     /// The A2 rule, at the gate it must not join.
@@ -594,7 +811,7 @@ mod tests {
         let loaded = DaemonSettings::load(&store).unwrap();
         assert_eq!(loaded.gemini_source, None);
         assert!(
-            !crate::source::all_sources(&loaded.source_roots())
+            !crate::source::all_sources(&loaded.source_roots(&store))
                 .iter()
                 .any(|s| s.name() == crate::source::SOURCE_GEMINI_CLI)
         );
@@ -612,11 +829,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let names: Vec<&str> = crate::source::all_sources(&s.source_roots())
+        let (_d, store) = temp_store();
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots(&store))
             .iter()
             .map(|s| s.name())
             .collect();
-        assert_eq!(names, vec![crate::source::SOURCE_GEMINI_CLI]);
+        // The trajectory source is always constructed now: the daemon reads
+        // the staging directory `import-antigravity` writes to. It comes
+        // last because `all_sources` appends it after the native adapters.
+        assert_eq!(
+            names,
+            vec![
+                crate::source::SOURCE_GEMINI_CLI,
+                crate::source::SOURCE_TRAJECTORY
+            ]
+        );
     }
 
     #[test]
@@ -644,6 +871,7 @@ mod tests {
     /// silently discards the contributor's answer.
     #[test]
     fn every_discoverable_source_has_a_settings_key_that_round_trips() {
+        let (_d, store) = temp_store();
         let home = std::env::temp_dir();
         for candidate in crate::source::discovery::probe(&home, |_| None) {
             let key = source_settings_key(&candidate.source)
@@ -655,7 +883,8 @@ mod tests {
                 "{key} is not a key apply_settings_object accepts"
             );
             assert!(
-                s.source_roots().is_declared(candidate.source.as_str()),
+                s.source_roots(&store)
+                    .is_declared(candidate.source.as_str()),
                 "{key} did not reach the declaration map"
             );
         }

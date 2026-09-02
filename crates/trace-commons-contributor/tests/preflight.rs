@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const UNENROLLED_NOTICE: &str = "unenrolled preview: deterministic-only redaction";
 
@@ -198,8 +198,24 @@ fn spawn_http_counter() -> (
     let thread_requests = Arc::clone(&requests);
     let thread_stop = Arc::clone(&stop);
     let handle = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !thread_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+        // The stop flag is the only thing that ends this loop.
+        //
+        // There used to be a ten-second wall-clock deadline here as well, and
+        // it was a race rather than a safety net: the clock started when this
+        // thread spawned, which is before the caller has even spawned the CLI
+        // subprocess, so the ten seconds had to cover process spawn, binary
+        // page-in, and the whole submit path. Under a fully parallel `cargo
+        // test` on a loaded machine that budget is reachable, and when it ran
+        // out the listener stopped accepting while the client was still
+        // coming. The client then could not reach its privacy filter and the
+        // CLI refused the submission with `privacy-filter-canary-failed` --
+        // a fail-closed refusal that looks exactly like a real privacy-filter
+        // regression, which is what made this flake expensive to read.
+        //
+        // Every caller stores `stop` immediately after the subprocess exits
+        // and then joins, so the flag alone bounds this thread's life against
+        // the thing it is actually waiting for instead of against the clock.
+        while !thread_stop.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     thread_requests.fetch_add(1, Ordering::SeqCst);
