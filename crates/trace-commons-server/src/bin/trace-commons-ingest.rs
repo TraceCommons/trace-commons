@@ -13004,13 +13004,6 @@ async fn submit_trace_handler(
     } = body;
     let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
 
-    // AT RECEIPT, before anything mutates the envelope. `rescrub_trace_envelope`
-    // below rewrites it in place, so verifying after that point -- or off the
-    // stored artifact, or off any re-serialisation -- would fail every honest
-    // witnessed submission. `the_certificate_is_verified_before_the_rescrub_runs`
-    // pins the ordering against this file's source.
-    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
-
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
     // submission-record read. Length-prefixing the authenticated tenant, method,
@@ -13075,6 +13068,20 @@ async fn submit_trace_handler(
         tenant_policy.as_ref(),
         state.require_tenant_submission_policy,
     )?;
+
+    // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
+    // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
+    // the envelope in place, so verifying against the parsed value -- or off
+    // the stored artifact, or off any re-serialisation -- would fail every
+    // honest witnessed submission.
+    //
+    // Placed here rather than at the top of the handler so that signature
+    // recovery sits BEHIND the submit rate limiter and the tenant-access-grant
+    // check. The bytes are captured either way, so this costs the guarantee
+    // nothing and denies an authenticated caller a free ECDSA-recovery
+    // amplifier. `the_certificate_is_verified_before_the_rescrub_runs` pins
+    // that it stays above the rescrub.
+    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
 
     // The basis is a return value of the pass, never a field on the
     // envelope: the envelope is deserialised from contributor input, so a
