@@ -93,6 +93,33 @@ final class AppModel: ObservableObject {
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
     @Published private(set) var daemonSettings: DaemonSettingsView?
+
+    // MARK: - The local proxy
+
+    /// The routing surface's fixed words, decoded once from the Rust.
+    ///
+    /// Nil only if the export or the decode failed, and the card renders
+    /// nothing at all in that case. A screen with blanks beside tool names
+    /// would be worse, and a screen with Swift-authored words worse still.
+    @Published private(set) var routingCopy: RoutingCopy? = RoutingCopy.decode(
+        fromJSON: TCRoutingCopy.copyJSON() ?? ""
+    )
+    /// What IronWire last answered about which tools point at it, or nil
+    /// for nothing held. Nil is not a fault; it is the absence of evidence,
+    /// and every tool reads as not known while it stands.
+    @Published private(set) var routingEvidence: RoutingEvidence?
+    /// The sentence the last probe produced, shown under the Apply button.
+    @Published private(set) var routingProbeLine: String?
+    /// A probe is in flight. Drives the button's own label, which is a
+    /// shared word like every other on this card.
+    @Published private(set) var routingChecking = false
+
+    /// The three sentences that interpolate, taken straight from the Rust.
+    /// This shell fills in no holes; see `TCRoutingCopy`.
+    let routingSentences = RoutingSentences(
+        tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
+        unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) }
+    )
     @Published private(set) var outcomeCounts: [String: Int] = [:]
     @Published private(set) var audit: [AuditEntry] = []
     @Published var undo: Undo?
@@ -524,6 +551,82 @@ final class AppModel: ObservableObject {
 
     func refreshSettings() {
         perform("get_settings", work: { try $0.settings() }) { self.publishIfChanged(\.daemonSettings, $0) }
+    }
+
+    /// The declaration the daemon is holding, as the card's three controls.
+    ///
+    /// The port shows the conventional number when nothing is declared.
+    /// That is display only: `RoutingSurface.settingsParams` writes nothing
+    /// while the switch is off, so a default nobody chose never becomes an
+    /// announcement that a local service is in use.
+    var routingForm: RoutingForm {
+        RoutingForm.fromDeclaration(
+            mode: daemonSettings?.ironwire?.mode,
+            port: daemonSettings?.ironwire?.port,
+            tokenDir: daemonSettings?.ironwire?.tokenDir
+        )
+    }
+
+    /// Write the declaration, then -- when it is on -- ask what was found.
+    ///
+    /// The evidence is dropped before the write, not after the answer: the
+    /// words have to stop asserting the moment the declaration changes, not
+    /// once a replacement arrives. Nothing here asks anybody to restart the
+    /// app; the daemon rebuilds its reader in the same call.
+    ///
+    /// The probes run only from here -- a contributor pressing the switch or
+    /// the button. Nothing on the submission path calls them.
+    func applyIronWire(_ form: RoutingForm) {
+        routingEvidence = nil
+        routingProbeLine = nil
+        routingChecking = form.on
+        perform("set_settings", work: { try $0.setIronWire(form) }) { view in
+            self.publishIfChanged(\.daemonSettings, view)
+            guard form.on else {
+                self.routingChecking = false
+                return
+            }
+            self.checkRouting(form)
+        }
+        if !form.on { routingChecking = false }
+    }
+
+    /// Ask whether the proxy answers, and say what it answered.
+    private func checkRouting(_ form: RoutingForm) {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let outcome = try? client.probeRouting(form)
+            let evidence = try? client.probeRoutedTools(form)
+            await MainActor.run {
+                self.routingChecking = false
+                // A call that did not run is not a fact about the proxy.
+                // `.unknown` is the outcome that claims nothing, and it is
+                // what a refused call degrades to here.
+                guard let copy = self.routingCopy else { return }
+                self.routingProbeLine = RoutingSurface.probeLine(
+                    outcome ?? .unknown, copy: copy, sentences: self.routingSentences
+                )
+                self.routingEvidence = evidence
+            }
+        }
+    }
+
+    /// Refresh the per-tool words without touching the declaration.
+    ///
+    /// Called when the card appears, and only while something is declared:
+    /// asking about a proxy nobody mentioned would be the probe of an
+    /// undeclared local service that the declaration exists to prevent.
+    func refreshRoutedTools() {
+        let form = routingForm
+        guard form.on, let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let evidence = try? client.probeRoutedTools(form)
+            await MainActor.run {
+                // Left as it was when the call did not run: a stale answer
+                // is replaced by a new one, never by a blank.
+                if let evidence { self.routingEvidence = evidence }
+            }
+        }
     }
 
     // MARK: - Enrollment

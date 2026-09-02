@@ -228,6 +228,110 @@
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="Wrap" />
 
+                <!--
+                    The routing surface.
+
+                    Every string in this block is bound. Not one is typed
+                    here: the wording lives once, in
+                    crates/trace-commons-contributor/src/routing_copy.rs, and
+                    reaches this shell across the C ABI. One of the four words
+                    is a privacy claim, so a word invented in this file would
+                    be a claim invented in this file.
+
+                    The whole section is collapsed when those words did not
+                    arrive, rather than rendered with blanks beside the tool
+                    names.
+                -->
+                <TextBlock Text="{x:Bind Settings.RoutingToolsHeading, Mode=OneWay}"
+                           Visibility="{x:Bind Settings.RoutingAvailable, Mode=OneWay}"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind Settings.RoutingAvailable, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind Settings.RoutingIntro, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+
+                        <!--
+                            One row per tool, one word each. The word comes
+                            from what IronWire answered about that tool, never
+                            from the switch below.
+                        -->
+                        <ItemsControl ItemsSource="{x:Bind Settings.RoutingToolRows}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:RoutingToolRowViewModel">
+                                    <Grid ColumnDefinitions="*,Auto"
+                                          ColumnSpacing="8"
+                                          Margin="0,2"
+                                          AutomationProperties.Name="{x:Bind AccessibleLabel}">
+                                        <TextBlock Grid.Column="0" Text="{x:Bind Name}"
+                                                   Style="{StaticResource TcBodyDenseTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind Word}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <ToggleSwitch Header="{x:Bind Settings.RoutingToggleText, Mode=OneWay}"
+                                      IsOn="{x:Bind Settings.RoutingDeclared, Mode=OneWay}"
+                                      IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                      Toggled="OnRoutingToggled" />
+                        <TextBlock Text="{x:Bind Settings.RoutingAppliesAtOnceText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+
+                        <!--
+                            The port box shows the conventional number so
+                            nobody has to know it. Showing is not declaring:
+                            nothing is written until the switch above is on.
+                        -->
+                        <NumberBox Header="{x:Bind Settings.RoutingPortTitle, Mode=OneWay}"
+                                   Value="{x:Bind Settings.RoutingPort, Mode=TwoWay}"
+                                   Minimum="1"
+                                   Maximum="65535"
+                                   SmallChange="1"
+                                   SpinButtonPlacementMode="Inline"
+                                   IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
+                        <TextBlock Text="{x:Bind Settings.RoutingPortNote, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+
+                        <TextBox Header="{x:Bind Settings.RoutingFolderTitle, Mode=OneWay}"
+                                 Text="{x:Bind Settings.RoutingTokenDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
+                        <TextBlock Text="{x:Bind Settings.RoutingFolderNote, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+
+                        <Button Content="{x:Bind Settings.RoutingApplyText, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}"
+                                Click="OnRoutingApply"
+                                Style="{StaticResource TcSecondaryButtonStyle}" />
+
+                        <TextBlock Text="{x:Bind Settings.RoutingProbeText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasRoutingProbeText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            Per process, and shown only where there has been an
+                            answer to be last. Never an install date.
+                        -->
+                        <TextBlock Text="{x:Bind Settings.RoutingLastChecked, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasRoutingLastChecked, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
                 <TextBlock Text="{x:Bind Settings.Notice, Mode=OneWay}"
                            Visibility="{x:Bind Settings.HasNotice, Mode=OneWay}"
                            Style="{StaticResource TcBodyDenseTextStyle}"
