@@ -16,6 +16,8 @@ const SENSITIVE_EXACT: &[&str] = &[
     "token",
     "password",
     "passwd",
+    "passphrase",
+    "passcode",
     "secret",
     "client_secret",
     "private_key",
@@ -26,6 +28,8 @@ const SENSITIVE_EXACT: &[&str] = &[
 const SENSITIVE_PARTS: &[&str] = &[
     "password",
     "passwd",
+    "passphrase",
+    "passcode",
     "secret",
     "credential",
     "authorization",
@@ -318,6 +322,91 @@ mod tests {
         });
         let out = redact_sensitive_json(&input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn redacts_passphrase_and_passcode_key_names() {
+        // `passphrase` and `passcode` belong to the same `pass*` credential
+        // family as `password`/`passwd`, which were already listed. Neither
+        // is a substring of anything else in either list, so nothing covered
+        // them. Every value below is SYNTHETIC.
+        assert!(is_sensitive_key("passphrase"));
+        assert!(is_sensitive_key("passcode"));
+        assert!(is_sensitive_key("Passphrase"));
+        assert!(is_sensitive_key("PASSCODE"));
+        // Substring forms, via SENSITIVE_PARTS.
+        assert!(is_sensitive_key("user_passphrase"));
+        assert!(is_sensitive_key("db_passcode"));
+        assert!(is_sensitive_key("walletPassphrase"));
+        assert!(is_sensitive_key("passphrase2"));
+        // Regression guard: the family members that already worked still do.
+        assert!(is_sensitive_key("password"));
+        assert!(is_sensitive_key("passwd"));
+        assert!(is_sensitive_key("db_password"));
+
+        let input = serde_json::json!({
+            "passphrase": "PB8QG906MVlHRd9GQexN6Svhf7625fix",
+            "nested": {"user_passphrase": "K5W8OssXBGsouhi2nZAEjIx6uuihMifr"},
+            "db_passcode": "492071",
+            "password": "AaIC59jtM0w5ZxhM0CRktUQbqzbmgMPP",
+            "safe": "keep"
+        });
+        let out = redact_sensitive_json(&input);
+        assert_eq!(out["passphrase"], "[REDACTED]");
+        assert_eq!(out["nested"]["user_passphrase"], "[REDACTED]");
+        assert_eq!(out["db_passcode"], "[REDACTED]");
+        assert_eq!(out["password"], "[REDACTED]");
+        assert_eq!(out["safe"], "keep");
+    }
+
+    /// NEGATIVE GUARD for the two names added to the sensitive lists.
+    ///
+    /// The line these draw is the one `password` already draws, deliberately:
+    /// a key whose parts merely CONTAIN the cue word is redacted regardless of
+    /// value shape (`redacts_json_key_name_cues_regardless_of_value_shape`),
+    /// so `passcode_required` is redacted exactly as `password_required` is.
+    /// Asserting the pair together is what keeps that a stated policy rather
+    /// than an accident of which words are on the list. What must stay
+    /// untouched is a key that does not carry the cue word as a part at all.
+    #[test]
+    fn passphrase_and_passcode_do_not_over_redact_neighbouring_keys() {
+        for key in [
+            "passenger_count",
+            "pass_rate",
+            "passing",
+            "compass",
+            "bypass_cache",
+            "passport_number",
+        ] {
+            assert!(!is_sensitive_key(key), "{key} should not be sensitive");
+        }
+
+        // A key that DOES carry the new cue word as a part is redacted
+        // whatever its value looks like -- `passcode_required: true` is
+        // masked. That is not a new over-redaction introduced here: it is the
+        // treatment `password_required` and `password_length` already get,
+        // and asserting the pair together is what keeps the two spellings
+        // from drifting apart. The text pass draws a narrower line, and
+        // `passphrase_and_passcode_cues_do_not_redact_innocent_text` in
+        // `trace_contribution` is where that is pinned.
+        for (new_spelling, established) in [
+            ("passcode_required", "password_required"),
+            ("passphrase_length", "password_length"),
+            ("passphrase_hint", "password_hint"),
+        ] {
+            assert_eq!(
+                is_sensitive_key(new_spelling),
+                is_sensitive_key(established),
+                "{new_spelling} must track {established}"
+            );
+        }
+
+        let input = serde_json::json!({
+            "passenger_count": 4,
+            "bypass_cache": true,
+            "passport_number": "X1234567"
+        });
+        assert_eq!(redact_sensitive_json(&input), input);
     }
 
     #[test]

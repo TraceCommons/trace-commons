@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace TraceCommons.Interop;
 
@@ -42,6 +43,20 @@ namespace TraceCommons.Interop;
 /// copy would introduce a way for the two to disagree.
 /// </para>
 /// </remarks>
+/// <summary>
+/// What a <c>digest_due</c> frame says: what is waiting for review, and what
+/// was contributed without being asked about since the last digest.
+/// </summary>
+/// <remarks>
+/// Labels only, never paths. These reach notification text that Windows may
+/// persist in its notification centre.
+/// </remarks>
+public sealed record DigestFacts(
+    int PendingCount,
+    int ContributedCount,
+    IReadOnlyList<string> ContributedProjects,
+    double CreditPending);
+
 public sealed class DigestCadence
 {
     /// <summary>
@@ -82,18 +97,24 @@ public sealed class DigestCadence
     /// grants it.
     /// </summary>
     /// <param name="pendingCount">
-    /// Decisions owed, as the daemon reported them. Zero means silence: a
-    /// notification saying nothing is worse than no notification.
+    /// Decisions owed, as the daemon reported them.
+    /// </param>
+    /// <param name="contributedCount">
+    /// Sessions contributed without being asked about since the last digest.
+    /// An armed project never queues anything, so this is the only count that
+    /// is ever nonzero for a contributor who armed everything -- gating on
+    /// <paramref name="pendingCount"/> alone meant they were never notified
+    /// at all.
     /// </param>
     /// <param name="now">The current instant, passed in so this is testable.</param>
     /// <returns>True at most once per <see cref="MinimumInterval"/>.</returns>
-    public bool TryClaim(int pendingCount, DateTimeOffset now)
+    public bool TryClaim(int pendingCount, int contributedCount, DateTimeOffset now)
     {
-        if (pendingCount <= 0)
+        if (pendingCount <= 0 && contributedCount <= 0)
         {
-            // Not a claim, and deliberately not a stamp either. An empty
-            // queue must not consume the window that a real digest arriving
-            // a minute later would need.
+            // Not a claim, and deliberately not a stamp either. Nothing to
+            // say must not consume the window that a real digest arriving a
+            // minute later would need.
             return false;
         }
 

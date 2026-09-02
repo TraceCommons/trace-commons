@@ -60,6 +60,11 @@ public static class ScrubDetectorCopy
             // prefixes. Naming them beats "provider tokens", which tells a
             // contributor nothing about whether their own provider is covered.
             "provider_token" => "Stripe, GitLab and Slack tokens",
+
+            // Named separately from `provider_token` for the same reason that
+            // entry names its providers: a Cursor user reading this list has
+            // to be able to see their own key in it.
+            "cursor_api_key" => "Cursor API keys",
             "jwt" => "JSON Web Tokens",
             "npm_token" => "npm tokens",
             "google_api_key" => "Google API keys",

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -50,10 +50,51 @@ pub struct ProjectEntry {
     pub label: String,
 }
 
+/// How many times a project must have contributed before the app offers to
+/// arm it.
+///
+/// Five, because the offer has to be backed by evidence the contributor
+/// actually has. Arming asks someone to stop reading previews from a
+/// project; the only honest basis for that question is that they have read
+/// several already and kept approving. One or two is a coincidence.
+pub const ARMING_SUGGESTION_THRESHOLD: u32 = 5;
+
+/// How long "Not now" silences the offer for one project.
+///
+/// Thirty days, which is the difference between an offer and nagging. It is
+/// deliberately not permanent: "Not now" says not now, and a suppression
+/// that never lifts would make those words a lie. Settings remains the way
+/// to arm a project at any point in between, without being asked.
+pub const ARMING_DECLINE_COOLDOWN_DAYS: i64 = 30;
+
+/// A project the app should offer to arm, and the evidence for offering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmingSuggestion {
+    pub project_id: String,
+    pub project_label: String,
+    pub contributed_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectPolicy {
     pub schema_version: String,
     pub projects: BTreeMap<String, ProjectEntry>,
+    /// Successful uploads per project key, counted for the arming offer.
+    ///
+    /// Kept here rather than derived from the history cache because history
+    /// is label-only by design -- it never carries a project key, so two
+    /// projects sharing a final path segment are indistinguishable in it.
+    /// Offering to arm the wrong repository on the strength of an ambiguous
+    /// label is exactly the mistake this counter exists to avoid.
+    ///
+    /// `#[serde(default)]` so a policy file written before this existed
+    /// still parses, and reads as "nothing counted yet" rather than failing
+    /// the whole file.
+    #[serde(default)]
+    pub contributed: BTreeMap<String, u32>,
+    /// When the contributor last said "Not now" to arming a project.
+    #[serde(default)]
+    pub arming_declined_at: BTreeMap<String, DateTime<Utc>>,
 }
 
 impl Default for ProjectPolicy {
@@ -67,7 +108,63 @@ impl ProjectPolicy {
         Self {
             schema_version: DAEMON_PROJECTS_SCHEMA.to_string(),
             projects: BTreeMap::new(),
+            contributed: BTreeMap::new(),
+            arming_declined_at: BTreeMap::new(),
         }
+    }
+
+    /// Count one successful upload against its project.
+    ///
+    /// The unresolvable bucket is never counted. It can never be armed --
+    /// `set_mode` and `resolve` both refuse it -- so a count for it could
+    /// only ever feed an offer that cannot be delivered.
+    pub fn record_contribution(&mut self, project_key: &str) {
+        if project_key == UNKNOWN_PROJECT_KEY {
+            return;
+        }
+        *self.contributed.entry(project_key.to_string()).or_insert(0) += 1;
+    }
+
+    /// Record a "Not now" against one project.
+    pub fn decline_arming(&mut self, project_key: &str, now: DateTime<Utc>) {
+        self.arming_declined_at.insert(project_key.to_string(), now);
+    }
+
+    /// The one project worth offering to arm right now, if any.
+    ///
+    /// At most one, deliberately. A queue that sprouts an offer per project
+    /// is the ongoing administration the contributor asked to be rid of; the
+    /// strongest single candidate is the whole of what this ever asks.
+    ///
+    /// A project qualifies when it has contributed at least
+    /// [`ARMING_SUGGESTION_THRESHOLD`] times, is still ask-first (an armed
+    /// project has nothing to offer and an ignored one has been answered
+    /// already), can be armed at all, and has not been declined inside
+    /// [`ARMING_DECLINE_COOLDOWN_DAYS`].
+    pub fn arming_suggestion(&self, now: DateTime<Utc>) -> Option<ArmingSuggestion> {
+        let cooldown = Duration::days(ARMING_DECLINE_COOLDOWN_DAYS);
+        self.contributed
+            .iter()
+            .filter(|(key, count)| {
+                **count >= ARMING_SUGGESTION_THRESHOLD
+                    && key.as_str() != UNKNOWN_PROJECT_KEY
+                    && self.resolve(key) == ProjectMode::NotifyOnly
+                    && match self.arming_declined_at.get(*key) {
+                        // A clock that went backwards lands here as "still
+                        // inside the cooldown", which can only ever suppress
+                        // an offer, never add one.
+                        Some(declined) => now.signed_duration_since(*declined) >= cooldown,
+                        None => true,
+                    }
+            })
+            // Most contributions first; the key breaks a tie so the answer is
+            // stable across runs rather than depending on map iteration.
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(key, count)| ArmingSuggestion {
+                project_id: project_id_for(key),
+                project_label: project_label_for(key),
+                contributed_count: *count,
+            })
     }
 
     pub fn load(store: &ConfigStore) -> Result<Self> {
@@ -350,6 +447,13 @@ pub fn known_keys(
         .projects
         .keys()
         .cloned()
+        // A project the daemon has uploaded from is one it knows, whether or
+        // not the contributor has ever set a mode for it and whether or not
+        // it still has anything queued. Without this, a project could be
+        // offered for arming -- the offer is built from exactly this counter
+        // -- and then the answer refused as an unrecognized id, because
+        // nothing else on the machine still remembered the key.
+        .chain(policy.contributed.keys().cloned())
         .chain(queue_project_keys)
         .collect()
 }
@@ -685,5 +789,123 @@ mod tests {
             disambiguated_label(UNKNOWN_PROJECT_KEY, &keys),
             UNKNOWN_PROJECT_KEY
         );
+    }
+
+    fn armed_policy() -> ProjectPolicy {
+        let mut p = ProjectPolicy::new();
+        for _ in 0..ARMING_SUGGESTION_THRESHOLD {
+            p.record_contribution("/Users/z/code/api");
+        }
+        p
+    }
+
+    fn t(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_project_is_offered_once_it_has_contributed_enough() {
+        let p = armed_policy();
+        let s = p.arming_suggestion(t("2026-08-31T12:00:00Z")).unwrap();
+        assert_eq!(s.project_label, "api");
+        assert_eq!(s.contributed_count, ARMING_SUGGESTION_THRESHOLD);
+        assert_eq!(s.project_id, project_id_for("/Users/z/code/api"));
+    }
+
+    /// The offer has to be backed by evidence the contributor actually has.
+    #[test]
+    fn a_project_below_the_threshold_is_not_offered() {
+        let mut p = ProjectPolicy::new();
+        for _ in 0..(ARMING_SUGGESTION_THRESHOLD - 1) {
+            p.record_contribution("/Users/z/code/api");
+        }
+        assert!(p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none());
+    }
+
+    /// An armed project has nothing to offer and an ignored one has been
+    /// answered already. Neither is a question worth asking again.
+    #[test]
+    fn an_armed_or_ignored_project_is_never_offered() {
+        for mode in [ProjectMode::AutoUpload, ProjectMode::Ignore] {
+            let mut p = armed_policy();
+            p.set_mode("/Users/z/code/api", mode, t("2026-08-31T11:00:00Z"))
+                .unwrap();
+            assert!(
+                p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none(),
+                "{mode:?} must not be offered"
+            );
+        }
+    }
+
+    /// The bucket can never be armed, so counting it could only ever feed an
+    /// offer the daemon would refuse.
+    #[test]
+    fn the_unresolvable_bucket_is_never_counted_or_offered() {
+        let mut p = ProjectPolicy::new();
+        for _ in 0..(ARMING_SUGGESTION_THRESHOLD * 3) {
+            p.record_contribution(UNKNOWN_PROJECT_KEY);
+        }
+        assert!(!p.contributed.contains_key(UNKNOWN_PROJECT_KEY));
+        assert!(p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn declining_silences_the_offer_for_the_cooldown() {
+        let mut p = armed_policy();
+        p.decline_arming("/Users/z/code/api", t("2026-08-01T12:00:00Z"));
+        assert!(p.arming_suggestion(t("2026-08-15T12:00:00Z")).is_none());
+    }
+
+    /// "Not now" says not now. A suppression that never lifted would make
+    /// those words a lie.
+    #[test]
+    fn the_offer_returns_after_the_cooldown() {
+        let mut p = armed_policy();
+        p.decline_arming("/Users/z/code/api", t("2026-08-01T12:00:00Z"));
+        assert!(p.arming_suggestion(t("2026-09-01T12:00:00Z")).is_some());
+    }
+
+    /// At most one offer, ever. A queue that sprouts one per project is the
+    /// ongoing administration this is supposed to remove.
+    #[test]
+    fn only_the_strongest_candidate_is_offered() {
+        let mut p = ProjectPolicy::new();
+        for _ in 0..ARMING_SUGGESTION_THRESHOLD {
+            p.record_contribution("/Users/z/code/api");
+        }
+        for _ in 0..(ARMING_SUGGESTION_THRESHOLD + 4) {
+            p.record_contribution("/Users/z/code/web");
+        }
+        let s = p.arming_suggestion(t("2026-08-31T12:00:00Z")).unwrap();
+        assert_eq!(s.project_label, "web");
+    }
+
+    /// Two projects on the same count must not shuffle between runs.
+    #[test]
+    fn a_tie_is_broken_stably() {
+        let mut p = ProjectPolicy::new();
+        for _ in 0..ARMING_SUGGESTION_THRESHOLD {
+            p.record_contribution("/Users/z/code/api");
+            p.record_contribution("/Users/z/code/web");
+        }
+        let first = p.arming_suggestion(t("2026-08-31T12:00:00Z")).unwrap();
+        for _ in 0..20 {
+            assert_eq!(
+                p.arming_suggestion(t("2026-08-31T12:00:00Z")).unwrap(),
+                first
+            );
+        }
+    }
+
+    /// A policy file written before these fields existed must still parse,
+    /// and read as "nothing counted yet" rather than failing the whole file
+    /// and losing every mode the contributor had set.
+    #[test]
+    fn a_policy_file_without_the_new_fields_still_parses() {
+        let json = format!(r#"{{"schema_version":"{DAEMON_PROJECTS_SCHEMA}","projects":{{}}}}"#);
+        let p: ProjectPolicy = serde_json::from_str(&json).unwrap();
+        assert!(p.contributed.is_empty());
+        assert!(p.arming_declined_at.is_empty());
+        assert!(p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none());
     }
 }

@@ -263,10 +263,15 @@ The shells differ in how far the defect went, and the difference matters.
 **GTK** offers a real three-position mode dropdown, so a contributor could
 select **Contributed without asking** on a row the daemon refuses to arm at
 `policy.rs:98` and `policy.rs:125` -- a control offering a choice it cannot
-deliver, which is the serious form of this. **macOS and Windows** offer only a
-two-way Ignore / Ask-again button and never present `auto_upload` as a choice
-at all, so on those two only the label was wrong. Do not "fix" a picker that
-does not exist; do check, per shell, which case you are in.
+deliver, which is the serious form of this. **Windows** offers the same three
+modes through `UnresolvedBucketCopy.OfferableModes`, which withholds
+`auto_upload` for this row by construction.
+
+**macOS** offered only a two-way Ignore / Ask-again button when this was
+written, so on that shell only the label was wrong. That is no longer true: it
+now has a mode picker of its own, driven by `ProjectRow.offerableModes`, and
+is subject to the same rule as the other two. All three shells can express
+`auto_upload`; none may offer it for this row.
 
 Required on all three shells, using the same words screen 5 uses, because it is
 the same fact stated on a second surface:
@@ -282,9 +287,11 @@ the same fact stated on a second surface:
   row. Offering a mode the daemon will refuse is worse than omitting it: it
   invites a contributor to believe they have armed something that cannot be
   armed. `Ignore` and ask-first remain, because the bucket can be silenced even
-  though it cannot be armed. A shell with no arming control has nothing to
-  remove, but should still encode the rule where a future picker would find it,
-  rather than leaving the next author to rediscover the refusal.
+  though it cannot be armed. Every shell now has a picker, so every shell has
+  something to remove; the rule lives beside each one
+  (`ProjectRow.offerableModes`, `mode_choices`,
+  `UnresolvedBucketCopy.OfferableModes`) rather than in a view, because it is a
+  claim about what the daemon will accept and not a presentation choice.
 - The note is a statement of what the daemon does, not an apology. Nothing in
   it is a contributor's to fix.
 

@@ -990,6 +990,28 @@ pub fn roster_leave_failure_sentence(label: &str) -> String {
 /// (§5.1), the go-public dialog (§5.7) and the desktop notification.
 pub const NOT_NOW: &str = "Not now";
 
+// --- The arming offer --------------------------------------------------
+
+/// The evidence, stated before the question, so a contributor who reads only
+/// the first line still learns why they are being asked.
+pub fn arming_offer_evidence(project_label: &str, count: u32) -> String {
+    let times = if count == 1 {
+        "once".to_string()
+    } else {
+        format!("{count} times")
+    };
+    format!("You've contributed from {project_label} {times}.")
+}
+
+pub fn arming_offer_question(project_label: &str) -> String {
+    format!("Contribute from {project_label} automatically?")
+}
+
+pub const ARMING_OFFER_CONFIRM: &str = "Turn on automatic contributing";
+/// "Not now" rather than "No": the daemon silences the offer for thirty days
+/// rather than forever, and the button must not promise otherwise.
+pub const ARMING_OFFER_DECLINE: &str = "Not now";
+
 // --- Arming ------------------------------------------------------------
 
 pub fn arming_heading(project_label: &str) -> String {
@@ -1332,6 +1354,10 @@ pub fn scrub_detector_label(slug: &str) -> String {
         // Naming them beats "provider tokens", which tells a contributor
         // nothing about whether their own provider is covered.
         "provider_token" => "Stripe, GitLab and Slack tokens".to_string(),
+        // Named separately from `provider_token` for the same reason that
+        // entry names its providers: a Cursor user reading this list has to
+        // be able to see their own key in it.
+        "cursor_api_key" => "Cursor API keys".to_string(),
         "jwt" => "JSON Web Tokens".to_string(),
         "npm_token" => "npm tokens".to_string(),
         "google_api_key" => "Google API keys".to_string(),
@@ -2537,6 +2563,63 @@ mod tests {
         }
     }
 
+    /// The words themselves, against the copy the other two shells read.
+    ///
+    /// `every_detector_has_a_human_label` above proves a label EXISTS. It
+    /// cannot see what the label says, and each shell hardcodes its own nine
+    /// strings, so all three could satisfy their coverage guards while
+    /// telling contributors three different things about the same detector.
+    /// That is not hypothetical about `provider_token` and `cursor_api_key`
+    /// in particular: the entire reason those are two detectors rather than
+    /// one is the words each is published under.
+    ///
+    /// The fixture is the single copy of those words, read by this test and
+    /// by the macOS and Windows ones named in its `checked_by`. A label
+    /// changed in one shell fails here; a label changed in the fixture fails
+    /// in the other two until they follow.
+    #[test]
+    fn scrub_detector_labels_match_the_shared_fixture() {
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/scrub-detectors/labels.json"
+        );
+
+        let raw = std::fs::read_to_string(FIXTURE)
+            .unwrap_or_else(|e| panic!("reading the shared scrub-label fixture {FIXTURE}: {e}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("the shared scrub-label fixture must be JSON");
+        let labels = parsed["labels"]
+            .as_object()
+            .expect("the fixture must carry a `labels` object");
+
+        // The fixture describes exactly the detectors that exist. Without
+        // this, a detector added upstream is simply absent from the fixture
+        // and every shell's parity test passes over a gap.
+        let detectors = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+        let mut fixture_slugs: Vec<&str> = labels.keys().map(String::as_str).collect();
+        let mut expected: Vec<&str> = detectors.clone();
+        fixture_slugs.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            fixture_slugs, expected,
+            "tests/fixtures/scrub-detectors/labels.json does not describe the detectors that \
+             exist. Add the new detector's words there, then to all three shells."
+        );
+
+        for slug in detectors {
+            let want = labels[slug]
+                .as_str()
+                .unwrap_or_else(|| panic!("{slug}'s label in the fixture must be a string"));
+            assert_eq!(
+                scrub_detector_label(slug),
+                want,
+                "this shell words {slug} differently from the shared fixture; the other two \
+                 shells read that file, so this is a contributor being told something \
+                 different on Linux"
+            );
+        }
+    }
+
     #[test]
     fn a_detector_nobody_named_still_renders() {
         // The safety net, asserted rather than assumed: an unrecognised slug
@@ -2590,5 +2673,51 @@ mod tests {
     #[test]
     fn the_ignore_title_names_the_project() {
         assert_eq!(ignore_project_title("api"), "Ignore api?");
+    }
+
+    /// The evidence is stated before the question, so a contributor who
+    /// reads only the first line still learns why they are being asked.
+    #[test]
+    fn the_arming_offer_states_its_evidence() {
+        assert_eq!(
+            arming_offer_evidence("api", 5),
+            "You've contributed from api 5 times."
+        );
+    }
+
+    /// The daemon's threshold is five, so this branch is unreachable today.
+    /// It is here because the sentence must be right about whatever count it
+    /// is handed, and "contributed from api 1 times" is not.
+    #[test]
+    fn the_arming_offer_is_singular_for_one() {
+        assert_eq!(
+            arming_offer_evidence("api", 1),
+            "You've contributed from api once."
+        );
+    }
+
+    #[test]
+    fn the_arming_question_names_the_project() {
+        assert_eq!(
+            arming_offer_question("api"),
+            "Contribute from api automatically?"
+        );
+    }
+
+    /// The offer's own words must match the confirmation sheet's, because a
+    /// contributor who accepts here has agreed to the same thing.
+    #[test]
+    fn the_offer_and_the_confirmation_agree_on_the_action() {
+        assert_eq!(ARMING_OFFER_CONFIRM, ARMING_CONFIRM);
+        assert_eq!(ARMING_OFFER_DECLINE, NOT_NOW);
+    }
+
+    /// "Not now", not "No": the daemon silences the offer for thirty days
+    /// rather than forever, and the button must not promise otherwise.
+    #[test]
+    fn declining_the_offer_does_not_sound_permanent() {
+        let lower = ARMING_OFFER_DECLINE.to_lowercase();
+        assert!(!lower.contains("never"), "{ARMING_OFFER_DECLINE}");
+        assert!(!lower.contains("don't ask"), "{ARMING_OFFER_DECLINE}");
     }
 }
