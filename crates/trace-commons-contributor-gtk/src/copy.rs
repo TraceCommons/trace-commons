@@ -2563,6 +2563,63 @@ mod tests {
         }
     }
 
+    /// The words themselves, against the copy the other two shells read.
+    ///
+    /// `every_detector_has_a_human_label` above proves a label EXISTS. It
+    /// cannot see what the label says, and each shell hardcodes its own nine
+    /// strings, so all three could satisfy their coverage guards while
+    /// telling contributors three different things about the same detector.
+    /// That is not hypothetical about `provider_token` and `cursor_api_key`
+    /// in particular: the entire reason those are two detectors rather than
+    /// one is the words each is published under.
+    ///
+    /// The fixture is the single copy of those words, read by this test and
+    /// by the macOS and Windows ones named in its `checked_by`. A label
+    /// changed in one shell fails here; a label changed in the fixture fails
+    /// in the other two until they follow.
+    #[test]
+    fn scrub_detector_labels_match_the_shared_fixture() {
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/scrub-detectors/labels.json"
+        );
+
+        let raw = std::fs::read_to_string(FIXTURE)
+            .unwrap_or_else(|e| panic!("reading the shared scrub-label fixture {FIXTURE}: {e}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("the shared scrub-label fixture must be JSON");
+        let labels = parsed["labels"]
+            .as_object()
+            .expect("the fixture must carry a `labels` object");
+
+        // The fixture describes exactly the detectors that exist. Without
+        // this, a detector added upstream is simply absent from the fixture
+        // and every shell's parity test passes over a gap.
+        let detectors = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+        let mut fixture_slugs: Vec<&str> = labels.keys().map(String::as_str).collect();
+        let mut expected: Vec<&str> = detectors.clone();
+        fixture_slugs.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            fixture_slugs, expected,
+            "tests/fixtures/scrub-detectors/labels.json does not describe the detectors that \
+             exist. Add the new detector's words there, then to all three shells."
+        );
+
+        for slug in detectors {
+            let want = labels[slug]
+                .as_str()
+                .unwrap_or_else(|| panic!("{slug}'s label in the fixture must be a string"));
+            assert_eq!(
+                scrub_detector_label(slug),
+                want,
+                "this shell words {slug} differently from the shared fixture; the other two \
+                 shells read that file, so this is a contributor being told something \
+                 different on Linux"
+            );
+        }
+    }
+
     #[test]
     fn a_detector_nobody_named_still_renders() {
         // The safety net, asserted rather than assumed: an unrecognised slug
