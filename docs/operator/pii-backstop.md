@@ -179,3 +179,106 @@ custom tooling reading `trace_object_refs` directly must prefer
 `RescrubbedEnvelope` over `submitted_envelope` when both are present, the
 same way the built-in read path does, or it will surface the pre-backstop
 envelope.
+
+## The redaction-witness bypass
+
+**Shipped off. `TRACE_COMMONS_WITNESS_BYPASS_ENABLED` defaults to `false`,
+and with it off an arriving certificate is ignored entirely.**
+
+A contributor whose redaction ran inside an attested redaction-witness
+enclave can send the resulting certificate with their submission, in two
+headers:
+
+| Header | Carries |
+|---|---|
+| `x-trace-commons-witness-certificate` | the certificate JSON, base64url (unpadded) |
+| `x-trace-commons-witness-signature` | the EIP-191 signature over it, `0x`-hex |
+
+When the bypass is configured and that certificate verifies, the submission
+is left `accepted` instead of being held on `awaiting_pii_backstop`.
+
+### 1. What it changes, and what it does not
+
+It changes **one thing**: whether a submission enters the hold. It changes no
+risk tier, lifts no quarantine, releases nothing already held, and **never
+means the trace is clean**.
+
+What a verified certificate says is that a known program, in an enclave whose
+measurement you pinned, reached a `Low` residual-PII verdict over the
+*originating* redaction pass. That is a real statement and a narrow one. In
+particular a credential the prose classifier itself wrote back into a field it
+was handed survives that verdict — which is why the bypass is not, and cannot
+be, a wholesale skip of the backstop.
+
+**The deterministic sweep still runs, on every submission, witnessed or not.**
+`rescrub_trace_envelope` — the deterministic pass over `redacted_content` and
+`structured_payload`, plus the residual scan — runs synchronously in the
+submit handler *before* the hold is decided. If it raises the risk, the
+submission is quarantined and the certificate cannot lift it. The only thing
+the bypass skips is the queued classifier re-check that the driver would
+otherwise perform. Four further conditions all have to hold: the bypass is
+configured, the certificate verified against the pin, its verdict is `Low`,
+and its policy alias is allowlisted.
+
+A witnessed trace's receipt says which pass admitted it, so a contributor can
+tell the two bases apart.
+
+### 2. It will not drain the queue
+
+If you are turning this on to move the held backlog, it will not, and you will
+conclude the feature is broken. Three independent reasons:
+
+- No contributor client emits a certificate yet.
+- The held traces are **already past** the decision point this changes. It is
+  a submit-path decision; nothing re-evaluates an existing hold.
+- What actually stops the queue is the driver's per-tick classifier canary,
+  which aborts the whole tick before enumeration — not per-trace classifier
+  cost.
+
+Draining the backlog is separate work. See the drain-rate and quarantine
+disposition notes above.
+
+### 3. Only `full-pipeline` aliases belong in the allowlist
+
+`TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS` is a separate control from the
+measurement pin because it is a separate hole.
+
+A witness reporting a `deterministic-only` policy alias **never ran a prose
+classifier at all**. Admitting that alias means no classifier ever reads that
+trace's prose — not the witness's, because it had none, and not the server's,
+because you just skipped it. Nothing in the code can distinguish that from a
+deliberate operator choice, so the only refusal available is on an *empty*
+allowlist. Allowlist only aliases that name a full pipeline: a deterministic
+pass **and** a classifier.
+
+### 4. Pin before you enable
+
+Enabling the bypass without a pinned signing address, without a measurement
+set, or with an empty policy allowlist is a **boot refusal** naming the
+missing control. That is by design, and it is the same shape
+`near_ai_expected_measurements` uses: a control an operator believes is in
+place but is not is worse than a server that will not start.
+
+The recommended sequence:
+
+1. Set the three pin variables with the switch still `false` or absent. The
+   binary boots normally and ignores certificates; nothing changes.
+2. Confirm the measurement matches a real witness deployment's
+   `/v1/attestation` output.
+3. Set `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=true`.
+
+| Variable | Missing-control name on refusal |
+|---|---|
+| `TRACE_COMMONS_WITNESS_BYPASS_ENABLED` | (the switch itself; absent means off, not an error) |
+| `TRACE_COMMONS_WITNESS_SIGNING_ADDRESS` | `witness_signing_address` |
+| `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` | `witness_expected_measurement` |
+| `TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS` | `witness_allowed_policy_versions` |
+
+### A malformed certificate never rejects a submission
+
+Every failure on this path — a half-present header pair, an unparseable
+certificate, a signature that does not recover, a measurement that is not
+pinned, a digest over other bytes — refuses **the bypass** and holds the trace
+exactly as an unwitnessed one. A witness outage must not become a submission
+outage. Refusals are logged at `debug`, by name only; no header value, digest
+or signature reaches a log line.
