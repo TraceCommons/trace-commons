@@ -1661,8 +1661,30 @@ pub async fn import_antigravity(
         ),
         None => None,
     };
-    let outcome =
-        crate::antigravity::import::import_antigravity(store, project.as_deref(), all).await?;
+    let outcome = match crate::antigravity::import::import_antigravity(
+        store,
+        project.as_deref(),
+        all,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        // A discovery failure is the one a first attempt is most likely
+        // to produce, and it arrived as a bare label. Human runs get the
+        // sentence; `--json` keeps the label, because a caller parses
+        // `error` and matches on it.
+        Err(error) => {
+            if json {
+                return Err(error);
+            }
+            return Err(
+                match crate::antigravity::import::discovery_guidance(&error) {
+                    Some(guidance) => anyhow::anyhow!(guidance),
+                    None => error,
+                },
+            );
+        }
+    };
 
     if json {
         let (document, status) = antigravity_import_json(outcome);
