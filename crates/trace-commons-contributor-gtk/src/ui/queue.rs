@@ -48,16 +48,20 @@ const CONTENT_GAP: i32 = 14;
 
 pub struct QueueView {
     pub root: gtk::Box,
+    /// The arming offer, above the cards it is about. Persistent and
+    /// emptied rather than rebuilt with the list, because it is not part of
+    /// the list: rebuilding it on every queue render would make it flicker
+    /// on every approval.
+    ///
+    /// Refreshed by `App::refresh`, which asks `arming_suggestion` alongside
+    /// `list_pending` -- the daemon's answer changes on exactly the events
+    /// that change the queue, since an upload landing is what moves a
+    /// project past the threshold.
+    arming_offer: gtk::Box,
     /// Persistent rather than rebuilt each render: it is the only widget in
     /// this window that updates once a second, and rebuilding it under the
     /// pointer would move `Undo` out from under a contributor reaching for
     /// it.
-    /// The arming offer, above the cards it is about. Persistent and
-    /// emptied rather than rebuilt with the list, because it is not part of
-    /// the list: it is refreshed by `list_projects`, not by `list_pending`,
-    /// and rebuilding it on every queue render would make it flicker on
-    /// every approval.
-    arming_offer: gtk::Box,
     undo_bar: gtk::Box,
     undo_headline: gtk::Label,
     undo_held: gtk::Label,
