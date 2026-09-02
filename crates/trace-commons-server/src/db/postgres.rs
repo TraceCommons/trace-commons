@@ -6078,32 +6078,6 @@ mod tests {
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    ///
-    /// The markers are built at runtime rather than written as literals.
-    /// `THIS_FILE` is this file, so a literal would appear in the assertion's
-    /// own source and the assertion would be satisfied by itself -- passing
-    /// with the migration wired into nothing.
-    #[test]
-    fn v53_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        let file_marker = format!(
-            "migrations/V{}__trace_gate_decision_composite_score.sql",
-            53
-        );
-        assert_eq!(
-            THIS_FILE.matches(&file_marker).count(),
-            2,
-            "V53 must be named exactly twice: once by run_migrations' include_str! \
-             and once by the migration-content test above"
-        );
-        let version_marker = format!("&{}_i32", 53);
-        assert!(
-            THIS_FILE.contains(&version_marker),
-            "V53 must record itself in _trace_commons_migrations"
-        );
-    }
-
     /// V54 records the composition statistic for large traces (#478). Shadow
     /// mode, and prospective for a harder reason than V53: per-chunk logprobs
     /// are never persisted, so it cannot be recomputed for a decision already
@@ -6123,29 +6097,6 @@ mod tests {
             "V54 must stay nullable and backfill-free: a zero default would \
              enrol every historical row into the calibration sample as a real \
              observation of the worst possible score"
-        );
-    }
-
-    /// Same hand-rolled-`run_migrations` trap as V47 and V53: wiring, pinned.
-    /// Counted rather than merely present, for the reason V53's test records
-    /// -- a literal in the assertion would otherwise satisfy itself.
-    #[test]
-    fn v54_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        let file_marker = format!(
-            "migrations/V{}__trace_gate_decision_qualifying_mass.sql",
-            54
-        );
-        assert_eq!(
-            THIS_FILE.matches(&file_marker).count(),
-            2,
-            "V54 must be named exactly twice: once by run_migrations' include_str! \
-             and once by the migration-content test above"
-        );
-        let version_marker = format!("&{}_i32", 54);
-        assert!(
-            THIS_FILE.contains(&version_marker),
-            "V54 must record itself in _trace_commons_migrations"
         );
     }
 
@@ -6424,117 +6375,235 @@ mod tests {
         assert!(refuse_if_enumeration_is_ambiguous(&tenants, true).is_ok());
     }
 
-    /// Same trap again, for the migration that forces RLS on the withdrawal
-    /// eviction receipts. This one renumbered from V55 to V56 after #520
-    /// landed, and a renumber that silently stops applying looks exactly like
-    /// success, so count the references rather than merely finding one.
+    /// The minimum number of times a migration's path may appear in THIS
+    /// file: once for `run_migrations`' own `include_str!`, plus one for each
+    /// test that READS the migration rather than restating it.
+    ///
+    /// Only migrations with a reader beyond `run_migrations` need a row; the
+    /// wiring check itself enumerates `migrations/` and needs no table.
+    /// Asserted as a lower bound, so a new legitimate reader does not fail an
+    /// unrelated row -- but deleting a content test still does.
+    const MIGRATION_READER_MINIMUMS: &[(u32, usize)] = &[
+        (47, 2),
+        (48, 2),
+        (49, 2),
+        (51, 2),
+        (52, 2),
+        (53, 2),
+        (54, 2),
+        (55, 3),
+        (56, 4),
+    ];
+
+    /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
+    /// test time rather than listed.
+    ///
+    /// `migrations/` is the source of truth for what migrations exist, so
+    /// enumerating it is what lets the wiring check below fail for a migration
+    /// nobody remembered to mention -- the failure mode a hand-maintained
+    /// table reproduces rather than closes. `CARGO_MANIFEST_DIR` is
+    /// `crates/trace-commons-server`; the migrations live at the repo root.
+    fn migrations_on_disk() -> Vec<(u32, String)> {
+        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+
+        let entries = std::fs::read_dir(MIGRATIONS_DIR)
+            .unwrap_or_else(|err| panic!("cannot read {MIGRATIONS_DIR}: {err}"));
+
+        let mut migrations: Vec<(u32, String)> = Vec::new();
+        for entry in entries {
+            let name = entry.expect("directory entry").file_name();
+            let name = name.to_str().expect("migration filenames are UTF-8");
+            let Some(rest) = name.strip_prefix('V') else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some((version, stem)) = rest.split_once("__") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some(stem) = stem.strip_suffix(".sql") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let version: u32 = version
+                .parse()
+                .unwrap_or_else(|_| panic!("{name}: version is not a number"));
+            migrations.push((version, stem.to_string()));
+        }
+
+        // An empty or wrong directory would make every check below pass
+        // vacuously, so refuse a read that plainly did not find the tree.
+        assert!(
+            migrations.len() >= 56,
+            "found only {} migrations in {MIGRATIONS_DIR}: the enumeration read the wrong \
+                 directory, and an empty one passes every check below",
+            migrations.len()
+        );
+
+        migrations.sort();
+        migrations
+    }
+
+    /// `run_migrations` is hand-rolled: a migration not wired in with its own
+    /// `include_str!`, or guarded on one version while recording another,
+    /// never runs, or re-runs on every boot. Driven from `migrations/` the way
+    /// `trace_commons_rls_registry_matches_migration_policy_coverage` below is
+    /// driven from its policy set, so a failing row names the migration.
+    ///
+    /// Four things make this hard to satisfy by accident:
+    ///
+    /// 1. The set under test is read from `migrations/`, not listed here. A
+    ///    migration added and never wired in fails without anyone having to
+    ///    remember this test exists -- which is how V50 came to have no
+    ///    coverage while nine hand-written per-version tests were green.
+    /// 2. Markers are checked against `run_migrations`' own body, not the
+    ///    whole file. Scanning the file let a block that was commented out or
+    ///    moved into dead code satisfy every marker -- the way a literal
+    ///    written inside the test used to satisfy the assertion reading it --
+    ///    and let an unrelated mention inflate a count.
+    /// 3. All three markers for a version must sit in the SAME
+    ///    `already_applied` block. Checked against the whole body they were
+    ///    independent, so a block guarded on `&1_i32` while recording `&55_i32`
+    ///    passed -- permanently dead, and green.
+    /// 4. Matching is whitespace-insensitive, because `rustfmt` decides
+    ///    whether a bound-params array fits on one line. V17's does not.
+    ///
+    /// The recorded name is derived from the filename rather than restated:
+    /// all 56 wired migrations record their own file stem, and a second copy
+    /// of it here would only be a new way for this test to lie.
+    ///
+    /// What it still does not prove: that the statement beside a bound-params
+    /// array is the INSERT.
     #[test]
-    fn v56_is_wired_into_run_migrations() {
+    fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
-        let file_marker = format!("migrations/V{}__community_withdrawal_eviction_rls.sql", 56);
+
+        let start = THIS_FILE
+            .find("async fn run_migrations(")
+            .expect("run_migrations must exist in this file");
+        let after_signature = start + "async fn run_migrations(".len();
+        let end = after_signature
+            + THIS_FILE[after_signature..]
+                .find("\n    async fn ")
+                .expect("run_migrations must be followed by another fn at the same indentation");
+        let body = &THIS_FILE[start..end];
+
+        // A failed slice must not pass vacuously by scanning the wrong region
+        // -- the same class of defect this test exists to catch. Both guards
+        // are structural rather than a line count, which would have to be
+        // raised every time a migration lands and would fail with a message
+        // about markers when nothing about the markers was wrong.
+        assert!(
+            body.contains("_trace_commons_migrations"),
+            "run_migrations slice found the wrong region: the migrations table \
+                 name is missing"
+        );
         assert_eq!(
-            THIS_FILE.matches(&file_marker).count(),
-            4,
-            "V56 must be named exactly four times: once by run_migrations' \
-             include_str!, once in each of the central-policy and force-RLS \
-             arrays that \
-             trace_commons_rls_registry_matches_migration_policy_coverage \
-             reads, and once by the TRACE_COMMONS_RLS_TABLES doc comment, \
-             which points at V56's exclusion notes rather than restating them"
+            body.matches("fn ").count(),
+            1,
+            "run_migrations slice contains more than its own signature: it swallowed the \
+                 methods that follow"
         );
-        let version_marker = format!("&{}_i32", 56);
-        assert!(
-            THIS_FILE.contains(&version_marker),
-            "V56 must record itself in _trace_commons_migrations"
-        );
-    }
-
-    /// Same hand-rolled-`run_migrations` trap as V47, V53, and V54: wiring,
-    /// pinned. Counted rather than merely present, for the reason V53's test
-    /// records -- a literal in the assertion would otherwise satisfy itself.
-    #[test]
-    fn v55_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        let file_marker = format!("migrations/V{}__register_stats_public_read.sql", 55);
         assert_eq!(
-            THIS_FILE.matches(&file_marker).count(),
-            3,
-            "V55 must be named exactly three times: once by run_migrations' \
-             include_str!, once by the migration-content test above, and once \
-             by the_public_read_statement_references_only_granted_columns, \
-             which reads V55's column grant rather than restating it"
+            body.lines().last().map(str::trim),
+            Some("}"),
+            "run_migrations slice does not end at the function's closing brace"
         );
-        let version_marker = format!("&{}_i32", 55);
+        // The strip below cuts each line at its first `//` and cannot see a
+        // block comment, so a migration wrapped in one would read as wired.
         assert!(
-            THIS_FILE.contains(&version_marker),
-            "V55 must record itself in _trace_commons_migrations"
+            !body.contains("/*"),
+            "run_migrations gained a block comment; the line-comment strip no \
+                 longer covers it"
         );
-    }
+        // The same strip cannot see that a `//` sits inside a string literal,
+        // and would cut the rest of that line -- dropping a marker, or fusing
+        // two blocks. Nothing in the body does this today; assert the
+        // precondition rather than assume it.
+        assert!(
+                !body.lines().any(|line| {
+                    matches!((line.find('"'), line.find("//")), (Some(quote), Some(comment)) if quote < comment)
+                }),
+                "run_migrations has a `//` after a string literal on the same line; the \
+                 line-comment strip would cut inside the string"
+            );
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    #[test]
-    fn v52_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V52__trace_submission_residual_risk_basis.sql"),
-            "V52 must be wired into run_migrations with an include_str!"
-        );
-        assert!(
-            THIS_FILE.contains("&52_i32"),
-            "V52 must record itself in _trace_commons_migrations"
-        );
-    }
+        // Comments dropped, then whitespace and the trailing comma rustfmt
+        // adds inside a wrapped array, so a marker matches whether or not
+        // rustfmt kept it on one line.
+        let squashed: String = body
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace(",]", "]");
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    #[test]
-    fn v51_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V51__privacy_classify_window_cache.sql"),
-            "V51 must be wired into run_migrations with an include_str!"
-        );
-        assert!(
-            THIS_FILE.contains("&51_i32"),
-            "V51 must record itself in _trace_commons_migrations"
-        );
-    }
+        const BLOCK: &str = "letalready_applied";
+        let mut failures: Vec<String> = Vec::new();
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    #[test]
-    fn v49_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V49__trace_submission_last_status_reason.sql"),
-            "V49 must be wired into run_migrations with an include_str!"
-        );
-        assert!(
-            THIS_FILE.contains("&49_i32"),
-            "V49 must record itself in _trace_commons_migrations"
-        );
-    }
+        for (version, file_stem) in migrations_on_disk() {
+            let file_marker = format!("migrations/V{version}__{file_stem}.sql");
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    #[test]
-    fn v48_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V48__trace_correction_value.sql"),
-            "V48 must be wired into run_migrations with an include_str!"
-        );
-    }
+            let hits = squashed.matches(&file_marker).count();
+            if hits != 1 {
+                failures.push(format!(
+                    "V{version}: named {hits} times in run_migrations, expected exactly once \
+                         by its own include_str!"
+                ));
+                continue;
+            }
 
-    /// `run_migrations` is hand-rolled: a migration file that is not wired in
-    /// with its own `include_str!` never runs. Pin the wiring.
-    #[test]
-    fn v47_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
+            // The block this migration owns: its own already_applied guard
+            // through the next one. All three markers must be inside it.
+            let at = squashed.find(&file_marker).expect("hit counted above");
+            let block_start = squashed[..at].rfind(BLOCK).unwrap_or(0);
+            let block_end = squashed[at..]
+                .find(BLOCK)
+                .map(|offset| at + offset)
+                .unwrap_or(squashed.len());
+            let block = &squashed[block_start..block_end];
+
+            let guard_marker = format!("&[&{version}_i32]");
+            if !block.contains(&guard_marker) {
+                failures.push(format!(
+                    "V{version}: its already_applied guard does not query version {version} -- \
+                         a block guarded on another version never runs, or runs on every boot"
+                ));
+            }
+
+            let insert_marker = format!("&[&{version}_i32,&\"{file_stem}\"]");
+            if !block.contains(&insert_marker) {
+                failures.push(format!(
+                    "V{version}: does not record itself in _trace_commons_migrations as \
+                         {file_stem:?} within its own block -- being gated by an already_applied \
+                         check for the same version is not the same thing"
+                ));
+            }
+
+            let readers = MIGRATION_READER_MINIMUMS
+                .iter()
+                .find(|(wanted, _)| *wanted == version)
+                .map(|(_, readers)| *readers)
+                .unwrap_or(1);
+            let references = THIS_FILE.matches(&file_marker).count();
+            if references < readers {
+                failures.push(format!(
+                    "V{version}: named {references} times in this file, expected at least \
+                         {readers} -- run_migrations' include_str! plus each test that reads the \
+                         migration. A missing one means such a test was deleted or now restates \
+                         the migration instead of reading it"
+                ));
+            }
+        }
+
         assert!(
-            THIS_FILE.contains("migrations/V47__trace_gate_decision_total_chunk_count.sql"),
-            "V47 must be wired into run_migrations with an include_str!"
-        );
-        assert!(
-            THIS_FILE.contains("&47_i32"),
-            "V47 must record itself in _trace_commons_migrations"
+            failures.is_empty(),
+            "{} migration(s) are not correctly wired into run_migrations:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
 
