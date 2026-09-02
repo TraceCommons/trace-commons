@@ -94,6 +94,33 @@ input, or a credit computation, because they come from a proxy the contributor
 can patch. A UI that presents routing data beside credit figures invites exactly
 that conflation.
 
+## The organising principle: never show a system they cannot reach
+
+This decides the information architecture, so it comes before any screen.
+
+A person arrives in one of three states, and the app is a **different app** in
+each. Not one app with sections greyed out -- greyed-out sections advertise a
+locked door, which is worse than silence.
+
+**1. Private coding only.** They route their tools through NEAR AI and have no
+invite. The app is a privacy tool: two tabs, Home and Tools. It says nothing
+about corpora, credits, ownership or contributing, because none of that is
+reachable. Sessions are listed as private and the footer says nothing is
+uploaded, which is true.
+
+**2. Sessions that can be proven.** Attested sessions now exist on their
+machine. This is the first moment the person could actually act on ownership, so
+it is the first moment the app mentions it. The unlock is a card, not a new tab:
+their sessions can be proven theirs, and that could be worth something if they
+choose.
+
+**3. Contributor.** They have an invite and have shared. A third tab appears and
+the full loop shows: inference used against work earned.
+
+**The gate is a local fact, not a server permission.** What moves someone from
+state 1 to state 2 is a receipt existing on their own machine. That is the
+honest trigger and it is checkable offline.
+
 ## Design
 
 ### 1. The declaration surface
