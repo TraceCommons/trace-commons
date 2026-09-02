@@ -213,6 +213,51 @@ internal static class NativeMethods
     internal static extern IntPtr tc_scrub_detector_names();
 
     /// <summary>
+    /// Every fixed word on the routing surface, as an owned JSON object; free
+    /// it with <see cref="tc_string_free"/>, which
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    ///
+    /// ONE CALL, NOT ONE PER STRING. This is a whole screen's wording and it
+    /// arrives as a set, so this shell cannot take four of the words and
+    /// hand-write the fifth. Exactly one of them claims privacy; a
+    /// hand-written copy of that claim would stop matching the other two
+    /// shells the day the claim changed, and nothing would notice.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_routing_copy();
+
+    /// <summary>
+    /// The routing surface's "that file could not be used" sentence, already
+    /// assembled. <paramref name="tokenPath"/> may be NULL, which is the
+    /// "nothing resolved at all" case and a different sentence, not an error.
+    ///
+    /// ASSEMBLED ON THE RUST SIDE. This ABI exports no template with a hole in
+    /// it, because a template this shell fills in is another place the wording
+    /// lives. Do not rebuild these sentences from parts.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_token_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? tokenPath);
+
+    /// <summary>
+    /// The routing surface's "nothing answered" sentence, already assembled.
+    /// A port outside 1..65535 -- including the 0 for "no port was tried" --
+    /// produces the sentence that names no port.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_routing_unreachable_line(int port);
+
+    /// <summary>
+    /// The routing surface's "Last checked ..." sentence, assembled around
+    /// this shell's own humanised time. NULL, with an error recorded, for a
+    /// NULL or non-UTF-8 argument: "Last checked " with nothing after it is
+    /// worse than no line at all.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_routing_last_checked(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? when);
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>

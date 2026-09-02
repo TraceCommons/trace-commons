@@ -1717,6 +1717,135 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
     })
 }
 
+/// Every fixed word on the routing surface, in one call.
+///
+/// Needs no handle: it describes the build, not a running daemon.
+///
+/// Returns an owned JSON object whose keys are `RoutingCopy`'s fields; free
+/// it with [`tc_string_free`].
+///
+/// ONE CALL, NOT ONE PER STRING. `tc_scrub_detector_names` answers a single
+/// question and returns a single list; this is a whole screen's wording and
+/// must arrive as a set. Exporting the words one at a time would let a shell
+/// take four of them and hand-write the fifth, and a hand-written word on
+/// this surface is a privacy claim that silently stops matching the one the
+/// other two shells print.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_copy() -> *mut c_char {
+    guard(|| {
+        let copy = trace_commons_contributor::routing_copy::routing_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "that file could not be used" sentence, assembled.
+///
+/// `token_path` may be NULL, which is the case where nothing resolved at
+/// all; the sentence for that says what to do instead of naming a file it
+/// does not have.
+///
+/// ASSEMBLED HERE, DELIBERATELY. The alternative -- exporting a template
+/// with a `{path}` in it and letting each shell format it -- would make the
+/// shells a fourth, fifth and sixth place this wording lives, each free to
+/// drop a clause around the hole, and nothing in this repo would notice.
+/// The sweep in `routing_copy` renders these sentences and checks them; it
+/// can only do that for sentences finished on this side.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `token_path`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_token_line(token_path: *const c_char) -> *mut c_char {
+    guard(|| {
+        // A NULL path is the "nothing resolved" case and not an error. Bytes
+        // that are not UTF-8 are treated the same way: this sentence exists
+        // to tell somebody what to do next, and refusing to produce it
+        // because a path is oddly encoded would leave the screen silent.
+        let path = if token_path.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(token_path) }.ok()
+        };
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_token_line(path),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "nothing answered" sentence, assembled.
+///
+/// `port` outside 1..=65535 -- including the 0 a caller passes for "no port
+/// was tried" -- produces the sentence that names no port, rather than one
+/// that names a port number nobody used.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`].
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_unreachable_line(port: i32) -> *mut c_char {
+    guard(|| {
+        let port = u16::try_from(port).ok().filter(|p| *p != 0);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_unreachable_line(port),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "Last checked ..." sentence, assembled.
+///
+/// `when` is the shell's own humanised time -- "an hour ago", "yesterday".
+/// That is the one piece of this surface each shell renders for itself,
+/// because it is a rendering of a timestamp and not wording about routing.
+/// The words around it are still written once, here.
+///
+/// A NULL or non-UTF-8 `when` returns NULL and records an error: unlike the
+/// two sentences above there is no meaningful shorter form of this one --
+/// "Last checked " with nothing after it is worse than no line at all -- and
+/// a shell that has no timestamp should not be calling it.
+///
+/// Uses [`guard_forwarding`] rather than [`guard`], which the rule on that
+/// function permits here: the closure's only error paths are
+/// [`borrow_str`]'s two fixed labels, `null-pointer` and `invalid-utf8`.
+/// Neither embeds any caller content, so forwarding them is exactly as safe
+/// as the fixed label, and a shell can tell the two apart.
+///
+/// Returns an owned string; free it with [`tc_string_free`].
+///
+/// # Safety
+/// `when` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let when = unsafe { borrow_str(when) }?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::last_checked_line(when),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
 /// The names of the secret detectors the scrubber runs, so a shell can tell
 /// a contributor what is removed without transcribing the list.
 ///
