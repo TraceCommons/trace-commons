@@ -1,14 +1,12 @@
-// Copyright (C) 2026 K&Z Partners LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
-
 //! Verification of a NEAR AI inference receipt.
 //!
-//! [`super::quote`] establishes that the *endpoint* is a genuine Intel TDX
-//! enclave running an image we pinned. That says nothing about any particular
-//! inference. A receipt is the other half: alongside a completion, NEAR AI
-//! returns a short `text` carrying the SHA-256 of the request body and of the
-//! response body, signed by the enclave's signing key. Verifying it binds one
-//! specific request/response pair to that key.
+//! Quote verification (the server's `near_attestation::quote`) establishes
+//! that the *endpoint* is a genuine Intel TDX enclave running an image we
+//! pinned. That says nothing about any particular inference. A receipt is the
+//! other half: alongside a completion, NEAR AI returns a short `text` carrying
+//! the SHA-256 of the request body and of the response body, signed by the
+//! enclave's signing key. Verifying it binds one specific request/response
+//! pair to that key.
 //!
 //! The mechanism follows NEAR AI's own reference verifier
 //! (`nearai/nearai-cloud-verifier`, `py/chat_verifier.py`):
@@ -208,7 +206,7 @@ fn eip191_digest(message: &[u8]) -> [u8; 32] {
 
 /// Recover the 20-byte Ethereum address that produced `signature_hex` over
 /// `message` under EIP-191.
-pub(crate) fn recover_eip191_signer(
+pub fn recover_eip191_signer(
     message: &[u8],
     signature_hex: &str,
 ) -> Result<[u8; 20], ReceiptError> {
@@ -260,7 +258,7 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
 }
 
 /// Decode a `0x`-prefixed 20-byte hex address, in either case.
-pub(crate) fn decode_address(s: &str) -> Option<[u8; 20]> {
+pub fn decode_address(s: &str) -> Option<[u8; 20]> {
     let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     if body.len() != 40 {
         return None;

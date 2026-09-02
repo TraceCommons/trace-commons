@@ -7778,6 +7778,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-commons-attestation"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "k256",
+ "sha2 0.10.9",
+ "sha3",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "trace-commons-build-info"
 version = "0.1.0"
 
@@ -7949,6 +7960,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "tower-http",
+ "trace-commons-attestation",
  "trace-commons-build-info",
  "trace-commons-gate-enclave",
  "trace-commons-operator-client",
