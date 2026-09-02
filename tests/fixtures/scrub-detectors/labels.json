@@ -1,0 +1,39 @@
+{
+  "comment": [
+    "The words each secret-leak detector is published under, one entry per",
+    "detector in secret_leak_pattern_names().",
+    "",
+    "Every shell already fails if a detector reaches a contributor with no",
+    "label at all -- every_detector_has_a_human_label (GTK),",
+    "testEveryDetectorHasAHumanLabel (macOS),",
+    "EveryDetectorTheScrubberReportsHasAHumanLabel (Windows). None of them can",
+    "see WORDING. Each shell hardcoded its own nine strings, so the three",
+    "could disagree about what a contributor is told is covered and nothing",
+    "would fail: a Cursor user reading 'Stripe, GitLab and Slack tokens' on",
+    "one platform and 'Cursor API keys' on another gets two different answers",
+    "about the same credential.",
+    "",
+    "This file is the single copy of those words. It lives outside every",
+    "package directory, following tests/fixtures/update-conformance/, so the",
+    "three readers cannot drift into three files.",
+    "",
+    "Changing a label here is changing what the product tells contributors is",
+    "scrubbed. That is a deliberate act; the tests exist to make it one."
+  ],
+  "checked_by": [
+    "crates/trace-commons-contributor-gtk: scrub_detector_labels_match_the_shared_fixture",
+    "macos/Tests/TCShellCoreTests: testScrubDetectorLabelsMatchTheSharedFixture",
+    "windows/tests/TraceCommons.Interop.Tests: ScrubDetectorLabelsMatchTheSharedFixture"
+  ],
+  "labels": {
+    "openai_api_key": "OpenAI API keys",
+    "github_token": "GitHub tokens",
+    "aws_access_key": "AWS access keys",
+    "provider_token": "Stripe, GitLab and Slack tokens",
+    "cursor_api_key": "Cursor API keys",
+    "jwt": "JSON Web Tokens",
+    "npm_token": "npm tokens",
+    "google_api_key": "Google API keys",
+    "pem_header_orphan": "Private keys in PEM blocks"
+  }
+}
