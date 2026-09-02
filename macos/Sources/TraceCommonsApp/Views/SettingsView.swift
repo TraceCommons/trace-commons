@@ -688,14 +688,18 @@ struct SettingsContent: View {
                     RoutingSurface.toolRows(
                         sourceModes: model.daemonSettings?.routingSourceModes ?? .unset,
                         evidence: model.routingEvidence,
-                        copy: copy
+                        copy: copy,
+                        calls: model.routingCalls
                     ),
                     id: \.name
                 ) { row in
                     HStack {
                         Text(row.name).font(TC.Font_.body)
                         Spacer()
-                        TCTag(text: row.word, tone: tone(RoutingSurface.tone(forWord: row.word, copy: copy)))
+                        // The tone rides on the row, decided by the same
+                        // shared table that chose the word. Nothing here
+                        // reads the word to paint it.
+                        TCTag(text: row.word, tone: tone(row.tone))
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(row.name): \(row.word)")
@@ -806,14 +810,19 @@ struct SettingsContent: View {
     @ViewBuilder
     private func routingState(copy: RoutingCopy) -> some View {
         let state = model.status.routing.state
+        // From the state, never from the sentence it produced. `tone` maps
+        // only the three values this surface can take, so nothing here can
+        // reach a fault colour whatever the daemon reports.
+        let stateTone = tone(RoutingSurface.tone(forState: state, calls: model.routingCalls))
         VStack(alignment: .leading, spacing: TC.Space.xxs) {
-            Text(RoutingSurface.stateLine(state, copy: copy))
+            Text(RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls))
                 .font(TC.Font_.body)
+                .foregroundStyle(stateTone.textColor)
                 .fixedSize(horizontal: false, vertical: true)
             // "Last checked" is a stamp on the running daemon -- never an
             // install date, never a connected-since -- so it is only shown
             // on a state that has actually had an answer.
-            if RoutingSurface.showsLastChecked(forState: state),
+            if RoutingSurface.showsLastChecked(forState: state, calls: model.routingCalls),
                let at = model.status.routing.lastRefreshAt,
                let line = TCRoutingCopy.lastChecked(
                    when: Self.lastChecked.localizedString(for: at, relativeTo: Date())

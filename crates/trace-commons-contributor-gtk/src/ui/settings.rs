@@ -898,19 +898,21 @@ fn probe_line(outcome: &ProbeOutcome) -> String {
     }
 }
 
-/// The tone of the daemon's three states.
+/// The tone of the daemon's three states, onto this shell's palette.
 ///
-/// `awaiting_rows` is `Held` and not `Attention`: a reader built a moment
-/// ago starts cold by construction, so this is the state a contributor
-/// sees immediately after touching anything on this card. Painting it as a
-/// fault would accuse a working proxy of being broken at exactly that
+/// NOT A BRANCH TABLE HERE. Which tone each state reads in is decided once,
+/// in `routing_copy`, beside the sentence it goes with -- this only carries
+/// that answer onto `style::Tone`, which has two values this surface can
+/// never reach. `awaiting_rows` is `Held` and not `Attention`: a reader
+/// built a moment ago starts cold by construction, so this is the state a
+/// contributor sees immediately after touching anything on this card, and
+/// painting it as a fault would accuse a working proxy at exactly that
 /// moment.
 fn routing_tone(state: &str) -> Tone {
-    use trace_commons_contributor::daemon::ipc::{ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN};
-    match state {
-        ROUTING_AWAITING_ROWS => Tone::Held,
-        ROUTING_ROWS_SEEN => Tone::Clear,
-        _ => Tone::Neutral,
+    match copy::ironwire_state_tone(state) {
+        copy::StateTone::Held => Tone::Held,
+        copy::StateTone::Clear => Tone::Clear,
+        copy::StateTone::Neutral => Tone::Neutral,
     }
 }
 
@@ -1015,7 +1017,8 @@ fn render_tool_rows(app: &Rc<App>) {
         (copy::TOOL_CODEX, &modes.codex, IRONWIRE_TOOL_CODEX),
         (copy::TOOL_GEMINI, &modes.gemini, IRONWIRE_TOOL_GEMINI),
     ] {
-        let word = copy::tool_word(mode, tool_wiring(evidence.as_ref(), id));
+        let wiring = tool_wiring(evidence.as_ref(), id);
+        let word = copy::tool_word(mode, wiring);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         let label = gtk::Label::builder()
             .label(name)
@@ -1024,10 +1027,14 @@ fn render_tool_rows(app: &Rc<App>) {
             .build();
         label.add_css_class("tc-body");
         row.append(&label);
-        let tone = if word == copy::TOOL_PRIVATE {
-            Tone::Clear
-        } else {
-            Tone::Neutral
+        // From the wiring, never from the word. A styling decision that
+        // compared the rendered string against the private word would be a
+        // text match against a privacy claim, and `Private` is a substring
+        // of the denial that must never come back -- the same shape that
+        // once let `contains("reachable")` match `"unreachable"` here.
+        let tone = match copy::tool_tone(mode, wiring) {
+            copy::ToolTone::Clear => Tone::Clear,
+            copy::ToolTone::Neutral => Tone::Neutral,
         };
         row.append(&style::tag(word, tone));
         // Read as one statement, not as a name and a stray word.
@@ -1109,7 +1116,7 @@ fn render_routing_status(app: &Rc<App>, status: &Status) {
         // that has had no answer at all.
         copy::ironwire_last_checked(status.routing.last_refresh_at)
             .as_deref()
-            .filter(|_| routing_tone(state) != Tone::Neutral),
+            .filter(|_| copy::ironwire_shows_last_checked(state)),
     ));
 }
 
@@ -2701,6 +2708,115 @@ mod tests {
             let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
             assert_eq!(word, copy::TOOL_UNKNOWN, "{dead}");
             assert_ne!(word, copy::TOOL_PRIVATE, "{dead}");
+        }
+    }
+
+    /// The daemon state's tone is the shared table's, not a fourth copy.
+    ///
+    /// This was the last routing branch table written out natively in all
+    /// three shells. Asserted on the source of the mapper, because three
+    /// copies that agree today are what drift looks like the day before it
+    /// happens -- and a value-level test would pass against a native table
+    /// that still agreed.
+    #[test]
+    fn the_daemon_state_tone_is_not_reimplemented_in_this_shell() {
+        use trace_commons_contributor::daemon::ipc::{
+            ROUTING_AWAITING_ROWS, ROUTING_NOT_DECLARED, ROUTING_ROWS_SEEN,
+        };
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn routing_tone(")
+            .expect("the state tone mapper exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("copy::ironwire_state_tone(state)"),
+            "the state tone must come from the shared branch table"
+        );
+        for spelled in [
+            "ROUTING_AWAITING_ROWS",
+            "ROUTING_ROWS_SEEN",
+            "awaiting_rows",
+            "rows_seen",
+        ] {
+            assert!(
+                !body.contains(spelled),
+                "the state tone is still branched on here: {spelled}"
+            );
+        }
+
+        // And it carries the shared answer faithfully, over states this
+        // build knows and ones it does not.
+        for state in [
+            ROUTING_NOT_DECLARED,
+            ROUTING_AWAITING_ROWS,
+            ROUTING_ROWS_SEEN,
+            "",
+            "a_state_from_a_later_daemon",
+        ] {
+            let expected = match copy::ironwire_state_tone(state) {
+                copy::StateTone::Held => Tone::Held,
+                copy::StateTone::Clear => Tone::Clear,
+                copy::StateTone::Neutral => Tone::Neutral,
+            };
+            assert_eq!(routing_tone(state), expected, "{state}");
+            // Neither of this palette's fault tones is reachable from any
+            // state, including one this build has never heard of.
+            assert_ne!(routing_tone(state), Tone::Attention, "{state}");
+            assert_ne!(routing_tone(state), Tone::Refused, "{state}");
+        }
+    }
+
+    /// No styling decision on a tool row reads the rendered word.
+    ///
+    /// The chip's tone comes from [`copy::tool_tone`], which takes what the
+    /// word takes. Asserted on the source of the one painter, because "this
+    /// does not compare a string" is a fact a later edit reintroduces
+    /// silently: `Private` is a substring of the denial that must never come
+    /// back, and a `contains` against a privacy claim is the same shape that
+    /// once matched `"unreachable"` as `"reachable"` on this surface.
+    #[test]
+    fn no_tool_row_styling_decision_reads_the_rendered_word() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn render_tool_rows(")
+            .expect("the row painter exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("copy::tool_tone(mode, wiring)"),
+            "the row painter must take its tone from the shared branch table"
+        );
+        for comparison in [
+            "TOOL_PRIVATE",
+            "word ==",
+            "word !=",
+            "word.contains",
+            "word.starts_with",
+            "word.eq",
+        ] {
+            assert!(
+                !body.contains(comparison),
+                "a styling decision reads the rendered word: {comparison}"
+            );
+        }
+
+        // And the tone is the one the shared table chose, over every pair.
+        for mode in ["off", "watch", "unset", ""] {
+            for wiring in [
+                copy::ToolWiring::Wired,
+                copy::ToolWiring::NotWired,
+                copy::ToolWiring::Unknown,
+            ] {
+                let clear = copy::tool_tone(mode, wiring) == copy::ToolTone::Clear;
+                assert_eq!(
+                    clear,
+                    copy::tool_word(mode, wiring) == copy::TOOL_PRIVATE,
+                    "{mode:?}/{wiring:?}"
+                );
+            }
         }
     }
 

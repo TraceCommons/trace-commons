@@ -271,8 +271,22 @@
                                         <TextBlock Grid.Column="0" Text="{x:Bind Name}"
                                                    Style="{StaticResource TcBodyDenseTextStyle}"
                                                    TextWrapping="Wrap" />
+                                        <!--
+                                            The wired row is toned and the
+                                            other three are not, matching the
+                                            GTK shell. Which one is drawn
+                                            comes from the shared table's
+                                            tone, never from the word's text:
+                                            "Private" is a substring of a
+                                            denial that must never come back.
+                                        -->
                                         <TextBlock Grid.Column="1" Text="{x:Bind Word}"
-                                                   Style="{StaticResource TcMonoChipTextStyle}" />
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Visibility="{x:Bind ShowsNeutralWord}" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind Word}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                                   Visibility="{x:Bind ShowsClearWord}" />
                                     </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -318,8 +332,26 @@
                                    Visibility="{x:Bind Settings.HasRoutingProbeText, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <!--
+                            The state sentence, painted from the daemon's
+                            state and never from its own text. None of the
+                            three states is a fault, so none of these three
+                            reaches a fault colour: awaiting_rows is held, not
+                            broken.
+                        -->
                         <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.RoutingStateIsNeutral, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.RoutingStateIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.RoutingStateIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
                                    TextWrapping="Wrap" />
                         <!--
                             Per process, and shown only where there has been an

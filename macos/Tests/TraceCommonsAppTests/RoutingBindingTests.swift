@@ -1,3 +1,4 @@
+import TCBridge
 import TCShellCore
 import XCTest
 
@@ -22,6 +23,18 @@ import XCTest
 /// reports the text it was looking in when it does not find what it needs,
 /// so a refactor that moves this card produces a failure to fix and not a
 /// test that quietly stops asserting.
+
+/// The Rust-side calls as the app wires them. Spelled here rather than taken
+/// from `AppModel` so these assertions do not need a live model.
+private let routingCalls = RoutingCalls(
+    tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
+    unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
+    toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
+    stateLine: { TCRoutingCopy.stateLine(state: $0) },
+    stateTone: { TCRoutingCopy.stateTone(state: $0) }
+)
+
 private enum RoutingCard {
     /// `.../macos/Tests/TraceCommonsAppTests/RoutingBindingTests.swift`
     static let viewPath = URL(fileURLWithPath: #filePath)
@@ -335,19 +348,29 @@ final class RoutingBindingTests: XCTestCase {
 
     /// No verdict is derived from the rendered word.
     ///
-    /// `RoutingSurface.tone(forWord:copy:)` compares against the payload's
-    /// own field; a comparison written here against a literal would keep
-    /// asserting after the Rust renamed the word, and would paint the wrong
-    /// row green in the meantime.
+    /// The row's tone now arrives **on the row**, decided by the same shared
+    /// branch table that chose the word, from the same two inputs. It used
+    /// to be recovered here by comparing the rendered word against the
+    /// payload's private field -- which was already a text comparison
+    /// against a privacy claim, one `contains` away from the bug that
+    /// matched "unreachable" as "reachable" on this same surface, and
+    /// `Private` is a substring of the denial that must never come back.
     func testNoStylingDecisionIsMadeAgainstARenderedString() throws {
         let body = try XCTUnwrap(RoutingCard.body())
         let rows = try XCTUnwrap(
             RoutingCard.region(of: body, from: "ForEach(", to: "accessibilityLabel(")
         )
         XCTAssertTrue(
-            rows.contains("tone(RoutingSurface.tone(forWord: row.word, copy: copy))"),
-            "the row's tone is not the surface's: \(rows)"
+            rows.contains("tone(row.tone)"),
+            "the row's tone is not the one the shared table put on the row: \(rows)"
         )
+        // And it is not recovered from the word on the way past.
+        for recovered in ["forWord:", "copy.wordPrivate", "wordPrivate"] {
+            XCTAssertFalse(
+                rows.contains(recovered),
+                "a tone decision reads the rendered word: \(recovered)"
+            )
+        }
         for banned in ["row.word ==", "== row.word", "row.word.contains", "\"Private\""] {
             XCTAssertFalse(rows.contains(banned), "a tone decision reads the rendered word: \(banned)")
         }
@@ -370,11 +393,13 @@ final class RoutingBindingTests: XCTestCase {
             "the status line no longer reads the daemon's state: \(body)"
         )
         XCTAssertTrue(
-            body.contains("RoutingSurface.stateLine(state, copy: copy)"),
+            body.contains("RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls)"),
             "the sentence is not built from that state: \(body)"
         )
         XCTAssertTrue(
-            body.contains("RoutingSurface.showsLastChecked(forState: state)"),
+            body.contains(
+                "RoutingSurface.showsLastChecked(forState: state, calls: model.routingCalls)"
+            ),
             "the stamp is not gated on that same state: \(body)"
         )
         XCTAssertTrue(
@@ -395,6 +420,41 @@ final class RoutingBindingTests: XCTestCase {
         XCTAssertFalse(body.contains("Date.distantPast"), body)
     }
 
+    /// The status line is painted, and from the daemon's state rather than
+    /// from the sentence that state produced.
+    ///
+    /// `tone(forState:)` was public, documented as the thing that keeps
+    /// `awaiting_rows` from reading as a fault, and reached from this view
+    /// only through `showsLastChecked` -- so it gated the stamp and nothing
+    /// ever painted with it. GTK has painted this row from the same three
+    /// states since it was written; this is that parity, asserted.
+    func testTheStatusSentenceIsPaintedFromTheStateAndNotFromItsOwnText() throws {
+        let body = try XCTUnwrap(RoutingCard.stateBody())
+
+        XCTAssertTrue(
+            body.contains(
+                "let stateTone = tone("
+                    + "RoutingSurface.tone(forState: state, calls: model.routingCalls))"
+            ),
+            "the status line's tone is not the surface's, from the daemon's state: \(body)"
+        )
+        XCTAssertTrue(
+            body.contains("foregroundStyle(stateTone.textColor)"),
+            "the status sentence is not painted with that tone: \(body)"
+        )
+        // Not recovered from the rendered sentence, the way the row's tone
+        // once was from the rendered word.
+        for recovered in [
+            "stateLine(state, copy: copy, calls: model.routingCalls) ==",
+            "copy.stateOff ==", "== copy.stateOff", "copy.stateReading ==", "copy.stateWaiting ==",
+        ] {
+            XCTAssertFalse(
+                body.contains(recovered),
+                "a tone decision reads the rendered sentence: \(recovered)"
+            )
+        }
+    }
+
     /// `awaiting_rows` is not a fault.
     ///
     /// A contributor who has just changed anything on this card sees it
@@ -407,7 +467,7 @@ final class RoutingBindingTests: XCTestCase {
         let state = try XCTUnwrap(RoutingCard.stateBody())
         let bridge = try XCTUnwrap(RoutingCard.toneBridge())
 
-        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows"), .held)
+        XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: routingCalls), .held)
         XCTAssertTrue(
             bridge.contains("case .held: return .held"),
             "the tone bridge no longer carries held through: \(bridge)"

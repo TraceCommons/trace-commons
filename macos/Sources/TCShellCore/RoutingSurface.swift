@@ -139,6 +139,22 @@ public enum RoutingToolWiring: Equatable, Sendable {
     case wired
     case notWired
     case unknown
+
+    /// This state as the C ABI spells it: `TC_TOOL_WIRING_*`.
+    ///
+    /// A wire value, like the daemon's outcome strings above, and the reason
+    /// it is here rather than in the bridge: the bridge deals in pointers,
+    /// and the numbering is part of the contract this file is written
+    /// against. Pinned in `RoutingSurfaceExportTests` against the real dylib,
+    /// because a renumbering here would send "wired" across as "not wired" --
+    /// a wrong verdict on a privacy claim, not a crash.
+    public var abiValue: Int32 {
+        switch self {
+        case .wired: return 0
+        case .notWired: return 1
+        case .unknown: return 2
+        }
+    }
 }
 
 /// What the contributor said about each tool's sessions, from
@@ -163,11 +179,18 @@ public struct RoutingSourceModes: Equatable, Sendable {
     public static let unset = RoutingSourceModes(claude: "unset", codex: "unset", gemini: "unset")
 }
 
-/// One rendered row: the tool's name and its one word, both from the shared
-/// payload.
+/// One rendered row: the tool's name, its one word, and how that word is
+/// painted. All three come from the shared source.
+///
+/// The tone travels with the word because both are decided by the same branch
+/// table, from the same two inputs. A view takes it from here and never
+/// re-derives it from `word`: that would be a text comparison against a
+/// privacy claim, and `Private` is a substring of the denial that must never
+/// come back.
 public struct RoutingToolWord: Equatable, Sendable {
     public let name: String
     public let word: String
+    public let tone: RoutingTone
 }
 
 /// How a line or a word is painted. Named rather than valued so this target
@@ -179,6 +202,21 @@ public enum RoutingTone: Equatable, Sendable {
     case held
     /// The reassuring reading.
     case clear
+
+    /// A tone as the ABI answers it: `TC_ROUTING_TONE_*`.
+    ///
+    /// One numbering serves both the tool words and the daemon's state, so
+    /// this is the only decoder. Anything this build does not know is
+    /// `.neutral`, the tone that claims nothing. Spelled out rather than
+    /// derived from this enum's declaration order, which is a Swift detail
+    /// and not the contract.
+    public static func fromABI(_ value: Int32) -> RoutingTone {
+        switch value {
+        case 1: return .held
+        case 2: return .clear
+        default: return .neutral
+        }
+    }
 }
 
 /// The sentences that cannot be finished without an argument, injected
@@ -191,16 +229,47 @@ public enum RoutingTone: Equatable, Sendable {
 ///
 /// Each returns nil when the ABI would not produce a sentence, which is what
 /// a caught panic looks like from here.
-public struct RoutingSentences: Sendable {
+public struct RoutingCalls: Sendable {
     public let tokenLine: @Sendable (String?) -> String?
     public let unreachableLine: @Sendable (UInt16?) -> String?
 
+    /// Which of the four words a tool gets, from its source mode and
+    /// `RoutingToolWiring.abiValue`.
+    ///
+    /// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. This used to be a
+    /// `switch` in this file, beside an identical one in C# and a third in
+    /// Rust. Every string all three returned was the same shared field, so
+    /// the words could not drift -- but the branching could, in three places,
+    /// and the three-shell test that proves the wording is shared would not
+    /// have caught it.
+    public let toolWord: @Sendable (String, Int32) -> String?
+
+    /// How that word is painted, from the same two inputs:
+    /// `TC_ROUTING_TONE_*`. Never nil, because a styling call that failed
+    /// would leave this shell choosing a tone for itself.
+    public let toolTone: @Sendable (String, Int32) -> Int32
+
+    /// The daemon's state, in words. Crosses for the reason `toolWord` does.
+    public let stateLine: @Sendable (String) -> String?
+
+    /// How firmly that sentence reads. The last routing branch table that
+    /// was still a `switch` in this file; it crosses for the same reason.
+    public let stateTone: @Sendable (String) -> Int32
+
     public init(
         tokenLine: @escaping @Sendable (String?) -> String?,
-        unreachableLine: @escaping @Sendable (UInt16?) -> String?
+        unreachableLine: @escaping @Sendable (UInt16?) -> String?,
+        toolWord: @escaping @Sendable (String, Int32) -> String?,
+        toolTone: @escaping @Sendable (String, Int32) -> Int32,
+        stateLine: @escaping @Sendable (String) -> String?,
+        stateTone: @escaping @Sendable (String) -> Int32
     ) {
         self.tokenLine = tokenLine
         self.unreachableLine = unreachableLine
+        self.toolWord = toolWord
+        self.toolTone = toolTone
+        self.stateLine = stateLine
+        self.stateTone = stateTone
     }
 }
 
@@ -282,15 +351,15 @@ public enum RoutingSurface {
     /// claims-nothing line, never to a half-sentence and never to wording
     /// this shell invented.
     public static func probeLine(
-        _ outcome: RoutingProbeOutcome, copy: RoutingCopy, sentences: RoutingSentences
+        _ outcome: RoutingProbeOutcome, copy: RoutingCopy, calls: RoutingCalls
     ) -> String {
         switch outcome {
         case .reachable:
             return copy.probeReachable
         case .tokenUnusable(let path):
-            return sentences.tokenLine(path) ?? copy.checkUnavailable
+            return calls.tokenLine(path) ?? copy.checkUnavailable
         case .unreachable(let port):
-            return sentences.unreachableLine(port) ?? copy.checkUnavailable
+            return calls.unreachableLine(port) ?? copy.checkUnavailable
         case .unknown:
             return copy.checkUnavailable
         }
@@ -300,25 +369,26 @@ public enum RoutingSurface {
 
     /// The daemon's three states, in words. A state this build does not know
     /// says what the off state says: it claims nothing.
-    public static func stateLine(_ state: String, copy: RoutingCopy) -> String {
-        switch state {
-        case State.awaitingRows: return copy.stateWaiting
-        case State.rowsSeen: return copy.stateReading
-        default: return copy.stateOff
-        }
+    /// NOT A BRANCH TABLE HERE. Which sentence each state reaches is decided
+    /// once, in `routing_copy.rs`, and crosses the ABI. A line the ABI would
+    /// not produce falls back to the off line -- which is what an unknown
+    /// state reads as anyway, because it claims nothing.
+    public static func stateLine(
+        _ state: String, copy: RoutingCopy, calls: RoutingCalls
+    ) -> String {
+        calls.stateLine(state) ?? copy.stateOff
     }
 
+    /// NOT A BRANCH TABLE HERE, for the reason on `stateLine`. This was the
+    /// last one in this file.
+    ///
     /// `awaiting_rows` is `.held` and **not** an error tone. A reader built
     /// a moment ago starts empty by construction, so this is the state a
     /// contributor sees immediately after touching anything on this card;
     /// painting it as a fault would accuse a working proxy of being broken
     /// at exactly that moment.
-    public static func tone(forState state: String) -> RoutingTone {
-        switch state {
-        case State.awaitingRows: return .held
-        case State.rowsSeen: return .clear
-        default: return .neutral
-        }
+    public static func tone(forState state: String, calls: RoutingCalls) -> RoutingTone {
+        RoutingTone.fromABI(calls.stateTone(state))
     }
 
     /// Whether the "last checked" stamp says anything on this state.
@@ -327,8 +397,8 @@ public enum RoutingSurface {
     /// date, never a connected-since -- and it starts empty again every time
     /// that process comes back up. On a state that has had no answer at all
     /// there is nothing for it to report.
-    public static func showsLastChecked(forState state: String) -> Bool {
-        tone(forState: state) != .neutral
+    public static func showsLastChecked(forState state: String, calls: RoutingCalls) -> Bool {
+        tone(forState: state, calls: calls) != .neutral
     }
 
     // MARK: Per-tool words
@@ -336,17 +406,24 @@ public enum RoutingSurface {
     /// One tool's word, from what the contributor said about that tool's
     /// sessions and what IronWire said about that tool.
     ///
-    /// Only `off` means not used: `unset` watches the conventional location,
-    /// which is a tool in use.
-    static func toolWord(
-        sourceMode: String, wiring: RoutingToolWiring, copy: RoutingCopy
+    /// NOT A BRANCH TABLE HERE, for the reason on `stateLine`. A word the ABI
+    /// would not produce falls back to the one that claims nothing, never to
+    /// a word chosen on this side.
+    public static func toolWord(
+        sourceMode: String, wiring: RoutingToolWiring, copy: RoutingCopy, calls: RoutingCalls
     ) -> String {
-        if sourceMode == "off" { return copy.wordNotUsed }
-        switch wiring {
-        case .wired: return copy.wordPrivate
-        case .notWired: return copy.wordDirect
-        case .unknown: return copy.wordUnknown
-        }
+        calls.toolWord(sourceMode, wiring.abiValue) ?? copy.wordUnknown
+    }
+
+    /// How that word is painted, from the same two inputs.
+    ///
+    /// From the wiring, never from the rendered word. A comparison against
+    /// the private word would be a text match on a privacy claim, and
+    /// `Private` is a substring of the denial that must never come back.
+    public static func toolTone(
+        sourceMode: String, wiring: RoutingToolWiring, calls: RoutingCalls
+    ) -> RoutingTone {
+        RoutingTone.fromABI(calls.toolTone(sourceMode, wiring.abiValue))
     }
 
     /// All three rows, always, in one order: a missing answer is a word
@@ -355,28 +432,23 @@ public enum RoutingSurface {
     /// `evidence` is nil when nothing has been asked yet, or when what was
     /// asked did not run. Neither is a fact about any tool.
     public static func toolRows(
-        sourceModes: RoutingSourceModes, evidence: RoutingEvidence?, copy: RoutingCopy
+        sourceModes: RoutingSourceModes,
+        evidence: RoutingEvidence?,
+        copy: RoutingCopy,
+        calls: RoutingCalls
     ) -> [RoutingToolWord] {
         [
             (copy.toolClaude, sourceModes.claude, ToolID.claude),
             (copy.toolCodex, sourceModes.codex, ToolID.codex),
             (copy.toolGemini, sourceModes.gemini, ToolID.gemini),
         ].map { name, mode, id in
-            RoutingToolWord(
+            let wiring = evidence?.wiring(forToolID: id) ?? .unknown
+            return RoutingToolWord(
                 name: name,
-                word: toolWord(
-                    sourceMode: mode,
-                    wiring: evidence?.wiring(forToolID: id) ?? .unknown,
-                    copy: copy
-                )
+                word: toolWord(sourceMode: mode, wiring: wiring, copy: copy, calls: calls),
+                tone: toolTone(sourceMode: mode, wiring: wiring, calls: calls)
             )
         }
-    }
-
-    /// Only the wired word is painted as reassurance. Every other word is
-    /// neutral, "not used" included: that is a preference, not an outcome.
-    public static func tone(forWord word: String, copy: RoutingCopy) -> RoutingTone {
-        word == copy.wordPrivate ? .clear : .neutral
     }
 
     // MARK: The declaration

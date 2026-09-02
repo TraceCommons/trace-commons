@@ -189,6 +189,40 @@ pub fn tool_word(source_mode: &str, wiring: ToolWiring) -> &'static str {
     }
 }
 
+/// How one tool's word is painted.
+///
+/// Two values and not a `bool`. A boolean meaning "this is the privacy
+/// word" is one refactor away from a shell recovering it by comparing the
+/// rendered word against `TOOL_PRIVATE` -- and `Private` is a substring of
+/// the denial that must never come back, which is the same shape that once
+/// let `contains("reachable")` match `"unreachable"` on this surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolTone {
+    /// Says nothing either way. Every word but the wired one gets this,
+    /// "not used" included: that is a preference, not an outcome.
+    Neutral,
+    /// The reassuring reading. Only the wired word gets it.
+    Clear,
+}
+
+/// The tone [`tool_word`]'s answer is painted in, from the same two inputs.
+///
+/// ONE BRANCH TABLE, NOT TWO. This takes what [`tool_word`] takes, so the
+/// two stay in step by construction. A shell must call this rather than
+/// test the rendered word: the word is a string that three shells print and
+/// the tone is a styling decision, and a styling decision that reads a
+/// rendered privacy claim is a substring match waiting to happen.
+#[must_use]
+pub fn tool_tone(source_mode: &str, wiring: ToolWiring) -> ToolTone {
+    if source_mode == "off" {
+        return ToolTone::Neutral;
+    }
+    match wiring {
+        ToolWiring::Wired => ToolTone::Clear,
+        ToolWiring::NotWired | ToolWiring::Unknown => ToolTone::Neutral,
+    }
+}
+
 /// The file could not be used: either it is not there, or IronWire would
 /// not accept what was in it.
 ///
@@ -231,6 +265,57 @@ pub fn ironwire_state_line(state: &str) -> &'static str {
         "rows_seen" => IRONWIRE_STATE_READING,
         _ => IRONWIRE_STATE_OFF,
     }
+}
+
+/// How firmly a daemon state reads.
+///
+/// Three values, and none of them is a fault: `awaiting_rows` is
+/// [`StateTone::Held`] and never an error. A reader built a moment ago
+/// starts empty by construction, and a declaration change puts a working
+/// install back into that state, so this is what a contributor sees
+/// immediately after touching anything on this card. Painting it as broken
+/// would accuse a working proxy at exactly that moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateTone {
+    /// Nothing is declared, so nothing is claimed.
+    Neutral,
+    /// Declared, and no answer has arrived yet. Normal, not broken.
+    Held,
+    /// Declared, and answers are arriving.
+    Clear,
+}
+
+/// The tone [`ironwire_state_line`]'s sentence is painted in.
+///
+/// ONE BRANCH TABLE, NOT TWO -- and, since this crossed the ABI, not four.
+/// This takes what the sentence takes, so the two stay in step by
+/// construction, and no shell may recover it by comparing the rendered
+/// sentence against one of the three state constants.
+///
+/// A state this build has never heard of is [`StateTone::Neutral`], which
+/// claims nothing, exactly as its sentence does.
+#[must_use]
+pub fn ironwire_state_tone(state: &str) -> StateTone {
+    match state {
+        "awaiting_rows" => StateTone::Held,
+        "rows_seen" => StateTone::Clear,
+        _ => StateTone::Neutral,
+    }
+}
+
+/// Whether the "last checked" stamp says anything on this state.
+///
+/// It is a per-process stamp on the running daemon -- never an install
+/// date, never a connected-since -- and it starts empty again every time
+/// that process comes back up. On a state that has had no answer at all
+/// there is nothing for it to report.
+///
+/// Derived from [`ironwire_state_tone`] rather than matched again, so a
+/// state added later cannot be given a sentence and a tone here and then
+/// silently disagree with the three shells about the stamp.
+#[must_use]
+pub fn ironwire_shows_last_checked(state: &str) -> bool {
+    ironwire_state_tone(state) != StateTone::Neutral
 }
 
 /// When the daemon last got an answer.
@@ -411,6 +496,70 @@ mod tests {
             tool_word("watch", ToolWiring::NotWired),
             tool_word("watch", ToolWiring::Unknown)
         );
+    }
+
+    /// The state's tone and its sentence are one decision.
+    ///
+    /// Asserted over every state this build knows plus ones it does not, so
+    /// the two tables cannot disagree about what a state means -- which is
+    /// the whole reason both cross the ABI rather than being written out in
+    /// each shell.
+    #[test]
+    fn every_state_tone_agrees_with_the_sentence_that_state_gets() {
+        for state in [
+            "not_declared",
+            "awaiting_rows",
+            "rows_seen",
+            "",
+            "ROWS_SEEN",
+            "a_state_from_a_later_daemon",
+        ] {
+            let line = ironwire_state_line(state);
+            let tone = ironwire_state_tone(state);
+            let expected = match line {
+                IRONWIRE_STATE_WAITING => StateTone::Held,
+                IRONWIRE_STATE_READING => StateTone::Clear,
+                _ => StateTone::Neutral,
+            };
+            assert_eq!(tone, expected, "{state:?} reads {line:?} as {tone:?}");
+            // The stamp is shown exactly where the state has had an answer.
+            assert_eq!(
+                ironwire_shows_last_checked(state),
+                tone != StateTone::Neutral,
+                "{state:?}"
+            );
+        }
+
+        // Named rather than left to the loop: the state that is normal and
+        // must never read as a fault.
+        assert_eq!(ironwire_state_tone("awaiting_rows"), StateTone::Held);
+        assert_eq!(ironwire_state_tone("not_declared"), StateTone::Neutral);
+        assert!(!ironwire_shows_last_checked("not_declared"));
+    }
+
+    /// The tone and the word are one decision, asserted over every input
+    /// pair rather than on the three a screenshot would show.
+    ///
+    /// This is what lets all three shells style from [`tool_tone`] and
+    /// never from the rendered string: if the two branch tables ever
+    /// disagree, they disagree here first.
+    #[test]
+    fn the_reassuring_tone_falls_exactly_on_the_word_that_claims_privacy() {
+        for mode in ["off", "watch", "unset", "", "OFF", "something_new"] {
+            for wiring in [ToolWiring::Wired, ToolWiring::NotWired, ToolWiring::Unknown] {
+                let word = tool_word(mode, wiring);
+                let tone = tool_tone(mode, wiring);
+                assert_eq!(
+                    tone == ToolTone::Clear,
+                    word == TOOL_PRIVATE,
+                    "{mode:?}/{wiring:?} rendered {word:?} with {tone:?}"
+                );
+            }
+        }
+        // Named rather than left to the loop: the two cases a reader of the
+        // screen would check.
+        assert_eq!(tool_tone("watch", ToolWiring::Wired), ToolTone::Clear);
+        assert_eq!(tool_tone("off", ToolWiring::Wired), ToolTone::Neutral);
     }
 
     /// The failure a real contributor hits, and the one fact that fixes

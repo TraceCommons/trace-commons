@@ -271,8 +271,15 @@ public sealed class RoutingModes
     public string Gemini { get; init; } = string.Empty;
 }
 
-/// <summary>One tool's name and its one word.</summary>
-public sealed record RoutingToolRow(string Name, string Word)
+/// <summary>One tool's name, its one word, and how that word is painted.</summary>
+/// <remarks>
+/// The tone travels with the word because both are decided by the same
+/// shared branch table, from the same two inputs. A view must take it from
+/// here and never re-derive it from <see cref="Word"/>: that would be a text
+/// comparison against a privacy claim, and "Private" is a substring of the
+/// denial that must never come back.
+/// </remarks>
+public sealed record RoutingToolRow(string Name, string Word, RoutingTone Tone)
 {
     /// <summary>
     /// Read as one statement, not as a name and a stray word beside it.
@@ -326,7 +333,11 @@ public static class RoutingTools
     public const string CodexId = "codex";
     public const string GeminiId = "gemini";
 
-    // The daemon's three routing states, from `status.routing.state`.
+    // The daemon's three routing states, from `status.routing.state`. Wire
+    // values, and no longer a branch table: which sentence each reaches is
+    // decided in routing_copy.rs and crosses the ABI. They are named here so
+    // this shell and its tests can talk about the states the daemon reports
+    // without spelling the literal in several files.
     public const string NotDeclared = "not_declared";
     public const string AwaitingRows = "awaiting_rows";
     public const string RowsSeen = "rows_seen";
@@ -344,20 +355,28 @@ public static class RoutingTools
     {
         ArgumentNullException.ThrowIfNull(copy);
 
-        // Only "off" means the tool is not used: "unset" watches the
-        // conventional location, which is a tool in use.
-        if (string.Equals(sourceMode, "off", StringComparison.Ordinal))
-        {
-            return copy.WordNotUsed;
-        }
-
-        return wiring switch
-        {
-            ToolWiring.Wired => copy.WordPrivate,
-            ToolWiring.NotWired => copy.WordDirect,
-            _ => copy.WordUnknown,
-        };
+        // NOT A BRANCH TABLE HERE. Which of the four words a tool gets is
+        // decided once, in routing_copy.rs, and crosses the ABI. It used to
+        // be written out again in this file and again in Swift: three copies
+        // of one decision that could drift apart in silence, because every
+        // string they returned stayed identical.
+        //
+        // A word the ABI would not produce falls back to the one that claims
+        // nothing, never to a word chosen here.
+        return RoutingSurface.ToolWord(sourceMode, wiring) ?? copy.WordUnknown;
     }
+
+    /// <summary>
+    /// How that word is painted, from the same two inputs.
+    /// </summary>
+    /// <remarks>
+    /// From <see cref="ToolWiring"/>, never from the rendered word. A bool
+    /// meaning "this is the privacy word" invites a text comparison later,
+    /// and a text comparison against a privacy claim is the shape that once
+    /// let "unreachable" match "reachable" on this same surface.
+    /// </remarks>
+    public static RoutingTone ToolTone(string sourceMode, ToolWiring wiring) =>
+        RoutingSurface.ToolTone(sourceMode, wiring);
 
     /// <summary>
     /// One row per tool, in the order the surface shows them.
@@ -383,8 +402,14 @@ public static class RoutingTools
         string name,
         string mode,
         string id,
-        RoutingEvidence? evidence) =>
-        new(name, ToolWord(copy, mode, evidence?.WiringFor(id) ?? ToolWiring.Unknown));
+        RoutingEvidence? evidence)
+    {
+        ToolWiring wiring = evidence?.WiringFor(id) ?? ToolWiring.Unknown;
+        return new RoutingToolRow(
+            name,
+            ToolWord(copy, mode, wiring),
+            ToolTone(mode, wiring));
+    }
 
     /// <summary>
     /// One outcome, one sentence.
@@ -418,12 +443,11 @@ public static class RoutingTools
     public static string StateLine(RoutingCopy copy, string state)
     {
         ArgumentNullException.ThrowIfNull(copy);
-        return state switch
-        {
-            AwaitingRows => copy.StateWaiting,
-            RowsSeen => copy.StateReading,
-            _ => copy.StateOff,
-        };
+
+        // Decided across the ABI, for the reason on ToolWord. A sentence the
+        // ABI would not produce falls back to the off line, which is what an
+        // unknown state reads as anyway: it claims nothing.
+        return RoutingSurface.StateLine(state) ?? copy.StateOff;
     }
 
     /// <summary>
@@ -436,12 +460,7 @@ public static class RoutingTools
     /// anything on this card. Painting it as broken would accuse a working
     /// proxy at exactly that moment.
     /// </remarks>
-    public static RoutingTone StateTone(string state) => state switch
-    {
-        AwaitingRows => RoutingTone.Held,
-        RowsSeen => RoutingTone.Clear,
-        _ => RoutingTone.Neutral,
-    };
+    public static RoutingTone StateTone(string state) => RoutingSurface.StateTone(state);
 
     /// <summary>
     /// "Last checked ...", around this shell's own humanised time.

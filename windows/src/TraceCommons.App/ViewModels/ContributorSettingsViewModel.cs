@@ -46,6 +46,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string _routingTokenDir = string.Empty;
     private string _routingProbeText = string.Empty;
     private string _routingStateText = string.Empty;
+    private RoutingTone _routingStateTone = RoutingTone.Neutral;
     private string? _routingLastChecked;
     private RoutingModes _routingModes = new();
 
@@ -187,6 +188,60 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         get => _routingStateText;
         private set => Set(ref _routingStateText, value);
     }
+
+    /// <summary>
+    /// How firmly that sentence reads, from the daemon's state.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RoutingTools.StateTone"/> already gated the "last checked"
+    /// stamp inside <see cref="RoutingTools.StatusLine"/>, but this shell
+    /// threw the tone away and painted the sentence flat. GTK has painted
+    /// this row from the same three states since it was written; this is
+    /// that parity.
+    ///
+    /// None of the three states is a fault, so this never reaches a fault
+    /// colour: <c>awaiting_rows</c> is held and not broken -- a reader built
+    /// a moment ago starts cold by construction, and that is the state a
+    /// contributor sees immediately after touching anything on this card.
+    ///
+    /// From the state, never from <see cref="RoutingStateText"/>. The word
+    /// half of this surface used to recover its tone by comparing a rendered
+    /// privacy claim, and that is the shape being removed everywhere.
+    /// </remarks>
+    public RoutingTone RoutingStateTone
+    {
+        get => _routingStateTone;
+        private set
+        {
+            if (_routingStateTone == value)
+            {
+                return;
+            }
+
+            _routingStateTone = value;
+            Raise(nameof(RoutingStateTone));
+            Raise(nameof(RoutingStateIsClear));
+            Raise(nameof(RoutingStateIsHeld));
+            Raise(nameof(RoutingStateIsNeutral));
+        }
+    }
+
+    /// <summary>
+    /// The XAML projection of <see cref="RoutingStateTone"/>, and only that.
+    ///
+    /// Three visibilities rather than one bound brush because the tone
+    /// colours live in a theme dictionary and only <c>ThemeResource</c>
+    /// resolves those correctly in both themes. All three read the enum;
+    /// none reads the sentence.
+    /// </summary>
+    public bool RoutingStateIsClear => RoutingStateTone == RoutingTone.Clear;
+
+    /// <summary>The held reading. Normal, never a fault.</summary>
+    public bool RoutingStateIsHeld => RoutingStateTone == RoutingTone.Held;
+
+    /// <summary>Says nothing either way, and is the default.</summary>
+    public bool RoutingStateIsNeutral =>
+        RoutingStateTone != RoutingTone.Clear && RoutingStateTone != RoutingTone.Held;
 
     /// <summary>
     /// When the daemon last got an answer.
@@ -963,6 +1018,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             status?.RoutingState ?? string.Empty,
             status?.Routing?.LastRefreshAt);
         RoutingStateText = line.Text;
+        RoutingStateTone = line.Tone;
         SetRoutingLastChecked(line.LastChecked);
     }
 
@@ -1144,10 +1200,15 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 /// <remarks>
 /// Both strings come from the shared source across the C ABI; nothing here
 /// composes wording, and no property here derives a second verdict from the
-/// word. The four words are styled identically, deliberately: the wired word
-/// is a substring of a denial that must never come back, and any test of the
-/// word's text to decide how to paint it is one <c>Contains</c> away from the
-/// bug that matched "unreachable" as "reachable" on this same surface.
+/// word.
+///
+/// The wired row is toned, matching the GTK shell. The tone arrives on
+/// <see cref="RoutingToolRow"/>, decided by the same shared branch table that
+/// chose the word, and NOTHING here reads <see cref="Word"/> to reach it: the
+/// wired word is a substring of a denial that must never come back, and a
+/// test of the word's text to decide how to paint it is one <c>Contains</c>
+/// away from the bug that matched "unreachable" as "reachable" on this same
+/// surface.
 /// </remarks>
 public sealed class RoutingToolRowViewModel
 {
@@ -1156,12 +1217,30 @@ public sealed class RoutingToolRowViewModel
         ArgumentNullException.ThrowIfNull(row);
         Name = row.Name;
         Word = row.Word;
+        Tone = row.Tone;
         AccessibleLabel = row.AccessibleLabel;
     }
 
     public string Name { get; }
 
     public string Word { get; }
+
+    /// <summary>
+    /// How the word is painted, straight from the shared table.
+    /// </summary>
+    public RoutingTone Tone { get; }
+
+    /// <summary>
+    /// The XAML projection of <see cref="Tone"/>, and only that.
+    ///
+    /// Two visibilities rather than one bound brush because the tone colours
+    /// live in a theme dictionary and only <c>ThemeResource</c> resolves them
+    /// correctly in both themes. Both read the enum; neither reads the word.
+    /// </summary>
+    public bool ShowsClearWord => Tone == RoutingTone.Clear;
+
+    /// <summary>The other half of <see cref="ShowsClearWord"/>.</summary>
+    public bool ShowsNeutralWord => Tone != RoutingTone.Clear;
 
     /// <summary>The row read as one statement, for a screen reader.</summary>
     public string AccessibleLabel { get; }

@@ -114,11 +114,17 @@ final class AppModel: ObservableObject {
     /// shared word like every other on this card.
     @Published private(set) var routingChecking = false
 
-    /// The three sentences that interpolate, taken straight from the Rust.
-    /// This shell fills in no holes; see `TCRoutingCopy`.
-    let routingSentences = RoutingSentences(
+    /// Everything on this surface that is decided in the Rust: the sentences
+    /// that interpolate, and the two branch tables that pick a word and a
+    /// state line. This shell fills in no holes and owns no `switch`; see
+    /// `TCRoutingCopy`.
+    let routingCalls = RoutingCalls(
         tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
-        unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) }
+        unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+        toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
+        toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
+        stateLine: { TCRoutingCopy.stateLine(state: $0) },
+        stateTone: { TCRoutingCopy.stateTone(state: $0) }
     )
     @Published private(set) var outcomeCounts: [String: Int] = [:]
     @Published private(set) var audit: [AuditEntry] = []
@@ -604,7 +610,7 @@ final class AppModel: ObservableObject {
                 // what a refused call degrades to here.
                 guard let copy = self.routingCopy else { return }
                 self.routingProbeLine = RoutingSurface.probeLine(
-                    outcome ?? .unknown, copy: copy, sentences: self.routingSentences
+                    outcome ?? .unknown, copy: copy, calls: self.routingCalls
                 )
                 self.routingEvidence = evidence
             }
