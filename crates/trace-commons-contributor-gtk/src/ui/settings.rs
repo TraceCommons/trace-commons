@@ -1024,7 +1024,7 @@ fn render_tool_rows(app: &Rc<App>) {
             .build();
         label.add_css_class("tc-body");
         row.append(&label);
-        let tone = if word == copy::TOOL_VIA_IRONWIRE {
+        let tone = if word == copy::TOOL_PRIVATE {
             Tone::Clear
         } else {
             Tone::Neutral
@@ -2673,7 +2673,7 @@ mod tests {
         );
         assert_eq!(
             copy::tool_word("watch", tool_wiring(Some(&alive), IRONWIRE_TOOL_CLAUDE)),
-            copy::TOOL_VIA_IRONWIRE
+            copy::TOOL_PRIVATE
         );
 
         // Each failure carries the tool list a *previous* good answer had,
@@ -2700,7 +2700,7 @@ mod tests {
             );
             let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
             assert_eq!(word, copy::TOOL_UNKNOWN, "{dead}");
-            assert_ne!(word, copy::TOOL_VIA_IRONWIRE, "{dead}");
+            assert_ne!(word, copy::TOOL_PRIVATE, "{dead}");
         }
     }
 
@@ -2721,7 +2721,7 @@ mod tests {
             serde_json::json!([{ "id": "claude", "installed": true, "wired": true }]),
         ));
         let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
-        assert_eq!(word, copy::TOOL_VIA_IRONWIRE);
+        assert_eq!(word, copy::TOOL_PRIVATE);
         // The state the daemon would be reporting alongside it, in either
         // of its two "on" values, changes nothing about that word.
         assert_ne!(routing_tone(ROUTING_AWAITING_ROWS), Tone::Attention);
@@ -2777,7 +2777,7 @@ mod tests {
         let claude = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
         let codex = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CODEX));
         let gemini = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_GEMINI));
-        assert_eq!(claude, copy::TOOL_VIA_IRONWIRE);
+        assert_eq!(claude, copy::TOOL_PRIVATE);
         assert_eq!(codex, copy::TOOL_DIRECT);
         assert_eq!(gemini, copy::TOOL_UNKNOWN);
         assert_ne!(claude, codex);

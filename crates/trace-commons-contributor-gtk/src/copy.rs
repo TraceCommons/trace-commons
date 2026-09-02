@@ -1838,10 +1838,29 @@ pub const TOOLS_HEADING: &str = "Tools";
 
 /// IronWire answered, and reports this tool as pointed at a local address.
 ///
-/// The strongest thing this page may print, and deliberately weaker than
-/// the word it replaced: it is a claim about the first hop on this machine,
-/// not about what reaches a model afterwards.
-pub const TOOL_VIA_IRONWIRE: &str = "Via IronWire";
+/// # What this word claims, and the gap under it
+///
+/// "Private" is what a contributor came here to learn, and naming the
+/// vendor instead tells them nothing they can act on. So this is the word.
+///
+/// Be clear-eyed about what backs it. IronWire reports a tool as wired when
+/// its config names **any loopback host, on any port, with the path
+/// `/anthropic`** -- deliberately, so `ironwire connect` can follow a port
+/// change. Nothing on that response carries a port or a URL, so this app
+/// cannot today distinguish IronWire from some other local proxy answering
+/// on the same path. In that configuration this word would be wrong.
+///
+/// That configuration is unusual, and the alternative -- printing a vendor
+/// name and leaving the person to work out whether it means their code is
+/// exposed -- is worse for every ordinary case. The gap closes properly
+/// when IronWire exposes either the URL a tool points at or a `wired`
+/// computed against the running port; the ask is with them, and
+/// `points_at_us` already parses that port and discards it.
+///
+/// Until then: this word is only ever printed from IronWire's per-tool
+/// answer, never from our own switch, and never when the probe did not
+/// reach.
+pub const TOOL_PRIVATE: &str = "Private";
 /// IronWire answered, and this tool is not pointed at it.
 pub const TOOL_DIRECT: &str = "Sends direct";
 /// Nothing usable answered, or the answer did not mention this tool.
@@ -1940,7 +1959,7 @@ pub fn tool_word(source_mode: &str, wiring: ToolWiring) -> &'static str {
         return TOOL_NOT_USED;
     }
     match wiring {
-        ToolWiring::Wired => TOOL_VIA_IRONWIRE,
+        ToolWiring::Wired => TOOL_PRIVATE,
         ToolWiring::NotWired => TOOL_DIRECT,
         ToolWiring::Unknown => TOOL_UNKNOWN,
     }
@@ -2889,7 +2908,7 @@ mod tests {
     /// one. It fails on the next word that reintroduces the shape.
     #[test]
     fn no_tool_word_contains_another_so_contains_cannot_match_the_wrong_one() {
-        let words = [TOOL_VIA_IRONWIRE, TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED];
+        let words = [TOOL_PRIVATE, TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED];
         for (i, one) in words.iter().enumerate() {
             for (j, other) in words.iter().enumerate() {
                 if i == j {
@@ -2904,23 +2923,28 @@ mod tests {
         }
     }
 
-    /// No word on this surface claims privacy, in any casing.
+    /// Exactly one word claims privacy, and no word denies it.
     ///
-    /// The defect this whole change exists to remove was a wrong
-    /// declaration producing a confident privacy claim in the one string a
-    /// person actually reads. "Private" is a substring of "Not private", so
-    /// a word that merely *denied* privacy would still trip a naive
-    /// `contains` check somewhere else; the rule is that the concept does
-    /// not appear at all.
+    /// The defect this surface exists to remove was a wrong *declaration*
+    /// producing a confident privacy claim. The claim itself is fine --
+    /// it is what a contributor came to learn -- as long as it is printed
+    /// only from IronWire's per-tool answer, which the state-mapping tests
+    /// pin.
+    ///
+    /// What must not come back is a word that **denies** privacy. "Private"
+    /// is a substring of "Not private", so the two together are the exact
+    /// shape that let `contains("reachable")` match "unreachable" earlier on
+    /// this surface. `TOOL_DIRECT` says "Sends direct" for that reason, and
+    /// this test is what stops somebody tidying it to "Not private".
     #[test]
-    fn no_tool_word_asserts_privacy() {
-        for word in [TOOL_VIA_IRONWIRE, TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED] {
-            assert!(!word.to_lowercase().contains("privat"), "{word}");
+    fn only_the_wired_word_claims_privacy_and_none_denies_it() {
+        assert!(TOOL_PRIVATE.to_lowercase().contains("privat"));
+        for word in [TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED] {
+            assert!(
+                !word.to_lowercase().contains("privat"),
+                "a word that denies privacy reintroduces the substring trap: {word}"
+            );
         }
-        assert!(
-            !IRONWIRE_INTRO.to_lowercase().contains("privat"),
-            "{IRONWIRE_INTRO}"
-        );
     }
 
     /// One tool, one word, and the switch is not an input to any of them.
@@ -2933,12 +2957,12 @@ mod tests {
         for wiring in [ToolWiring::Wired, ToolWiring::NotWired, ToolWiring::Unknown] {
             assert_eq!(tool_word("off", wiring), TOOL_NOT_USED);
         }
-        assert_eq!(tool_word("watch", ToolWiring::Wired), TOOL_VIA_IRONWIRE);
+        assert_eq!(tool_word("watch", ToolWiring::Wired), TOOL_PRIVATE);
         assert_eq!(tool_word("watch", ToolWiring::NotWired), TOOL_DIRECT);
         assert_eq!(tool_word("watch", ToolWiring::Unknown), TOOL_UNKNOWN);
         // "unset" means the conventional location is watched, which is a
         // tool in use.
-        assert_eq!(tool_word("unset", ToolWiring::Wired), TOOL_VIA_IRONWIRE);
+        assert_eq!(tool_word("unset", ToolWiring::Wired), TOOL_PRIVATE);
         assert_eq!(tool_word("unset", ToolWiring::Unknown), TOOL_UNKNOWN);
         // A mode this build has never heard of is still a tool in use, and
         // still gets no verdict without evidence.
@@ -3115,7 +3139,7 @@ mod tests {
         );
         for expected in [
             TOOLS_HEADING,
-            TOOL_VIA_IRONWIRE,
+            TOOL_PRIVATE,
             TOOL_DIRECT,
             TOOL_UNKNOWN,
             TOOL_NOT_USED,
