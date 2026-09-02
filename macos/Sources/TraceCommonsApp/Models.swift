@@ -24,7 +24,17 @@ enum QueueState: String, Codable {
 struct QueueEntry: Decodable, Identifiable, Hashable {
     let entryID: String
     let sessionHash: String
+    /// Which ADAPTER produced this. Not always the tool the contributor
+    /// used -- see `declaredSource`.
     let source: String
+    /// What the transcript declares itself to be, when the daemon knew it.
+    ///
+    /// An imported Antigravity conversation is stored as a trajectory file,
+    /// so `source` says `trajectory`: the storage format, and not the word
+    /// the contributor typed to collect it. Optional because every native
+    /// adapter declares nothing, and because a daemon predating the field
+    /// sends none.
+    let declaredSource: String?
     /// The opaque id `set_project_mode` and `approve`'s `project_id` filter
     /// both accept. Never a path, and never `projectLabel` -- the daemon
     /// refuses a label there (`project-key-unrecognized`), and a label is
@@ -65,6 +75,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case entryID = "entry_id"
         case sessionHash = "session_hash"
         case source
+        case declaredSource = "declared_source"
         case projectID = "project_id"
         case projectLabel = "project_label"
         case sizeBytes = "size_bytes"
@@ -76,12 +87,23 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case subagentsDropped = "subagents_dropped"
     }
 
-    /// "Claude Code" / "Codex", never the raw source token.
+    /// "Claude Code" / "Antigravity", never the raw source token.
+    ///
+    /// Prefers what the transcript declares over the adapter that stores
+    /// it: an imported Antigravity conversation is a trajectory FILE, and
+    /// calling it "Letta trajectory" names the format rather than the tool
+    /// the contributor used.
+    ///
+    /// The `default` arm deliberately falls back to `source`, not to the
+    /// coalesced value: an unrecognised declaration is untrusted text out
+    /// of a file, and title-casing it onto the screen is a different
+    /// decision from mapping a slug this build knows.
     var agentName: String {
-        switch source {
+        switch declaredSource ?? source {
         case "claude-code", "claude_code": return "Claude Code"
         case "codex": return "Codex"
         case "gemini-cli", "gemini_cli": return "Gemini CLI"
+        case "antigravity": return "Antigravity"
         case "trajectory", "letta_trajectory": return "Letta trajectory"
         default:
             return source

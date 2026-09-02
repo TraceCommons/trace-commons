@@ -351,6 +351,73 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// All-time totals for the public register-stats aggregate. Crosses
+    /// tenants the same way `compute_leaderboard_inputs` and
+    /// `compute_corpus_analytics_summary` do: per-tenant transactions under
+    /// the RLS tenant GUC, never a raw cross-tenant query and never
+    /// `BYPASSRLS`.
+    ///
+    /// `configured_tenant_ids` is the same escape hatch
+    /// `compute_leaderboard_inputs` / `compute_corpus_analytics_summary`
+    /// take: when non-empty, enumerate exactly those tenants; when empty,
+    /// fall back to `SELECT tenant_id FROM trace_tenants`. That fallback
+    /// query carries no tenant GUC, and `trace_tenants` is itself
+    /// FORCE-RLS'd on `tenant_id = trace_current_tenant_id()` -- so under a
+    /// NOBYPASSRLS runtime role with no tenant context, it silently returns
+    /// zero rows rather than erroring. Implementations MUST refuse
+    /// (`Err`) rather than compute totals when the resolved tenant list is
+    /// empty: a zero here is indistinguishable from "the register really
+    /// has nothing" and from "RLS ate the enumeration," and only the first
+    /// is safe to publish. (This is why a superuser-connected pg test
+    /// cannot exercise the failure mode this guards against -- the owning
+    /// test principal bypasses the RLS that would otherwise produce it.)
+    async fn compute_register_stats_totals(
+        &self,
+        _configured_tenant_ids: &[String],
+    ) -> Result<RegisterStatsTotals, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "compute_register_stats_totals not implemented".to_string(),
+        ))
+    }
+
+    /// Read the `trace_register_stats` singleton row as it stands.
+    async fn fetch_register_stats_row(&self) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "fetch_register_stats_row not implemented".to_string(),
+        ))
+    }
+
+    /// Read the same singleton row, but under the dedicated
+    /// `trace_commons_public_read` role, for the unauthenticated public
+    /// endpoint.
+    ///
+    /// Separate from [`Database::fetch_register_stats_row`] on purpose. That
+    /// one runs as the ordinary runtime role, which reaches this row through
+    /// the unscoped `trace_register_stats_runtime_read` policy and could
+    /// reach every other table besides. The unauthenticated path takes the
+    /// least-privileged route V55 built for it: a NOBYPASSRLS role holding
+    /// one column-scoped SELECT grant and nothing else, so a mistake in this
+    /// handler cannot become a read of anything but six aggregate columns.
+    async fn fetch_register_stats_row_as_public_read(
+        &self,
+    ) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "fetch_register_stats_row_as_public_read not implemented".to_string(),
+        ))
+    }
+
+    /// Write freshly computed totals into the `trace_register_stats`
+    /// singleton row, stamping both `as_of` and `refreshed_at` to now, and
+    /// clearing `withheld`. Returns the row as written.
+    async fn write_register_stats_row(
+        &self,
+        _totals: RegisterStatsTotals,
+    ) -> Result<RegisterStatsRow, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "write_register_stats_row not implemented".to_string(),
+        ))
+    }
+
     /// Insert a pre-rendered leaderboard snapshot. `contents_jsonb` is
     /// the wire-shape payload the read endpoints will serve verbatim.
     async fn insert_leaderboard_snapshot(
@@ -1519,6 +1586,42 @@ pub struct CorpusAnalyticsSummary {
     /// Labels: `both_passed`, `novelty_failed`, `perplexity_failed`,
     /// `both_failed`.
     pub gate_outcomes: Vec<(String, i64)>,
+}
+
+/// All-time, all-tenant totals for [`Database::compute_register_stats_totals`].
+/// Feeds the `trace_register_stats` singleton row that the public register
+/// endpoint reads; computed from the same tables the tenant-scoped admin
+/// summaries already read, crossed the same way `compute_corpus_analytics_summary`
+/// crosses tenants -- per-tenant transactions under the RLS tenant GUC,
+/// never `BYPASSRLS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterStatsTotals {
+    pub traces_accepted: i64,
+    /// Distinct `credit_account_ref` values across every tenant's credit
+    /// ledger.
+    pub contributors: i64,
+    /// Sum of positive `points_delta` across every tenant's credit ledger.
+    pub points_issued: i64,
+}
+
+/// The `trace_register_stats` singleton row, as read or as just written by
+/// [`Database::fetch_register_stats_row`] / [`Database::write_register_stats_row`].
+/// `refreshed_at` is `None` until a refresh has actually run; the public
+/// endpoint (a later slice) must refuse to publish while it is `None`,
+/// because a zero would be a claim about the register nobody made.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegisterStatsRow {
+    pub traces_accepted: i64,
+    pub contributors: i64,
+    pub points_issued: i64,
+    /// The computed/never-computed marker: TRUE until a refresh has run, and
+    /// cleared by every refresh. Not an operator control -- see `suppressed`.
+    pub withheld: bool,
+    /// The operator's lever. No refresh ever writes it, so suppression set
+    /// during an incident survives the next scheduled run.
+    pub suppressed: bool,
+    pub as_of: chrono::DateTime<chrono::Utc>,
+    pub refreshed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Write-shape for [`Database::insert_leaderboard_snapshot`]. The caller
