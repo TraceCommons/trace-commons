@@ -17,6 +17,7 @@ pub mod pricing;
 pub mod routing;
 pub mod routing_copy;
 pub mod source;
+pub mod source_copy;
 pub mod submit;
 pub mod update;
 pub mod watch_events;

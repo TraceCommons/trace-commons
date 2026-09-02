@@ -447,6 +447,32 @@ char*       tc_routing_unreachable_line(int32_t port);
  */
 char*       tc_routing_last_checked(const char* when);
 
+/* The settings screen's session-source row for one tool, assembled.
+ *
+ * tool is "claude", "codex" or "gemini". source_mode is get_settings's
+ * *_source_mode -- "watch", "off" or "unset".
+ *
+ * THREE MODES, THREE SENTENCES. *_root_configured is (mode == "watch") and is
+ * therefore false for both "off" and "unset". A shell that branches on that
+ * boolean tells a contributor who declared a tool OFF that their sessions are
+ * being read from the usual place, which is false in the fail-open direction
+ * on the one screen they would check to confirm otherwise. Call this with the
+ * mode word and render what comes back; do not add a second branch of your
+ * own, and do not build the "off" line as the "unset" line with a "not" in
+ * front -- no word on this surface may deny a claim another word makes.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * A source_mode this build does not know renders as "unset", deliberately:
+ * an older daemon sends no mode at all, and claiming nothing is read from a
+ * folder that is being scanned is the worse of the two errors. An unknown
+ * tool is refused, because there is no safe sentence for a tool with no name.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL with
+ * "unknown-source-tool", "null-pointer", "invalid-utf8" or "panic" recorded
+ * for tc_last_error.
+ */
+char*       tc_source_check_line(const char* tool, const char* source_mode);
 
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
  * contributor what is removed without transcribing the list.

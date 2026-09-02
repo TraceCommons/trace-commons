@@ -124,11 +124,13 @@ struct SettingsContent: View {
                 }
             }
             if let settings = model.daemonSettings {
-                // Booleans only. The contract reports the credential and both
-                // session roots as configured-or-not, and this view has
-                // nowhere to put a value even if it were sent one.
-                checkRow("Claude Code sessions folder set", settings.claudeRootConfigured)
-                checkRow("Codex sessions folder set", settings.codexRootConfigured)
+                // No path and no credential: the contract keeps both off the
+                // wire, and this view has nowhere to put one even if it were
+                // sent it. The two session rows are driven by the MODE --
+                // `*_root_configured` is `mode == "watch"` and cannot tell
+                // "not declared" from "declared off".
+                sourceCheckRow(TCSourceChecks.claude, settings.routingSourceModes.claude)
+                sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)
                 checkRow("Extra privacy scan configured", settings.nearAIConfigured)
             }
         }
@@ -1048,6 +1050,25 @@ struct SettingsContent: View {
         }
         guard let project, !project.isEmpty else { return sentence }
         return "\(sentence) \(project)"
+    }
+
+    /// One session-source row, worded by the Rust from the MODE.
+    ///
+    /// Not from `claudeRootConfigured`, which is `mode == "watch"` and so is
+    /// false for `off` as well as for `unset`. The GTK and Windows shells
+    /// branched on that boolean and printed "sessions read from the usual
+    /// place" for a tool the contributor had declared off; this view printed
+    /// an unticked "sessions folder set", which is not false but says
+    /// nothing about what `off` means. All three now render one sentence per
+    /// mode, from `trace_commons_contributor::source_copy`.
+    ///
+    /// Nothing is drawn if the ABI refused. A blank row is better than a
+    /// sentence about somebody's session folder written in Swift.
+    @ViewBuilder
+    private func sourceCheckRow(_ tool: String, _ sourceMode: String) -> some View {
+        if let line = TCSourceChecks.checkLine(tool: tool, sourceMode: sourceMode) {
+            checkRow(line, sourceMode == "watch")
+        }
     }
 
     /// Spec §5.4 / §6.9: a 12pt filled green disc carrying a white tick, then

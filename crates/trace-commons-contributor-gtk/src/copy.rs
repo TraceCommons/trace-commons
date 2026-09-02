@@ -780,10 +780,14 @@ pub const COMMUNITY_FOOTNOTE: &str = "Shown only while \"List my handle publicly
 pub const CONNECTION_HEADING: &str = "Connection";
 pub const CONNECTED: &str = "Connected";
 pub const NOT_CONNECTED: &str = "Not connected";
-pub const CHECK_CLAUDE_SET: &str = "Claude Code sessions folder set";
-pub const CHECK_CLAUDE_DEFAULT: &str = "Claude Code sessions read from the usual place";
-pub const CHECK_CODEX_SET: &str = "Codex sessions folder set";
-pub const CHECK_CODEX_DEFAULT: &str = "Codex sessions read from the usual place";
+// The two session-source rows are NOT constants here. They were, as a
+// set/default pair each, and the "default" half was printed for `off` as
+// well as for `unset` -- so a contributor who said they do not use Claude
+// Code was told its sessions were being read from the usual place. Three
+// modes need three sentences, and the other two shells print them too, so
+// the words live in `trace_commons_contributor::source_copy` and this
+// shell re-exports the one definition.
+pub use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
 pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
 pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 
