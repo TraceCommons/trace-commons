@@ -6,4 +6,5 @@
 //! verification code cannot live behind the AGPL boundary that
 //! `trace-commons-server` sits on.
 
+pub mod quote;
 pub mod receipt;

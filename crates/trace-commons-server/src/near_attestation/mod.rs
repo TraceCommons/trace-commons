@@ -20,13 +20,12 @@
 pub mod client;
 pub mod drill;
 pub mod measurements;
-pub mod quote;
 
-/// Receipt verification moved to the permissive `trace-commons-attestation`
-/// crate so that client-side code can verify an attestation before sending
-/// raw bytes. Re-exported here so existing `crate::near_attestation::receipt`
-/// paths keep working.
-pub use trace_commons_attestation::receipt;
+/// Receipt and quote verification moved to the permissive
+/// `trace-commons-attestation` crate so that client-side code can verify an
+/// attestation before sending raw bytes. Re-exported here so existing
+/// `crate::near_attestation::{receipt, quote}` paths keep working.
+pub use trace_commons_attestation::{quote, receipt};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;

@@ -1,24 +1,21 @@
-// Copyright (C) 2026 K&Z Partners LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
-
 //! Verification of the Intel TDX quote carried inside a NEAR AI attestation
 //! report.
 //!
-//! [`super::AttestationReport::quote_binds_nonce`] proves that a nonce we
-//! chose is present inside the quote. On its own that is not worth much: a
-//! quote is just bytes, and anyone able to serve us a report can serve us a
-//! fabricated quote with our nonce written into it. This module is what makes
-//! the nonce binding mean something -- it checks the quote against Intel's
-//! DCAP collateral, so the report data we read out has been signed by a
-//! Quoting Enclave whose attestation key chains to Intel's root, on a
+//! `AttestationReport::quote_binds_nonce`, in the hosted server, proves that
+//! a nonce we chose is present inside the quote. On its own that is not worth
+//! much: a quote is just bytes, and anyone able to serve us a report can
+//! serve us a fabricated quote with our nonce written into it. This module is
+//! what makes the nonce binding mean something -- it checks the quote against
+//! Intel's DCAP collateral, so the report data we read out has been signed by
+//! a Quoting Enclave whose attestation key chains to Intel's root, on a
 //! platform whose TCB level Intel vouches for.
 //!
 //! The registers exposed on [`VerifiedQuote`] are read out of the *verified*
 //! quote structure. They are deliberately not copied from the report's
 //! `info.tcb_info` JSON, which is unsigned and is the server's own claim
 //! about itself; pinning against that would verify nothing. Measurement
-//! pinning (Task 3) must consume [`VerifiedQuote`], never
-//! [`super::UnverifiedJsonMeasurements`].
+//! pinning (Task 3) must consume [`VerifiedQuote`], never the server's
+//! `UnverifiedJsonMeasurements`.
 //!
 //! `compose_hash`, `os_image_hash` and `mr_aggregated` are deliberately
 //! absent here. They exist only in the unsigned JSON and are not recoverable
@@ -38,9 +35,9 @@ pub type Collateral = QuoteCollateralV3;
 /// Why a quote was refused.
 ///
 /// Variants deliberately carry no text from the underlying library. `dcap_qvl`
-/// error chains can quote collateral endpoint URLs, and this crate's logs and
-/// audit rows are hash-only. `detail_hash` is a truncated SHA-256 of the
-/// underlying message: two operators seeing the same hash are looking at the
+/// error chains can quote collateral endpoint URLs, and the hosted server's
+/// logs and audit rows are hash-only. `detail_hash` is a truncated SHA-256 of
+/// the underlying message: two operators seeing the same hash are looking at the
 /// same failure, without the message itself ever reaching a log line.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QuoteVerifyError {
@@ -129,11 +126,17 @@ pub fn verify_quote(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::near_attestation::AttestationReport;
 
-    const FIXTURE: &str = include_str!("../../tests/fixtures/near_ai_attestation_report.json");
-    const COLLATERAL: &str =
-        include_str!("../../tests/fixtures/near_ai_attestation_collateral.json");
+    // The fixtures stay in the server crate: four modules there still read
+    // the same two files, and a second copy would drift. `include_str!` is a
+    // compile-time read under `cfg(test)`, so it costs this crate nothing
+    // when it is vendored into a harness -- but it does mean a packaged copy
+    // of this crate alone cannot run its own tests.
+    const FIXTURE: &str =
+        include_str!("../../trace-commons-server/tests/fixtures/near_ai_attestation_report.json");
+    const COLLATERAL: &str = include_str!(
+        "../../trace-commons-server/tests/fixtures/near_ai_attestation_collateral.json"
+    );
 
     /// 2026-09-01T12:00:00Z. The fixture report and its collateral were both
     /// captured on 2026-09-01; the collateral's `nextUpdate` is
@@ -159,11 +162,16 @@ mod tests {
         v["_fixture_nonce"].as_str().unwrap().to_string()
     }
 
+    /// The raw quote bytes out of the fixture report.
+    ///
+    /// The hosted server reaches these through
+    /// `AttestationReport::quote_bytes`, which is exactly a hex decode of
+    /// `intel_quote`. That type is AGPL and stays behind the boundary, so
+    /// this reads the same field out of the same fixture directly rather
+    /// than dragging the server crate in as a dev-dependency.
     fn fixture_quote() -> Vec<u8> {
-        AttestationReport::from_json(FIXTURE)
-            .unwrap()
-            .quote_bytes()
-            .unwrap()
+        let v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        hex::decode(v["intel_quote"].as_str().unwrap()).unwrap()
     }
 
     #[test]

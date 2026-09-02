@@ -478,6 +478,41 @@ mod tests {
         assert_eq!(http.missing_control(), None);
     }
 
+    /// The refusal above is constructed by hand, so it proves the rendering
+    /// and nothing about the build. This one calls the real client and is
+    /// therefore the only thing that proves the feature gate is wired: with
+    /// `near-attestation-collateral` off, `fetch_collateral` must refuse by
+    /// this exact control name, before any network call. With the feature on
+    /// the method reaches Intel, so this test cannot exist in that build --
+    /// hence the `cfg`, and hence the CI job that builds the other side.
+    #[cfg(not(feature = "near-attestation-collateral"))]
+    #[tokio::test]
+    async fn without_the_collateral_feature_the_client_refuses_by_name() {
+        let client = HttpAttestationClient::new(
+            "https://invalid.test/v1",
+            "model",
+            SecretString::from("unused"),
+            "https://invalid.test",
+            Duration::from_secs(1),
+        )
+        .expect("client builds");
+        let err = client
+            .fetch_collateral(b"not a quote")
+            .await
+            .expect_err("a build without the collateral client cannot fetch collateral");
+        assert_eq!(
+            err,
+            AttestationClientError::MissingControl {
+                step: AttestationStep::Collateral,
+                control: COLLATERAL_CLIENT_CONTROL,
+            }
+        );
+        assert_eq!(
+            err.missing_control(),
+            Some("near_ai_attestation_collateral_client")
+        );
+    }
+
     #[test]
     fn error_messages_carry_no_url_or_body() {
         // The messages are what reach an operator. `detail_hash` is the only
