@@ -206,18 +206,33 @@ This is what converts "absence and failure are the same state" from a trap into
 a defensible design: the submission path still cannot fail, and the contributor
 can still see that nothing is arriving.
 
-### 5. Restart semantics, stated rather than hidden
+### 5. Changes apply immediately
 
-The ledger is built once at daemon construction, so a declaration change takes
-effect on restart. **This is not a macOS quirk; it is true everywhere**, and it
-happens to match macOS, which has no runtime settings write at all.
+**A declaration takes effect on the next poll, not the next launch.** Asking
+someone to restart an app because they typed a port is the kind of friction that
+makes a feature feel broken, and "restart to apply" is the sentence people skip
+before mistaking a working setting for a dead one.
 
-Two honest options, and this spec picks the first:
+Today the ledger is a plain field on `DaemonShared`, built once at load:
+`routing: Option<Arc<IronWireLedger>>`. Making it hot-swappable is contained --
+the field becomes an `RwLock<Option<Arc<..>>>`, `source_roots_with_routing` and
+`refresh_routing` read through the lock, and the `set_settings` handler rebuilds
+it from the new declaration. Three test sites assign the field directly and
+follow.
 
-- **Say so.** The declaration UI states that routing changes apply after a
-  restart, and offers the restart. Cheap, truthful, consistent across shells.
-- Make the ledger rebuildable on settings change. More code in the daemon, and
-  it still cannot help macOS.
+There is a real cost and it lands on macOS. That shell never calls
+`set_settings` at runtime -- its only IPC methods are `set_project_mode`,
+`set_consent_scopes` and `set_public_profile`, and declarations enter at daemon
+start through `tc_daemon_start_with_settings`. So macOS needs a runtime
+`set_settings` path it does not have today. The FFI already exposes the generic
+method, so this is a shell change rather than an ABI change, but it is the
+largest single item in the macOS half and it should be budgeted as such rather
+than discovered.
+
+A rebuilt ledger starts cold: its first snapshot is empty until the next
+refresh. That is correct and it is exactly the "declared, nothing seen yet"
+state the status surface exists to name, so the UI already has somewhere honest
+to put it.
 
 ### 6. Consent, which is the largest piece
 
