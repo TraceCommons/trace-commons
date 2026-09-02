@@ -62,6 +62,25 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    The app layer's routing surface, copied next to the test assembly.
+
+    TraceCommons.App is a WinUI project and cannot be built, let alone
+    referenced, on the macOS and Linux machines this suite runs on, so
+    without this there is nothing anywhere that checks the half of the
+    surface a contributor actually looks at. Asserted about the source for
+    the same reason NoWordingIsAuthoredInThisShell is: a view that recovered
+    a tone from a rendered string would pass every behavioural test here.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs"
+          Link="ContributorSettingsViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/SettingsView.xaml"
+          Link="SettingsView.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
     <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/debug</TcFfiLibDir>

@@ -810,9 +810,14 @@ struct SettingsContent: View {
     @ViewBuilder
     private func routingState(copy: RoutingCopy) -> some View {
         let state = model.status.routing.state
+        // From the state, never from the sentence it produced. `tone` maps
+        // only the three values this surface can take, so nothing here can
+        // reach a fault colour whatever the daemon reports.
+        let stateTone = tone(RoutingSurface.tone(forState: state))
         VStack(alignment: .leading, spacing: TC.Space.xxs) {
             Text(RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls))
                 .font(TC.Font_.body)
+                .foregroundStyle(stateTone.textColor)
                 .fixedSize(horizontal: false, vertical: true)
             // "Last checked" is a stamp on the running daemon -- never an
             // install date, never a connected-since -- so it is only shown

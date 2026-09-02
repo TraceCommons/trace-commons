@@ -847,6 +847,117 @@ public class RoutingSurfaceTests
     }
 
     /// <summary>
+    /// The daemon's state tone is carried into the view and painted there.
+    ///
+    /// <see cref="RoutingTools.StateTone"/> was already load-bearing -- it
+    /// gates the "last checked" stamp inside
+    /// <see cref="RoutingTools.StatusLine"/> -- but this shell threw
+    /// <see cref="RoutingStatusLine.Tone"/> away and painted the sentence
+    /// flat, while GTK has painted the same three states since it was
+    /// written. This is that parity.
+    ///
+    /// Asserted about the app's source because <c>TraceCommons.App</c> is a
+    /// WinUI project and cannot be built on the machines this suite runs on.
+    /// That is a real limitation and worth naming: this catches a tone
+    /// thrown away or recovered from a string, and it does not catch a
+    /// binding that never reaches the screen.
+    /// </summary>
+    [Fact]
+    public void TheStatusSentenceIsPaintedFromTheStateAndNotFromItsOwnText()
+    {
+        string viewModel = AppSource("ContributorSettingsViewModel.cs.txt");
+        string xaml = AppSource("SettingsView.xaml.txt");
+
+        Assert.Contains("RoutingStateTone = line.Tone;", viewModel, StringComparison.Ordinal);
+        Assert.Contains(
+            "RoutingStateTone == RoutingTone.Clear", viewModel, StringComparison.Ordinal);
+        Assert.Contains(
+            "RoutingStateTone == RoutingTone.Held", viewModel, StringComparison.Ordinal);
+        foreach (string binding in new[]
+                 {
+                     "Settings.RoutingStateIsNeutral", "Settings.RoutingStateIsHeld",
+                     "Settings.RoutingStateIsClear",
+                 })
+        {
+            Assert.Contains(binding, xaml, StringComparison.Ordinal);
+        }
+
+        // None of the three states is a fault, so none of them may reach a
+        // fault colour. awaiting_rows is what a contributor sees immediately
+        // after touching anything on this card; painting it as broken would
+        // accuse a working proxy at exactly that moment.
+        Assert.NotEqual(RoutingTone.Clear, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        foreach (string alarming in new[]
+                 {
+                     "TcGoldTextBrush", "TcGoldBrandBrush", "TcCoralTextBrush", "TcCoralBrandBrush",
+                 })
+        {
+            Assert.DoesNotContain(alarming, RoutingCardMarkup(xaml), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// No styling decision in the app layer reads a rendered string.
+    ///
+    /// The tool row's tone rides on <see cref="RoutingToolRow.Tone"/> and the
+    /// status line's on <see cref="RoutingStatusLine.Tone"/>; both were
+    /// decided from an enum. A comparison against
+    /// <see cref="RoutingToolRowViewModel"/>'s word or against the state text
+    /// would be a text match on a privacy claim -- "Private" is a substring
+    /// of the denial that must never come back.
+    /// </summary>
+    [Fact]
+    public void NoStylingDecisionInTheAppLayerReadsARenderedString()
+    {
+        string viewModel = AppSource("ContributorSettingsViewModel.cs.txt");
+
+        Assert.Contains("Tone = row.Tone;", viewModel, StringComparison.Ordinal);
+        Assert.Contains("Tone == RoutingTone.Clear", viewModel, StringComparison.Ordinal);
+        foreach (string recovered in new[]
+                 {
+                     "Word ==", "Word.Contains", "Word.Equals", "Word.StartsWith",
+                     "RoutingStateText ==", "RoutingStateText.Contains",
+                     "\"Private\"", "WordPrivate",
+                 })
+        {
+            Assert.False(
+                viewModel.Contains(recovered, StringComparison.Ordinal),
+                $"a styling decision reads a rendered string: {recovered}");
+        }
+    }
+
+    /// <summary>
+    /// One of the app-layer sources, copied beside the test assembly, with
+    /// its C# comments stripped -- prose about the rule quotes the very
+    /// strings the rule forbids.
+    /// </summary>
+    private static string AppSource(string name)
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, name);
+        Assert.True(File.Exists(path), $"the app source was not copied to {path}");
+        return string.Join(
+            "\n",
+            File.ReadAllText(path)
+                .Split('\n')
+                .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal))
+                .Where(line => !line.TrimStart().StartsWith("///", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// The routing card's slice of the settings markup: from the tool rows
+    /// down to the last-checked stamp. Scoped, because the rest of that file
+    /// paints things that legitimately are faults.
+    /// </summary>
+    private static string RoutingCardMarkup(string xaml)
+    {
+        int start = xaml.IndexOf("Settings.RoutingToolRows", StringComparison.Ordinal);
+        int end = xaml.IndexOf("Settings.HasRoutingLastChecked", StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "the routing card is no longer in this markup");
+        return xaml[start..end];
+    }
+
+    /// <summary>
     /// <c>RoutingTools.cs</c> with its comments stripped: prose about the wire
     /// may quote it, and nothing in a comment is ever rendered or executed.
     /// </summary>
