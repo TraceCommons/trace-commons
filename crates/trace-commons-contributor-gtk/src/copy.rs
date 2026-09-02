@@ -1777,26 +1777,56 @@ mod daily_cap_tests {
 //
 // One tool, one word.
 //
-// A contributor running IronWire has one concept to hold: whether what a
-// tool sends is kept private on this machine. "Destination", "backend",
-// "route" and "proxy" are our vocabulary for the mechanism, and none of
-// them is a thing this person has to learn to answer the question. The
-// three words below are the whole of it, and the controls underneath them
-// are the exception rather than the front door: the conventional port is
-// already filled in and the folder box is for an unusual install.
+// TOOLS-SURFACE-BEGIN
+//
+// Everything between this marker and TOOLS-SURFACE-END is swept by
+// `the_tools_surface_says_nothing_it_should_not`, which reads this file
+// rather than a hand-kept list of names. A string literal added anywhere in
+// this region is checked automatically; one added outside it is not.
+//
+// A contributor running IronWire has one question to answer about each of
+// their tools: is IronWire handling it. "Destination", "backend", "route"
+// and "proxy" are our vocabulary for the mechanism, and none of them is a
+// thing this person has to learn in order to answer it. The controls
+// underneath the words are the exception rather than the front door: the
+// conventional port is already filled in and the folder box is for an
+// unusual install.
+//
+// # Why no word here says "private"
+//
+// The word this surface used to print was "Private", off a single switch
+// declaring IronWire in *this* app. That was wrong twice over. It was not
+// per-tool -- declaring IronWire here has no causal relation to whether
+// Codex is configured to send through it -- and it asserted a property of
+// the *destination* from evidence that only ever covered the *local hop*.
+// IronWire's own `wired` field, which is now what these words are built
+// from, is true for any loopback host on any port whose path is
+// `/anthropic`, and nothing on that response carries a port or a URL. So
+// it cannot distinguish IronWire from another local proxy, and it says
+// nothing whatever about where a request goes after that first hop.
+//
+// "IronWire is handling this tool" is defensible where "Private" is not.
+// Every word below is written to that line and no further.
 
 pub const TOOLS_HEADING: &str = "Tools";
 
-/// This tool's work is kept private on this machine.
+/// IronWire answered, and reports this tool as pointed at a local address.
 ///
-/// NOTE: this is a substring of [`TOOL_NOT_PRIVATE`]. No assertion about
-/// these words may use `contains` -- that is the shape that let
-/// `contains("reachable")` match "unreachable" earlier on this work.
-pub const TOOL_PRIVATE: &str = "Private";
-/// This tool is watched, and nothing is keeping what it sends private.
-pub const TOOL_NOT_PRIVATE: &str = "Not private";
+/// The strongest thing this page may print, and deliberately weaker than
+/// the word it replaced: it is a claim about the first hop on this machine,
+/// not about what reaches a model afterwards.
+pub const TOOL_VIA_IRONWIRE: &str = "Via IronWire";
+/// IronWire answered, and this tool is not pointed at it.
+pub const TOOL_DIRECT: &str = "Sends direct";
+/// Nothing usable answered, or the answer did not mention this tool.
+///
+/// Not a fault and not a verdict. Gemini CLI reaches this state on every
+/// machine today, because IronWire's tool list does not carry a row for it
+/// at all -- which is exactly the case the old single-switch word got
+/// confidently wrong.
+pub const TOOL_UNKNOWN: &str = "Not known";
 /// The contributor said they do not use this tool. Nothing is read from
-/// it, so there is nothing to keep private either way.
+/// it, so no question about handling arises.
 pub const TOOL_NOT_USED: &str = "Not used";
 
 /// The tools this window has a word for. Short names, because the word
@@ -1805,9 +1835,17 @@ pub const TOOL_CLAUDE: &str = "Claude Code";
 pub const TOOL_CODEX: &str = "Codex";
 pub const TOOL_GEMINI: &str = "Gemini CLI";
 
-pub const IRONWIRE_INTRO: &str = "IronWire runs on this machine and keeps what your tools send to a model private. With it \
-     on, Trace Commons reads its local record so this page can tell you which of your tools \
-     are covered. Nothing here leaves your computer.";
+/// The one paragraph that has to be true.
+///
+/// The sentence it replaced promised that IronWire "keeps what your tools
+/// send to a model private" and that this page "can tell you which of your
+/// tools are covered". The first is a claim about a destination this app
+/// cannot see; the second was not per-tool at all. What is left is what the
+/// evidence supports: IronWire is asked, per tool, and the answer is about
+/// the first hop on this machine.
+pub const IRONWIRE_INTRO: &str = "IronWire runs on this machine. Trace Commons asks it which of your tools are set to \
+     send through it, and says so below, one tool at a time. That is a fact about this machine \
+     alone: it says where a request goes first, not what happens to it afterwards.";
 
 pub const IRONWIRE_TOGGLE: &str = "Use IronWire on this machine";
 
@@ -1842,21 +1880,43 @@ pub const IRONWIRE_STATE_WAITING: &str = "On. Nothing recorded yet, which is nor
      here.";
 pub const IRONWIRE_STATE_READING: &str = "On, and Trace Commons is reading what IronWire records.";
 
+/// What IronWire answered about one tool, as far as this page may use it.
+///
+/// Deliberately three states and not a boolean. The old word was computed
+/// from `ironwire.mode == "watch"` -- a declaration in this app -- which
+/// has no third state and therefore no way to say "nobody has told us".
+/// That missing state is the whole defect: a dead proxy and an unlisted
+/// tool both used to render as a confident verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolWiring {
+    /// IronWire listed this tool and said it is pointed at a local address.
+    Wired,
+    /// IronWire listed this tool and said it is not.
+    NotWired,
+    /// Nothing usable answered, IronWire did not list this tool, or it
+    /// listed it as not present on this machine. No verdict is available.
+    Unknown,
+}
+
 /// One tool's word, from what the contributor said about that tool's
-/// sessions and whether IronWire is declared.
+/// sessions and what IronWire said about that tool.
 ///
 /// `source_mode` is `get_settings`'s `*_source_mode`: `off`, `watch` or
 /// `unset`. Only `off` means the tool is not used -- `unset` watches the
 /// conventional location, which is a tool in use.
+///
+/// The declaration switch is **not** an input. It was the only input
+/// before, and that is what let a contributor read "Private" on the same
+/// card as "Nothing answered on port 8463".
 #[must_use]
-pub fn tool_word(source_mode: &str, ironwire_on: bool) -> &'static str {
+pub fn tool_word(source_mode: &str, wiring: ToolWiring) -> &'static str {
     if source_mode == "off" {
         return TOOL_NOT_USED;
     }
-    if ironwire_on {
-        TOOL_PRIVATE
-    } else {
-        TOOL_NOT_PRIVATE
+    match wiring {
+        ToolWiring::Wired => TOOL_VIA_IRONWIRE,
+        ToolWiring::NotWired => TOOL_DIRECT,
+        ToolWiring::Unknown => TOOL_UNKNOWN,
     }
 }
 
@@ -1913,6 +1973,8 @@ pub fn ironwire_state_line(state: &str) -> &'static str {
 pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
     at.map(|at| format!("Last checked {}", crate::model::human_when(Some(at))))
 }
+
+// TOOLS-SURFACE-END
 
 #[cfg(test)]
 mod tests {
@@ -2735,34 +2797,86 @@ mod tests {
 
     /// The one-word vocabulary, and the trap inside it.
     ///
-    /// "Private" is a substring of "Not private", which is the exact shape
-    /// that made `contains("reachable")` match "unreachable" earlier on
-    /// this plan. Nothing about these three words may be asserted with
-    /// `contains`; this test exists to say so where the next person
-    /// writing an assertion will read it.
+    /// "Private" used to be one of these words and is a substring of "Not
+    /// private" -- the exact shape that made `contains("reachable")` match
+    /// "unreachable" earlier on this plan. Both words are gone, and this
+    /// test now asserts the property rather than the historical pair: no
+    /// word in the vocabulary contains any other, in either case, so an
+    /// assertion written with `contains` cannot silently match the wrong
+    /// one. It fails on the next word that reintroduces the shape.
     #[test]
-    fn private_is_a_substring_of_not_private_so_nothing_here_asserts_with_contains() {
-        assert!(TOOL_NOT_PRIVATE.contains(TOOL_PRIVATE.to_lowercase().as_str()));
-        assert_ne!(TOOL_PRIVATE, TOOL_NOT_PRIVATE);
-        assert_ne!(TOOL_PRIVATE, TOOL_NOT_USED);
-        assert_ne!(TOOL_NOT_PRIVATE, TOOL_NOT_USED);
+    fn no_tool_word_contains_another_so_contains_cannot_match_the_wrong_one() {
+        let words = [TOOL_VIA_IRONWIRE, TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED];
+        for (i, one) in words.iter().enumerate() {
+            for (j, other) in words.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_ne!(one, other);
+                assert!(
+                    !one.to_lowercase().contains(&other.to_lowercase()),
+                    "{other:?} is a substring of {one:?}"
+                );
+            }
+        }
     }
 
-    /// One tool, one word. A tool the contributor said they do not use
-    /// reads "Not used" whatever the proxy declaration says -- there is
-    /// nothing of theirs to keep private either way.
+    /// No word on this surface claims privacy, in any casing.
+    ///
+    /// The defect this whole change exists to remove was a wrong
+    /// declaration producing a confident privacy claim in the one string a
+    /// person actually reads. "Private" is a substring of "Not private", so
+    /// a word that merely *denied* privacy would still trip a naive
+    /// `contains` check somewhere else; the rule is that the concept does
+    /// not appear at all.
     #[test]
-    fn each_tool_reads_exactly_one_of_three_words() {
-        assert_eq!(tool_word("off", true), TOOL_NOT_USED);
-        assert_eq!(tool_word("off", false), TOOL_NOT_USED);
-        assert_eq!(tool_word("watch", true), TOOL_PRIVATE);
-        assert_eq!(tool_word("watch", false), TOOL_NOT_PRIVATE);
+    fn no_tool_word_asserts_privacy() {
+        for word in [TOOL_VIA_IRONWIRE, TOOL_DIRECT, TOOL_UNKNOWN, TOOL_NOT_USED] {
+            assert!(!word.to_lowercase().contains("privat"), "{word}");
+        }
+        assert!(
+            !IRONWIRE_INTRO.to_lowercase().contains("privat"),
+            "{IRONWIRE_INTRO}"
+        );
+    }
+
+    /// One tool, one word, and the switch is not an input to any of them.
+    ///
+    /// A tool the contributor said they do not use reads "Not used"
+    /// whatever IronWire says -- there is nothing of theirs being read
+    /// either way.
+    #[test]
+    fn each_tool_reads_exactly_one_of_four_words() {
+        for wiring in [ToolWiring::Wired, ToolWiring::NotWired, ToolWiring::Unknown] {
+            assert_eq!(tool_word("off", wiring), TOOL_NOT_USED);
+        }
+        assert_eq!(tool_word("watch", ToolWiring::Wired), TOOL_VIA_IRONWIRE);
+        assert_eq!(tool_word("watch", ToolWiring::NotWired), TOOL_DIRECT);
+        assert_eq!(tool_word("watch", ToolWiring::Unknown), TOOL_UNKNOWN);
         // "unset" means the conventional location is watched, which is a
         // tool in use.
-        assert_eq!(tool_word("unset", true), TOOL_PRIVATE);
-        assert_eq!(tool_word("unset", false), TOOL_NOT_PRIVATE);
-        // A mode this build has never heard of is still a tool in use.
-        assert_eq!(tool_word("", false), TOOL_NOT_PRIVATE);
+        assert_eq!(tool_word("unset", ToolWiring::Wired), TOOL_VIA_IRONWIRE);
+        assert_eq!(tool_word("unset", ToolWiring::Unknown), TOOL_UNKNOWN);
+        // A mode this build has never heard of is still a tool in use, and
+        // still gets no verdict without evidence.
+        assert_eq!(tool_word("", ToolWiring::Unknown), TOOL_UNKNOWN);
+    }
+
+    /// Two tools in use, one declaration, two different words.
+    ///
+    /// The second Critical this change closes: the word is per tool, so a
+    /// machine where Claude Code is pointed at IronWire and Codex is not
+    /// cannot render as one verdict repeated three times.
+    #[test]
+    fn two_tools_under_one_declaration_can_read_differently() {
+        assert_ne!(
+            tool_word("watch", ToolWiring::Wired),
+            tool_word("watch", ToolWiring::NotWired)
+        );
+        assert_ne!(
+            tool_word("watch", ToolWiring::NotWired),
+            tool_word("watch", ToolWiring::Unknown)
+        );
     }
 
     /// The failure a real contributor hits, and the one fact that fixes
@@ -2833,38 +2947,130 @@ mod tests {
         }
     }
 
+    /// The literals this file's tools surface contains, read from the file
+    /// rather than listed by hand.
+    ///
+    /// The list this replaced enumerated 23 names. It diverged: a constant
+    /// added to the surface and rendered was simply absent from it, and the
+    /// suite stayed green with two forbidden words on screen. "Enforced,
+    /// not asserted" held only for the strings somebody had remembered to
+    /// add.
+    ///
+    /// So this walks the region between the `TOOLS-SURFACE-BEGIN` and
+    /// `TOOLS-SURFACE-END` markers and returns every string literal in it --
+    /// constants and the bodies of the functions that build sentences alike.
+    /// A new constant is covered the moment it is written, and moving one
+    /// out of the region to dodge the sweep is a visible edit to a marker.
+    ///
+    /// Deliberately a scanner and not a regex: it has to skip `//` and
+    /// `/* */` comments, because the prose in this region quotes forbidden
+    /// words on purpose while explaining why they are forbidden.
+    fn tools_surface_literals() -> Vec<String> {
+        let source = include_str!("copy.rs");
+        let begin = source
+            .find("// TOOLS-SURFACE-BEGIN")
+            .expect("the tools surface must be marked");
+        let end = source
+            .find("// TOOLS-SURFACE-END")
+            .expect("the tools surface must be closed");
+        assert!(begin < end, "the markers must be in order");
+        let region: Vec<char> = source[begin..end].chars().collect();
+
+        let mut literals = Vec::new();
+        let mut i = 0;
+        while i < region.len() {
+            match region[i] {
+                '/' if i + 1 < region.len() && region[i + 1] == '/' => {
+                    while i < region.len() && region[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '/' if i + 1 < region.len() && region[i + 1] == '*' => {
+                    i += 2;
+                    while i + 1 < region.len() && !(region[i] == '*' && region[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                '"' => {
+                    i += 1;
+                    let mut literal = String::new();
+                    while i < region.len() && region[i] != '"' {
+                        if region[i] == '\\' {
+                            // Only the escapes this file uses: a line
+                            // continuation, whose payload is whitespace, and
+                            // an escaped quote. Both are folded to nothing
+                            // rather than decoded, because the sweep reads
+                            // words and not punctuation.
+                            i += 2;
+                            continue;
+                        }
+                        literal.push(region[i]);
+                        i += 1;
+                    }
+                    i += 1;
+                    literals.push(literal);
+                }
+                _ => i += 1,
+            }
+        }
+        literals
+    }
+
+    /// The scanner itself, checked against what it must and must not find.
+    ///
+    /// A sweep that silently found nothing would pass every assertion built
+    /// on it, so this pins both ends: real constants are in, and the prose
+    /// that quotes forbidden words while explaining them is out.
+    #[test]
+    fn the_surface_sweep_reads_the_literals_and_not_the_comments() {
+        let literals = tools_surface_literals();
+        assert!(
+            literals.len() > 20,
+            "the sweep found {} literals, which is not a surface",
+            literals.len()
+        );
+        for expected in [
+            TOOLS_HEADING,
+            TOOL_VIA_IRONWIRE,
+            TOOL_DIRECT,
+            TOOL_UNKNOWN,
+            TOOL_NOT_USED,
+            IRONWIRE_TOGGLE,
+            IRONWIRE_APPLY,
+        ] {
+            assert!(
+                literals.iter().any(|found| found == expected),
+                "{expected:?} was not swept"
+            );
+        }
+        // The region's own comments say "proxy" and "Private" repeatedly,
+        // on purpose. If they were being swept, the rule below could never
+        // be stated where it belongs.
+        assert!(
+            !literals.iter().any(|found| found.contains("local proxy")),
+            "comment prose leaked into the sweep"
+        );
+    }
+
     /// The rule that governs this whole surface, asserted rather than
     /// promised. This app's user has no invite: they cannot reach a
     /// corpus, credits, ownership or contribution, and a locked door
     /// advertised is worse than no door. Nor may any of it name a restart,
     /// which Task 3 removed the need for.
+    ///
+    /// The input is [`tools_surface_literals`], so this covers every string
+    /// in the region and not a list somebody maintains beside it.
     #[test]
     fn the_tools_surface_says_nothing_it_should_not() {
-        let mut strings: Vec<String> = vec![
-            TOOLS_HEADING.to_string(),
-            TOOL_PRIVATE.to_string(),
-            TOOL_NOT_PRIVATE.to_string(),
-            TOOL_NOT_USED.to_string(),
-            TOOL_CLAUDE.to_string(),
-            TOOL_CODEX.to_string(),
-            TOOL_GEMINI.to_string(),
-            IRONWIRE_INTRO.to_string(),
-            IRONWIRE_TOGGLE.to_string(),
-            IRONWIRE_APPLIES_AT_ONCE.to_string(),
-            IRONWIRE_PORT_TITLE.to_string(),
-            IRONWIRE_PORT_NOTE.to_string(),
-            IRONWIRE_FOLDER_TITLE.to_string(),
-            IRONWIRE_FOLDER_NOTE.to_string(),
-            IRONWIRE_APPLY.to_string(),
-            IRONWIRE_CHECKING.to_string(),
-            IRONWIRE_CHECK_UNAVAILABLE.to_string(),
-            IRONWIRE_PROBE_REACHABLE.to_string(),
-            ironwire_token_line(Some("/home/x/.ironwire/control.token")),
-            ironwire_token_line(None),
-            ironwire_unreachable_line(Some(8463)),
-            ironwire_unreachable_line(None),
-            ironwire_last_checked(Some(chrono::Utc::now())).unwrap(),
-        ];
+        let mut strings = tools_surface_literals();
+        // The sentences the region's functions assemble, which exist only
+        // once something has been formatted into them.
+        strings.push(ironwire_token_line(Some("/home/x/.ironwire/control.token")));
+        strings.push(ironwire_token_line(None));
+        strings.push(ironwire_unreachable_line(Some(8463)));
+        strings.push(ironwire_unreachable_line(None));
+        strings.push(ironwire_last_checked(Some(chrono::Utc::now())).unwrap());
         for state in ["not_declared", "awaiting_rows", "rows_seen", "unknown"] {
             strings.push(ironwire_state_line(state).to_string());
         }

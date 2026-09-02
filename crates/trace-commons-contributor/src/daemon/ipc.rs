@@ -254,6 +254,7 @@ pub const METHODS: &[&str] = &[
     "preview_request",
     "preview_turns",
     "preview_visible",
+    "probe_routed_tools",
     "probe_routing",
     "queue_outcome_counts",
     "quiesce",
@@ -523,12 +524,17 @@ impl DaemonShared {
     /// guard is never held for longer than the clone -- in particular never
     /// across the await in [`Self::refresh_routing`], where holding it would
     /// block `set_settings` for the length of a network call.
+    /// A poisoned lock reads as no ledger, and never as a panic. Before the
+    /// hot-swap this was a plain `Option` that could not fail, and the
+    /// promise made of the submission path -- which reaches here through
+    /// `source_roots_with_routing` -- was that it cannot. Absence is
+    /// already the state every caller handles, and it is the state a
+    /// vanished proxy produces, so the one answer costs a trace nothing.
     pub(crate) fn routing_ledger(&self) -> Option<Arc<crate::routing::ironwire::IronWireLedger>> {
         self.routing
             .read()
-            .expect("routing lock")
-            .as_ref()
-            .map(Arc::clone)
+            .ok()
+            .and_then(|held| held.as_ref().map(Arc::clone))
     }
 
     /// Rebuild the held ledger from a declaration, replacing whatever was
@@ -1189,6 +1195,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // without asking would be exactly the silence this method exists
         // to end.
         "probe_routing" => Response::err(req.id, ERR_UNAVAILABLE, "probe-routing-requires-async"),
+        // Same reason: it asks the proxy, over loopback, for the tool list.
+        "probe_routed_tools" => {
+            Response::err(req.id, ERR_UNAVAILABLE, "probe-routed-tools-requires-async")
+        }
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
         // synchronous path, and a shell can call it before it has anything
@@ -1504,6 +1514,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
 
 /// The complete dispatcher: answers the async methods (`"approve"`,
 /// `"preview"`, `"preview_body"`, `"preview_turns"`, `"probe_routing"`,
+/// `"probe_routed_tools"`,
 /// `"quiesce"`, `"enroll"`,
 /// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
 /// `"clear_public_profile"`) for real and delegates every other method,
@@ -1520,6 +1531,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
+        "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
@@ -3123,12 +3135,52 @@ fn handle_discover_routing(req: &Request) -> Response {
     Response::ok(req.id, serde_json::Value::Object(result))
 }
 
-async fn handle_probe_routing(req: &Request) -> Response {
+/// `token_unreadable`, naming the path when one resolved.
+///
+/// **Absent, not null**, when nothing resolved at all: there is no path to
+/// name, and an empty string would send a contributor to look at "".
+fn token_unreadable(req: &Request, token_path: Option<&std::path::Path>) -> Response {
+    match token_path {
+        Some(path) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "outcome": PROBE_TOKEN_UNREADABLE,
+                "token_path": path.to_string_lossy(),
+            }),
+        ),
+        None => Response::ok(
+            req.id,
+            serde_json::json!({ "outcome": PROBE_TOKEN_UNREADABLE }),
+        ),
+    }
+}
+
+/// The port, the credential, and the path it came from: everything both
+/// proxy-facing calls need before they can open a connection.
+///
+/// Extracted so `probe_routing` and `probe_routed_tools` cannot drift into
+/// two answers about one machine. Every refusal here is already a
+/// well-formed answer to either caller -- a bad-params error, or
+/// `token_unreadable` naming the path -- so it is returned whole rather
+/// than re-derived per call site.
+///
+/// **Never returns the token to a caller.** It is handed back so the
+/// request can carry it; nothing in either handler's result contains it.
+/// The refusal is boxed: a `Response` is large, and an unboxed one on
+/// the error side of every call trips `result_large_err`, which the
+/// clippy gate fails the build on.
+fn probe_credential(req: &Request) -> Result<(u16, String, std::path::PathBuf), Box<Response>> {
     let port = match req.params.get("port").and_then(serde_json::Value::as_u64) {
         // Port 0 is not a port a proxy listens on; it is the ask-the-kernel
         // sentinel, and accepting it would probe whatever it resolved to.
         Some(port) if port > 0 && port <= u64::from(u16::MAX) => port as u16,
-        _ => return Response::err(req.id, ERR_BAD_PARAMS, "port-invalid"),
+        _ => {
+            return Err(Box::new(Response::err(
+                req.id,
+                ERR_BAD_PARAMS,
+                "port-invalid",
+            )));
+        }
     };
     let token_dir = match req.params.get("token_dir") {
         None | Some(serde_json::Value::Null) => None,
@@ -3138,7 +3190,13 @@ async fn handle_probe_routing(req: &Request) -> Response {
             // environment would answer about a path the caller did not ask
             // about.
             Some(dir) if !dir.is_empty() => Some(std::path::PathBuf::from(dir)),
-            _ => return Response::err(req.id, ERR_BAD_PARAMS, "token-dir-invalid"),
+            _ => {
+                return Err(Box::new(Response::err(
+                    req.id,
+                    ERR_BAD_PARAMS,
+                    "token-dir-invalid",
+                )));
+            }
         },
     };
 
@@ -3146,37 +3204,32 @@ async fn handle_probe_routing(req: &Request) -> Response {
     // probe cannot send a contributor to fix a file nothing reads.
     let Some(path) = super::settings::ironwire_token_path(token_dir.as_deref()) else {
         // Nothing resolved at all: no declared directory, no
-        // `IRONWIRE_HOME`, no discoverable home. There is no path to name,
-        // and `token_path` is absent rather than empty.
-        return Response::ok(
-            req.id,
-            serde_json::json!({ "outcome": PROBE_TOKEN_UNREADABLE }),
-        );
+        // `IRONWIRE_HOME`, no discoverable home. There is no path to name.
+        return Err(Box::new(token_unreadable(req, None)));
     };
     // Lexical, not a canonicalization: `std::path::absolute` touches no
     // filesystem and resolves a relative path against the same working
     // directory `fs::read_to_string` would, so what is reported and what is
     // read stay the same file.
     let reported = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
-    let unreadable = || {
-        Response::ok(
-            req.id,
-            serde_json::json!({
-                "outcome": PROBE_TOKEN_UNREADABLE,
-                "token_path": reported.to_string_lossy(),
-            }),
-        )
-    };
 
     let token = match std::fs::read_to_string(&path) {
         Ok(token) => token.trim().to_string(),
-        Err(_) => return unreadable(),
+        Err(_) => return Err(Box::new(token_unreadable(req, Some(&reported)))),
     };
     if token.is_empty() {
         // A file that exists with nothing in it. There is no credential to
         // send, so this is the same fixable state as no file at all.
-        return unreadable();
+        return Err(Box::new(token_unreadable(req, Some(&reported))));
     }
+    Ok((port, token, reported))
+}
+
+async fn handle_probe_routing(req: &Request) -> Response {
+    let (port, token, reported) = match probe_credential(req) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
 
     let Ok(client) = reqwest::Client::builder().build() else {
         // The platform trust store would not load. Not a fact about the
@@ -3201,12 +3254,155 @@ async fn handle_probe_routing(req: &Request) -> Response {
         return Response::ok(req.id, serde_json::json!({ "outcome": PROBE_REACHABLE }));
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return unreadable();
+        return token_unreadable(req, Some(&reported));
     }
     Response::ok(
         req.id,
         serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": port }),
     )
+}
+
+/// The largest `/_ironwire/settings` body this reader will accumulate.
+///
+/// Another process's output, arriving from a port anything on the machine
+/// can bind. The real body is a few kilobytes; the bound is here so a
+/// process that streams forever cannot make a settings dialog eat the
+/// machine's memory while a human waits on it.
+const ROUTED_TOOLS_BODY_LIMIT: usize = 64 * 1024;
+
+/// The most tool rows echoed back to a shell. Same reasoning, one layer up.
+const ROUTED_TOOLS_LIMIT: usize = 64;
+
+/// Ask the declared proxy which tools on this machine are pointed at it.
+///
+/// The per-tool counterpart to `probe_routing`, and the reason it exists:
+/// declaring a proxy in *this* app says nothing about whether Codex or
+/// Gemini CLI are configured to send through it, so a shell that renders
+/// one switch as three tool verdicts is inventing two of them. IronWire
+/// answers the question itself -- `ironwire connect` is what edits those
+/// config files, so a second detector here would be a second answer on one
+/// machine, and ours would be the wrong one.
+///
+/// Result shape:
+///
+/// ```json
+/// { "outcome": "reachable", "tools": [ { "id": "claude", "installed": true, "wired": true } ] }
+/// { "outcome": "unreachable", "port": 8463 }
+/// { "outcome": "token_unreadable", "token_path": "/home/x/.ironwire/control.token" }
+/// ```
+///
+/// The outcome vocabulary is `probe_routing`'s, deliberately: it is the
+/// same connection to the same proxy with the same credential, and a
+/// caller that already reads one must not have to learn a second set of
+/// words for the identical three states.
+///
+/// **What `wired` does and does not evidence.** It is true for any loopback
+/// host on any port whose path is `/anthropic` -- deliberately upstream, so
+/// that `connect` can follow a port change -- and nothing on the response
+/// carries a port or a URL. So it evidences the *local hop* and not the
+/// destination: "IronWire is handling this tool" is supportable, "this
+/// tool's work is private" is not. Copy built on this must say the first.
+///
+/// An answer that arrives but cannot be read reports `reachable` with no
+/// tools rather than `unreachable`. The proxy did answer -- sending a
+/// contributor to check a port that is fine would be the wrong next step --
+/// and an empty list is exactly the right amount of evidence about every
+/// tool: none.
+///
+/// Only `id`, `installed` and `wired` cross the socket. `config_path` and
+/// `connect_command` are a path and a shell command from another process,
+/// and nothing here renders either.
+async fn handle_probe_routed_tools(req: &Request) -> Response {
+    let (port, token, reported) = match probe_credential(req) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+
+    let Ok(client) = reqwest::Client::builder().build() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "probe-client-unavailable");
+    };
+    let unreachable = || {
+        Response::ok(
+            req.id,
+            serde_json::json!({ "outcome": PROBE_UNREACHABLE, "port": port }),
+        )
+    };
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/_ironwire/settings"))
+        .timeout(PROBE_TIMEOUT)
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await;
+    let Ok(mut response) = response else {
+        return unreachable();
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return token_unreadable(req, Some(&reported));
+    }
+    if !status.is_success() {
+        return unreachable();
+    }
+
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > ROUTED_TOOLS_BODY_LIMIT {
+                    // Over the bound. The proxy answered, so this is not an
+                    // unreachable port; it is an answer nothing can read.
+                    return Response::ok(
+                        req.id,
+                        serde_json::json!({ "outcome": PROBE_REACHABLE, "tools": [] }),
+                    );
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return unreachable(),
+        }
+    }
+
+    Response::ok(
+        req.id,
+        serde_json::json!({ "outcome": PROBE_REACHABLE, "tools": routed_tools(&body) }),
+    )
+}
+
+/// The tool rows in a `/_ironwire/settings` body, or none.
+///
+/// Every unreadable shape yields an empty list rather than an error: a body
+/// this build cannot parse is the same fact to a shell as a proxy that
+/// listed nothing -- no evidence about any tool -- and the shell must
+/// render that as "not known", never as a verdict.
+fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(tools) = parsed.get("tools").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let id = tool.get("id").and_then(serde_json::Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "id": id,
+                "installed": tool
+                    .get("installed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                "wired": tool
+                    .get("wired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            }))
+        })
+        .take(ROUTED_TOOLS_LIMIT)
+        .collect()
 }
 
 #[cfg(test)]
@@ -6041,6 +6237,226 @@ mod tests {
         assert!(
             METHODS.contains(&"probe_routing"),
             "a method hello does not advertise is a method no shell will call"
+        );
+    }
+
+    /// A poisoned routing lock reads as no ledger, and never as a panic.
+    ///
+    /// Before the ledger could be hot-swapped this was a plain `Option`
+    /// that could not fail, and the promise made of the submission path --
+    /// which reaches `routing_ledger` through `source_roots_with_routing`
+    /// -- was that it cannot. Poisoning is near-unreachable, which is
+    /// exactly why nothing would have caught the regression.
+    #[test]
+    fn a_poisoned_routing_lock_costs_a_trace_nothing() {
+        let (_dir, store) = temp_store();
+        let shared = Arc::new(DaemonShared::load(store).expect("load"));
+
+        let poisoner = Arc::clone(&shared);
+        let panicked = std::thread::spawn(move || {
+            let _held = poisoner.routing.write().expect("first write succeeds");
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread must have panicked");
+        assert!(
+            shared.routing.read().is_err(),
+            "the lock must actually be poisoned, or this proves nothing"
+        );
+
+        // Absence is the state every caller already handles, and the state
+        // a vanished proxy produces.
+        assert!(shared.routing_ledger().is_none());
+        // And the submission path's own reader still answers.
+        let _roots = shared.source_roots_with_routing();
+    }
+
+    // --- probe_routed_tools --------------------------------------------
+
+    /// The same request shape as the probe, against the tool-list method.
+    fn routed_tools_request(port: u16, token_dir: Option<&std::path::Path>) -> Request {
+        let mut req = probe_request(port, token_dir);
+        req.method = "probe_routed_tools".to_string();
+        req
+    }
+
+    /// The whole point of the method: three tools, three different answers,
+    /// from one declaration. A shell rendering one switch as three verdicts
+    /// would get two of these wrong.
+    #[tokio::test]
+    async fn the_tool_list_is_per_tool_and_not_one_switch() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "tools": [
+                        { "id": "claude", "name": "Claude Code", "installed": true, "wired": true },
+                        { "id": "codex", "name": "Codex", "installed": true, "wired": false },
+                    ]
+                }))
+            }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("an answer, never an IPC error");
+
+        assert_eq!(result["outcome"], PROBE_REACHABLE);
+        let tools = result["tools"].as_array().expect("a list");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["id"], "claude");
+        assert_eq!(tools[0]["wired"], true);
+        assert_eq!(tools[1]["id"], "codex");
+        assert_eq!(
+            tools[1]["wired"], false,
+            "the second tool must be able to differ from the first"
+        );
+        // Gemini CLI is absent upstream entirely, which is the state a
+        // shell has to render as "not known" rather than as a verdict.
+        assert!(
+            !tools.iter().any(|tool| tool["id"] == "gemini"),
+            "nothing may invent a row the proxy did not send"
+        );
+    }
+
+    /// Neither a path nor a shell command crosses the socket.
+    #[tokio::test]
+    async fn the_tool_list_carries_no_path_and_no_command() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "tools": [ {
+                        "id": "claude",
+                        "config_path": "/home/x/.claude/settings.json",
+                        "connect_command": "ironwire connect claude",
+                        "installed": true,
+                        "wired": true,
+                    } ]
+                }))
+            }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let rendered = serde_json::to_string(&response.result.expect("a result")).expect("json");
+        for leaked in [
+            "config_path",
+            "connect_command",
+            ".claude",
+            "ironwire connect",
+        ] {
+            assert!(!rendered.contains(leaked), "{leaked} in: {rendered}");
+        }
+        assert!(!rendered.contains("a-readable-token"), "{rendered}");
+    }
+
+    /// A dead port is `unreachable`, with the port, exactly as the probe
+    /// reports it. One vocabulary for one connection.
+    #[tokio::test]
+    async fn a_tool_list_against_a_dead_port_reports_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_UNREACHABLE);
+        assert_eq!(result["port"], serde_json::json!(port));
+        assert!(result.get("tools").is_none(), "no tools without an answer");
+    }
+
+    /// A refused credential is the token state, naming the path, and never
+    /// an empty tool list that a shell could read as "nothing is wired".
+    #[tokio::test]
+    async fn a_refused_credential_is_a_token_answer_and_not_an_empty_list() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-stale-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_TOKEN_UNREADABLE);
+        assert!(
+            result["token_path"]
+                .as_str()
+                .expect("a path")
+                .ends_with("control.token"),
+            "{result}"
+        );
+        assert!(result.get("tools").is_none());
+    }
+
+    /// An answer that arrives but cannot be read is `reachable` with no
+    /// tools: the proxy did answer, so nobody is sent to check a port that
+    /// is fine, and no tool gets a verdict off a body nothing parsed.
+    #[tokio::test]
+    async fn an_unreadable_body_yields_no_tools_rather_than_a_wrong_port() {
+        let port = serve_on_loopback(axum::Router::new().route(
+            "/_ironwire/settings",
+            axum::routing::get(|| async { "this is not the json you are looking for" }),
+        ))
+        .await;
+        let dir = token_dir_holding("a-readable-token");
+
+        let response =
+            handle_probe_routed_tools(&routed_tools_request(port, Some(dir.path()))).await;
+        let result = response.result.expect("a result");
+        assert_eq!(result["outcome"], PROBE_REACHABLE);
+        assert_eq!(result["tools"], serde_json::json!([]));
+    }
+
+    /// Bounds, on a body written by another process on this machine.
+    #[test]
+    fn the_tool_list_is_bounded_and_ignores_shapes_it_cannot_read() {
+        assert!(routed_tools(b"").is_empty());
+        assert!(routed_tools(b"{}").is_empty());
+        assert!(routed_tools(br#"{"tools":{}}"#).is_empty());
+        // No id, or an empty one, is not a tool.
+        assert!(routed_tools(br#"{"tools":[{"wired":true},{"id":"","wired":true}]}"#).is_empty());
+        // Missing booleans read as false rather than as a claim.
+        let one = routed_tools(br#"{"tools":[{"id":"claude"}]}"#);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0]["installed"], false);
+        assert_eq!(one[0]["wired"], false);
+
+        let many: Vec<String> = (0..ROUTED_TOOLS_LIMIT + 40)
+            .map(|n| format!(r#"{{"id":"t{n}"}}"#))
+            .collect();
+        let body = format!(r#"{{"tools":[{}]}}"#, many.join(","));
+        assert_eq!(routed_tools(body.as_bytes()).len(), ROUTED_TOOLS_LIMIT);
+    }
+
+    /// Advertised, and refused on the synchronous path rather than answered
+    /// without asking.
+    #[test]
+    fn the_tool_list_is_advertised_and_is_async_only() {
+        assert!(METHODS.contains(&"probe_routed_tools"), "{METHODS:?}");
+        let (_dir, store) = temp_store();
+        let shared = DaemonShared::load(store).expect("load");
+        let response = handle_request(
+            &shared,
+            &Request {
+                id: 1,
+                method: "probe_routed_tools".to_string(),
+                params: serde_json::json!({ "port": 8463 }),
+            },
+        );
+        assert_eq!(
+            response.error.expect("the sync path refuses").code,
+            ERR_UNAVAILABLE
         );
     }
 

@@ -121,6 +121,22 @@ pub struct SettingsView {
     routing_probe: gtk::Label,
     /// The daemon's own three-state view, rebuilt on each status event.
     routing_status: gtk::Box,
+    /// What the contributor said about each tool, held so the tool rows can
+    /// be repainted from an event that does not carry `Settings`.
+    ///
+    /// Caching is not tidiness. The word beside each tool is built from two
+    /// facts that arrive on **different events** -- the declaration on
+    /// `get_settings`, the evidence on the answer to `probe_routed_tools` --
+    /// so a render that read one without holding the other would blank the
+    /// word on alternate ticks. Both are cached; either event repaints from
+    /// both. See `render_tool_rows`.
+    routing_modes: RefCell<Option<RoutingModes>>,
+    /// What IronWire last said about each tool, and whether it answered at
+    /// all. `None` means nothing has been asked yet this run.
+    routing_evidence: RefCell<Option<RoutingEvidence>>,
+    /// Set while a tool-list call is in flight, so a refresh -- which runs
+    /// on every daemon event -- cannot start a second one.
+    routing_evidence_pending: std::cell::Cell<bool>,
     /// Set while `render_routing` is writing the daemon's own declaration
     /// into the controls, so the signals that fires are not mistaken for a
     /// contributor declaring something and echoed straight back.
@@ -434,6 +450,9 @@ impl SettingsView {
             routing_apply,
             routing_probe,
             routing_status,
+            routing_modes: RefCell::new(None),
+            routing_evidence: RefCell::new(None),
+            routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
         }
     }
@@ -897,22 +916,112 @@ fn routing_tone(state: &str) -> Tone {
 
 /// Fill the declaration controls from the daemon's own answer, and say one
 /// word about each tool.
-fn render_routing(app: &Rc<App>, settings: &Settings) {
-    let declared = settings
-        .ironwire
-        .as_ref()
-        .is_some_and(|d| d.mode == "watch");
+/// What the contributor said about each of the three tools this card names.
+///
+/// Held rather than re-read because the tool rows are repainted from the
+/// tool-list answer, which arrives on its own event and carries no
+/// `Settings`.
+/// The declaration switch is deliberately **not** a field. It was the only
+/// input to the word before this change, which is what let a contributor
+/// read "Private" on the same card as "Nothing answered on port 8463".
+/// Turning it off clears the evidence instead, so the words fall back to
+/// "not known" rather than being computed from the switch.
+#[derive(Clone, Default)]
+struct RoutingModes {
+    claude: String,
+    codex: String,
+    gemini: String,
+}
 
+/// What IronWire last answered when asked which tools are pointed at it.
+///
+/// `outcome` is the same three states the probe reports, and it is what
+/// makes a dead proxy stop producing verdicts: on anything but
+/// [`ProbeOutcome::Reachable`] every tool reads
+/// [`copy::ToolWiring::Unknown`], whatever the switch says.
+struct RoutingEvidence {
+    outcome: ProbeOutcome,
+    /// When this answer was taken.
+    ///
+    /// Evidence has to expire. A machine where nothing in this app changes
+    /// but the proxy stops running would otherwise keep printing the last
+    /// good word indefinitely -- which is the same defect as the one this
+    /// change removes, arrived at by waiting instead of by declaring. A
+    /// bound short enough that a card left open re-asks, long enough that
+    /// a stream of daemon events does not become a stream of connections.
+    taken_at: std::time::Instant,
+    /// One entry per tool IronWire listed, keyed by its own stable id.
+    /// A tool absent from the list -- Gemini CLI on every machine today --
+    /// is not in this map and gets no verdict.
+    tools: std::collections::HashMap<String, ToolRow>,
+}
+
+/// One row of IronWire's tool list, reduced to what a word may be built on.
+struct ToolRow {
+    installed: bool,
+    wired: bool,
+}
+
+/// IronWire's own stable ids for the three tools this card names.
+///
+/// `ironwire connect <id>` takes these, and the settings response is keyed
+/// by them. Gemini CLI has no row upstream at all today -- neither built-in
+/// nor in the catalogue -- which is why it is listed here and expected to
+/// be missing rather than left out and quietly defaulted.
+const IRONWIRE_TOOL_CLAUDE: &str = "claude";
+const IRONWIRE_TOOL_CODEX: &str = "codex";
+const IRONWIRE_TOOL_GEMINI: &str = "gemini";
+
+/// What may be said about one tool, from what IronWire answered about it.
+///
+/// The rules, and why each is where it is:
+///
+/// * **Nothing answered.** `unreachable` and `token_unreadable` are stable
+///   states -- a port nothing is listening on, a credential that is not
+///   there or is refused -- so a word built on them would keep asserting
+///   while the card underneath says "Nothing answered on port 8463". They
+///   yield `Unknown`. This is the original defect, in the one string a
+///   person reads.
+/// * **The daemon's `awaiting_rows` is deliberately not consulted here.** A
+///   proxy installed this morning legitimately reports it, and it flips
+///   back to `awaiting_rows` whenever a declaration changes, so letting it
+///   downgrade the word would flicker it against a working install.
+/// * **Listed but not present.** IronWire saying a tool is not installed,
+///   while this app is watching that tool's sessions, is two detectors
+///   disagreeing about one machine. That is not evidence for a verdict.
+fn tool_wiring(evidence: Option<&RoutingEvidence>, id: &str) -> copy::ToolWiring {
+    let Some(evidence) = evidence else {
+        return copy::ToolWiring::Unknown;
+    };
+    if evidence.outcome != ProbeOutcome::Reachable {
+        return copy::ToolWiring::Unknown;
+    }
+    match evidence.tools.get(id) {
+        Some(row) if row.wired => copy::ToolWiring::Wired,
+        Some(row) if row.installed => copy::ToolWiring::NotWired,
+        _ => copy::ToolWiring::Unknown,
+    }
+}
+
+/// One row per tool: a name, and one word built from both caches.
+///
+/// The single painter for these rows. Both events that can change a word
+/// call it, and it reads the declaration and the evidence together, so
+/// neither can arrive and blank what the other established.
+fn render_tool_rows(app: &Rc<App>) {
     let view = &app.settings.routing_tools;
     while let Some(child) = view.first_child() {
         view.remove(&child);
     }
-    for (name, mode) in [
-        (copy::TOOL_CLAUDE, settings.claude_source_mode.as_str()),
-        (copy::TOOL_CODEX, settings.codex_source_mode.as_str()),
-        (copy::TOOL_GEMINI, settings.gemini_source_mode.as_str()),
+    let modes = app.settings.routing_modes.borrow();
+    let Some(modes) = modes.as_ref() else { return };
+    let evidence = app.settings.routing_evidence.borrow();
+    for (name, mode, id) in [
+        (copy::TOOL_CLAUDE, &modes.claude, IRONWIRE_TOOL_CLAUDE),
+        (copy::TOOL_CODEX, &modes.codex, IRONWIRE_TOOL_CODEX),
+        (copy::TOOL_GEMINI, &modes.gemini, IRONWIRE_TOOL_GEMINI),
     ] {
-        let word = copy::tool_word(mode, declared);
+        let word = copy::tool_word(mode, tool_wiring(evidence.as_ref(), id));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         let label = gtk::Label::builder()
             .label(name)
@@ -921,7 +1030,7 @@ fn render_routing(app: &Rc<App>, settings: &Settings) {
             .build();
         label.add_css_class("tc-body");
         row.append(&label);
-        let tone = if word == copy::TOOL_PRIVATE {
+        let tone = if word == copy::TOOL_VIA_IRONWIRE {
             Tone::Clear
         } else {
             Tone::Neutral
@@ -930,6 +1039,30 @@ fn render_routing(app: &Rc<App>, settings: &Settings) {
         // Read as one statement, not as a name and a stray word.
         row.update_property(&[gtk::accessible::Property::Label(&format!("{name}: {word}"))]);
         view.append(&row);
+    }
+}
+
+fn render_routing(app: &Rc<App>, settings: &Settings) {
+    let declared = settings
+        .ironwire
+        .as_ref()
+        .is_some_and(|d| d.mode == "watch");
+
+    app.settings.routing_modes.replace(Some(RoutingModes {
+        claude: settings.claude_source_mode.clone(),
+        codex: settings.codex_source_mode.clone(),
+        gemini: settings.gemini_source_mode.clone(),
+    }));
+    if !declared {
+        // Nothing is declared, so nothing held about IronWire is still
+        // about this machine's current state. Dropped rather than kept,
+        // so turning the switch back on cannot paint a stale verdict
+        // before the new answer lands.
+        app.settings.routing_evidence.replace(None);
+    }
+    render_tool_rows(app);
+    if declared {
+        ask_routed_tools(app, settings);
     }
 
     app.settings.filling_routing.set(true);
@@ -994,6 +1127,11 @@ fn render_routing_status(app: &Rc<App>, status: &Status) {
 fn send_routing(app: &Rc<App>, on: bool) {
     let port = routing_port_value(app);
     let token_dir = app.settings.routing_token_dir.text().to_string();
+    // The declaration is about to change, so what IronWire said about the
+    // old one is no longer about this machine. Dropped before the write,
+    // not after the answer: the words must stop asserting immediately, not
+    // once a replacement arrives.
+    app.settings.routing_evidence.replace(None);
     if on {
         app.settings.routing_probe.set_text(copy::IRONWIRE_CHECKING);
         app.settings.routing_probe.set_visible(true);
@@ -1020,18 +1158,119 @@ fn send_routing(app: &Rc<App>, on: bool) {
     );
 }
 
+/// Ask IronWire which tools on this machine are pointed at it, and repaint
+/// the words from the answer.
+///
+/// Guarded twice, because `render_routing` runs on every daemon event and
+/// this opens a connection: once by the cache (an answer already held is
+/// not re-asked) and once by `routing_evidence_pending` (a call already in
+/// flight does not start a second). Both are cleared where a contributor
+/// changes something, which is the only place a fresh answer is owed.
+fn ask_routed_tools(app: &Rc<App>, settings: &Settings) {
+    if app.settings.routing_evidence_pending.get() {
+        return;
+    }
+    let fresh = app
+        .settings
+        .routing_evidence
+        .borrow()
+        .as_ref()
+        .is_some_and(|held| held.taken_at.elapsed() < ROUTED_TOOLS_MAX_AGE);
+    if fresh {
+        return;
+    }
+    // The declared values, not the widgets': a refresh can land while
+    // somebody is typing into the port box, and the question has to be
+    // about the declaration the daemon is actually holding.
+    let Some(declaration) = settings.ironwire.as_ref() else {
+        return;
+    };
+    let port = declaration.port.unwrap_or(DEFAULT_IRONWIRE_PORT);
+    let token_dir = declaration.token_dir.clone().unwrap_or_default();
+    app.settings.routing_evidence_pending.set(true);
+    app.call(
+        "probe_routed_tools",
+        probe_params(port, &token_dir),
+        |app, result| {
+            app.settings.routing_evidence_pending.set(false);
+            // A call that did not run is not a fact about any tool. The
+            // cache is left empty so the next render asks again, and every
+            // word stays "not known" meanwhile.
+            if let Ok(value) = result {
+                app.settings
+                    .routing_evidence
+                    .replace(Some(parse_routed_tools(&value)));
+            }
+            render_tool_rows(app);
+        },
+    );
+}
+
+/// Read the daemon's tool-list answer.
+///
+/// Anything unreadable degrades to no evidence rather than to a default:
+/// an outcome this build does not know is [`ProbeOutcome::Unknown`], a
+/// missing `wired` is not a claim that a tool is wired, and a row without
+/// an id is not a row.
+fn parse_routed_tools(value: &serde_json::Value) -> RoutingEvidence {
+    let mut tools = std::collections::HashMap::new();
+    if let Some(rows) = value.get("tools").and_then(serde_json::Value::as_array) {
+        for row in rows {
+            let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            tools.insert(
+                id.to_string(),
+                ToolRow {
+                    installed: row
+                        .get("installed")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    wired: row
+                        .get("wired")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                },
+            );
+        }
+    }
+    RoutingEvidence {
+        outcome: parse_probe(value),
+        taken_at: std::time::Instant::now(),
+        tools,
+    }
+}
+
+/// How long an answer about the tool list stands before it is re-asked.
+const ROUTED_TOOLS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Ask the daemon whether the proxy is there, and print what it answered.
 fn check_routing(app: &Rc<App>, port: u16, token_dir: String) {
     app.call(
         "probe_routing",
         probe_params(port, &token_dir),
         |app, result| {
+            let outcome = match &result {
+                Ok(value) => parse_probe(value),
+                Err(_) => ProbeOutcome::Unknown,
+            };
             let line = match result {
-                Ok(value) => probe_line(&parse_probe(&value)),
+                Ok(_) => probe_line(&outcome),
                 // The check itself did not run. Not a fact about the
                 // proxy, so it does not send anybody to look at a port.
                 Err(_) => copy::IRONWIRE_CHECK_UNAVAILABLE.to_string(),
             };
+            // The card must not carry a verdict above a sentence that
+            // contradicts it. This is the defect in its original form: a
+            // contributor whose proxy was dead read a confident word on the
+            // same card as "Nothing answered on port 8463". The probe is
+            // what establishes reachability here, so anything but a
+            // reachable answer drops the evidence the words are built from
+            // and every tool falls back to "not known".
+            if outcome != ProbeOutcome::Reachable {
+                app.settings.routing_evidence.replace(None);
+                render_tool_rows(app);
+            }
             app.settings.routing_probe.set_text(&line);
             app.settings.routing_probe.set_visible(true);
         },
@@ -2379,5 +2618,208 @@ mod tests {
         assert_eq!(params["port"], serde_json::json!(8463));
         assert_eq!(params["token_dir"], serde_json::json!("/home/x/iw"));
         assert!(probe_params(8463, "  ").get("token_dir").is_none());
+    }
+
+    /// A tool-list answer, as the daemon sends one.
+    fn answered(outcome: &str, tools: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "outcome": outcome, "tools": tools })
+    }
+
+    /// **Critical 1.** A stable failure stops the word asserting.
+    ///
+    /// The defect: a contributor whose proxy is dead read "Claude Code:
+    /// Private" on the same card as "Nothing answered on port 8463". Both
+    /// stable failures -- nothing listening, and a credential that is not
+    /// there or is refused -- must reach `Unknown` however good the last
+    /// answer was.
+    #[test]
+    fn a_proxy_that_stopped_answering_stops_the_word_asserting() {
+        let listed = answered(
+            "reachable",
+            serde_json::json!([{ "id": "claude", "installed": true, "wired": true }]),
+        );
+        let alive = parse_routed_tools(&listed);
+        assert_eq!(
+            tool_wiring(Some(&alive), IRONWIRE_TOOL_CLAUDE),
+            copy::ToolWiring::Wired
+        );
+        assert_eq!(
+            copy::tool_word("watch", tool_wiring(Some(&alive), IRONWIRE_TOOL_CLAUDE)),
+            copy::TOOL_VIA_IRONWIRE
+        );
+
+        // Each failure carries the tool list a *previous* good answer had,
+        // so the outcome is the only thing that can produce "not known".
+        // Without that, the fixture would pass on an empty list alone and
+        // the gate this asserts could be deleted unnoticed.
+        for dead in [
+            serde_json::json!({
+                "outcome": "unreachable",
+                "port": 8463,
+                "tools": [{ "id": "claude", "installed": true, "wired": true }],
+            }),
+            serde_json::json!({
+                "outcome": "token_unreadable",
+                "token_path": "/x/control.token",
+                "tools": [{ "id": "claude", "installed": true, "wired": true }],
+            }),
+        ] {
+            let evidence = parse_routed_tools(&dead);
+            assert_eq!(
+                tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE),
+                copy::ToolWiring::Unknown,
+                "{dead}"
+            );
+            let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
+            assert_eq!(word, copy::TOOL_UNKNOWN, "{dead}");
+            assert_ne!(word, copy::TOOL_VIA_IRONWIRE, "{dead}");
+        }
+    }
+
+    /// **Critical 1, the other half.** `awaiting_rows` must not downgrade.
+    ///
+    /// It is the daemon's own state and is not an input to `tool_wiring` at
+    /// all. A proxy installed this morning reports it, and a declaration
+    /// change puts a working install back into it, so a word that fell to
+    /// "not known" on it would flicker against a machine where nothing is
+    /// wrong. Asserted through the tone function, which is where that state
+    /// is read, and by construction: the word is computed from the same
+    /// evidence either way.
+    #[test]
+    fn awaiting_rows_does_not_downgrade_the_word() {
+        use trace_commons_contributor::daemon::ipc::{ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN};
+        let evidence = parse_routed_tools(&answered(
+            "reachable",
+            serde_json::json!([{ "id": "claude", "installed": true, "wired": true }]),
+        ));
+        let word = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
+        assert_eq!(word, copy::TOOL_VIA_IRONWIRE);
+        // The state the daemon would be reporting alongside it, in either
+        // of its two "on" values, changes nothing about that word.
+        assert_ne!(routing_tone(ROUTING_AWAITING_ROWS), Tone::Attention);
+        assert_ne!(routing_tone(ROUTING_ROWS_SEEN), Tone::Attention);
+
+        // And it cannot, structurally: the daemon's state reaches only
+        // `render_routing_status`, which paints the status block and never
+        // the tool rows. Read from the source, because "this function does
+        // not call that one" is the kind of fact a later edit breaks
+        // silently and no value-level assertion can hold.
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn render_routing_status(")
+            .expect("the status painter exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+        for reached in [
+            "render_tool_rows",
+            "routing_tools",
+            "tool_wiring",
+            "tool_word",
+        ] {
+            assert!(
+                !body.contains(reached),
+                "the daemon state painter must not reach {reached}"
+            );
+        }
+        // The word's own input takes no daemon state at all.
+        assert!(
+            source.contains(
+                "fn tool_wiring(evidence: Option<&RoutingEvidence>, id: &str) -> copy::ToolWiring"
+            ),
+            "tool_wiring must take evidence and a tool id, and nothing else"
+        );
+    }
+
+    /// **Critical 2.** The word is per tool, not per switch.
+    ///
+    /// One declaration, one answer, three different words -- which is
+    /// exactly what the old `settings.ironwire.mode == "watch"` input could
+    /// not produce. Gemini CLI is the case that made it wrong: IronWire has
+    /// no row for it on any machine today, so the only honest word is "not
+    /// known", and the old code printed "Private".
+    #[test]
+    fn one_declaration_produces_three_different_words() {
+        let evidence = parse_routed_tools(&answered(
+            "reachable",
+            serde_json::json!([
+                { "id": "claude", "installed": true, "wired": true },
+                { "id": "codex", "installed": true, "wired": false },
+            ]),
+        ));
+        let claude = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
+        let codex = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CODEX));
+        let gemini = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_GEMINI));
+        assert_eq!(claude, copy::TOOL_VIA_IRONWIRE);
+        assert_eq!(codex, copy::TOOL_DIRECT);
+        assert_eq!(gemini, copy::TOOL_UNKNOWN);
+        assert_ne!(claude, codex);
+        assert_ne!(codex, gemini);
+    }
+
+    /// Nothing has been asked yet, so nothing may be claimed.
+    #[test]
+    fn no_answer_yet_is_not_a_verdict() {
+        assert_eq!(
+            tool_wiring(None, IRONWIRE_TOOL_CLAUDE),
+            copy::ToolWiring::Unknown
+        );
+        assert_eq!(
+            copy::tool_word("watch", tool_wiring(None, IRONWIRE_TOOL_CLAUDE)),
+            copy::TOOL_UNKNOWN
+        );
+        // A tool the contributor does not use is still "not used": that
+        // answer never needed evidence.
+        assert_eq!(
+            copy::tool_word("off", tool_wiring(None, IRONWIRE_TOOL_CLAUDE)),
+            copy::TOOL_NOT_USED
+        );
+    }
+
+    /// Two detectors disagreeing about one machine is not evidence.
+    ///
+    /// IronWire saying a tool is not present, while this app is watching
+    /// that tool's sessions, gets no verdict in either direction.
+    #[test]
+    fn a_tool_ironwire_says_is_absent_gets_no_verdict() {
+        let evidence = parse_routed_tools(&answered(
+            "reachable",
+            serde_json::json!([{ "id": "codex", "installed": false, "wired": false }]),
+        ));
+        assert_eq!(
+            tool_wiring(Some(&evidence), IRONWIRE_TOOL_CODEX),
+            copy::ToolWiring::Unknown
+        );
+    }
+
+    /// A missing field is never read as a claim.
+    #[test]
+    fn an_answer_missing_its_fields_claims_nothing() {
+        let evidence = parse_routed_tools(&answered(
+            "reachable",
+            serde_json::json!([{ "id": "claude" }, { "wired": true }]),
+        ));
+        assert_eq!(evidence.tools.len(), 1, "a row without an id is not a row");
+        assert_eq!(
+            tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE),
+            copy::ToolWiring::Unknown
+        );
+        // An outcome this build cannot read claims nothing either.
+        let strange = parse_routed_tools(&answered(
+            "something_new",
+            serde_json::json!([{ "id": "claude", "installed": true, "wired": true }]),
+        ));
+        assert_eq!(strange.outcome, ProbeOutcome::Unknown);
+        assert_eq!(
+            tool_wiring(Some(&strange), IRONWIRE_TOOL_CLAUDE),
+            copy::ToolWiring::Unknown
+        );
+    }
+
+    /// The ids are IronWire's own, which is what the response is keyed by.
+    #[test]
+    fn the_tool_ids_are_the_ones_ironwire_answers_with() {
+        assert_eq!(IRONWIRE_TOOL_CLAUDE, "claude");
+        assert_eq!(IRONWIRE_TOOL_CODEX, "codex");
+        assert_eq!(IRONWIRE_TOOL_GEMINI, "gemini");
     }
 }
