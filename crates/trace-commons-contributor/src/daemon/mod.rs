@@ -373,6 +373,12 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
             }
             _ = ticker.tick() => {
                 let now = Utc::now();
+                // Ahead of `watcher::tick` so the sources it builds via
+                // `source_roots_with_routing` see this pass's snapshot
+                // rather than the previous one. A no-op when nothing was
+                // declared; otherwise bounded by the ledger's own short
+                // timeout, so this cannot stall the tick.
+                shared.refresh_routing().await;
                 // Fixed labels, never `error = %e`. These errors are
                 // `anyhow::Error`s whose outermost context routinely embeds
                 // a filesystem path -- `write_atomic_0600`'s "creating temp
@@ -486,10 +492,11 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    let (near_ai, source_roots) = {
+    let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots(&shared.store))
+        s.near_ai.clone()
     };
+    let source_roots = shared.source_roots_with_routing();
     // These options are envelope-determining and are NOT covered by
     // `preview::input_fingerprint`, which fingerprints the config. They are
     // safe only because every one of them is a constant here.

@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod identity;
 pub mod issuer_client;
 pub mod picker;
+pub mod routing;
 pub mod source;
 pub mod submit;
 pub mod update;

@@ -15,7 +15,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use rust_decimal::Decimal;
+/// Re-exported so a consumer can build a `cost_usd` without taking its own
+/// dependency on `rust_decimal`. The permissive client crates ship inside
+/// third-party harnesses, and every direct dependency they gain is one their
+/// vendor inherits.
+pub use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -214,6 +218,20 @@ pub struct ConsentMetadata {
     /// guess.
     #[serde(default)]
     pub correction_included: bool,
+    /// Whether the envelope carries routing and cost metadata about the
+    /// inference hops that produced the session.
+    ///
+    /// A fourth content class. Unlike `correction_included` it does NOT enrol
+    /// the trace in the PII backstop hold and does not floor residual risk:
+    /// the class is numbers and labels -- a backend id, a rung, a token count,
+    /// a price -- and carries no prose from the session.
+    ///
+    /// `#[serde(default)]` because every envelope submitted before this field
+    /// existed omits it, and those envelopes carry no routing metadata:
+    /// nothing could set one. `false` is the correct reading of their silence,
+    /// not a guess.
+    #[serde(default)]
+    pub routing_metadata_included: bool,
     pub revocable: bool,
 }
 
@@ -1343,7 +1361,18 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     };
     let privacy_risk = privacy_risk_score(envelope.privacy.residual_pii_risk);
     let gate = privacy_gate(envelope.privacy.residual_pii_risk);
-    let event_count = envelope.events.len() as f32;
+    // Routing rows are attribution metadata about which backend served a
+    // request, not conversation content -- they carry `content: None` and a
+    // payload shape (`backend`, `rung`, `attempts`, ...) that never overlaps
+    // `REPLAY_ARGUMENT_KEYS` or `REPLAY_RESULT_KEYS`. Counting them here would
+    // inflate the denominator without ever being able to satisfy the
+    // numerator, so a routing-heavy trace would score as if it were mostly
+    // padding even when every non-routing event is substantive.
+    let event_count = envelope
+        .events
+        .iter()
+        .filter(|event| event.event_type != TraceContributionEventType::RoutingDecision)
+        .count() as f32;
     // Length alone used to be the whole of `quality`, which meant redaction
     // raised a trace's score: stripping content leaves the event count
     // untouched. Weight length by the share of events that actually carry
@@ -1351,6 +1380,7 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
     let substantive_events = envelope
         .events
         .iter()
+        .filter(|event| event.event_type != TraceContributionEventType::RoutingDecision)
         .filter(|event| event_carries_content(event))
         .count() as f32;
     let content_share = if event_count == 0.0 {
@@ -1841,6 +1871,7 @@ impl RawTraceContribution {
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -2087,6 +2118,7 @@ impl RawTraceContribution {
                 message_text_included: options.include_message_text,
                 tool_payloads_included: options.include_tool_payloads,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -5259,6 +5291,23 @@ pub struct EnvelopeContentPresence {
     /// A contributor-authored correction. Its own class rather than part of
     /// `message_text`: see [`ConsentMetadata::correction_included`].
     pub correction: bool,
+    /// Routing and cost metadata about the inference hops that produced the
+    /// session -- which backend served a turn, what it cost, how long it took.
+    ///
+    /// Its own class because it is neither prose nor a tool payload. Folding it
+    /// into `tool_payloads` would floor every enriched envelope at Medium
+    /// residual risk and quarantine it on a default deployment for payloads it
+    /// does not carry, and `tool_payloads_included` has never been true
+    /// anywhere in this project -- so the fold would also silently change what
+    /// consent an envelope declares.
+    ///
+    /// `reconcile_consent_declarations` deliberately does not correct this
+    /// flag upward: see its doc comment. Nothing in this crate or the ingest
+    /// binary reads `consent.routing_metadata_included` to decide anything --
+    /// not `residual_risk`, not the PII-backstop hold -- so there is no
+    /// protective gate an under-reported flag could be silently bypassing,
+    /// unlike the other three.
+    pub routing_metadata: bool,
 }
 
 /// Inspect an envelope for content that must be declared in consent flags.
@@ -5312,7 +5361,14 @@ pub fn derive_envelope_content_presence(
         // existed upstream and carries none of it. See
         // `payload_carries_readable_content`.
         if payload_carries_readable_content(&event.structured_payload) {
-            presence.tool_payloads = true;
+            match event.event_type {
+                // A routing overlay's payload is the backend, the rung and the
+                // model pair -- labels about the hop, never content from it.
+                TraceContributionEventType::RoutingDecision => {
+                    presence.routing_metadata = true;
+                }
+                _ => presence.tool_payloads = true,
+            }
         }
     }
 
@@ -5333,6 +5389,23 @@ pub fn derive_envelope_content_presence(
 /// Only moves flags from `false` → `true`. Over-reporting (true flags on an
 /// empty payload) is left alone: that is a stricter declaration and does not
 /// open an acceptance path the payload did not earn.
+///
+/// # `routing_metadata` is deliberately never corrected here
+///
+/// This function upgrades `message_text_included`, `tool_payloads_included`,
+/// and `correction_included`, but has no arm for
+/// `consent.routing_metadata_included`, and that is intentional, not an
+/// omission. The upward correction exists to protect a downstream gate from
+/// an under-reported flag -- see the asymmetry argument below -- and no gate
+/// reads `routing_metadata_included`: `residual_risk` and the ingest
+/// PII-backstop hold both key on `message_text_included`,
+/// `tool_payloads_included`, and `correction_included` only (see
+/// `EnvelopeContentPresence::routing_metadata`'s doc comment). Adding a
+/// correction arm for a flag nothing consumes would only produce a
+/// "Server corrected under-reported consent declarations" warning with no
+/// protective effect behind it, which misrepresents what happened. If a
+/// consumer of `routing_metadata_included` is ever added, this exclusion and
+/// that doc comment both need revisiting together.
 ///
 /// # Why not a downward correction
 ///
@@ -7152,6 +7225,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         }
     }
@@ -7556,6 +7630,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
         assert_eq!(
@@ -8278,6 +8353,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -8329,6 +8405,67 @@ mod tests {
             training_dynamics: None,
             process_evaluation: None,
         }
+    }
+
+    #[test]
+    fn routing_metadata_is_not_declared_as_a_tool_payload() {
+        // A routing overlay is numbers and labels about an inference hop. It is
+        // not a tool payload, and declaring it as one floors the envelope at
+        // Medium residual risk and quarantines it on a default deployment for
+        // content it does not carry.
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        envelope.events = vec![TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::RoutingDecision,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"backend": "nearai", "rung": "same_model"}),
+            tool_name: None,
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: Some(1200),
+            token_counts: None,
+            cost_usd: None,
+            success: None,
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }];
+
+        let presence = derive_envelope_content_presence(&envelope);
+        assert!(presence.routing_metadata, "declared as routing metadata");
+        assert!(!presence.tool_payloads, "NOT declared as a tool payload");
+        assert!(!presence.message_text);
+    }
+
+    #[test]
+    fn a_tool_result_payload_is_still_a_tool_payload() {
+        // The regression guard for the change above: routing must be carved out
+        // without loosening the rule for everything else.
+        use super::*;
+        let mut envelope = sample_envelope_with_event_content("seed");
+        envelope.events = vec![TraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: Utc::now(),
+            redacted_content: None,
+            structured_payload: serde_json::json!({"stdout": "hello"}),
+            tool_name: Some("Bash".to_string()),
+            tool_category: None,
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+            side_effect: SideEffectLevel::None,
+        }];
+
+        let presence = derive_envelope_content_presence(&envelope);
+        assert!(presence.tool_payloads);
+        assert!(!presence.routing_metadata);
     }
 
     #[cfg(feature = "near-ai-privacy-filter")]
@@ -9022,6 +9159,7 @@ mod tests {
                 message_text_included: false,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -9290,6 +9428,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: true,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -9312,6 +9451,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10254,6 +10394,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10279,6 +10420,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10340,6 +10482,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
 
@@ -10369,6 +10512,7 @@ mod tests {
             message_text_included: false,
             tool_payloads_included: false,
             correction_included: false,
+            routing_metadata_included: false,
             revocable: true,
         };
         let report = RedactionReport {
@@ -10659,6 +10803,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
@@ -10827,6 +10972,7 @@ mod tests {
                 message_text_included: true,
                 tool_payloads_included: false,
                 correction_included: false,
+                routing_metadata_included: false,
                 revocable: true,
             },
             contributor: ContributorMetadata {
