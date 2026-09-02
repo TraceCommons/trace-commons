@@ -647,6 +647,15 @@ pub fn apply_settings_object(
     let obj = params.as_object().ok_or(ERR_SETTINGS_NOT_OBJECT)?;
     let mut changed = false;
     for (key, value) in obj {
+        // SET-SETTINGS-KEYS-BEGIN
+        //
+        // `docs/contributor-daemon-ipc-v1_1.md` lists these keys twice, and
+        // drifted to eight while this match accepted twelve -- a Task author
+        // reading the doc would have concluded `ironwire` was not settable.
+        // `the_ipc_doc_lists_every_key_this_match_accepts` walks the region
+        // between these markers via `include_str!`. **Adding a key outside
+        // them makes that test cover nothing**, which is the exact failure it
+        // replaces.
         match key.as_str() {
             "quiescence_secs" => {
                 settings.quiescence_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -707,6 +716,7 @@ pub fn apply_settings_object(
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
+        // SET-SETTINGS-KEYS-END
         changed = true;
     }
     Ok(changed)
@@ -1734,5 +1744,66 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
+    }
+
+    /// Every key `apply_settings_object` accepts is documented, in both
+    /// places the IPC doc lists them.
+    ///
+    /// This drift was real: the doc named eight keys while the match accepted
+    /// twelve, so `claude_source`, `codex_source`, `gemini_source` and
+    /// `ironwire` were settable and undocumented. A shell author reading the
+    /// `set_settings` section rather than the changelog would have concluded
+    /// `ironwire` could not be set at all.
+    ///
+    /// The key list is read from the source between the
+    /// `SET-SETTINGS-KEYS-BEGIN` / `-END` markers rather than restated here,
+    /// because a list restated in a test is a third place to drift.
+    #[test]
+    fn the_ipc_doc_lists_every_key_this_match_accepts() {
+        let source = include_str!("settings.rs");
+        let region = source
+            .split_once("SET-SETTINGS-KEYS-BEGIN")
+            .expect("begin marker present")
+            .1
+            .split_once("SET-SETTINGS-KEYS-END")
+            .expect("end marker present")
+            .0;
+
+        let keys: Vec<&str> = region
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix('"')?;
+                let (key, tail) = rest.split_once('"')?;
+                tail.trim_start().starts_with("=>").then_some(key)
+            })
+            .collect();
+
+        assert!(
+            keys.len() >= 12,
+            "the marked region yielded {} keys, so the sweep is covering \
+             almost nothing -- did the match move out from between the \
+             markers? {keys:?}",
+            keys.len()
+        );
+
+        let doc = include_str!("../../../../docs/contributor-daemon-ipc-v1_1.md");
+        let (table, body) = doc
+            .split_once("### `set_settings`")
+            .expect("the doc has a set_settings section");
+
+        for key in &keys {
+            let quoted = format!("`{key}`");
+            assert!(
+                table.contains(&quoted),
+                "`{key}` is accepted by set_settings but missing from the \
+                 method table in docs/contributor-daemon-ipc-v1_1.md"
+            );
+            assert!(
+                body.contains(&quoted),
+                "`{key}` is accepted by set_settings but missing from the \
+                 `set_settings` section of docs/contributor-daemon-ipc-v1_1.md"
+            );
+        }
     }
 }
