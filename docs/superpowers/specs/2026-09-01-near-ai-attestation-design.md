@@ -418,7 +418,9 @@ on the submission path. Raw data transits to it, so a compromised witness is a
 real exposure. It also inherits the redaction policy version as a compatibility
 surface: a policy change invalidates the ability to re-derive old certificates.
 
-**It has its own spec:** [`2026-09-01-redaction-witness-design.md`](./2026-09-01-redaction-witness-design.md).
+**It has its own spec:** [`2026-09-02-redaction-witness-service-design.md`](./2026-09-02-redaction-witness-service-design.md).
+Note that the witness no longer binds a certificate to an inference receipt --
+no trace population in this repo carries one. That spec records the evidence.
 
 ### The requirement was never content identity
 

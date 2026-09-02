@@ -88933,7 +88933,7 @@ impl trace_commons_server::near_attestation::client::AttestationClient
     > {
         Ok(
             trace_commons_server::near_attestation::AttestationReport::from_json(include_str!(
-                "../../../tests/fixtures/near_ai_attestation_report.json"
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
             ))
             .expect("fixture report parses"),
         )
@@ -88948,7 +88948,7 @@ impl trace_commons_server::near_attestation::client::AttestationClient
     > {
         Ok(
             trace_commons_server::near_attestation::quote::parse_collateral(include_str!(
-                "../../../tests/fixtures/near_ai_attestation_collateral.json"
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
             ))
             .expect("fixture collateral parses"),
         )
