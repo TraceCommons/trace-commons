@@ -238,6 +238,22 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
 
+    /// An absolute token path on the platform the test is running on.
+    ///
+    /// `/t/control.token` is absolute on Unix and **relative on Windows**,
+    /// which has no drive letter in it — so a fixture written that way is
+    /// silently rejected by the `is_absolute` filter above, and the test
+    /// reads as "the pointer named no token" rather than as a bad fixture.
+    /// That is exactly what it did: two tests passed everywhere and failed
+    /// only on `windows-latest`.
+    fn absolute(tail: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{tail}")
+        } else {
+            format!("/{tail}")
+        }
+    }
+
     /// The fixed layout. `IRONWIRE_HOME` does not move this file -- IronWire
     /// writes it under the real home directory whatever that variable says
     /// -- so looking for it anywhere else would find nothing on exactly the
@@ -252,16 +268,18 @@ mod tests {
 
     #[test]
     fn a_real_pointer_yields_the_port_and_the_token_path() {
-        let parsed = parse_pointer(
-            r#"{"control_url":"http://127.0.0.1:8463",
-                "token_path":"/custom/home/control.token"}"#,
-        )
-        .expect("the shape IronWire writes must parse");
+        let token = absolute("custom/home/control.token");
+        // Built with serde, not by interpolation: a Windows path carries
+        // backslashes, which are invalid JSON escapes.
+        let body = serde_json::to_string(&serde_json::json!({
+            "control_url": "http://127.0.0.1:8463",
+            "token_path": token,
+        }))
+        .expect("fixture serialises");
+
+        let parsed = parse_pointer(&body).expect("the shape IronWire writes must parse");
         assert_eq!(parsed.port, 8463);
-        assert_eq!(
-            parsed.token_path,
-            Some(PathBuf::from("/custom/home/control.token")),
-        );
+        assert_eq!(parsed.token_path, Some(PathBuf::from(&token)));
     }
 
     /// Unknown keys are ignored rather than refused: IronWire may add
@@ -391,9 +409,14 @@ mod tests {
     fn a_pointer_on_disk_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("endpoint.json");
+        let token = absolute("t/control.token");
         std::fs::write(
             &path,
-            r#"{"control_url":"http://127.0.0.1:9111","token_path":"/t/control.token"}"#,
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9111",
+                "token_path": token,
+            }))
+            .expect("fixture serialises"),
         )
         .expect("write pointer");
         let _at = test_support::PointerAt::set(&path);
@@ -402,7 +425,7 @@ mod tests {
             read_pointer(),
             Some(IronWirePointer {
                 port: 9111,
-                token_path: Some(PathBuf::from("/t/control.token")),
+                token_path: Some(PathBuf::from(&token)),
             }),
         );
     }
