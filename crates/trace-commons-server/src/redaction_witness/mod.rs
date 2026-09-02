@@ -40,4 +40,5 @@
 pub mod certificate;
 pub mod config;
 pub mod correspondence;
+pub mod request;
 pub mod verification;

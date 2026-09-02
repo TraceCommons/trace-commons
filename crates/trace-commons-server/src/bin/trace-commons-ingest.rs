@@ -10,7 +10,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::Context;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::rejection::{JsonRejection, MissingJsonContentType};
+use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
@@ -20,6 +21,7 @@ use axum::{
     middleware::Next,
 };
 use base64::Engine as _;
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -51,8 +53,13 @@ use trace_commons_server::account_session::{
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
-use trace_commons_server::redaction_witness::config::WitnessBypassConfig;
-use trace_commons_server::redaction_witness::verification::VerifiedWitnessCertificate;
+use trace_commons_server::redaction_witness::config::{
+    WitnessBypassConfig, witness_bypass_config_from_env,
+};
+use trace_commons_server::redaction_witness::request::witness_headers;
+use trace_commons_server::redaction_witness::verification::{
+    VerifiedWitnessCertificate, verify_witness_certificate,
+};
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -1610,6 +1617,14 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
+    /// posture every deployment ships in -- means an arriving certificate is
+    /// ignored entirely and every content-bearing trace holds exactly as it
+    /// does today. `Some` means an operator has pinned a witness signing
+    /// address, a measurement set and a policy allowlist, and a certificate
+    /// verifying against all three keeps a submission out of the hold. It
+    /// lifts no quarantine and never means the trace is clean.
+    witness_bypass: Option<WitnessBypassConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3793,6 +3808,13 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        // Fail closed on configuration. An enabled bypass missing its signing
+        // address, its measurement set, or its policy allowlist refuses to
+        // boot naming the control, rather than running with a control an
+        // operator believes is in place. `Ok(None)` is the switch being off,
+        // which is not an acceptance of anything.
+        let witness_bypass = witness_bypass_config_from_env()
+            .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -4072,6 +4094,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            witness_bypass,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -12835,12 +12858,157 @@ async fn append_tenant_access_grant_update_audit(
     .await
 }
 
+/// A submission body, kept as BOTH the parsed envelope and the exact bytes
+/// that arrived.
+///
+/// The raw bytes are the point. A witness certificate's digest is over the
+/// envelope bytes the witness produced and the contributor forwarded
+/// verbatim, and `rescrub_trace_envelope` rewrites the envelope in place --
+/// `privacy.residual_pii_risk`, `redaction_counts`, `pii_labels_present`,
+/// `redaction_pipeline_version`, `warnings` and `redaction_hash` -- so **the
+/// stored bytes are never the received bytes**, and neither is any
+/// re-serialisation of the parsed value. Verification has to run against
+/// these bytes, at receipt.
+///
+/// # Why this is an extractor rather than a `Bytes` argument
+///
+/// This is the busiest handler in the binary and its rejection behaviour is
+/// client-visible. Taking `Bytes` and hand-rolling the parse would have meant
+/// hand-rolling axum's rejection shape too -- status, body text and
+/// content-type -- and any drift there is a regression for every client,
+/// including the ones that never send a certificate. Instead this reproduces
+/// `Json`'s own `FromRequest` and returns `JsonRejection` **verbatim**, so a
+/// malformed body fails exactly as it did before.
+struct SubmitBody {
+    envelope: TraceContributionEnvelope,
+    /// The body exactly as received, for the witness digest and nothing else.
+    raw: Bytes,
+}
+
+impl SubmitBody {
+    /// Build a body from an envelope, for tests that call the handler
+    /// directly rather than through the router.
+    ///
+    /// The raw bytes are a real serialisation of the envelope, not a
+    /// placeholder: a test that hands the handler bytes which are not the
+    /// envelope would exercise a state no request can produce, and the
+    /// witness digest is taken over exactly this field.
+    ///
+    /// A direct call therefore cannot carry a certificate -- there are no
+    /// headers to put one in -- which is correct. The witnessed path is
+    /// exercised through the real router, because that is the only way to
+    /// prove the extractor and the handler agree about which bytes arrived.
+    #[cfg(test)]
+    fn for_test(envelope: TraceContributionEnvelope) -> Self {
+        let raw = Bytes::from(serde_json::to_vec(&envelope).expect("the envelope serialises"));
+        SubmitBody { envelope, raw }
+    }
+}
+
+impl<S> FromRequest<S> for SubmitBody
+where
+    S: Send + Sync,
+{
+    type Rejection = JsonRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !json_content_type(request.headers()) {
+            return Err(MissingJsonContentType::default().into());
+        }
+        let raw = Bytes::from_request(request, state).await?;
+        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)?;
+        Ok(SubmitBody { envelope, raw })
+    }
+}
+
+/// Whether a request's `Content-Type` is JSON, matching `axum::Json`.
+///
+/// Reimplemented rather than reached for, because axum's is private and the
+/// `mime` crate it uses is not a dependency of this workspace -- and adding a
+/// dependency to spell one predicate is not a trade this repo makes. The
+/// cases that matter are pinned by `json_content_type_matches_axum`: bare
+/// `application/json`, a `charset` parameter, a `+json` suffix, and
+/// `text/json` refused.
+///
+/// Where this differs from axum's it is stricter: a value `mime` would reject
+/// as malformed is rejected here too, because the essence must match
+/// `application/<token>` with no interior whitespace.
+fn json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let Some(subtype) = essence.strip_prefix("application/") else {
+        return false;
+    };
+    if subtype.is_empty()
+        || !subtype
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_'))
+    {
+        return false;
+    }
+    subtype.eq_ignore_ascii_case("json") || subtype.to_ascii_lowercase().ends_with("+json")
+}
+
+/// Verify a request-borne witness certificate against the body as received.
+///
+/// **Fail open on the submission, closed on the bypass.** Every failure path
+/// returns `None`, which means the trace is held exactly as an unwitnessed
+/// one would be. Nothing here can reject a submission that would otherwise be
+/// accepted: a witness outage, a client bug, or an attacker spraying garbage
+/// headers must not become a submission outage.
+///
+/// With no bypass configured this does not even decode the headers. That is
+/// the ship-disabled default: an arriving certificate on an unconfigured
+/// deployment is ignored, not merely unverifiable.
+///
+/// Refusals are logged at `debug` and by name only. A header value is
+/// attacker-chosen and `WitnessHeaderError` carries none of it, which is what
+/// makes logging the error safe at all.
+fn verified_witness_for_submission(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<VerifiedWitnessCertificate> {
+    let bypass = state.witness_bypass.as_ref()?;
+    let (certificate, signature) = match witness_headers(headers) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate header refused; holding as usual");
+            return None;
+        }
+    };
+    match verify_witness_certificate(certificate, &signature, Some(bypass.pin()), body) {
+        Ok(verified) => Some(verified),
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate did not verify; holding as usual");
+            None
+        }
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut envelope): Json<TraceContributionEnvelope>,
+    body: SubmitBody,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    let SubmitBody {
+        mut envelope,
+        raw: raw_body,
+    } = body;
     let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+
+    // AT RECEIPT, before anything mutates the envelope. `rescrub_trace_envelope`
+    // below rewrites it in place, so verifying after that point -- or off the
+    // stored artifact, or off any re-serialisation -- would fail every honest
+    // witnessed submission. `the_certificate_is_verified_before_the_rescrub_runs`
+    // pins the ordering against this file's source.
+    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
 
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
@@ -12957,8 +13125,8 @@ async fn submit_trace_handler(
         corpus_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
-        None,
-        None,
+        witness.as_ref(),
+        state.witness_bypass.as_ref(),
     );
 
     let artifact_label = if remediating_prior.is_some() {
