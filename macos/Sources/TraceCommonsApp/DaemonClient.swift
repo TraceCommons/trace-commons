@@ -15,9 +15,35 @@ final class DaemonClient {
         var description: String { "\(code): \(message)" }
     }
 
-    private let daemon: TCDaemon
+    /// What a settings write refused to send, before anything left this
+    /// process. Distinct from `Failure`, which is always the daemon's own
+    /// answer: these never reach it.
+    enum SettingsRefusal: Error, Equatable, CustomStringConvertible {
+        /// No keys at all. The daemon refuses this too
+        /// (`no-known-setting-supplied`); the point of refusing it here is
+        /// that an empty object encodes to the same `{}` a no-parameter
+        /// call sends, so a caller bug would otherwise look like a call.
+        case nothingDeclared
+        /// A key that is empty or only whitespace is not a settings key.
+        case blankKey
+        /// A value Foundation cannot encode as JSON. Named by key, and
+        /// caught before encoding: `JSONSerialization` raises an ObjC
+        /// exception for this rather than throwing a Swift error, which
+        /// would end the process instead of the call.
+        case valueNotEncodable(key: String)
 
-    init(daemon: TCDaemon) {
+        var description: String {
+            switch self {
+            case .nothingDeclared: return "nothing-declared"
+            case .blankKey: return "blank-key"
+            case .valueNotEncodable(let key): return "value-not-encodable: \(key)"
+            }
+        }
+    }
+
+    private let daemon: any DaemonCalling
+
+    init(daemon: any DaemonCalling) {
         self.daemon = daemon
     }
 
@@ -153,6 +179,60 @@ final class DaemonClient {
 
     func settings() throws -> DaemonSettingsView {
         try call("get_settings", as: DaemonSettingsView.self)
+    }
+
+    // MARK: - Declare
+
+    /// Changes settings on the daemon that is already running.
+    ///
+    /// The one write path this shell has. `tc_daemon_start_with_settings`
+    /// applies a settings object *before* start and is what the roots
+    /// screen uses; this applies one to a live daemon, which is the only
+    /// form a contributor changing something on screen can use. The daemon
+    /// saves the object and then applies it -- a changed proxy declaration
+    /// is rebuilt on the running daemon (`shared.rebuild_routing`) -- so a
+    /// caller has nothing to restart and must not say otherwise.
+    ///
+    /// `declarations` are the keys `set_settings` takes, and this method
+    /// deliberately does not hold a second copy of that list: the daemon
+    /// refuses a key it does not recognise outright, with a definite label,
+    /// and a client-side allow-list is how a key the daemon gained becomes
+    /// one this app cannot send. What is checked here is only shape -- the
+    /// things that would produce a call nobody can answer, or no call at
+    /// all. See `SettingsRefusal`.
+    ///
+    /// Answers with the daemon's own updated view, which is what a caller
+    /// must render. Nothing here is applied optimistically: `set_settings`
+    /// validates the whole object and changes nothing if any part of it is
+    /// refused.
+    @discardableResult
+    func setSettings(_ declarations: [String: Any]) throws -> DaemonSettingsView {
+        let params = try Self.settingsParams(declarations)
+        return try call("set_settings", params: params, as: DaemonSettingsView.self)
+    }
+
+    /// Shape-checks a settings object, refusing rather than returning one
+    /// that cannot honestly be sent.
+    ///
+    /// `static` for the reason `approveParams` is: the rules worth
+    /// asserting here are about what does and does not leave, and a rule
+    /// that can only be tested through a live socket does not get tested.
+    static func settingsParams(_ declarations: [String: Any]) throws -> [String: Any] {
+        guard !declarations.isEmpty else { throw SettingsRefusal.nothingDeclared }
+        for (key, value) in declarations {
+            guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SettingsRefusal.blankKey
+            }
+            // Checked one key at a time so the refusal can name the key.
+            // `NSNull` passes, and must: it is how `ironwire` is turned off
+            // and how a root override is cleared, so treating it as an
+            // absent value would send "unchanged" where the contributor
+            // said "off".
+            guard JSONSerialization.isValidJSONObject([key: value]) else {
+                throw SettingsRefusal.valueNotEncodable(key: key)
+            }
+        }
+        return declarations
     }
 
     /// Redeems `invite` for enrollment. Deliberately never sends
