@@ -78,8 +78,21 @@ Nothing is bucketed or coarsened; values leave at full precision. The only lossy
 paths are a saturating `u32::MAX` clamp on token counts and the both-or-nothing
 token rule.
 
+**`cost_usd` is priced, not billed.** `routing/mod.rs` states it: work served on
+a subscription is priced at what it *would* have cost on the meter, and **no
+surface may render it as money the contributor spent.** Any copy naming a dollar
+figure has to carry that distinction, which rules out the obvious phrasings --
+"what you spent", "your cost", a running total that reads like a bill.
+
 **So the honest one-line description is: which model was asked, which answered,
-how long it took, how many tokens, and what it cost. No prompts, no responses.**
+how long it took, how many tokens, and a priced estimate of what that work would
+cost on the meter. No prompts, no responses.**
+
+The same file adds a constraint worth repeating on any surface that shows these
+numbers: they are **attribution only**, and must never reach a gate, a scoring
+input, or a credit computation, because they come from a proxy the contributor
+can patch. A UI that presents routing data beside credit figures invites exactly
+that conflation.
 
 ## Design
 
@@ -110,7 +123,39 @@ renders. Three outcomes, each with distinct copy:
 This requires a new IPC method. It does **not** change the submission path: the
 probe runs when a human asks, never on the trace path.
 
-### 3. A status surface
+### 3. The `IRONWIRE_HOME` gap
+
+The token is read from `$IRONWIRE_HOME/control.token` -- stated in
+`routing/ironwire.rs`'s module doc, and read at call time, never copied into our
+settings or logged. That is the right handling of a credential. It also creates
+a failure this design has to name.
+
+**A GUI-launched application does not inherit the user's shell environment.** On
+macOS an app started from Finder or Dock gets `launchd`'s environment, not the
+one in a shell profile; the same is broadly true of desktop-launched apps on
+Linux. So `$IRONWIRE_HOME` will be unset for the daemon our app starts, whatever
+the contributor has configured in their shell. If their IronWire lives anywhere
+but the default location, the token read fails -- and today that is
+indistinguishable from "off".
+
+This is the same silent-failure class as the port, arriving by a different
+route, and it is worse because the contributor has no reason to suspect it: they
+set the variable, their shell honours it, and the app quietly does not see it.
+
+Three things follow:
+
+- The declaration probe (above) must report **which file it looked for**, by
+  absolute path, not merely that a token was unreadable. That single string
+  turns an invisible failure into a fixable one.
+- A path field belongs beside the port, defaulted to the conventional location
+  and only needed by contributors whose install is elsewhere.
+- **Confirm the fallback behaviour before implementing.** I could not verify
+  from the patch set what happens when `$IRONWIRE_HOME` is unset -- whether it
+  falls back to a conventional directory or simply fails. The implementer must
+  read `ironwire_ledger_for()` and design to what it does, not to this
+  paragraph.
+
+### 4. A status surface
 
 `has_rows()` already exists and is `pub`; it reaches nothing. Expose routing
 state through the existing daemon health/status IPC -- declared or not, last
@@ -121,7 +166,7 @@ This is what converts "absence and failure are the same state" from a trap into
 a defensible design: the submission path still cannot fail, and the contributor
 can still see that nothing is arriving.
 
-### 4. Restart semantics, stated rather than hidden
+### 5. Restart semantics, stated rather than hidden
 
 The ledger is built once at daemon construction, so a declaration change takes
 effect on restart. **This is not a macOS quirk; it is true everywhere**, and it
@@ -134,7 +179,7 @@ Two honest options, and this spec picks the first:
 - Make the ledger rebuildable on settings change. More code in the daemon, and
   it still cannot help macOS.
 
-### 5. Consent, which is the largest piece
+### 6. Consent, which is the largest piece
 
 Two distinct surfaces, and #513's deferral names only the smaller one.
 
@@ -176,17 +221,36 @@ whoever owns the legal page. **It is not a decision for this spec or its
 implementer**, and it is a cross-repo dependency that must land before any shell
 shows consent copy naming routing.
 
-### 6. Onboarding
+### 7. Onboarding
 
 Onboarding is written three times with no shared scaffolding -- macOS
 `Onboarding*View.swift` under `OnboardingCoordinatorView`, Windows
 `OnboardingWindow.xaml` + `OnboardingViewModel`, GTK `ui/onboarding.rs`. The
 only shared artefact is the settings JSON shape.
 
-**Routing does not belong in onboarding.** A new contributor does not have
-IronWire; a contributor who does can find it in settings. Adding a fourth step
-to three divergent flows to ask a question most people answer "no" to is cost
-without benefit. Revisit if IronWire ships as part of a bundle.
+**Routing does not get its own onboarding step -- it gets detected.**
+
+The data to collect is unusually small: a toggle, a port, and (per the
+`IRONWIRE_HOME` gap above) possibly a path. No account, no endpoint, no
+credential -- the token is read from disk, never typed. So the usual argument
+against a new step, that it costs three implementations to gather a lot from a
+few people, only half applies: it would cost three implementations to gather
+very little.
+
+What still holds is that a new contributor almost certainly does not have
+IronWire, and onboarding should not ask about a proxy before it has asked about
+traces.
+
+The resolution is to **detect rather than ask**: if the daemon finds a readable
+`control.token` at startup, the settings screen surfaces routing as an offer;
+if it does not, routing stays a setting a contributor can find. Nobody is
+interrogated about software they do not run, and nobody who runs it has to know
+the feature exists to find it.
+
+That reuses machinery this spec already needs -- the probe from section 2 and
+the status block from section 4 -- so it costs little beyond the offer copy.
+Revisit a dedicated step only if IronWire ships bundled, where the assumption
+inverts.
 
 ## Per-shell notes
 
@@ -216,6 +280,14 @@ needs no ABI change. The probe and status additions do.
   and then sees nothing arrive for a week is in a failure state the status line
   reports only if they look. A notification is the obvious answer and also the
   obvious way to become annoying. Not decided here.
+- **Does `$IRONWIRE_HOME` have a fallback?** Unverified from #513's patch set.
+  It decides whether the environment gap is a nuisance for unusual installs or
+  a hard failure for every GUI-launched daemon. Read `ironwire_ledger_for()`
+  before designing the copy.
+- **What does the probe report to a contributor who has no IronWire at all?**
+  The offer only appears on detection, so this should be unreachable -- but a
+  contributor who types a port by hand can reach it, and "not reachable" must
+  not read as an error they caused.
 - **`has_rows` is a poor status signal.** It says data exists, not that the
   proxy is healthy now. A last-successful-refresh timestamp is the better
   primitive and may need adding to the ledger.
