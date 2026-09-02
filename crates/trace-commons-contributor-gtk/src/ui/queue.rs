@@ -48,6 +48,16 @@ const CONTENT_GAP: i32 = 14;
 
 pub struct QueueView {
     pub root: gtk::Box,
+    /// The arming offer, above the cards it is about. Persistent and
+    /// emptied rather than rebuilt with the list, because it is not part of
+    /// the list: rebuilding it on every queue render would make it flicker
+    /// on every approval.
+    ///
+    /// Refreshed by `App::refresh`, which asks `arming_suggestion` alongside
+    /// `list_pending` -- the daemon's answer changes on exactly the events
+    /// that change the queue, since an upload landing is what moves a
+    /// project past the threshold.
+    arming_offer: gtk::Box,
     /// Persistent rather than rebuilt each render: it is the only widget in
     /// this window that updates once a second, and rebuilding it under the
     /// pointer would move `Undo` out from under a contributor reaching for
@@ -172,14 +182,40 @@ impl QueueView {
             .sync_create()
             .build();
 
+        let arming_offer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::S)
+            .visible(false)
+            .build();
+        arming_offer.add_css_class("tc-card");
+
+        let arming_clamp = adw::Clamp::builder()
+            .maximum_size(super::COLUMN_MAX)
+            .tightening_threshold(super::COLUMN_TIGHTEN)
+            .margin_top(space::L)
+            .margin_start(space::XL)
+            .margin_end(space::XL)
+            .child(&arming_offer)
+            .build();
+
+        // The wrapper follows the card, for the same reason `undo_clamp`
+        // follows the undo bar: a clamp left visible around a hidden child
+        // keeps its margins and leaves a band of dead space above the queue.
+        arming_offer
+            .bind_property("visible", &arming_clamp, "visible")
+            .sync_create()
+            .build();
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("tc-root");
+        root.append(&arming_clamp);
         root.append(&undo_clamp);
         root.append(&empty);
         root.append(&scroller);
 
         Self {
             root,
+            arming_offer,
             undo_bar,
             undo_headline,
             undo_held,
@@ -493,6 +529,80 @@ fn stat_card(tone: Tone, label: &str, value: u32) -> gtk::Box {
 ///
 /// Called once a second while an approval is held, so it must not rebuild
 /// anything -- see `QueueView::undo_bar`.
+/// The offer to stop being asked about one project.
+///
+/// Drawn above the cards it is about: the contributor is looking at the very
+/// thing the offer would remove, and has just approved several of them.
+///
+/// This asks; it does not decide. The daemon decides whether there is
+/// anything to ask (`ProjectPolicy::arming_suggestion`) and both answers go
+/// back to it, so "Not now" is remembered across relaunches and across
+/// shells rather than being a dismissal this view forgets.
+pub fn render_arming_offer(app: &Rc<App>, offer: Option<crate::model::ArmingOffer>) {
+    let view = &app.queue;
+    clear(&view.arming_offer);
+    let Some(offer) = offer else {
+        view.arming_offer.set_visible(false);
+        return;
+    };
+
+    // Evidence first, question second: someone who reads only the first line
+    // still learns why they are being asked.
+    let evidence = gtk::Label::builder()
+        .label(copy::arming_offer_evidence(
+            &offer.project_label,
+            offer.contributed_count,
+        ))
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    evidence.add_css_class("tc-meta");
+    view.arming_offer.append(&evidence);
+
+    let question = gtk::Label::builder()
+        .label(copy::arming_offer_question(&offer.project_label))
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    view.arming_offer.append(&question);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    let decline = gtk::Button::with_label(copy::ARMING_OFFER_DECLINE);
+    let arm = gtk::Button::with_label(copy::ARMING_OFFER_CONFIRM);
+    // Neither is `suggested-action`. Arming is a real choice with a real
+    // cost -- previews from this project stop -- and a card that leads the
+    // eye to "yes" is not asking a question.
+    actions.append(&decline);
+    actions.append(&arm);
+    view.arming_offer.append(&actions);
+    view.arming_offer.set_visible(true);
+
+    let declined_id = offer.project_id.clone();
+    let declined_app = Rc::clone(app);
+    decline.connect_clicked(move |_| {
+        let app = Rc::clone(&declined_app);
+        app.call(
+            "decline_arming",
+            serde_json::json!({ "project_id": declined_id }),
+            |app, _| render_arming_offer(app, None),
+        );
+    });
+
+    let armed_id = offer.project_id.clone();
+    let armed_app = Rc::clone(app);
+    arm.connect_clicked(move |_| {
+        let app = Rc::clone(&armed_app);
+        app.call(
+            "set_project_mode",
+            serde_json::json!({ "project_id": armed_id, "mode": "auto_upload" }),
+            |app, _| {
+                render_arming_offer(app, None);
+                app.refresh();
+            },
+        );
+    });
+}
+
 pub fn render_undo(app: &Rc<App>) {
     let view = &app.queue;
     let pending = app.undo.borrow();
