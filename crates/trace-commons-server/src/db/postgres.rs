@@ -6375,102 +6375,102 @@ mod tests {
         assert!(refuse_if_enumeration_is_ambiguous(&tenants, true).is_ok());
     }
 
-    /// One row per migration that has a wiring check:
-    /// `(version, file_stem, insert_name, whole_file_references)`.
+    /// The minimum number of times a migration's path may appear in THIS
+    /// file: once for `run_migrations`' own `include_str!`, plus one for each
+    /// test that READS the migration rather than restating it.
     ///
-    /// This is the nine migrations that had per-version wiring tests, plus
-    /// V56. V1-V46 have none and are not claimed here -- enumerating
-    /// `migrations/` instead of listing it belongs to the migration-registry
-    /// follow-up, which would also have to handle a bound-params array that
-    /// rustfmt has wrapped (V17's is).
-    ///
-    /// `whole_file_references` counts how many times the migration's path
-    /// appears in THIS file: once for `run_migrations`' own `include_str!`,
-    /// plus one for each test that READS the migration rather than restating
-    /// it. Asserted as a lower bound, so a new legitimate reader does not
-    /// fail an unrelated row -- but deleting a content test, which the
-    /// per-version tests caught with an exact count, still does.
-    const WIRED_MIGRATIONS: &[(u32, &str, &str, usize)] = &[
-        (
-            47,
-            "trace_gate_decision_total_chunk_count",
-            "trace_gate_decision_total_chunk_count",
-            2,
-        ),
-        (48, "trace_correction_value", "trace_correction_value", 2),
-        (
-            49,
-            "trace_submission_last_status_reason",
-            "trace_submission_last_status_reason",
-            2,
-        ),
-        (
-            50,
-            "onboarding_invite_grant_consumption",
-            "onboarding_invite_grant_consumption",
-            1,
-        ),
-        (
-            51,
-            "privacy_classify_window_cache",
-            "privacy_classify_window_cache",
-            2,
-        ),
-        (
-            52,
-            "trace_submission_residual_risk_basis",
-            "trace_submission_residual_risk_basis",
-            2,
-        ),
-        (
-            53,
-            "trace_gate_decision_composite_score",
-            "trace_gate_decision_composite_score",
-            2,
-        ),
-        (
-            54,
-            "trace_gate_decision_qualifying_mass",
-            "trace_gate_decision_qualifying_mass",
-            2,
-        ),
-        (
-            55,
-            "register_stats_public_read",
-            "register_stats_public_read",
-            3,
-        ),
-        (
-            56,
-            "community_withdrawal_eviction_rls",
-            "community_withdrawal_eviction_rls",
-            4,
-        ),
+    /// Only migrations with a reader beyond `run_migrations` need a row; the
+    /// wiring check itself enumerates `migrations/` and needs no table.
+    /// Asserted as a lower bound, so a new legitimate reader does not fail an
+    /// unrelated row -- but deleting a content test still does.
+    const MIGRATION_READER_MINIMUMS: &[(u32, usize)] = &[
+        (47, 2),
+        (48, 2),
+        (49, 2),
+        (51, 2),
+        (52, 2),
+        (53, 2),
+        (54, 2),
+        (55, 3),
+        (56, 4),
     ];
+
+    /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
+    /// test time rather than listed.
+    ///
+    /// `migrations/` is the source of truth for what migrations exist, so
+    /// enumerating it is what lets the wiring check below fail for a migration
+    /// nobody remembered to mention -- the failure mode a hand-maintained
+    /// table reproduces rather than closes. `CARGO_MANIFEST_DIR` is
+    /// `crates/trace-commons-server`; the migrations live at the repo root.
+    fn migrations_on_disk() -> Vec<(u32, String)> {
+        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+
+        let entries = std::fs::read_dir(MIGRATIONS_DIR)
+            .unwrap_or_else(|err| panic!("cannot read {MIGRATIONS_DIR}: {err}"));
+
+        let mut migrations: Vec<(u32, String)> = Vec::new();
+        for entry in entries {
+            let name = entry.expect("directory entry").file_name();
+            let name = name.to_str().expect("migration filenames are UTF-8");
+            let Some(rest) = name.strip_prefix('V') else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some((version, stem)) = rest.split_once("__") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some(stem) = stem.strip_suffix(".sql") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let version: u32 = version
+                .parse()
+                .unwrap_or_else(|_| panic!("{name}: version is not a number"));
+            migrations.push((version, stem.to_string()));
+        }
+
+        // An empty or wrong directory would make every check below pass
+        // vacuously, so refuse a read that plainly did not find the tree.
+        assert!(
+            migrations.len() >= 56,
+            "found only {} migrations in {MIGRATIONS_DIR}: the enumeration read the wrong \
+                 directory, and an empty one passes every check below",
+            migrations.len()
+        );
+
+        migrations.sort();
+        migrations
+    }
 
     /// `run_migrations` is hand-rolled: a migration not wired in with its own
     /// `include_str!`, or guarded on one version while recording another,
-    /// never runs, or re-runs on every boot. Table-driven the way
-    /// `trace_commons_rls_registry_matches_migration_policy_coverage` below
-    /// is, so a failing row names the migration.
+    /// never runs, or re-runs on every boot. Driven from `migrations/` the way
+    /// `trace_commons_rls_registry_matches_migration_policy_coverage` below is
+    /// driven from its policy set, so a failing row names the migration.
     ///
-    /// Three things make this hard to satisfy by accident:
+    /// Four things make this hard to satisfy by accident:
     ///
-    /// 1. Markers are checked against `run_migrations`' own body, not the
+    /// 1. The set under test is read from `migrations/`, not listed here. A
+    ///    migration added and never wired in fails without anyone having to
+    ///    remember this test exists -- which is how V50 came to have no
+    ///    coverage while nine hand-written per-version tests were green.
+    /// 2. Markers are checked against `run_migrations`' own body, not the
     ///    whole file. Scanning the file let a block that was commented out or
     ///    moved into dead code satisfy every marker -- the way a literal
     ///    written inside the test used to satisfy the assertion reading it --
     ///    and let an unrelated mention inflate a count.
-    /// 2. All three markers for a version must sit in the SAME
+    /// 3. All three markers for a version must sit in the SAME
     ///    `already_applied` block. Checked against the whole body they were
     ///    independent, so a block guarded on `&1_i32` while recording `&55_i32`
     ///    passed -- permanently dead, and green.
-    /// 3. Matching is whitespace-insensitive, because `rustfmt` decides
+    /// 4. Matching is whitespace-insensitive, because `rustfmt` decides
     ///    whether a bound-params array fits on one line. V17's does not.
     ///
+    /// The recorded name is derived from the filename rather than restated:
+    /// all 56 wired migrations record their own file stem, and a second copy
+    /// of it here would only be a new way for this test to lie.
+    ///
     /// What it still does not prove: that the statement beside a bound-params
-    /// array is the INSERT, and that a migration absent from the table is
-    /// wired at all. Both belong to the migration-registry follow-up.
+    /// array is the INSERT.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
@@ -6486,26 +6486,44 @@ mod tests {
         let body = &THIS_FILE[start..end];
 
         // A failed slice must not pass vacuously by scanning the wrong region
-        // -- the same class of defect this test exists to catch. Bounded on
-        // both sides: too small means the end marker moved, too large means it
-        // swallowed the methods that follow.
+        // -- the same class of defect this test exists to catch. Both guards
+        // are structural rather than a line count, which would have to be
+        // raised every time a migration lands and would fail with a message
+        // about markers when nothing about the markers was wrong.
         assert!(
             body.contains("_trace_commons_migrations"),
             "run_migrations slice found the wrong region: the migrations table \
-             name is missing"
+                 name is missing"
         );
-        let line_count = body.lines().count();
-        assert!(
-            (500..1500).contains(&line_count),
-            "run_migrations slice is {line_count} lines: check the start/end markers"
+        assert_eq!(
+            body.matches("fn ").count(),
+            1,
+            "run_migrations slice contains more than its own signature: it swallowed the \
+                 methods that follow"
+        );
+        assert_eq!(
+            body.lines().last().map(str::trim),
+            Some("}"),
+            "run_migrations slice does not end at the function's closing brace"
         );
         // The strip below cuts each line at its first `//` and cannot see a
         // block comment, so a migration wrapped in one would read as wired.
         assert!(
             !body.contains("/*"),
             "run_migrations gained a block comment; the line-comment strip no \
-             longer covers it"
+                 longer covers it"
         );
+        // The same strip cannot see that a `//` sits inside a string literal,
+        // and would cut the rest of that line -- dropping a marker, or fusing
+        // two blocks. Nothing in the body does this today; assert the
+        // precondition rather than assume it.
+        assert!(
+                !body.lines().any(|line| {
+                    matches!((line.find('"'), line.find("//")), (Some(quote), Some(comment)) if quote < comment)
+                }),
+                "run_migrations has a `//` after a string literal on the same line; the \
+                 line-comment strip would cut inside the string"
+            );
 
         // Comments dropped, then whitespace and the trailing comma rustfmt
         // adds inside a wrapped array, so a marker matches whether or not
@@ -6526,14 +6544,14 @@ mod tests {
         const BLOCK: &str = "letalready_applied";
         let mut failures: Vec<String> = Vec::new();
 
-        for &(version, file_stem, insert_name, readers) in WIRED_MIGRATIONS {
+        for (version, file_stem) in migrations_on_disk() {
             let file_marker = format!("migrations/V{version}__{file_stem}.sql");
 
             let hits = squashed.matches(&file_marker).count();
             if hits != 1 {
                 failures.push(format!(
                     "V{version}: named {hits} times in run_migrations, expected exactly once \
-                     by its own include_str!"
+                         by its own include_str!"
                 ));
                 continue;
             }
@@ -6552,26 +6570,31 @@ mod tests {
             if !block.contains(&guard_marker) {
                 failures.push(format!(
                     "V{version}: its already_applied guard does not query version {version} -- \
-                     a block guarded on another version never runs, or runs on every boot"
+                         a block guarded on another version never runs, or runs on every boot"
                 ));
             }
 
-            let insert_marker = format!("&[&{version}_i32,&\"{insert_name}\"]");
+            let insert_marker = format!("&[&{version}_i32,&\"{file_stem}\"]");
             if !block.contains(&insert_marker) {
                 failures.push(format!(
                     "V{version}: does not record itself in _trace_commons_migrations as \
-                     {insert_name:?} within its own block -- being gated by an already_applied \
-                     check for the same version is not the same thing"
+                         {file_stem:?} within its own block -- being gated by an already_applied \
+                         check for the same version is not the same thing"
                 ));
             }
 
+            let readers = MIGRATION_READER_MINIMUMS
+                .iter()
+                .find(|(wanted, _)| *wanted == version)
+                .map(|(_, readers)| *readers)
+                .unwrap_or(1);
             let references = THIS_FILE.matches(&file_marker).count();
             if references < readers {
                 failures.push(format!(
                     "V{version}: named {references} times in this file, expected at least \
-                     {readers} -- run_migrations' include_str! plus each test that reads the \
-                     migration. A missing one means such a test was deleted or now restates \
-                     the migration instead of reading it"
+                         {readers} -- run_migrations' include_str! plus each test that reads the \
+                         migration. A missing one means such a test was deleted or now restates \
+                         the migration instead of reading it"
                 ));
             }
         }
