@@ -72,8 +72,17 @@ public sealed partial class SettingsView : UserControl
     /// knob on this screen.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Nothing here waits on a restart: the daemon picks the declaration up on
     /// its next poll, which is what the line under the switch says.
+    /// </para>
+    /// <para>
+    /// This also fires when the binding moves the switch, which a repaint
+    /// driven by a daemon event now does. <c>SetRoutingEnabledAsync</c>
+    /// refuses a write that matches what it already holds, and the view model
+    /// sets its field before it notifies, so a repaint cannot write anything
+    /// back through here.
+    /// </para>
     /// </remarks>
     private async void OnRoutingToggled(object sender, RoutedEventArgs e)
     {
