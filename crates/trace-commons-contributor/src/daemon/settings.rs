@@ -218,8 +218,8 @@ pub enum IronWireDeclaration {
     Watch {
         port: u16,
         /// Where the proxy writes `control.token`, when the contributor
-        /// said. Absent means fall back to `IRONWIRE_HOME` and then
-        /// `~/.ironwire`; see [`ironwire_ledger_for`].
+        /// said. Absent means fall back to the discovery pointer, then
+        /// `IRONWIRE_HOME`, then `~/.ironwire`; see [`ironwire_ledger_for`].
         ///
         /// The *directory*, never the token. The token is a credential for
         /// an API that can rewrite the contributor's agent configuration; it
@@ -268,31 +268,119 @@ impl IronWireDeclaration {
 /// drift. The resolution order it encodes is documented on
 /// [`ironwire_ledger_for`].
 ///
+/// Reads the discovery pointer at call time, so a proxy started after the
+/// daemon is found without a restart, and one stopped cleanly stops being
+/// consulted. See [`super::ironwire_pointer`] for why a missing or unusable
+/// pointer is not an error.
+///
 /// `None` only when nothing at all resolves -- no declared directory, no
-/// `IRONWIRE_HOME`, and no discoverable home directory.
+/// pointer, no `IRONWIRE_HOME`, and no discoverable home directory.
 #[must_use]
 pub fn ironwire_token_path(declared: Option<&std::path::Path>) -> Option<PathBuf> {
-    let home = declared
+    ironwire_token_path_with(declared, super::ironwire_pointer::read_pointer().as_ref())
+}
+
+/// [`ironwire_token_path`] against a pointer supplied by the caller.
+///
+/// The whole resolution order in one pure function, so a test can state it
+/// without a home directory to write into.
+#[must_use]
+pub(crate) fn ironwire_token_path_with(
+    declared: Option<&std::path::Path>,
+    pointer: Option<&super::ironwire_pointer::IronWirePointer>,
+) -> Option<PathBuf> {
+    if let Some(declared) = declared {
+        return Some(declared.join(IRONWIRE_TOKEN_FILE));
+    }
+    // The pointer names a *file*, not a directory, and is used as written.
+    // A running daemon's own statement of where it put its token is better
+    // evidence than a convention, and strictly better evidence than
+    // `IRONWIRE_HOME`, which a GUI application launched from Finder, the
+    // Dock or a desktop entry never sees.
+    //
+    // Taken only when the file is actually there, and this is the one place
+    // in this function that falls through on a miss. It is deliberately the
+    // opposite of the declared-directory rule directly above, and for the
+    // same underlying reason. A *declared* directory that holds no token
+    // must not fall through, because falling through would enrich the
+    // contributor from a proxy they did not name. A *pointer* is not a
+    // thing the contributor named; it is a file a crashed daemon can leave
+    // behind. Honouring a stale one to the point of refusing the token
+    // `IRONWIRE_HOME` still names would make discovery turn a working
+    // configuration into a broken one -- a stale pointer strictly worse
+    // than no pointer, which is the thing it must never be. Falling
+    // through leaves that machine exactly where it was before this file
+    // was ever read.
+    //
+    // A file that exists and cannot be read does not fall through: it
+    // yields that path, the read fails, and there is no reader -- the same
+    // state as no proxy, and the state the probe reports as
+    // `token_unreadable` naming this path, which is the fixable fact.
+    //
+    // The existence check races a daemon shutting down. Losing that race
+    // costs a token read that fails, which is a state every caller here
+    // already treats as "no proxy".
+    if let Some(from_pointer) = pointer.and_then(|p| p.token_path.as_ref())
+        && from_pointer.is_file()
+    {
+        return Some(from_pointer.clone());
+    }
+    let home = std::env::var_os("IRONWIRE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("IRONWIRE_HOME").map(PathBuf::from))
         .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
     Some(home.join(IRONWIRE_TOKEN_FILE))
 }
 
 /// Build a routing ledger for a declaration, or nothing.
 ///
-/// The directory holding `control.token` resolves in this order:
+/// The `control.token` to read resolves in this order:
 ///
-/// 1. the directory declared in settings,
-/// 2. `$IRONWIRE_HOME`,
-/// 3. `~/.ironwire`.
+/// 1. `control.token` in the directory declared in settings,
+/// 2. the `token_path` in IronWire's discovery pointer, when that file is
+///    actually there,
+/// 3. `$IRONWIRE_HOME/control.token`,
+/// 4. `~/.ironwire/control.token`.
 ///
-/// Settings come first because they are the only one of the three a GUI
+/// Settings come first because a declaration is an explicit human
+/// instruction, and because they are the only one of the four a GUI
 /// contributor can actually set: an app launched from Finder, the Dock or a
 /// desktop entry inherits the session manager's environment, not a shell
 /// profile's, so `IRONWIRE_HOME` is not a configuration mechanism for the
-/// desktop applications at all. It stays supported, second, so a CLI started
+/// desktop applications at all. It stays supported, third, so a CLI started
 /// from a shell keeps working.
+///
+/// The pointer sits second, above the environment, because it is the
+/// running daemon's own statement of fact about where it put its token,
+/// written by the process that wrote the token. `IRONWIRE_HOME` is a guess
+/// about that same daemon made by whoever launched this app -- and on the
+/// desktop, nobody.
+///
+/// # The port is not discovered here
+///
+/// The pointer also states a port, and this function ignores it. A declared
+/// port is left alone, always, and an *undeclared* proxy is still not read.
+///
+/// A declared port is a human instruction; the pointer is a file left on
+/// disk that survives the daemon that wrote it. IronWire removes it on a
+/// clean stop, so a crash leaves it behind -- and the failure mode of
+/// letting it win is not "one refused connection". It is a contributor who
+/// declared 8463, whose stale pointer says 9000, and whose traces quietly
+/// carry either nothing or the routing data of whatever else is on 9000,
+/// with the settings file still reading 8463 and the probe -- which is
+/// handed the port by the caller -- still agreeing with it. That is a
+/// confidently wrong answer, which is the one thing a stale pointer must
+/// not be able to produce.
+///
+/// And leaving an undeclared proxy unread is the tri-state on
+/// [`IronWireDeclaration`]: connecting to a local service nobody named is
+/// exactly the error the declaration exists to stop.
+///
+/// So discovery of the *port* is offered to the declaring flow instead, by
+/// the `discover_routing` IPC method: the app pre-fills what the machine
+/// already knows and the contributor confirms it, which removes the
+/// question without removing the consent. The token path needs no such
+/// confirmation because it is only ever consulted for a proxy the
+/// contributor already declared.
 ///
 /// The token itself is read here at build time and never copied into our
 /// settings file. An unreadable token yields no reader: absence and failure
@@ -888,6 +976,11 @@ mod tests {
     fn the_environment_is_still_honoured_when_no_path_is_declared() {
         let environment = token_dir_holding("token-from-environment");
         let _env = IronWireHomeEnv::set(environment.path());
+        // Pin "no pointer" for the length of the test. Without the guard a
+        // discovery test running on another thread could set the process
+        // override underneath this one, and it would resolve that pointer's
+        // token instead.
+        let _no_pointer = PointerAt::none();
 
         let declaration = IronWireDeclaration::Watch {
             port: 8463,
@@ -919,6 +1012,216 @@ mod tests {
             ironwire_ledger_for(Some(&declaration)).is_none(),
             "a declared directory with no token yields no reader, and never \
              falls back to the environment"
+        );
+    }
+
+    // --- the discovery pointer -----------------------------------------
+
+    use super::super::ironwire_pointer::{IronWirePointer, test_support::PointerAt};
+
+    /// A pointer naming a `control.token` holding exactly this text.
+    /// Returns the directory, which must outlive the assertions.
+    fn pointer_holding(token: &str) -> (tempfile::TempDir, IronWirePointer) {
+        let d = tempfile::tempdir().expect("tempdir");
+        let path = d.path().join("control.token");
+        std::fs::write(&path, format!("{token}\n")).expect("write token");
+        let pointer = IronWirePointer {
+            port: 8463,
+            token_path: Some(path),
+        };
+        (d, pointer)
+    }
+
+    fn watch(token_dir: Option<&std::path::Path>) -> IronWireDeclaration {
+        IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: token_dir.map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// A declaration is an explicit human instruction and outranks a file
+    /// the machine wrote about itself.
+    ///
+    /// Asserts *which* token is resolved. "A path came back" would pass
+    /// under either precedence and prove nothing.
+    #[test]
+    fn a_declared_directory_wins_over_the_pointer() {
+        let declared = token_dir_holding("token-from-settings");
+        let (_d, pointer) = pointer_holding("token-from-pointer");
+
+        let path = ironwire_token_path_with(Some(declared.path()), Some(&pointer))
+            .expect("a declared directory always resolves");
+
+        assert_eq!(path, declared.path().join(IRONWIRE_TOKEN_FILE));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            "token-from-settings",
+        );
+    }
+
+    /// The running daemon's own statement of fact beats an environment
+    /// variable no GUI application ever sees.
+    #[test]
+    fn the_pointer_wins_over_the_environment() {
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+        let (_d, pointer) = pointer_holding("token-from-pointer");
+
+        let path =
+            ironwire_token_path_with(None, Some(&pointer)).expect("the pointer resolves a path");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            "token-from-pointer",
+            "the pointer must outrank IRONWIRE_HOME",
+        );
+    }
+
+    /// The pointer names a file. Joining `control.token` onto it would read
+    /// `.../control.token/control.token` and find nothing, on every machine
+    /// where IronWire put its token anywhere but the conventional name.
+    #[test]
+    fn the_pointer_path_is_used_as_a_file_not_joined_as_a_directory() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let path = d.path().join("ironwire.tok");
+        std::fs::write(&path, "tok\n").expect("write token");
+        let pointer = IronWirePointer {
+            port: 8463,
+            token_path: Some(path.clone()),
+        };
+
+        assert_eq!(ironwire_token_path_with(None, Some(&pointer)), Some(path));
+    }
+
+    /// The rule that keeps discovery from ever making a machine worse: a
+    /// pointer left behind by a crashed daemon, naming a token that is no
+    /// longer there, must leave that machine exactly where it was.
+    #[test]
+    fn a_stale_pointer_falls_through_and_is_no_worse_than_no_pointer() {
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+
+        let gone = tempfile::tempdir().expect("tempdir");
+        let missing = gone.path().join("control.token");
+        let stale = IronWirePointer {
+            port: 8463,
+            token_path: Some(missing),
+        };
+
+        let with_stale = ironwire_token_path_with(None, Some(&stale));
+        let without = ironwire_token_path_with(None, None);
+
+        assert_eq!(
+            with_stale, without,
+            "a stale pointer must resolve exactly what no pointer resolves",
+        );
+        assert_eq!(
+            std::fs::read_to_string(with_stale.unwrap()).unwrap().trim(),
+            "token-from-environment",
+        );
+    }
+
+    /// A pointer that named no token path at all is not a reason to stop
+    /// resolving one.
+    #[test]
+    fn a_pointer_with_no_token_path_still_falls_through() {
+        let environment = token_dir_holding("token-from-environment");
+        let _env = IronWireHomeEnv::set(environment.path());
+        let pointer = IronWirePointer {
+            port: 8463,
+            token_path: None,
+        };
+
+        assert_eq!(
+            ironwire_token_path_with(None, Some(&pointer)),
+            ironwire_token_path_with(None, None),
+        );
+    }
+
+    /// End to end through the real entry point, which reads the pointer off
+    /// disk. Asserts the token the ledger was actually built with.
+    #[test]
+    fn a_discovered_token_builds_a_reader_for_a_declaration_that_named_no_directory() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let token = d.path().join("control.token");
+        std::fs::write(&token, "token-from-pointer\n").expect("write token");
+        let endpoint = d.path().join("endpoint.json");
+        std::fs::write(
+            &endpoint,
+            format!(
+                r#"{{"control_url":"http://127.0.0.1:8463","token_path":"{}"}}"#,
+                token.display()
+            ),
+        )
+        .expect("write pointer");
+        let _at = PointerAt::set(&endpoint);
+
+        let ledger = ironwire_ledger_for(Some(&watch(None)))
+            .expect("a discovered token must build a reader");
+        assert_eq!(ledger.token_for_test(), "token-from-pointer");
+    }
+
+    /// The judgement recorded on `ironwire_ledger_for`: the pointer's port
+    /// is advisory and never overrides a declared one. A pointer left by a
+    /// crashed daemon naming a live-but-unrelated port would otherwise send
+    /// every read somewhere the contributor never named, with settings and
+    /// the probe both still agreeing on the declared port.
+    #[test]
+    fn a_pointer_port_never_overrides_a_declared_port() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let token = d.path().join("control.token");
+        std::fs::write(&token, "tok\n").expect("write token");
+        let endpoint = d.path().join("endpoint.json");
+        std::fs::write(
+            &endpoint,
+            format!(
+                r#"{{"control_url":"http://127.0.0.1:9999","token_path":"{}"}}"#,
+                token.display()
+            ),
+        )
+        .expect("write pointer");
+        let _at = PointerAt::set(&endpoint);
+
+        let declaration = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: None,
+        };
+        let ledger =
+            ironwire_ledger_for(Some(&declaration)).expect("a reader is built from the token");
+        assert_eq!(
+            ledger.port_for_test(),
+            8463,
+            "the declared port must survive a pointer naming another one",
+        );
+    }
+
+    /// An undeclared proxy stays unread. Discovery reaches the *declaring*
+    /// flow through `discover_routing`; it does not quietly start reading a
+    /// local service nobody named, which is the error the declaration
+    /// tri-state exists to prevent.
+    #[test]
+    fn a_discovered_proxy_is_not_read_without_a_declaration() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let token = d.path().join("control.token");
+        std::fs::write(&token, "tok\n").expect("write token");
+        let endpoint = d.path().join("endpoint.json");
+        std::fs::write(
+            &endpoint,
+            format!(
+                r#"{{"control_url":"http://127.0.0.1:8463","token_path":"{}"}}"#,
+                token.display()
+            ),
+        )
+        .expect("write pointer");
+        let _at = PointerAt::set(&endpoint);
+
+        assert!(
+            ironwire_ledger_for(None).is_none(),
+            "no declaration means nothing is read, however discoverable",
+        );
+        assert!(
+            ironwire_ledger_for(Some(&IronWireDeclaration::Off)).is_none(),
+            "off means off, however discoverable",
         );
     }
 

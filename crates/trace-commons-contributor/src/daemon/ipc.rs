@@ -236,6 +236,7 @@ pub const METHODS: &[&str] = &[
     "cancel",
     "clear_public_profile",
     "consent_options",
+    "discover_routing",
     "dismiss",
     "enroll",
     "get_public_profile",
@@ -1188,6 +1189,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // without asking would be exactly the silence this method exists
         // to end.
         "probe_routing" => Response::err(req.id, ERR_UNAVAILABLE, "probe-routing-requires-async"),
+        // Unlike the probe, discovery opens no connection: it reads one
+        // small file the proxy left on disk. So it answers here, on the
+        // synchronous path, and a shell can call it before it has anything
+        // to declare.
+        "discover_routing" => handle_discover_routing(req),
         "pause" => {
             // An optional timed pause, persisted so it survives a restart of
             // either the daemon or the app that requested it -- an app-side
@@ -3073,6 +3079,50 @@ pub const PROBE_UNREACHABLE: &str = "unreachable";
 ///
 /// The token *directory* is a different thing and is the point: the path is
 /// what makes the failure fixable.
+/// Answer what a running IronWire says about itself, so the app does not
+/// have to ask a contributor for it.
+///
+/// The declaring flow's counterpart to `probe_routing`. The probe checks a
+/// port and a token the contributor already named; this reports the port
+/// and token path a *running* proxy published, before there is anything
+/// declared to check.
+///
+/// Result shape, and the reason for it:
+///
+/// ```json
+/// { "found": true, "port": 8463, "token_path": "/home/x/.ironwire/control.token" }
+/// { "found": false }
+/// ```
+///
+/// A boolean rather than a named outcome. There is exactly one distinction
+/// to draw here -- a pointer was read, or it was not -- and every reason it
+/// was not (never installed, not running, a version that does not publish,
+/// a file this reader will not act on) is the same fact to the caller and
+/// the same next step for the contributor: type the port. A vocabulary of
+/// outcome strings would invite a caller to match on one, and a string that
+/// is a prefix of another is how a shell comes to treat "unreachable" as
+/// "reachable".
+///
+/// **Never carries a token.** `token_path` is a path, for display beside
+/// the port; the daemon opens it itself, at call time, when it builds a
+/// reader. Discovery is advisory throughout: nothing here writes settings,
+/// touches daemon state, or can affect a submission.
+fn handle_discover_routing(req: &Request) -> Response {
+    let Some(pointer) = super::ironwire_pointer::read_pointer() else {
+        return Response::ok(req.id, serde_json::json!({ "found": false }));
+    };
+    let mut result = serde_json::Map::new();
+    result.insert("found".to_string(), serde_json::Value::Bool(true));
+    result.insert("port".to_string(), serde_json::json!(pointer.port));
+    if let Some(token_path) = pointer.token_path.as_ref() {
+        result.insert(
+            "token_path".to_string(),
+            serde_json::json!(token_path.to_string_lossy()),
+        );
+    }
+    Response::ok(req.id, serde_json::Value::Object(result))
+}
+
 async fn handle_probe_routing(req: &Request) -> Response {
     let port = match req.params.get("port").and_then(serde_json::Value::as_u64) {
         // Port 0 is not a port a proxy listens on; it is the ask-the-kernel
@@ -5990,6 +6040,116 @@ mod tests {
     fn probe_routing_is_advertised() {
         assert!(
             METHODS.contains(&"probe_routing"),
+            "a method hello does not advertise is a method no shell will call"
+        );
+    }
+
+    // --- discover_routing ----------------------------------------------
+
+    fn discover_request() -> Request {
+        Request {
+            id: 11,
+            method: "discover_routing".to_string(),
+            params: serde_json::Value::Null,
+        }
+    }
+
+    /// A pointer on disk naming a token file that holds `token`. Returns the
+    /// tempdir, which must outlive the assertions.
+    fn pointer_dir(port: u16, token: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("control.token");
+        std::fs::write(&token_path, token).expect("write token");
+        std::fs::write(
+            dir.path().join("endpoint.json"),
+            format!(
+                r#"{{"control_url":"http://127.0.0.1:{port}","token_path":"{}"}}"#,
+                token_path.display()
+            ),
+        )
+        .expect("write pointer");
+        dir
+    }
+
+    #[test]
+    fn discovery_reports_what_a_running_proxy_published() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let result = handle_discover_routing(&discover_request())
+            .result
+            .expect("discovery answers with a result, never an IPC error");
+
+        assert_eq!(result["found"], serde_json::json!(true));
+        assert_eq!(result["port"], serde_json::json!(9143));
+        assert_eq!(
+            result["token_path"],
+            serde_json::json!(dir.path().join("control.token").to_string_lossy()),
+        );
+    }
+
+    /// The rule the whole feature hangs on. A machine without IronWire is
+    /// the ordinary case, and it must answer -- not error -- so the app can
+    /// fall back to asking.
+    #[test]
+    fn no_pointer_is_answered_as_not_found_rather_than_as_an_error() {
+        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+
+        let response = handle_discover_routing(&discover_request());
+
+        assert!(
+            response.error.is_none(),
+            "a machine without IronWire is not an error: {:?}",
+            response.error
+        );
+        let result = response.result.expect("a real answer");
+        assert_eq!(result["found"], serde_json::json!(false));
+        assert!(
+            result.get("port").is_none(),
+            "there is no port to report, and reporting one would be invented"
+        );
+    }
+
+    /// The pointer names a token path; the answer must carry the path and
+    /// never the credential at it. This answer crosses a socket to a shell.
+    #[test]
+    fn discovery_never_carries_the_token() {
+        let dir = pointer_dir(9143, "a-secret-token");
+        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+            &dir.path().join("endpoint.json"),
+        );
+
+        let response = handle_discover_routing(&discover_request());
+        let wire = serde_json::to_string(&response.result.expect("a result")).unwrap();
+
+        assert!(
+            !wire.contains("a-secret-token"),
+            "the token must not appear anywhere in the answer: {wire}"
+        );
+    }
+
+    /// Answered by the synchronous dispatcher, which is the path a shell's
+    /// request actually takes for a method that opens no connection.
+    #[test]
+    fn the_sync_dispatcher_answers_discovery_for_real() {
+        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+
+        let response = handle_request(&shared(), &discover_request());
+
+        assert!(
+            response.error.is_none(),
+            "discovery must answer on the sync path: {:?}",
+            response.error
+        );
+        assert_eq!(response.result.expect("a result")["found"], false);
+    }
+
+    #[test]
+    fn discover_routing_is_advertised() {
+        assert!(
+            METHODS.contains(&"discover_routing"),
             "a method hello does not advertise is a method no shell will call"
         );
     }

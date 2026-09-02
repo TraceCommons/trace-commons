@@ -100,6 +100,17 @@ impl IronWireLedger {
         &self.token
     }
 
+    /// The port this ledger was built with.
+    ///
+    /// Test-only for the same reason as `token_for_test`: nothing shipped
+    /// needs to read it back, and a test that asserts a ledger exists
+    /// proves nothing about which proxy it will talk to.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn port_for_test(&self) -> u16 {
+        self.port
+    }
+
     #[must_use]
     pub fn new(port: u16, token: String) -> Self {
         Self {
