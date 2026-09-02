@@ -49,9 +49,30 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string? _routingLastChecked;
     private RoutingModes _routingModes = new();
 
+    /// <summary>
+    /// Whether a daemon event may re-ask IronWire, and whether an answer
+    /// still describes the declaration this machine holds now. The rules and
+    /// their reasons live in <see cref="RoutingRefreshGate"/>, where they are
+    /// tested off Windows.
+    /// </summary>
+    private readonly RoutingRefreshGate _routingGate = new();
+
     public ContributorSettingsViewModel(DaemonHost host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+
+        // The routing card is the daemon's state, not this window's: the
+        // reader moves from awaiting-rows to rows-seen on its own, the proxy
+        // comes up, the daemon restarts and loses its per-process stamp.
+        // Without this the card showed whatever was true when it was opened
+        // until the contributor touched something. This is the same event
+        // MainViewModel refreshes on, and DaemonHost raises it for the ABI's
+        // lag and resync frames too, so a missed delta repaints this surface
+        // as well. No timer is added: the event path already exists.
+        //
+        // Never unsubscribed, matching MainViewModel. SettingsView is built
+        // once with `??=` and lives as long as the window.
+        _host.StatusChanged += OnDaemonStatusChanged;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -678,6 +699,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private async Task WriteRoutingAsync(bool on)
     {
         _routingEvidence = null;
+        _routingGate.Forget();
         RenderRoutingToolRows();
         RoutingDeclared = on;
         RoutingProbeText = on && _routingCopy is not null ? _routingCopy.Checking : string.Empty;
@@ -737,28 +759,30 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             return;
         }
 
+        long ticket = _routingGate.BeginProbe();
         RoutingProbeText = _routingCopy.Checking;
         IsBusy = true;
         try
         {
-            string payload = TraceCommons.Interop.RoutingTools.SerializeProbeParams(
-                RoutingPortValue(),
-                RoutingTokenDir);
-            DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.ProbeRoutedTools, payload)
+            RoutingEvidence? evidence = await AskRoutedToolsAsync(
+                    RoutingPortValue(),
+                    RoutingTokenDir)
                 .ConfigureAwait(true);
 
-            if (response.IsError || response.Result is null)
+            if (evidence is null)
             {
-                _routingEvidence = null;
-                RoutingProbeText = _routingCopy.CheckUnavailable;
+                if (_routingGate.CompleteWithoutAnswer(ticket))
+                {
+                    _routingEvidence = null;
+                    RoutingProbeText = _routingCopy.CheckUnavailable;
+                }
             }
-            else
+            else if (_routingGate.CompleteWithAnswer(ticket, DateTimeOffset.UtcNow))
             {
-                _routingEvidence = RoutingEvidence.Parse(response.Result.Value.GetRawText());
+                _routingEvidence = evidence;
                 RoutingProbeText = TraceCommons.Interop.RoutingTools.ProbeLine(
                     _routingCopy,
-                    _routingEvidence.Outcome);
+                    evidence.Outcome);
             }
 
             RenderRoutingToolRows();
@@ -770,10 +794,136 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// A daemon event says something may have changed, so this card is
+    /// repainted from the daemon rather than left showing what was true when
+    /// it was opened.
+    /// </summary>
+    /// <remarks>
+    /// async void because this is an event handler, which is the one place it
+    /// is correct. Nothing it calls throws on a daemon error: an error frame
+    /// is a parsed response, and a card that could not be refreshed keeps
+    /// what it had rather than blanking.
+    /// </remarks>
+    private async void OnDaemonStatusChanged()
+    {
+        await RefreshRoutingAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Re-reads the daemon's routing state and repaints the card.
+    /// </summary>
+    /// <remarks>
+    /// Only the routing card. Everything else on this screen is a knob whose
+    /// value this window is the author of, and refetching those under a
+    /// contributor's hands would be a different change.
+    ///
+    /// Skipped while a write is in flight: that write ends by filling this
+    /// card from the daemon's own answer, and a repaint racing it would paint
+    /// the state from before it.
+    /// </remarks>
+    private async Task RefreshRoutingAsync()
+    {
+        if (!IsLoaded || IsBusy)
+        {
+            return;
+        }
+
+        DaemonResponse settingsResponse = await _host
+            .CallAsync(DaemonProtocol.Methods.GetSettings)
+            .ConfigureAwait(true);
+        DaemonResponse statusResponse = await _host
+            .CallAsync(DaemonProtocol.Methods.Status)
+            .ConfigureAwait(true);
+
+        DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
+        FillRouting(
+            snapshot,
+            statusResponse.ResultAs<DaemonStatus>(),
+            fillDeclarationFields: false);
+
+        await ReAskRoutedToolsAsync(snapshot).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Asks IronWire again on a daemon event, if the gate allows it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three differences from the human path, each deliberate. It does not
+    /// raise <see cref="IsBusy"/>: an event nobody asked for must not disable
+    /// the controls under a contributor's hands. It does not touch
+    /// <see cref="RoutingProbeText"/>: that line answers a press, and a
+    /// background call rewriting it would answer a question nobody asked.
+    /// And a call that did not run drops nothing -- the previous answer stays
+    /// on screen rather than every word blanking because one background call
+    /// failed.
+    /// </para>
+    /// <para>
+    /// The declared port and folder are used, never the boxes': an event can
+    /// land while somebody is typing into the port field, and the question
+    /// has to be about the declaration the daemon is actually holding.
+    /// </para>
+    /// </remarks>
+    private async Task ReAskRoutedToolsAsync(DaemonSettingsSnapshot? settings)
+    {
+        if (_routingCopy is null
+            || !_routingGate.TryBeginProbe(RoutingDeclared, DateTimeOffset.UtcNow, out long ticket))
+        {
+            return;
+        }
+
+        RoutingEvidence? evidence = await AskRoutedToolsAsync(
+                settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort,
+                settings?.Routing?.TokenDir ?? string.Empty)
+            .ConfigureAwait(true);
+
+        if (evidence is null)
+        {
+            _routingGate.CompleteWithoutAnswer(ticket);
+            return;
+        }
+
+        if (_routingGate.CompleteWithAnswer(ticket, DateTimeOffset.UtcNow))
+        {
+            _routingEvidence = evidence;
+            RenderRoutingToolRows();
+        }
+    }
+
+    /// <summary>
+    /// One <c>probe_routed_tools</c> call, or null when it did not run.
+    /// </summary>
+    /// <remarks>
+    /// Null and not an empty answer: a call that did not run is not a fact
+    /// about any tool, and the two callers say different things about that.
+    /// </remarks>
+    private async Task<RoutingEvidence?> AskRoutedToolsAsync(ushort port, string tokenDir)
+    {
+        string payload = TraceCommons.Interop.RoutingTools.SerializeProbeParams(port, tokenDir);
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.ProbeRoutedTools, payload)
+            .ConfigureAwait(true);
+
+        return response.IsError || response.Result is null
+            ? null
+            : RoutingEvidence.Parse(response.Result.Value.GetRawText());
+    }
+
+    /// <summary>
     /// Fills the declaration controls and the state line from the daemon's
     /// own answer.
     /// </summary>
-    private void FillRouting(DaemonSettingsSnapshot? settings, DaemonStatus? status)
+    /// <param name="fillDeclarationFields">
+    /// Whether the port and folder boxes are refilled from the daemon's
+    /// declaration. False on a repaint driven by a daemon event: those two
+    /// are written when Apply is pressed rather than as they are typed, so an
+    /// event landing mid-edit would otherwise replace a half-typed port with
+    /// the declared one.
+    /// </param>
+    private void FillRouting(
+        DaemonSettingsSnapshot? settings,
+        DaemonStatus? status,
+        bool fillDeclarationFields = true)
     {
         _routingModes = new RoutingModes
         {
@@ -790,12 +940,17 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             // so turning the switch back on cannot paint a stale verdict
             // before a new answer lands.
             _routingEvidence = null;
+            _routingGate.Forget();
             RoutingProbeText = string.Empty;
         }
 
         RoutingDeclared = declared;
-        RoutingPort = settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort;
-        RoutingTokenDir = settings?.Routing?.TokenDir ?? string.Empty;
+        if (fillDeclarationFields)
+        {
+            RoutingPort = settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort;
+            RoutingTokenDir = settings?.Routing?.TokenDir ?? string.Empty;
+        }
+
         RenderRoutingToolRows();
 
         if (_routingCopy is null)
