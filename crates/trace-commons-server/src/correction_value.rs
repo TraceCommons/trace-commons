@@ -154,6 +154,11 @@ mod tests {
             // The correction signal's derivation is the simhash algorithm
             // alone, exactly as the inline path stamps it: `trace_simhash`
             // above is the whole of it, and no event renderer is involved.
+            //
+            // Unversioned in the same way the inline path is, and this
+            // fixture reproduces that faithfully: one constant serves as both
+            // the incoming version and every candidate's, so the comparison
+            // in `assign_cluster` never fires. See #538.
             let version = crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
             let candidates: Vec<ClusterCandidate<'_>> = self
                 .clusters

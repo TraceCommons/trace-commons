@@ -1993,7 +1993,7 @@ pub struct DedupSignalRow {
     pub dedup_cluster_id: Option<Uuid>,
     pub dedup_simhash: Option<i64>,
     /// Which renderer and simhash algorithm produced `dedup_simhash`
-    /// (migration V56). `None` means the row was recorded before the stamp
+    /// (migration V57). `None` means the row was recorded before the stamp
     /// existed and is read as
     /// [`crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION`] -- never as
     /// "unknown". Two rows whose effective versions differ are not
@@ -2036,7 +2036,7 @@ pub struct CorrectionSignalRow {
 }
 
 /// The four cross-trace dedup fields written for one decision row
-/// (migrations V40 and V56). Bundled for the reason V48 bundled its own six:
+/// (migrations V40 and V57). Bundled for the reason V48 bundled its own six:
 /// three of the four are positional integers and UUIDs that transpose
 /// silently, and the stamp has to travel with the simhash it names rather
 /// than trailing it as a sixth argument nobody reads.
@@ -2611,7 +2611,7 @@ pub trait TraceCorpusStore: Send + Sync {
     }
 
     /// Drop this submission's gate decisions out of any dedup cluster
-    /// (migration V40 columns, and V56's version stamp, back to NULL). Peer
+    /// (migration V40 columns, and V57's version stamp, back to NULL). Peer
     /// rows keep their own cluster assignment; their `dedup_cluster_size`
     /// snapshot is refreshed by the existing recluster pass.
     async fn clear_trace_dedup_cluster_for_submission(
@@ -2956,7 +2956,7 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
-    /// Update ONLY the dedup columns (migrations V40 and V56) for the
+    /// Update ONLY the dedup columns (migrations V40 and V57) for the
     /// decision row identified by `(tenant_id, decision_id)`. Perplexity,
     /// novelty, tail-fraction, vector, gate status, and credit are left
     /// untouched. Implementations MUST scope by `tenant_id` (forced RLS).
@@ -2993,8 +2993,8 @@ pub trait TraceCorpusStore: Send + Sync {
     /// point. The sweep re-clusters simhashes that are already stored; it
     /// derives neither the simhash nor the stamp, so it has no standing to
     /// write either. Writing the stamp back would materialise the legacy
-    /// literal into every pre-V56 row -- exactly the assertion-in-the-schema
-    /// that V56's header refuses a DEFAULT for, made by a background pass
+    /// literal into every pre-V57 row -- exactly the assertion-in-the-schema
+    /// that V57's header refuses a DEFAULT for, made by a background pass
     /// instead of by the migration.
     async fn update_trace_gate_decision_dedup_cluster(
         &self,

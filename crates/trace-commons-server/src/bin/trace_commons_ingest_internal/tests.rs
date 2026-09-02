@@ -5822,12 +5822,22 @@ async fn build_derived_record_writes_the_named_summary_model() {
     let mut with_precheck = sample_envelope().await;
     let precheck = build_derived_precheck(&with_precheck, &[]);
     apply_embedding_precheck(&mut with_precheck, &precheck);
+    let embedding_model = with_precheck
+        .embedding_analysis
+        .as_ref()
+        .and_then(|analysis| analysis.embedding_model.as_deref());
+    assert_eq!(embedding_model, Some(SUMMARY_MODEL));
+
+    // The drift check proper: the two producers against EACH OTHER, with no
+    // const in between. Every assertion above routes through `SUMMARY_MODEL`,
+    // so all of them still pass if the const is deleted and each site goes
+    // back to writing its own literal -- which is the drift they claim to
+    // prevent. This one does not: two literals that disagree fail here.
     assert_eq!(
-        with_precheck
-            .embedding_analysis
-            .as_ref()
-            .and_then(|analysis| analysis.embedding_model.as_deref()),
-        Some(SUMMARY_MODEL)
+        Some(record.summary_model.as_str()),
+        embedding_model,
+        "build_derived_record and apply_embedding_precheck must name the same \
+         model -- whether or not either goes through a shared const"
     );
 }
 
@@ -65927,7 +65937,7 @@ struct DecisionRowWithDedup {
     dedup_simhash: Option<i64>,
     dedup_cluster_id: Option<Uuid>,
     dedup_cluster_size: Option<i32>,
-    /// Migration V56's stamp. The outer `Option` is "no dedup row at all";
+    /// Migration V57's stamp. The outer `Option` is "no dedup row at all";
     /// the inner one is the column's own NULL, i.e. a row recorded before the
     /// stamp existed.
     dedup_signal_version: Option<Option<String>>,
@@ -65968,7 +65978,7 @@ struct RecordedDedup {
     simhash: i64,
     cluster_id: Uuid,
     cluster_size: i32,
-    /// The column's own NULL: a row recorded before V56 existed.
+    /// The column's own NULL: a row recorded before V57 existed.
     signal_version: Option<String>,
 }
 
@@ -66185,7 +66195,7 @@ impl PerplexityDriverTestDb {
     /// No server code path can do this — the stamp is always written in the
     /// same statement as the simhash it names — and that is precisely why the
     /// helper exists: it manufactures the two row shapes a real corpus holds
-    /// but a test cannot otherwise produce, a pre-V56 row (`None`) and a row
+    /// but a test cannot otherwise produce, a pre-V57 row (`None`) and a row
     /// derived under a renderer this build no longer has.
     fn overwrite_dedup_signal_version_for_tests(
         &self,
@@ -67312,7 +67322,7 @@ impl Database for PerplexityDriverTestDb {
                     dedup_simhash: seen.map(|d| d.simhash),
                     // Flattened exactly as the real SELECT flattens it: a row
                     // that has never been through a dedup pass and a row
-                    // written before V56 both surface as `None`.
+                    // written before V57 both surface as `None`.
                     dedup_signal_version: seen.and_then(|d| d.signal_version.clone()),
                 }
             })
@@ -68441,7 +68451,7 @@ async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns()
 }
 
 /// Unit test for the isolation invariant: `update_trace_gate_decision_dedup`
-/// sets ONLY the four cross-trace dedup values (migrations V40 and V56) — the
+/// sets ONLY the four cross-trace dedup values (migrations V40 and V57) — the
 /// base decision row (perplexity, novelty, tail-fraction, status, credit) is
 /// byte-identical before and after.
 #[tokio::test]
@@ -68537,10 +68547,10 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
 /// stamp are left exactly as they were, INCLUDING a stamp that is NULL.
 ///
 /// This is what the recluster sweep uses, and the whole point of a second,
-/// narrower write is that a row recorded before V56 comes out of a sweep
-/// still recorded before V56. If the pass wrote the version it read the row
+/// narrower write is that a row recorded before V57 comes out of a sweep
+/// still recorded before V57. If the pass wrote the version it read the row
 /// as, every pre-column row would acquire the legacy literal on the first
-/// sweep -- the schema-level assertion V56's header refuses a DEFAULT for,
+/// sweep -- the schema-level assertion V57's header refuses a DEFAULT for,
 /// made by a background job instead, and no later pass could then tell a
 /// row it re-derived from a row it merely re-clustered.
 #[tokio::test]
@@ -68551,7 +68561,7 @@ async fn update_trace_gate_decision_dedup_cluster_touches_only_cluster_columns()
     let decision_id = before_row.decision_id;
     db.seed_gate_decision("tenant-a", before_row.clone());
 
-    // A row as it exists before V56: a simhash, a cluster, and no stamp.
+    // A row as it exists before V57: a simhash, a cluster, and no stamp.
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         decision_id,
@@ -68806,7 +68816,7 @@ async fn score_submission_for_dedup_test(
     decision_id
 }
 
-/// The inline half of V56's version scoping, through three real
+/// The inline half of V57's version scoping, through three real
 /// `evaluate_and_record_gate` calls over BYTE-IDENTICAL text — so every
 /// simhash here is the same number and the stamp is the only variable.
 ///
@@ -69486,7 +69496,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
     );
 }
 
-/// Sibling of the test above, for the property migration V56 exists to give
+/// Sibling of the test above, for the property migration V57 exists to give
 /// the pass: `run_recluster_dedup_pass` never fuses rows whose
 /// `dedup_signal_version` differs, however close their simhashes are.
 ///
@@ -69556,7 +69566,7 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
         .expect("seed dedup");
     }
     // Drop the third row's stamp to NULL. Nothing in the server can write a
-    // simhash without a stamp; this is what a row recorded before V56 looks
+    // simhash without a stamp; this is what a row recorded before V57 looks
     // like, and the pass has to read it as v1 rather than as its own version.
     db.overwrite_dedup_signal_version_for_tests("tenant-a", row_null.decision_id, None);
 
@@ -69588,7 +69598,7 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
     );
     assert_eq!(
         after_null.dedup_cluster_id, after_v1_a.dedup_cluster_id,
-        "a NULL stamp reads as the legacy v1 stamp, so a pre-V56 row clusters \
+        "a NULL stamp reads as the legacy v1 stamp, so a pre-V57 row clusters \
          with freshly stamped v1 rows"
     );
     assert_eq!(
@@ -69621,7 +69631,7 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
         "a NULL stamp is READ as the legacy version and STAYS NULL: the pass \
          has no evidence for the reading, and a row it stamped would be \
          indistinguishable from one the re-derivation pass actually \
-         re-derived -- which is the reason V56 refuses a column DEFAULT"
+         re-derived -- which is the reason V57 refuses a column DEFAULT"
     );
     assert_eq!(
         after_v2.dedup_signal_version,
@@ -69642,7 +69652,7 @@ async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
 /// A deterministic service never sees plaintext, so its `dedup_simhash` is an
 /// eight-byte window of the decision digest -- not a simhash of anything. It
 /// lands in the same column as the enclave's, enters the same sweep, and
-/// before V56 nothing recorded the difference. Both rows here carry an
+/// before V57 nothing recorded the difference. Both rows here carry an
 /// IDENTICAL value, which is the case a threshold cannot save you from:
 /// Hamming distance 0 between two numbers that are not measuring the same
 /// thing.

@@ -4012,7 +4012,7 @@ async fn pg_store_update_trace_gate_decision_credit_quality_touches_only_credit_
 async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     // `update_trace_gate_decision_dedup` targets the exact PK `(tenant_id,
     // decision_id)` supplied by the caller and must set ONLY the four
-    // cross-trace dedup columns (migrations V40 and V56) — every other
+    // cross-trace dedup columns (migrations V40 and V57) — every other
     // column, including perplexity/novelty/status/credit_quality on the SAME
     // row, must be byte-identical before and after.
     let Some(backend) = postgres_backend().await else {
@@ -4096,7 +4096,7 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
         Some(3),
         "dedup_cluster_size was set"
     );
-    // Set in the SAME statement as the simhash it names (V56): a row holding
+    // Set in the SAME statement as the simhash it names (V57): a row holding
     // one without the other reads as the legacy version to the recluster
     // sweep for as long as the gap lasts.
     assert_eq!(
@@ -4173,7 +4173,7 @@ async fn pg_store_update_trace_gate_decision_dedup_touches_only_dedup_columns() 
 
 #[tokio::test]
 async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
-    // The V56 grant, exercised the way production exercises it.
+    // The V57 grant, exercised the way production exercises it.
     //
     // `list_dedup_signals` runs on the NARROW trace_gate_driver pool, which
     // holds column-level SELECT grants (V45/V47/V48), and PostgreSQL column

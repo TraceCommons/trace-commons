@@ -50848,8 +50848,20 @@ async fn evaluate_and_record_gate(
     let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
     // Which renderer and simhash algorithm produced the value above. Rows
     // stamped differently are not comparable to it, however close the two
-    // numbers are, so this scopes the candidate set below (V56, #211).
-    let dedup_signal_version = decision.dedup_signal_version.clone();
+    // numbers are, so this scopes the candidate set below (V57, #211).
+    //
+    // Normalised the same way the candidates are. A stored row reads its
+    // stamp through `effective_signal_version`, which maps NULL and empty
+    // alike to the legacy name; the incoming one used to be taken raw. A gate
+    // service returning `""` would then match no candidate at all -- every
+    // submission a permanent singleton, `dup_pen = 1`, duplicates earning
+    // full credit -- and nothing would report an error. Both sides must
+    // normalise, or neither does.
+    let dedup_signal_version = if decision.dedup_signal_version.is_empty() {
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
+    } else {
+        decision.dedup_signal_version.clone()
+    };
     let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
     let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
     // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
@@ -50964,13 +50976,27 @@ async fn evaluate_and_record_gate(
                 .map(|sh| *sh as u64)
                 .collect::<Vec<u64>>(),
         );
+        // CORRECTION CLUSTERING IS UNVERSIONED. See #538.
+        //
         // The correction signal's derivation is the simhash algorithm alone:
         // `correction_simhash_from_plaintext` takes it over
         // `outcome.human_correction`, which no event renderer touches, and
         // ends in `trace_simhash` — so a tokenizer bump would split every
         // correction cluster exactly as a render bump splits the trace ones.
-        // The correction column stores no stamp today, so every candidate
-        // carries this same constant and behaviour is unchanged.
+        //
+        // It would, and nothing here stops it. `trace_correction_value`
+        // stores no stamp beside `correction_simhash`, so the constant below
+        // is both every candidate's `signal_version` and the incoming one:
+        // the version comparison inside `assign_cluster` is structurally
+        // false, not a gate. On a `DEDUP_SIMHASH_ALGORITHM` bump every stored
+        // correction simhash silently acquires the new label and old and new
+        // values fuse -- precisely the defect the trace-side stamp exists to
+        // prevent.
+        //
+        // Passing the constant is what the signature requires, not a claim of
+        // protection. Closing this needs a `correction_signal_version` column,
+        // which is a migration and belongs with the re-derivation pass, not
+        // here.
         let correction_version = trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
         let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> =
             correction_reps
@@ -51598,8 +51624,8 @@ async fn run_recluster_dedup_pass(
             continue;
         };
         let simhash_u64 = simhash_i64 as u64;
-        // NULL reads as the legacy v1 stamp, never as unknown (V56, D2), so a
-        // pre-V56 row and a freshly stamped v1 row still cluster together.
+        // NULL reads as the legacy v1 stamp, never as unknown (V57, D2), so a
+        // pre-V57 row and a freshly stamped v1 row still cluster together.
         // Borrowed from `rows`, which outlives every map built from it.
         let row_version = row.effective_signal_version();
         // No version filter here: `assign_cluster` refuses a differently
@@ -51649,7 +51675,7 @@ async fn run_recluster_dedup_pass(
         // materialise the legacy literal into a row whose stamp is NULL.
         // That row is READ as the legacy version; writing the reading back
         // would make it indistinguishable from a row the re-derivation pass
-        // has actually re-stamped, which is the precise reason V56 refuses a
+        // has actually re-stamped, which is the precise reason V57 refuses a
         // column DEFAULT.
         match db
             .update_trace_gate_decision_dedup_cluster(
@@ -52601,14 +52627,12 @@ async fn gate_evaluate_worker_handler(
             // there is nothing meaningful to compute for this throwaway copy.
             dedup_simhash: 0,
             // Same reason: with no simhash to describe, there is no
-            // derivation to name. `None` here can never reach a row — this
-            // copy is not persisted — and would read as the legacy stamp if
-            // it somehow did.
-            // Named explicitly, the way `dedup_simhash: 0` above is: this
-            // copy is never persisted, and a version it "would be read under"
-            // is the only honest value for a simhash that is a placeholder.
-            dedup_signal_version: trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
-                .to_string(),
+            // derivation to name. A stamp no derivation produces, so that if
+            // this copy ever does reach a row, `dedup_simhash: 0` above joins
+            // nothing -- under the legacy stamp it would be Hamming-close to
+            // every low-weight v1 signal in the corpus.
+            dedup_signal_version:
+                trace_commons_server::dedup_assign::PLACEHOLDER_DEDUP_SIGNAL_VERSION.to_string(),
             // Same reason: this throwaway copy carries no plaintext, and the
             // correction value already ran inline against the real decision.
             correction_simhash: None,

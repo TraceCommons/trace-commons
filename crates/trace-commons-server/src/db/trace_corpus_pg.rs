@@ -4033,7 +4033,7 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let updated = tx
             .execute(
-                // The version stamp goes with the value it names (V56): a
+                // The version stamp goes with the value it names (V57): a
                 // row holding a stamp but no simhash would claim a
                 // derivation it no longer carries the output of.
                 "UPDATE trace_gate_decisions
@@ -6228,7 +6228,7 @@ impl TraceCorpusStore for PgBackend {
         // credit are left exactly as-is.
         //
         // The version stamp is set in the SAME statement as the simhash it
-        // describes (migration V56): a row that carries one without the other,
+        // describes (migration V57): a row that carries one without the other,
         // even briefly, reads as the legacy version to the recluster sweep.
         tx.execute(
             "UPDATE trace_gate_decisions

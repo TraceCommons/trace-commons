@@ -9,6 +9,32 @@
 //! the same thing, so a small distance between them is a coincidence rather
 //! than evidence. Among the rest: OR-match on either signal; tie -> larger
 //! cluster (deterministic); no match -> new singleton.
+//!
+//! # The version bump is a credit event, not just a clustering one
+//!
+//! Refusing across versions is the right semantics and it has a consequence
+//! that must be handled before any renderer or simhash constant moves.
+//!
+//! The moment `CANONICAL_RENDER_VERSION` (or `DEDUP_SIMHASH_ALGORITHM`)
+//! changes, new submissions carry the new stamp while the entire stored
+//! corpus still carries the old one. Every candidate is then refused, so
+//! every resubmission of an already-stored trace clusters as a singleton:
+//! `dedup_cluster_size = 1`, `dup_pen = 1`, and the per-contributor cap's
+//! `R = sum(q * dup_pen)` counts a duplicate at full weight. For the length
+//! of that window, resubmitting is worth more than it was before this
+//! module started refusing -- silently, and to anyone who tries it.
+//!
+//! So the re-derivation pass is not a tidying step that can follow the bump
+//! at leisure. Two rules:
+//!
+//! 1. The pass completes before the constant flips in production.
+//! 2. The pass and the new constant never ship in the same binary, or there
+//!    is no ordering to enforce.
+//!
+//! If a deployment cannot honour both, the fallback is to withhold or flag
+//! credit for any decision whose `effective_signal_version` is not the
+//! build's current stamp, so a stale-version row cannot earn a
+//! duplicate-free `dup_pen` while the corpus is mixed.
 
 use crate::dedup_simhash::hamming_distance;
 use uuid::Uuid;
@@ -46,6 +72,19 @@ pub const DEDUP_CONSTANTS_V1: DedupConstants = DedupConstants {
 /// re-label every historical row on the next bump — which is the exact defect
 /// the column exists to prevent.
 pub const LEGACY_DEDUP_SIGNAL_VERSION: &str = "events.v1+fnv1a-2shingle.v1";
+
+/// The stamp for a `GateDecision` that is a synthetic re-hydration rather
+/// than a scored trace -- one built only to call a downstream emitter, whose
+/// `dedup_simhash` is a placeholder `0`.
+///
+/// Deliberately not [`LEGACY_DEDUP_SIGNAL_VERSION`]. No writer persists a
+/// copy carrying this, but a stamp is only worth anything if the value that
+/// would do the most damage on the day someone does is not the one sitting
+/// there. Under the legacy stamp, a simhash of `0` is Hamming-close to every
+/// low-weight v1 signal in the corpus, so a placeholder would be the single
+/// best-connected node in the graph. Under a name no real derivation ever
+/// produces, `assign_cluster` refuses it against every candidate.
+pub const PLACEHOLDER_DEDUP_SIGNAL_VERSION: &str = "placeholder.not-a-derivation";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterCandidate<'a> {
