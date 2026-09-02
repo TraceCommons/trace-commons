@@ -130,7 +130,10 @@ a tri-state in each shell today (`SourceChoice` on macOS, `SourceDecisionKind`
 on Windows, built inline in GTK's `ui/roots.rs`), and routing is a two-state
 plus a port.
 
-The control is: off by default, a toggle, and a port field enabled only when on.
+The control reads **Private / Not private / Not used**, one row per tool. Not
+"destination", not "backend", not "route" -- someone with NEAR AI alone needs
+exactly one concept and that is it. Underneath it is off by default, a toggle,
+and a port field enabled only when on.
 Default the field to IronWire's conventional port so a contributor is not asked
 to know it, but **write nothing until they act** -- the displayed default must
 not become a declaration, because `None` means off and that distinction is the
@@ -248,6 +251,26 @@ whoever owns the legal page. **It is not a decision for this spec or its
 implementer**, and it is a cross-repo dependency that must land before any shell
 shows consent copy naming routing.
 
+### 6a. What an unlock card may promise
+
+The unlock in state 2 is the app's one moment of persuasion, so it is the one
+most likely to overclaim.
+
+**It may promise ownership and control**, both true and already built: nothing
+is shared unless the person says so, they choose who may use it, and withdrawal
+pulls a trace from every corpus while they keep what it earned.
+
+**It may not promise an amount unless the amount is real.** Credit scoring runs
+server-side after submission, from perplexity and novelty against the existing
+corpus. A pre-share figure would either be estimated client-side from data the
+client does not have, or fetched in a round trip that reveals scoring inputs.
+**Establish which is possible before any shell renders a number.** If neither
+is, the card promises ownership and says nothing about worth until after the
+first share -- a weaker card, and an honest one.
+
+The same rule governs the post-session moment, which is the screen most people
+will actually read.
+
 ### 7. Onboarding
 
 Onboarding is written three times with no shared scaffolding -- macOS
@@ -255,7 +278,12 @@ Onboarding is written three times with no shared scaffolding -- macOS
 `OnboardingWindow.xaml` + `OnboardingViewModel`, GTK `ui/onboarding.rs`. The
 only shared artefact is the settings JSON shape.
 
-**Routing does not get its own onboarding step -- it gets detected.**
+**Routing does not get its own onboarding step -- it gets detected. And first
+run says nothing about earning.**
+
+A first-run person is in state 1 by definition: no traces, no invite, nothing
+shared. Dangling money in front of them is a promise the app cannot keep yet.
+First run sells privacy, which it can deliver that afternoon.
 
 The data to collect is unusually small: a toggle, a port, and (per the
 `IRONWIRE_HOME` gap above) possibly a path. No account, no endpoint, no
