@@ -131,6 +131,26 @@ final class DaemonClient {
         return (object?["purged"] as? Int) ?? 0
     }
 
+    /// The one project worth offering to arm right now, or nil.
+    ///
+    /// The daemon answers with an empty object when there is nothing to
+    /// suggest, which decodes to nil here rather than to a zero-filled
+    /// offer: a shell that receives no suggestion must draw no card.
+    ///
+    /// Asking does not consume the offer. This is called on every projects
+    /// refresh, and an offer that vanished on being read would be a
+    /// dismissal the contributor never made.
+    func armingSuggestion() throws -> ArmingOffer? {
+        let data = try rawResult("arming_suggestion", params: [:])
+        return try? DaemonDecoding.decoder().decode(ArmingOffer.self, from: data)
+    }
+
+    /// "Not now" against one project's offer. The daemon silences it for
+    /// thirty days; it does not forget it.
+    func declineArming(projectID: String) throws {
+        _ = try rawResult("decline_arming", params: ["project_id": projectID])
+    }
+
     func settings() throws -> DaemonSettingsView {
         try call("get_settings", as: DaemonSettingsView.self)
     }

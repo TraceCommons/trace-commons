@@ -87,6 +87,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var history: [HistoryRecord] = []
     @Published private(set) var rollup: HistoryRollup?
     @Published private(set) var projects: [ProjectRow] = []
+    /// The one project the daemon suggests arming, or nil. Refreshed
+    /// alongside `projects`, because every reason the project list changes
+    /// is also a reason this answer might have.
+    @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
     @Published private(set) var daemonSettings: DaemonSettingsView?
     @Published private(set) var outcomeCounts: [String: Int] = [:]
@@ -429,6 +433,41 @@ final class AppModel: ObservableObject {
 
     func refreshProjects() {
         perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
+        refreshArmingOffer()
+    }
+
+    /// The daemon decides whether there is an offer and what it says; this
+    /// only carries the answer. The rule -- how many contributions, which
+    /// modes qualify, how long "Not now" lasts -- is
+    /// `ProjectPolicy::arming_suggestion`, in one place, so the three shells
+    /// cannot drift into offering different things.
+    func refreshArmingOffer() {
+        perform("arming_suggestion", work: { try $0.armingSuggestion() }) {
+            self.publishIfChanged(\.armingOffer, $0)
+        }
+    }
+
+    /// Arms the offered project. The offer clears because the daemon's next
+    /// answer will not include an armed project, but it is cleared here too
+    /// so the card does not linger for a round trip.
+    func acceptArmingOffer(_ offer: ArmingOffer) {
+        perform(
+            "set_project_mode",
+            work: { try $0.setProjectMode(projectID: offer.projectId, mode: .autoUpload) }
+        ) { _ in
+            self.armingOffer = nil
+            self.refreshProjects()
+            self.refreshAudit()
+        }
+    }
+
+    /// "Not now". Silenced for thirty days by the daemon, not forgotten --
+    /// and persisted there rather than here, so it survives a relaunch and
+    /// applies to whichever shell asks next.
+    func declineArmingOffer(_ offer: ArmingOffer) {
+        perform("decline_arming", work: { try $0.declineArming(projectID: offer.projectId) }) { _ in
+            self.armingOffer = nil
+        }
     }
 
     /// Sets `project`'s mode via the daemon and refreshes `projects` from
