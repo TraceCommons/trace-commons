@@ -7,12 +7,35 @@ that certificate against bytes it already holds and, when the witness
 measurement is pinned, trusts the verdict instead of re-running its own PII
 backstop.
 
-This supersedes the correspondence-checking design in
-[`2026-09-01-redaction-witness-design.md`](./2026-09-01-redaction-witness-design.md).
-That spec's server-side verification shipped in #533 and is reused unchanged.
-Its *rationale* did not survive reconnaissance, and this document records why.
+This is the authoritative witness spec. It replaces an earlier
+correspondence-checking design whose verification core shipped in #533 and is
+reused here unchanged; that design's *rationale* did not survive
+reconnaissance, and the section below records why, because the reasoning is
+worth more than the file was.
 
-## What changed, and why it matters
+## What already exists
+
+Verified against the tree on 2026-09-02.
+
+- **Nothing in this project runs in a TEE.** `trace-commons-gate-enclave` is
+  aspirational naming. The witness would be **the project's first real
+  trusted-execution deployment**, and the operational cost of that --
+  provisioning, measurement management, attestation serving, upgrade discipline
+  -- belongs to this design and not to a later slice.
+- **The server-side certificate verification is already on `main`** (#533,
+  `crates/trace-commons-server/src/redaction_witness/`). It checks a signature,
+  a digest against bytes the server holds, and a measurement against an
+  operator's pin -- all three or none. It is reused as-is.
+- **The redactor is not deterministic.** `DeterministicTraceRedactor` holds an
+  optional model-based prose-PII classifier. Its pattern half reproduces; a
+  model call does not. This is why the witness **performs** the redaction rather
+  than recomputing and comparing one: any witness that replayed the classifier
+  would fail on honest submissions. It is the single most important constraint
+  here and it invalidates the obvious implementation.
+- **`MAX_TRACE_ENVELOPE_BYTES` is 16,000,000.** Raw is larger than redacted, so
+  the witness handles payloads above that.
+
+## Why not bind to an inference receipt
 
 The earlier design existed to bind a redacted artifact to a NEAR AI inference
 receipt whose hashes cover the raw bytes. **No trace population in this repo
