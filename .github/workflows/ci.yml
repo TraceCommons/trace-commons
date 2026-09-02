@@ -205,6 +205,50 @@ jobs:
       # cover of the transitive build the local-gpu-models job pulls in.
       - run: cargo check -p trace-commons-server --bins --features near-ai-scorer
       - run: cargo test -p trace-commons-gate-enclave --features near-ai-scorer --lib perplexity_near_ai
+      # Run it, do not merely check it.
+      #
+      # The rustls provider ambiguity that took the pilot down on 2026-09-01
+      # compiled cleanly under every job in this file and panicked at startup.
+      # A feature that changes what is LINKED rather than what COMPILES is
+      # invisible to `cargo check`. `--tls-selfcheck` constructs the HTTPS
+      # client, which is the exact call that panicked.
+      - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-ai-scorer
+      - run: ./target/debug/trace-commons-ingest --tls-selfcheck
+
+  cargo-check-near-attestation-collateral:
+    name: cargo check (near-attestation-collateral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-near-attestation-collateral-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-near-attestation-collateral-
+      # The Intel DCAP collateral client behind `#[cfg(feature = ...)]` in
+      # near_attestation/client.rs is the only code that fetches collateral in
+      # production, and no other job compiles it. Without this job that cfg arm
+      # rots silently and the first sign is a red attestation drill on a pilot
+      # host. It also pulls reqwest 0.13 into the tree, which nothing else in
+      # this workspace builds.
+      - run: cargo check -p trace-commons-server --bins --features near-attestation-collateral
+      # Run it, do not merely check it.
+      #
+      # The rustls provider ambiguity that took the pilot down on 2026-09-01
+      # compiled cleanly under every job in this file and panicked at startup.
+      # A feature that changes what is LINKED rather than what COMPILES is
+      # invisible to `cargo check`. `--tls-selfcheck` constructs the HTTPS
+      # client, which is the exact call that panicked.
+      - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-attestation-collateral
+      - run: ./target/debug/trace-commons-ingest --tls-selfcheck
+      - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
 
   cargo-test-default:
     name: cargo test (default features)
@@ -229,6 +273,59 @@ jobs:
       # (41 tests) were never executed by CI at all, and a new crate joins the
       # workspace untested by default.
       - run: cargo test --workspace
+
+  preserve-order-guard:
+    name: serde_json preserve_order guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-preserve-order-guard-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-preserve-order-guard-
+      # The end-to-end proof for crates/trace-commons-protocol/src/canonical_json.rs,
+      # narrowed to the one build graph that still needs it.
+      #
+      # `dcap-qvl`'s mandatory `std` feature depends on
+      # `serde_json/preserve_order`, so every graph containing it -- the whole
+      # workspace, and anything reaching trace-commons-server, which includes
+      # trace-commons-contributor through its cfg(not(windows)) dev-dependency
+      # -- already resolves `serde_json::Map` to an insertion-ordered IndexMap.
+      # In those graphs the ordinary `cargo test --workspace` is the proof:
+      # measured by deleting the sort from `canonicalize`, that run goes red on
+      # four canonical_json tests, the NEAR settle idempotency key and the
+      # pinned envelope digest. Forcing the feature on there would be a no-op,
+      # and the job's old expectation -- that exactly the guard test fails --
+      # is now inverted, since the guard no longer fails under preserve_order.
+      #
+      # `cargo test -p trace-commons-protocol` is the exception: nothing in
+      # that graph pulls dcap-qvl, so its map is a BTreeMap and sorting it is
+      # unobservable. Measured the same way, the mutation above leaves that
+      # run entirely green. That is also the graph a third-party harness gets,
+      # since the protocol crate ships inside permissive clients without the
+      # server. So this job forces the feature on and requires the protocol
+      # crate's suite to pass unchanged.
+      #
+      # A green run here is the statement "a consumer of trace-commons-protocol
+      # may turn preserve_order on and no digest moves". Do not weaken it to
+      # compiling the module, and do not re-broaden it to the workspace: the
+      # workspace already runs under preserve_order, so a second run proves
+      # nothing this does not.
+      - name: Force serde_json/preserve_order on
+        run: |
+          sed -i 's|^serde_json = "1"$|serde_json = { version = "1", features = ["preserve_order"] }|' \
+            crates/trace-commons-protocol/Cargo.toml
+          grep -q 'preserve_order' crates/trace-commons-protocol/Cargo.toml
+      - name: The protocol crate must hold its bytes under preserve_order
+        run: cargo test -p trace-commons-protocol
 
   pilot-bootstrap-smoke:
     name: pilot-bootstrap smoke

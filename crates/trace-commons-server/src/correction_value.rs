@@ -151,7 +151,16 @@ mod tests {
         fn submit(&mut self, text: &str) -> CorrectionValueScore {
             let simhash = trace_simhash(text);
             let novelty = correction_novelty_micros(simhash, &self.reps());
-            let candidates: Vec<ClusterCandidate> = self
+            // The correction signal's derivation is the simhash algorithm
+            // alone, exactly as the inline path stamps it: `trace_simhash`
+            // above is the whole of it, and no event renderer is involved.
+            //
+            // Unversioned in the same way the inline path is, and this
+            // fixture reproduces that faithfully: one constant serves as both
+            // the incoming version and every candidate's, so the comparison
+            // in `assign_cluster` never fires. See #538.
+            let version = crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
+            let candidates: Vec<ClusterCandidate<'_>> = self
                 .clusters
                 .iter()
                 .map(|(id, sh, size)| ClusterCandidate {
@@ -159,9 +168,10 @@ mod tests {
                     size: *size,
                     simhash: *sh,
                     embed_cosine_micros: None,
+                    signal_version: version,
                 })
                 .collect();
-            let assignment = assign_cluster(simhash, &candidates, &DEDUP_CONSTANTS_V1);
+            let assignment = assign_cluster(simhash, version, &candidates, &DEDUP_CONSTANTS_V1);
             let size = match assignment {
                 ClusterAssignment::Existing(id) => {
                     let slot = self

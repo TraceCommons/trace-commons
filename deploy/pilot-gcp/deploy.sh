@@ -15,9 +15,45 @@
 #
 # Required features when building the ingest binary on the host:
 #   cargo build --release --bin trace-commons-ingest \
-#     --features gcs-client,gcp-kms,near-ai-scorer
+#     --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
+#
+# near-attestation-collateral compiles the Intel DCAP collateral client. Without
+# it POST /v1/admin/near-attestation-drill runs but refuses at its collateral
+# step with missing_control:near_ai_attestation_collateral_client, so the pilot
+# would hold a drill that can never pass. See
+# docs/operator/near-attestation-drill.md.
 
 set -euo pipefail
+
+# 0. Keep the outgoing binaries.
+#
+# `install` overwrites in place, so without this there is nothing to roll back
+# to. That is not hypothetical: on 2026-09-01 a binary built with
+# near-attestation-collateral panicked at startup on a rustls provider
+# ambiguity, crash-looped 23 times, and could not be rolled back -- the newest
+# backup in this directory was almost a month old, and recovery meant waiting
+# for a fresh build with the service down. The hand-made `.bak-*` copies
+# already scattered through /opt/tracecommons/bin are evidence that people have
+# hit this before and solved it by hand each time.
+#
+# Cheap insurance: a timestamped copy of whatever is currently installed,
+# before anything replaces it. `|| true` because a first-ever install has
+# nothing to preserve, and that must not abort the deploy under `set -e`.
+DEPLOY_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+for b in trace-commons-ingest trace-commons-upload-claim-issuer; do
+  if [ -f "/opt/tracecommons/bin/$b" ]; then
+    sudo cp -p "/opt/tracecommons/bin/$b" \
+      "/opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP" || true
+    echo "preserved /opt/tracecommons/bin/$b.bak-$DEPLOY_STAMP"
+  fi
+done
+
+# To roll back, stop the unit, copy the chosen .bak-* back over the live name,
+# and start it again. Check `ls -t /opt/tracecommons/bin/*.bak-*` for what is
+# available -- and note a rollback across a migration boundary is NOT safe on
+# its own: a binary older than the applied schema may silently misbehave rather
+# than fail. V56, for instance, forces RLS on a table whose drain worker only
+# sets the required GUC in binaries that postdate it.
 
 # 1. Binaries.
 sudo install -o tracecommons -g tracecommons -m 755 \

@@ -337,10 +337,20 @@ impl DaemonSettings {
     /// built from them here, in one place, so adding an adapter does not
     /// touch the daemon, the watcher, the preview scheduler or the CLI.
     ///
-    /// No trajectory selection: a daemon's working directory is whatever a
-    /// service manager handed it, so auto-discovery would mean nothing
-    /// there. Callers that want one add it with
-    /// [`crate::source::SourceRoots::with_trajectory`].
+    /// No WORKING-DIRECTORY trajectory scope: a daemon's working directory
+    /// is whatever a service manager handed it, so auto-discovery would
+    /// mean nothing there.
+    ///
+    /// The STAGING directory is a different thing and is included. It is a
+    /// fixed path under the contributor's own state directory, resolved
+    /// through `ConfigStore`, created 0700 and cleared by `logout`, holding
+    /// only what `import-antigravity` put there on an explicit command.
+    ///
+    /// That distinction was previously collapsed: this method took neither,
+    /// under one reason that covers only the first. The cost was that every
+    /// imported conversation was invisible to all three desktop apps -- no
+    /// entry, no error, no empty state naming it -- while the CLI, which
+    /// builds its own roots, could see them the whole time.
     ///
     /// No routing overlay either, and deliberately not yet: settings
     /// describe the IronWire *declaration*, not the ledger *instance*.
@@ -350,7 +360,7 @@ impl DaemonSettings {
     /// produce a row. The instance needs a single long-lived owner that
     /// refreshes it on a schedule, which is a separate, reviewed piece of
     /// work; see [`crate::source::SourceRoots::with_routing`].
-    pub fn source_roots(&self) -> crate::source::SourceRoots {
+    pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
         crate::source::SourceRoots::new()
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
@@ -358,6 +368,10 @@ impl DaemonSettings {
             )
             .declare(crate::source::SOURCE_CODEX, self.codex_source.clone())
             .declare(crate::source::SOURCE_GEMINI_CLI, self.gemini_source.clone())
+            .with_trajectory(crate::source::TrajectorySelection::Auto {
+                working_dir: None,
+                staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
+            })
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -620,6 +634,62 @@ mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
 
+    /// The daemon reads the staging directory `import-antigravity` writes to.
+    ///
+    /// It did not, and the reason given covered only half of what it
+    /// excluded: a service manager's working directory means nothing to a
+    /// daemon, which says nothing about a fixed path under the
+    /// contributor's own 0700 state directory. A contributor who imported
+    /// and then opened a desktop app saw nothing at all -- no entry, no
+    /// error, no empty state naming Antigravity.
+    #[test]
+    fn the_daemon_reads_the_trajectory_staging_directory() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::default();
+
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots(&store))
+            .iter()
+            .map(|s| s.name())
+            .collect();
+        assert!(
+            names.contains(&crate::source::SOURCE_TRAJECTORY),
+            "the daemon must construct a trajectory source; got {names:?}"
+        );
+    }
+
+    /// And ONLY the staging directory. The working-directory half of
+    /// `TrajectorySelection::Auto` stays off, which is what the original
+    /// exclusion was actually about: a daemon's working directory is
+    /// whatever a service manager handed it.
+    #[test]
+    fn the_daemon_does_not_read_its_own_working_directory() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::default();
+        let roots = s.source_roots(&store);
+
+        match roots.trajectory_selection() {
+            crate::source::TrajectorySelection::Auto {
+                working_dir,
+                staging_dir,
+            } => {
+                assert!(
+                    working_dir.is_none(),
+                    "the daemon must not scan its own working directory"
+                );
+                assert_eq!(
+                    staging_dir.as_deref(),
+                    Some(
+                        store
+                            .dir()
+                            .join(crate::source::TRAJECTORY_STAGING_SUBDIR)
+                            .as_path()
+                    )
+                );
+            }
+            other => panic!("expected an Auto staging selection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn settings_round_trip_through_the_store() {
         let (_d, store) = temp_store();
@@ -740,7 +810,7 @@ mod tests {
         let loaded = DaemonSettings::load(&store).unwrap();
         assert_eq!(loaded.gemini_source, None);
         assert!(
-            !crate::source::all_sources(&loaded.source_roots())
+            !crate::source::all_sources(&loaded.source_roots(&store))
                 .iter()
                 .any(|s| s.name() == crate::source::SOURCE_GEMINI_CLI)
         );
@@ -758,11 +828,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let names: Vec<&str> = crate::source::all_sources(&s.source_roots())
+        let (_d, store) = temp_store();
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots(&store))
             .iter()
             .map(|s| s.name())
             .collect();
-        assert_eq!(names, vec![crate::source::SOURCE_GEMINI_CLI]);
+        // The trajectory source is always constructed now: the daemon reads
+        // the staging directory `import-antigravity` writes to. It comes
+        // last because `all_sources` appends it after the native adapters.
+        assert_eq!(
+            names,
+            vec![
+                crate::source::SOURCE_GEMINI_CLI,
+                crate::source::SOURCE_TRAJECTORY
+            ]
+        );
     }
 
     #[test]
@@ -790,6 +870,7 @@ mod tests {
     /// silently discards the contributor's answer.
     #[test]
     fn every_discoverable_source_has_a_settings_key_that_round_trips() {
+        let (_d, store) = temp_store();
         let home = std::env::temp_dir();
         for candidate in crate::source::discovery::probe(&home, |_| None) {
             let key = source_settings_key(&candidate.source)
@@ -801,7 +882,8 @@ mod tests {
                 "{key} is not a key apply_settings_object accepts"
             );
             assert!(
-                s.source_roots().is_declared(candidate.source.as_str()),
+                s.source_roots(&store)
+                    .is_declared(candidate.source.as_str()),
                 "{key} did not reach the declaration map"
             );
         }

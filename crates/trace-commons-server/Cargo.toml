@@ -26,6 +26,16 @@ chrono = { version = "0.4", features = ["serde"] }
 cookie = "0.18"
 clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
+# Intel DCAP quote verification, for NEAR AI's TDX attestation reports.
+# Not the default feature set: `report` pulls a second async HTTP stack for
+# fetching collateral, and `rustcrypto` a second crypto backend, where `ring`
+# is already a dependency here. `danger-allow-tcb-override` must stay off --
+# it does exactly what its name says.
+dcap-qvl = { version = "0.6", default-features = false, features = [
+    "std",
+    "ring",
+    "default-x509",
+] }
 dotenvy = "0.15"
 dirs = "6"
 hex = "0.4"
@@ -35,12 +45,24 @@ k256 = "0.13"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
+# rustls is already in the tree transitively. It is a DIRECT dependency here for
+# one reason: with the `near-attestation-collateral` feature, two crypto
+# providers end up compiled in -- ours via `reqwest`'s `rustls-tls-native-roots`
+# (ring), and `dcap-qvl/report`'s via `reqwest`'s `rustls` (aws-lc-rs). Feature
+# unification is additive, so neither can be removed by de-selecting. rustls
+# then refuses to guess and panics at the first TLS use. main() installs `ring`
+# explicitly; see the call there. Adds no new lockfile entry.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ripemd = "0.1"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# keccak256, for recovering the EIP-191 signer of a NEAR AI inference receipt.
+# 0.10 deliberately, to share the digest 0.10 tree that sha2 above already
+# pulls in rather than adding a second one.
+sha3 = "0.10"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
@@ -89,6 +111,18 @@ local-gpu-models-cuda = ["local-gpu-models", "trace-commons-gate-enclave/local-g
 # `--scorer-backend=near-ai` arm. Independent of `local-gpu-models` so a
 # TEE-hosted scoring host compiles without the mistralrs/candle/CUDA stack.
 near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
+# Compile the Intel DCAP collateral client used by the NEAR AI attestation
+# drill (`POST /v1/admin/near-attestation-drill`). Forwards to `dcap-qvl`'s
+# `report` feature, which is that crate's collateral client and which pulls a
+# second async HTTP stack (reqwest 0.13) plus `futures` into the build --
+# nothing else in this workspace compiles reqwest 0.13 by default. Off by
+# default for that reason. With it off the drill still exists and still runs;
+# its collateral step refuses with the missing control
+# `near_ai_attestation_collateral_client`, so the gap is a red drill with a
+# named cause rather than an absent route. Fetching the PCS endpoints by hand
+# is not the alternative: FMSPC extraction and CRL handling are exactly what
+# `dcap-qvl` gets right.
+near-attestation-collateral = ["dcap-qvl/report"]
 
 [[bin]]
 name = "trace-commons-gate-calibrate"

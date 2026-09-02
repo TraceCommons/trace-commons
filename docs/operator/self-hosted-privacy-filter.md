@@ -289,9 +289,9 @@ sessions.
 
 ```sh
 scripts/operator/gpu-privacy-filter-batch.sh up      # create + provision
-scripts/operator/gpu-privacy-filter-batch.sh attach  # local shim down, tunnel up
+scripts/operator/gpu-privacy-filter-batch.sh attach  # local shim down, forwarder up
 scripts/operator/gpu-privacy-filter-batch.sh status  # watch the held count
-scripts/operator/gpu-privacy-filter-batch.sh detach  # tunnel down, local shim up
+scripts/operator/gpu-privacy-filter-batch.sh detach  # forwarder down, local shim up
 scripts/operator/gpu-privacy-filter-batch.sh down    # delete, and VERIFY
 ```
 
@@ -308,11 +308,23 @@ The 14 MB submission that consumed 50 hours of CPU takes about 5.5 minutes.
 
 ### Why ingest needs no change
 
-`attach` stops the pilot's local shim and opens an IAP tunnel on the same
-`127.0.0.1:8471`. Ingest keeps addressing loopback, so there is no config
-change, no restart, and no code change. Traffic is encrypted and authenticated
-by IAP rather than crossing the VPC in plaintext -- which matters, because the
-self-hosted adapter has **no TLS guard** for non-loopback endpoints.
+`attach` stops the pilot's local shim and runs a `socat` forwarder on the same
+`127.0.0.1:8471`, pointed at the GPU's internal address. Ingest keeps addressing
+loopback, so there is no config change, no restart, and no code change.
+
+**The hop to the GPU crosses the VPC in plaintext.** An earlier version of this
+page claimed the traffic was "encrypted and authenticated by IAP". That
+described a tunnel design that does not work here and has been removed: the
+pilot's runtime service account is least-privilege and cannot call
+`compute.instances.list`, so it cannot open an IAP tunnel at all. GCP encrypts
+VM-to-VM traffic, but there is no application-layer TLS on this hop and the
+self-hosted adapter has **no TLS guard** for non-loopback endpoints. Trace
+content crosses it.
+
+What bounds the exposure is the firewall rule `attach` creates: `tcp:8471`,
+target tag `opf-gpu-drain`, source restricted to the pilot's internal address
+alone (`/32`). Do not widen that source range, and run `down` when the batch
+ends -- it deletes the rule along with the VM.
 
 **No database credentials, KEK access or artifact keys reach the spot VM.** It
 runs the stateless classifier only; ingest still does envelope decrypt and
@@ -322,8 +334,18 @@ release.
 without a filter. If the GPU is preempted mid-drain, ingest sees a transport
 error, which the adapter types as transient and does not charge to the trace.
 
-### Two traps, both hit while building this
+### Traps, all hit while building this
 
+- **The two shims bind differently, and confusing them breaks `attach`.** The
+  pilot's local shim binds `127.0.0.1` and must stay that way -- it is reached
+  only by ingest on the same host. The GPU's shim binds its **internal IP**,
+  because `attach` reaches it from the pilot over the VPC; a loopback-bound
+  listener there is unreachable no matter how the firewall is set. This shipped
+  broken once: `attach` was rewritten to use `socat` while the provisioning step
+  still passed `--host 127.0.0.1`, so every attach failed at the healthz check
+  with the firewall and tags both correct. Note also that the post-start probe
+  must target the internal IP -- a `localhost` probe on the GPU box passes
+  against a loopback-bound shim and hides exactly this fault.
 - The image needs **`python3-dev`**. Without it Triton cannot JIT CUDA kernels,
   and the real cause (`Python.h: No such file or directory`) is buried under a
   `CalledProcessError` that reads like a CUDA fault.

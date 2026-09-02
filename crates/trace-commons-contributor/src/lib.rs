@@ -4,6 +4,7 @@
 //! identities.
 
 pub mod account_auth;
+pub(crate) mod antigravity;
 pub mod commands;
 pub mod config;
 pub mod consent;

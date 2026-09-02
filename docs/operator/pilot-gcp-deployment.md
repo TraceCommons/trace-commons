@@ -88,7 +88,7 @@ Optional / posture:
 
 ```
 cargo build --release --bin trace-commons-ingest \
-  --features gcs-client,gcp-kms,near-ai-scorer
+  --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
 cargo build --release --bin trace-commons-upload-claim-issuer
 ```
 
@@ -99,8 +99,14 @@ Pitfalls:
   startup validation then reports
   `object_store=trace_commons_service_owned_remote_disabled` and refuses
   to start when `TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING=true`.
-  Always pass `--features gcs-client,gcp-kms,near-ai-scorer`. The
-  feature-complete binary is ~65 MB.
+  Always pass `--features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral`.
+  The feature-complete binary is ~65 MB.
+- Dropping `near-attestation-collateral` does not fail startup, which is
+  why it is easy to leave off: `POST /v1/admin/near-attestation-drill`
+  still runs and still refuses, at its collateral step, with
+  `missing_control:near_ai_attestation_collateral_client`. The pilot then
+  holds a required rollout-smoke check that can never pass. See
+  [`near-attestation-drill.md`](near-attestation-drill.md).
 
 ## Render artifacts
 

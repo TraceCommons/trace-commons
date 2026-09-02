@@ -138,7 +138,23 @@ pub struct PgBackend {
     invite_registry_pool: Option<Pool>,
 }
 
-const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
+/// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
+///
+/// Public so RLS tests assert against this list rather than a hand-maintained
+/// copy; the copy had drifted twelve tables out of date while the diagnostic
+/// that would have caught it was failing to parse.
+///
+/// Deliberate exclusions, so an absence is never mistaken for an oversight
+/// again: `trace_instance_enrollments` and `onboarding_invite_grants` are
+/// isolated by subject hash rather than by tenant, and
+/// `trace_community_snapshot_invalidations` and `trace_leaderboard_snapshots`
+/// are deployment-wide aggregate bookkeeping with no tenant column to
+/// predicate on -- inexpressible rather than merely unnecessary. The
+/// leaderboard snapshot's `contents_jsonb` DOES carry contributor handles;
+/// see the exclusion notes at the bottom of
+/// `migrations/V56__community_withdrawal_eviction_rls.sql` for why that is
+/// opt-in published data and does not change the answer.
+pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenants",
     "trace_tenant_policies",
     "trace_tenant_access_grants",
@@ -183,6 +199,7 @@ const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_webauthn_credentials",
     "trace_near_identities",
     "trace_account_merge_proposals",
+    "trace_community_withdrawal_evictions",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -2004,6 +2021,75 @@ impl Database for PgBackend {
                 )
                 .await?;
         }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&55_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V55__register_stats_public_read.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&55_i32, &"register_stats_public_read"],
+                )
+                .await?;
+        }
+
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&56_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V56__community_withdrawal_eviction_rls.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&56_i32, &"community_withdrawal_eviction_rls"],
+                )
+                .await?;
+        }
+
+        // V57 names the derivation behind dedup_simhash (#211, #325).
+        // Additive, nullable and backfill-free: a row written before it keeps
+        // NULL, which code reads as the legacy v1 stamp rather than as
+        // unknown. Also grants the new column to the gate-driver role, which
+        // holds column-scoped grants and now selects it in
+        // `list_dedup_signals`.
+        let already_applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                &[&57_i32],
+            )
+            .await?
+            .is_some();
+        if !already_applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V57__trace_gate_decision_dedup_signal_version.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
+                    &[&57_i32, &"trace_gate_decision_dedup_signal_version"],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -2029,16 +2115,16 @@ impl Database for PgBackend {
                     c.relname,
                     c.relrowsecurity,
                     c.relforcerowsecurity,
-                    p.has_policy,
+                    COALESCE(p.has_policy, false) AS has_policy,
                     COALESCE(p.expression_matches, false) AS expression_matches
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  LEFT JOIN LATERAL (
                     SELECT
                         true AS has_policy,
-                        pol.cmd = '*'
-                            AND pg_get_expr(pol.qual, pol.polrelid) = ANY($2)
-                            AND pg_get_expr(pol.with_check, pol.polrelid) = ANY($2)
+                        pol.polcmd = '*'
+                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
+                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
                             AS expression_matches
                         FROM pg_policies p
                         JOIN pg_policy pol
@@ -2334,6 +2420,18 @@ impl Database for PgBackend {
             .transaction()
             .await
             .map_err(DatabaseError::Postgres)?;
+        // The eviction UPDATE below is deliberately cross-tenant: one drain
+        // covers every pending withdrawal for this (window, metric). V56 gates
+        // that on this transaction-local GUC rather than on a tenant
+        // predicate. Without it the statement does not fail -- it silently
+        // marks zero rows, because the tenant policy hides every row from a
+        // connection with no tenant context.
+        tx.execute(
+            "SELECT set_config('trace_commons.community_drain', 'on', true)",
+            &[],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
         let drained = tx
             .execute(
                 "UPDATE trace_community_snapshot_invalidations
@@ -2567,6 +2665,154 @@ impl Database for PgBackend {
             novelty_histogram,
             gate_outcomes,
         })
+    }
+
+    async fn compute_register_stats_totals(
+        &self,
+        configured_tenant_ids: &[String],
+    ) -> Result<crate::db::RegisterStatsTotals, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+
+        // Can this role see through RLS at all? An empty enumeration means
+        // something different depending on the answer -- see
+        // refuse_if_enumeration_is_ambiguous.
+        let visibility = client
+            .query_one(
+                "SELECT current_setting('is_superuser') = 'on' AS is_superuser,
+                        COALESCE(
+                            (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user),
+                            false
+                        ) AS bypasses_rls",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let role_sees_through_rls =
+            visibility.get::<_, bool>("is_superuser") || visibility.get::<_, bool>("bypasses_rls");
+
+        let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
+            client
+                .query("SELECT tenant_id FROM trace_tenants", &[])
+                .await
+                .map_err(DatabaseError::Postgres)?
+                .into_iter()
+                .map(|row| row.get::<_, String>("tenant_id"))
+                .collect()
+        } else {
+            configured_tenant_ids.to_vec()
+        };
+        refuse_if_enumeration_is_ambiguous(&tenant_ids, role_sees_through_rls)?;
+
+        let mut traces_accepted = 0_i64;
+        // Accumulated as f64 and rounded once at the end (the same
+        // `(x).round() as i64` idiom `credit_delta_micros` uses elsewhere in
+        // this codebase to cross from a float points figure to an integer),
+        // rather than casting each tenant's SUM to bigint before adding it
+        // to the running total -- which would round per tenant and let the
+        // published total drift from the true global sum.
+        let mut points_issued: f64 = 0.0;
+        let mut contributors: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        for tenant_id in &tenant_ids {
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+            let accepted = tx
+                .query_one(
+                    "SELECT COUNT(*) AS accepted FROM trace_submissions WHERE status = 'accepted'",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            traces_accepted += accepted.get::<_, i64>("accepted");
+
+            let issued = tx
+                .query_one(
+                    "SELECT COALESCE(SUM(points_delta::numeric), 0)::double precision AS issued
+                     FROM trace_credit_ledger
+                     WHERE points_delta::numeric > 0",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            points_issued += issued.get::<_, f64>("issued");
+
+            let accounts = tx
+                .query(
+                    "SELECT DISTINCT credit_account_ref FROM trace_credit_ledger",
+                    &[],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in accounts {
+                contributors.insert(row.get::<_, String>("credit_account_ref"));
+            }
+            tx.commit().await.map_err(DatabaseError::Postgres)?;
+        }
+
+        Ok(crate::db::RegisterStatsTotals {
+            traces_accepted,
+            contributors: contributors.len() as i64,
+            // Rounded once here, at the global sum -- not per tenant.
+            points_issued: points_issued.round() as i64,
+        })
+    }
+
+    async fn fetch_register_stats_row(&self) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(REGISTER_STATS_SELECT_SQL, &[])
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(register_stats_row_from(&row))
+    }
+
+    async fn fetch_register_stats_row_as_public_read(
+        &self,
+    ) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let pool = self.trace_pool();
+        let mut client = pool.get().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        // SET LOCAL, never a bare SET: the role reverts when this transaction
+        // ends, including on the error path, so a pooled connection can never
+        // be handed back to another request still wearing it.
+        //
+        // This fails loudly ("permission denied to set role") when the serving
+        // role is not a member of trace_commons_public_read, which is the
+        // fail-closed direction: a deployment that applied migrations as a
+        // different role gets an error on this endpoint rather than a quietly
+        // over-privileged read. See docs/operator/register-stats-role.md.
+        tx.batch_execute("SET LOCAL ROLE trace_commons_public_read")
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let row = tx
+            .query_one(REGISTER_STATS_SELECT_SQL, &[])
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let parsed = register_stats_row_from(&row);
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(parsed)
+    }
+
+    async fn write_register_stats_row(
+        &self,
+        totals: crate::db::RegisterStatsTotals,
+    ) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                REGISTER_STATS_REFRESH_SQL,
+                &[
+                    &totals.traces_accepted,
+                    &totals.contributors,
+                    &totals.points_issued,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(register_stats_row_from(&row))
     }
 
     async fn insert_leaderboard_snapshot(
@@ -4969,7 +5215,12 @@ impl Database for PgBackend {
         // SELECT policies authorize this read across every tenant's decisions.
         let rows = client
             .query(
-                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash
+                // `dedup_signal_version` (V57) is selected here, so V57 also
+                // grants it to trace_gate_driver: the role holds
+                // COLUMN-scoped grants, and column privileges cover every
+                // column a query references.
+                "SELECT tenant_id, decision_id, dedup_cluster_id, dedup_simhash,
+                        dedup_signal_version
                  FROM trace_gate_decisions
                  ORDER BY decided_at ASC
                  LIMIT $1",
@@ -4984,6 +5235,7 @@ impl Database for PgBackend {
                 decision_id: row.get("decision_id"),
                 dedup_cluster_id: row.get("dedup_cluster_id"),
                 dedup_simhash: row.get("dedup_simhash"),
+                dedup_signal_version: row.get("dedup_signal_version"),
             })
             .collect())
     }
@@ -5414,6 +5666,110 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// The seven columns `trace_commons_public_read` is granted, and no others --
+/// `singleton` among them, because the filter below references it.
+///
+/// One constant rather than two copies: the runtime read and the public read
+/// must return the same shape, and the public role's GRANT is column-scoped,
+/// so a seventh column added to one copy would fail at request time under
+/// that role only.
+///
+/// `WHERE singleton = TRUE` is a correctness guard, not decoration, and stays.
+/// `query_one` errors on anything but exactly one row, so a bare
+/// `SELECT ... FROM trace_register_stats` is correct only for as long as
+/// `singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton)` holds. That
+/// constraint is one migration away from being relaxed, and the failure mode
+/// then is a 500 or a silently wrong row, not a compile error.
+///
+/// `singleton` must therefore appear in V55's column grant, and does.
+/// PostgreSQL column privileges cover every column a query REFERENCES, not
+/// just the ones it projects, so filtering on an ungranted column denies the
+/// whole table under `trace_commons_public_read` ("permission denied for
+/// table trace_register_stats") even when every projected column is granted.
+/// That shipped once as a 500 on every request.
+///
+/// Public so `tests/register_stats_rls.rs` proves the role against the
+/// statement the server actually issues. That test previously ran a
+/// hand-copied, shortened projection with no `WHERE`, and so passed while the
+/// shipped query was denied on every request.
+pub const REGISTER_STATS_SELECT_SQL: &str = "SELECT traces_accepted, contributors, points_issued, \
+     withheld, suppressed, as_of, refreshed_at FROM trace_register_stats WHERE singleton = TRUE";
+
+/// The refresh write. Note what is NOT in the `SET` list: `suppressed`.
+///
+/// That column is the operator's lever, and a refresh that cleared it would
+/// make it useless -- an operator suppressing publication during an incident
+/// would have it silently undone by the next scheduled run, with no error and
+/// no log. `withheld` is the computed/never-computed marker and is cleared
+/// here, which is exactly why it cannot double as the lever.
+///
+/// One constant so `the_refresh_never_clears_the_operator_suppression` can
+/// assert that property without a database.
+const REGISTER_STATS_REFRESH_SQL: &str = "UPDATE trace_register_stats
+                 SET traces_accepted = $1,
+                     contributors = $2,
+                     points_issued = $3,
+                     withheld = FALSE,
+                     as_of = NOW(),
+                     refreshed_at = NOW()
+                 WHERE singleton = TRUE
+                 RETURNING traces_accepted, contributors, points_issued, withheld, \
+                           suppressed, as_of, refreshed_at";
+
+fn register_stats_row_from(row: &tokio_postgres::Row) -> crate::db::RegisterStatsRow {
+    crate::db::RegisterStatsRow {
+        traces_accepted: row.get("traces_accepted"),
+        contributors: row.get("contributors"),
+        points_issued: row.get("points_issued"),
+        withheld: row.get("withheld"),
+        suppressed: row.get("suppressed"),
+        as_of: row.get("as_of"),
+        refreshed_at: row.get("refreshed_at"),
+    }
+}
+
+/// Guard for `PgBackend::compute_register_stats_totals`.
+///
+/// An empty resolved tenant enumeration is genuinely ambiguous: it is the
+/// correct, honest answer on a fresh deployment before any tenant exists,
+/// but it is *also* exactly what `SELECT tenant_id FROM trace_tenants`
+/// silently returns under a NOBYPASSRLS role with no tenant GUC set, since
+/// `trace_tenants` is itself FORCE RLS on `tenant_id = trace_current_tenant_id()`.
+/// The query cannot tell those two cases apart from inside itself, so this
+/// asks a different question instead: can the connecting role see through
+/// RLS at all (`is_superuser`, or `rolbypassrls`)? If it can, an empty
+/// result is a true statement about the register and is safe to publish. If
+/// it cannot, forced RLS with no GUC set MUST hide every row, so an empty
+/// result is uninformative and the refresh must refuse rather than stamp a
+/// zero it cannot vouch for.
+///
+/// This does not wedge anything: on refusal `refreshed_at` stays whatever it
+/// already was (unstamped on a fresh table), the endpoint keeps publishing
+/// nothing, and the very next run after the first tenant exists succeeds --
+/// which is the right posture for a register with no contributors anyway.
+///
+/// Extracted as a pure function so this exact branch is unit-testable
+/// without a database: the live masking scenario it protects against cannot
+/// be reproduced against a superuser-connected local test database (the
+/// connecting role bypasses RLS entirely, which is itself the `true` branch
+/// here), so the only thing CI can verify is that the guard's logic is
+/// correct for both roles.
+fn refuse_if_enumeration_is_ambiguous(
+    tenant_ids: &[String],
+    role_sees_through_rls: bool,
+) -> Result<(), DatabaseError> {
+    if tenant_ids.is_empty() && !role_sees_through_rls {
+        Err(DatabaseError::Pool(
+            "compute_register_stats_totals enumerated no tenants under a role that \
+             cannot see through RLS; refusing to publish a zero it cannot distinguish \
+             from RLS hiding every row"
+                .to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 async fn trace_tenant_context_is_transaction_local(
     client: &mut deadpool_postgres::Client,
 ) -> Result<bool, DatabaseError> {
@@ -5755,32 +6111,6 @@ mod tests {
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
-    ///
-    /// The markers are built at runtime rather than written as literals.
-    /// `THIS_FILE` is this file, so a literal would appear in the assertion's
-    /// own source and the assertion would be satisfied by itself -- passing
-    /// with the migration wired into nothing.
-    #[test]
-    fn v53_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        let file_marker = format!(
-            "migrations/V{}__trace_gate_decision_composite_score.sql",
-            53
-        );
-        assert_eq!(
-            THIS_FILE.matches(&file_marker).count(),
-            2,
-            "V53 must be named exactly twice: once by run_migrations' include_str! \
-             and once by the migration-content test above"
-        );
-        let version_marker = format!("&{}_i32", 53);
-        assert!(
-            THIS_FILE.contains(&version_marker),
-            "V53 must record itself in _trace_commons_migrations"
-        );
-    }
-
     /// V54 records the composition statistic for large traces (#478). Shadow
     /// mode, and prospective for a harder reason than V53: per-chunk logprobs
     /// are never persisted, so it cannot be recomputed for a decision already
@@ -5803,93 +6133,591 @@ mod tests {
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47 and V53: wiring, pinned.
-    /// Counted rather than merely present, for the reason V53's test records
-    /// -- a literal in the assertion would otherwise satisfy itself.
+    /// V55 gives the public register-stats endpoint (Task 4) a way to read
+    /// one aggregate row without a tenant. This test runs WITHOUT
+    /// PostgreSQL, so it is the only thing CI can ever check about the
+    /// role/policy shape below -- it has to carry real weight rather than
+    /// just check the file exists.
     #[test]
-    fn v54_is_wired_into_run_migrations() {
+    fn v55_creates_a_nobypassrls_role_scoped_to_one_column_grant_and_policy() {
+        const V55: &str =
+            include_str!("../../../../migrations/V55__register_stats_public_read.sql");
+        assert!(
+            V55.contains("CREATE ROLE trace_commons_public_read NOLOGIN NOBYPASSRLS"),
+            "V55 must create the public-read role as NOLOGIN NOBYPASSRLS -- \
+             never a role that can bypass RLS"
+        );
+        assert!(
+            V55.contains(
+                "GRANT SELECT (singleton, traces_accepted, contributors, points_issued, withheld, suppressed, as_of, refreshed_at)\n    ON trace_register_stats TO trace_commons_public_read"
+            ),
+            "V55 must grant the public-read role SELECT on exactly the named \
+             columns and nothing else -- `singleton` included, because the \
+             public read filters on it and column privileges cover every \
+             column a query references"
+        );
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_public_read")
+                && V55.contains("TO trace_commons_public_read")
+                && V55.contains("FOR SELECT"),
+            "V55 must scope the read policy to the public-read role, not PUBLIC"
+        );
+        // SQL comment lines stripped first, so this checks actual statements
+        // rather than tripping on the prose ("... NOT `BYPASSRLS` ...") that
+        // explains why. Every remaining NOBYPASSRLS occurrence is then
+        // stripped too, so what's left can only be a stray BYPASSRLS grant.
+        let sql_only_v55 = V55
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !sql_only_v55
+                .to_uppercase()
+                .replace("NOBYPASSRLS", "")
+                .contains("BYPASSRLS"),
+            "V55 must never grant BYPASSRLS to any role"
+        );
+        assert!(
+            V55.contains("FORCE ROW LEVEL SECURITY"),
+            "V55 must force RLS on trace_register_stats"
+        );
+        assert!(
+            !V55.to_uppercase().contains("DISABLE ROW LEVEL SECURITY"),
+            "V55 must not weaken forced RLS"
+        );
+        // FORCE ROW LEVEL SECURITY binds the table owner too, so the refresh
+        // worker (running as the ordinary runtime role, not
+        // trace_commons_public_read) needs its own read/write policies or it
+        // could never touch the row -- not even once. Both are scoped by
+        // predicate (no `TO` clause) rather than by role, so they add no
+        // privilege to trace_commons_public_read: that role's reach stays
+        // bounded by the column-scoped GRANT above, not by these policies.
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_runtime_write")
+                && V55.contains("FOR UPDATE"),
+            "V55 must let the runtime role write the row it refreshes"
+        );
+        assert!(
+            V55.contains("CREATE POLICY trace_register_stats_runtime_read"),
+            "V55 must let the runtime role read the row it just wrote"
+        );
+        // Whitespace-normalized rather than matching the file's exact
+        // indentation/newlines: an exact-whitespace match here would go
+        // silently vacuous (always pass) the moment someone reflows this
+        // SQL without changing its meaning, which defeats the point of a
+        // negative assertion.
+        let normalized_v55 = V55.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            !normalized_v55.contains(
+                "trace_register_stats_runtime_write ON trace_register_stats FOR UPDATE TO "
+            ) && !normalized_v55.contains(
+                "trace_register_stats_runtime_read ON trace_register_stats FOR SELECT TO "
+            ),
+            "V55's runtime policies must stay unscoped by role (no `TO`), \
+             not widened to name trace_commons_public_read"
+        );
+        assert!(
+            !V55.contains("FOR INSERT"),
+            "V55 must not let the runtime role INSERT: the singleton row is \
+             seeded once by the migration itself; a refresh that finds the \
+             row missing must fail loudly, not conjure a fresh one in a \
+             state nobody computed"
+        );
+        // Roles are cluster-wide: a bare CREATE ROLE aborts the whole
+        // batch_execute on a cluster where the role already exists (a
+        // second database, a recreated one), and since run_migrations
+        // records the version only after the batch succeeds, V55 would
+        // never record itself and would retry -- and fail -- on every boot.
+        assert!(
+            V55.contains(
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_commons_public_read')"
+            ) && V55.contains("DO $$"),
+            "V55 must guard CREATE ROLE with an existence check, like V30 \
+             and V42 do for their roles"
+        );
+        // Without this, nothing grants membership in the role, and Task 4's
+        // SET ROLE trace_commons_public_read fails in production with
+        // "permission denied to set role".
+        assert!(
+            V55.contains("GRANT trace_commons_public_read TO CURRENT_USER"),
+            "V55 must grant whoever applies the migration membership in the \
+             role, or nothing can ever assume it"
+        );
+    }
+
+    /// V57 names the derivation behind `dedup_simhash` (#211, #325). The
+    /// column has to be nullable and backfill-free for the reason V53 and V54
+    /// are, and for one of its own: a DEFAULT would assert in the schema the
+    /// reading that code makes explicitly (NULL means the legacy v1 stamp),
+    /// and a later re-derivation pass could no longer tell a defaulted row
+    /// from a stamped one.
+    #[test]
+    fn v57_adds_a_nullable_dedup_signal_version_column() {
+        const V57: &str = include_str!(
+            "../../../../migrations/V57__trace_gate_decision_dedup_signal_version.sql"
+        );
+        // Comment lines stripped first (the idiom V55's test uses), because
+        // this file's header explains at length why there is NO DEFAULT and
+        // no backfill -- prose that would trip every negative assertion
+        // below and make them vacuous to "fix".
+        let sql_only = V57
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            sql_only.contains("ADD COLUMN IF NOT EXISTS dedup_signal_version TEXT"),
+            "V57 must add the dedup-signal-version column as TEXT: it carries \
+             a composed \"<render>+<simhash>\" name plus a third value that is \
+             neither, which an integer version cannot express"
+        );
+        assert!(
+            !sql_only.to_uppercase().contains("NOT NULL")
+                && !sql_only.to_uppercase().contains("DEFAULT"),
+            "V57 must stay nullable and default-free: NULL is what says \
+             \"recorded before the stamp existed\", and code maps it to the \
+             legacy v1 stamp"
+        );
+        assert!(
+            !sql_only
+                .to_uppercase()
+                .contains("UPDATE TRACE_GATE_DECISIONS"),
+            "V57 must not backfill: the re-derivation pass rewrites these \
+             rows from retained inputs, and a migration cannot render text"
+        );
+        // Unlike V53/V54, this column IS read on the gate-driver pool.
+        assert!(
+            sql_only.contains(
+                "GRANT SELECT (dedup_signal_version) ON trace_gate_decisions TO trace_gate_driver"
+            ),
+            "V57 must grant the new column to trace_gate_driver: \
+             `list_dedup_signals` runs on that pool and now selects it, and \
+             column privileges cover every column a query references"
+        );
+        assert!(
+            !sql_only
+                .to_uppercase()
+                .contains("DISABLE ROW LEVEL SECURITY"),
+            "V57 must not weaken forced RLS"
+        );
+    }
+
+    /// Same hand-rolled-`run_migrations` trap as V47, V53 and V54: wiring,
+    /// pinned. Counted rather than merely present, because a literal in the
+    /// assertion's own source would satisfy the assertion by itself and pass
+    /// with the migration wired into nothing.
+    #[test]
+    fn v57_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
         let file_marker = format!(
-            "migrations/V{}__trace_gate_decision_qualifying_mass.sql",
-            54
+            "migrations/V{}__trace_gate_decision_dedup_signal_version.sql",
+            57
         );
         assert_eq!(
             THIS_FILE.matches(&file_marker).count(),
             2,
-            "V54 must be named exactly twice: once by run_migrations' include_str! \
+            "V57 must be named exactly twice: once by run_migrations' include_str! \
              and once by the migration-content test above"
         );
-        let version_marker = format!("&{}_i32", 54);
+        let version_marker = format!("&{}_i32", 57);
         assert!(
             THIS_FILE.contains(&version_marker),
-            "V54 must record itself in _trace_commons_migrations"
+            "V57 must record itself in _trace_commons_migrations"
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
     #[test]
-    fn v52_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
+    fn every_column_the_public_read_references_is_granted() {
+        // PostgreSQL column privileges cover every column a query REFERENCES,
+        // not just the ones it projects -- a WHERE, an ORDER BY, a function
+        // argument all count. A column in the statement but not in V55's
+        // GRANT denies the WHOLE TABLE under trace_commons_public_read, with
+        // an error that names no column. That shipped once as a 500 on every
+        // request, from a `WHERE singleton = TRUE` against a grant that
+        // omitted `singleton`.
+        //
+        // This compares the statement against the grant PARSED OUT of V55
+        // rather than a restated list, so the two cannot drift: add a column
+        // to the query without granting it and this fails, on a machine with
+        // no PostgreSQL.
+        const V55: &str =
+            include_str!("../../../../migrations/V55__register_stats_public_read.sql");
+        let granted = V55
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split("GRANT SELECT (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("V55 carries a column-scoped GRANT SELECT")
+            .split(',')
+            .map(|column| column.trim().to_string())
+            .collect::<Vec<_>>();
+
+        // The table's columns, PARSED OUT of V55's CREATE TABLE rather than
+        // restated. A hardcoded list here would be a third hand-maintained
+        // copy of the schema: add an eighth column to the table, the query
+        // and the grant but not to the list, and this test would silently
+        // have no opinion about it while claiming to cover every column.
+        let table_columns = V55
+            .split("CREATE TABLE trace_register_stats (")
+            .nth(1)
+            .and_then(|rest| rest.split("\n);").next())
+            .expect("V55 creates trace_register_stats")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("--"))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(|name| name.trim_end_matches(',').to_string())
+            .collect::<Vec<_>>();
+
+        // Anti-vacuity: a parser that silently returned nothing would make
+        // every loop below run zero times and pass. Tie it to the grant,
+        // which is parsed independently -- every granted column must be a
+        // real column of the table, which also catches a typo in the grant.
         assert!(
-            THIS_FILE.contains("migrations/V52__trace_submission_residual_risk_basis.sql"),
-            "V52 must be wired into run_migrations with an include_str!"
+            !table_columns.is_empty(),
+            "failed to parse any column out of V55's CREATE TABLE"
         );
         assert!(
-            THIS_FILE.contains("&52_i32"),
-            "V52 must record itself in _trace_commons_migrations"
+            !granted.is_empty(),
+            "failed to parse V55's GRANT SELECT list"
+        );
+        for column in &granted {
+            assert!(
+                table_columns.contains(column),
+                "V55 grants {column}, which is not a column of \
+                 trace_register_stats -- check the grant for a typo"
+            );
+        }
+
+        for column in &table_columns {
+            if REGISTER_STATS_SELECT_SQL.contains(column.as_str()) {
+                assert!(
+                    granted.contains(column),
+                    "the public read references {column}, so V55 must grant \
+                     it -- an ungranted reference denies the whole table"
+                );
+            }
+        }
+
+        // And the filter specifically, since dropping it is the tempting
+        // wrong fix: `query_one` demands exactly one row, which a bare
+        // SELECT delivers only while the CHECK constraint holds.
+        assert!(
+            REGISTER_STATS_SELECT_SQL.contains("WHERE singleton = TRUE"),
+            "the public read must keep its singleton filter: it is what \
+             keeps the read correct if the CHECK is ever relaxed"
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
     #[test]
-    fn v51_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
+    fn the_refresh_never_clears_the_operator_suppression() {
+        // `suppressed` is the operator's lever and the refresh must not touch
+        // it: a cron-driven refresh that cleared it would silently undo an
+        // incident-time suppression, with no error and no log. Split at
+        // RETURNING first, because `suppressed` legitimately appears there.
+        let set_clause = REGISTER_STATS_REFRESH_SQL
+            .split("RETURNING")
+            .next()
+            .expect("the refresh has a SET clause before RETURNING");
         assert!(
-            THIS_FILE.contains("migrations/V51__privacy_classify_window_cache.sql"),
-            "V51 must be wired into run_migrations with an include_str!"
+            !set_clause.contains("suppressed"),
+            "the refresh must never write `suppressed` -- it is the \
+             operator's lever, not a computed field"
         );
+        // And it must still clear the computed marker, which is what makes
+        // the two columns different things rather than duplicates.
         assert!(
-            THIS_FILE.contains("&51_i32"),
-            "V51 must record itself in _trace_commons_migrations"
+            set_clause.contains("withheld = FALSE"),
+            "the refresh must clear `withheld`, the computed marker"
+        );
+        // The read must actually carry the lever, or the endpoint cannot
+        // honour it however faithfully the refresh leaves it alone.
+        assert!(
+            REGISTER_STATS_SELECT_SQL.contains("suppressed"),
+            "the public read must select `suppressed`"
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
     #[test]
-    fn v49_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
+    fn the_operator_verification_recipe_runs_the_real_statement() {
+        // The recipe in that runbook is what an operator actually types to
+        // prove the role works. It carried a shortened projection while the
+        // shipped query was denied on every request, so it would have said
+        // "verified" about a statement the server never issues.
+        const RUNBOOK: &str = include_str!("../../../../docs/operator/register-stats-role.md");
+        let normalized = RUNBOOK.split_whitespace().collect::<Vec<_>>().join(" ");
+        let statement = REGISTER_STATS_SELECT_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Terminated with `;`, so a runbook carrying a LONGER statement does
+        // not satisfy this by containing the shorter one as a prefix. That
+        // asymmetry is how a recipe that quietly drops a trailing clause --
+        // exactly the defect this guards -- would otherwise still pass.
         assert!(
-            THIS_FILE.contains("migrations/V49__trace_submission_last_status_reason.sql"),
-            "V49 must be wired into run_migrations with an include_str!"
-        );
-        assert!(
-            THIS_FILE.contains("&49_i32"),
-            "V49 must record itself in _trace_commons_migrations"
+            normalized.contains(&format!("{statement};")),
+            "docs/operator/register-stats-role.md must contain the exact \
+             statement the public read issues, terminated, not a shortened \
+             or extended one"
         );
     }
 
-    /// Same hand-rolled-`run_migrations` trap as V47: wiring, pinned.
     #[test]
-    fn v48_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
-        assert!(
-            THIS_FILE.contains("migrations/V48__trace_correction_value.sql"),
-            "V48 must be wired into run_migrations with an include_str!"
-        );
+    fn refuses_an_empty_enumeration_under_a_role_that_cannot_see_through_rls() {
+        // The masking case: forced RLS with no GUC set MUST hide every row,
+        // so an empty result under a role that cannot see through RLS is
+        // uninformative -- indistinguishable from "RLS ate it".
+        assert!(refuse_if_enumeration_is_ambiguous(&[], false).is_err());
     }
 
-    /// `run_migrations` is hand-rolled: a migration file that is not wired in
-    /// with its own `include_str!` never runs. Pin the wiring.
     #[test]
-    fn v47_is_wired_into_run_migrations() {
-        const THIS_FILE: &str = include_str!("postgres.rs");
+    fn accepts_an_empty_enumeration_under_a_role_that_sees_through_rls() {
+        // The fresh-deployment case: a role that can see through RLS
+        // (superuser or BYPASSRLS) genuinely saw every trace_tenants row,
+        // so an empty result means the register really has no tenants yet
+        // -- a true, publishable zero.
+        assert!(refuse_if_enumeration_is_ambiguous(&[], true).is_ok());
+    }
+
+    #[test]
+    fn a_nonempty_enumeration_never_refuses_regardless_of_role() {
+        let tenants = ["some-tenant".to_string()];
+        assert!(refuse_if_enumeration_is_ambiguous(&tenants, false).is_ok());
+        assert!(refuse_if_enumeration_is_ambiguous(&tenants, true).is_ok());
+    }
+
+    /// The minimum number of times a migration's path may appear in THIS
+    /// file: once for `run_migrations`' own `include_str!`, plus one for each
+    /// test that READS the migration rather than restating it.
+    ///
+    /// Only migrations with a reader beyond `run_migrations` need a row; the
+    /// wiring check itself enumerates `migrations/` and needs no table.
+    /// Asserted as a lower bound, so a new legitimate reader does not fail an
+    /// unrelated row -- but deleting a content test still does.
+    const MIGRATION_READER_MINIMUMS: &[(u32, usize)] = &[
+        (47, 2),
+        (48, 2),
+        (49, 2),
+        (51, 2),
+        (52, 2),
+        (53, 2),
+        (54, 2),
+        (55, 3),
+        (56, 4),
+    ];
+
+    /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
+    /// test time rather than listed.
+    ///
+    /// `migrations/` is the source of truth for what migrations exist, so
+    /// enumerating it is what lets the wiring check below fail for a migration
+    /// nobody remembered to mention -- the failure mode a hand-maintained
+    /// table reproduces rather than closes. `CARGO_MANIFEST_DIR` is
+    /// `crates/trace-commons-server`; the migrations live at the repo root.
+    fn migrations_on_disk() -> Vec<(u32, String)> {
+        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+
+        let entries = std::fs::read_dir(MIGRATIONS_DIR)
+            .unwrap_or_else(|err| panic!("cannot read {MIGRATIONS_DIR}: {err}"));
+
+        let mut migrations: Vec<(u32, String)> = Vec::new();
+        for entry in entries {
+            let name = entry.expect("directory entry").file_name();
+            let name = name.to_str().expect("migration filenames are UTF-8");
+            let Some(rest) = name.strip_prefix('V') else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some((version, stem)) = rest.split_once("__") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let Some(stem) = stem.strip_suffix(".sql") else {
+                panic!("{name}: migrations must be named V<version>__<stem>.sql");
+            };
+            let version: u32 = version
+                .parse()
+                .unwrap_or_else(|_| panic!("{name}: version is not a number"));
+            migrations.push((version, stem.to_string()));
+        }
+
+        // An empty or wrong directory would make every check below pass
+        // vacuously, so refuse a read that plainly did not find the tree.
         assert!(
-            THIS_FILE.contains("migrations/V47__trace_gate_decision_total_chunk_count.sql"),
-            "V47 must be wired into run_migrations with an include_str!"
+            migrations.len() >= 56,
+            "found only {} migrations in {MIGRATIONS_DIR}: the enumeration read the wrong \
+                 directory, and an empty one passes every check below",
+            migrations.len()
         );
+
+        migrations.sort();
+        migrations
+    }
+
+    /// `run_migrations` is hand-rolled: a migration not wired in with its own
+    /// `include_str!`, or guarded on one version while recording another,
+    /// never runs, or re-runs on every boot. Driven from `migrations/` the way
+    /// `trace_commons_rls_registry_matches_migration_policy_coverage` below is
+    /// driven from its policy set, so a failing row names the migration.
+    ///
+    /// Four things make this hard to satisfy by accident:
+    ///
+    /// 1. The set under test is read from `migrations/`, not listed here. A
+    ///    migration added and never wired in fails without anyone having to
+    ///    remember this test exists -- which is how V50 came to have no
+    ///    coverage while nine hand-written per-version tests were green.
+    /// 2. Markers are checked against `run_migrations`' own body, not the
+    ///    whole file. Scanning the file let a block that was commented out or
+    ///    moved into dead code satisfy every marker -- the way a literal
+    ///    written inside the test used to satisfy the assertion reading it --
+    ///    and let an unrelated mention inflate a count.
+    /// 3. All three markers for a version must sit in the SAME
+    ///    `already_applied` block. Checked against the whole body they were
+    ///    independent, so a block guarded on `&1_i32` while recording `&55_i32`
+    ///    passed -- permanently dead, and green.
+    /// 4. Matching is whitespace-insensitive, because `rustfmt` decides
+    ///    whether a bound-params array fits on one line. V17's does not.
+    ///
+    /// The recorded name is derived from the filename rather than restated:
+    /// all 56 wired migrations record their own file stem, and a second copy
+    /// of it here would only be a new way for this test to lie.
+    ///
+    /// What it still does not prove: that the statement beside a bound-params
+    /// array is the INSERT.
+    #[test]
+    fn every_migration_is_wired_into_run_migrations() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+
+        let start = THIS_FILE
+            .find("async fn run_migrations(")
+            .expect("run_migrations must exist in this file");
+        let after_signature = start + "async fn run_migrations(".len();
+        let end = after_signature
+            + THIS_FILE[after_signature..]
+                .find("\n    async fn ")
+                .expect("run_migrations must be followed by another fn at the same indentation");
+        let body = &THIS_FILE[start..end];
+
+        // A failed slice must not pass vacuously by scanning the wrong region
+        // -- the same class of defect this test exists to catch. Both guards
+        // are structural rather than a line count, which would have to be
+        // raised every time a migration lands and would fail with a message
+        // about markers when nothing about the markers was wrong.
         assert!(
-            THIS_FILE.contains("&47_i32"),
-            "V47 must record itself in _trace_commons_migrations"
+            body.contains("_trace_commons_migrations"),
+            "run_migrations slice found the wrong region: the migrations table \
+                 name is missing"
+        );
+        assert_eq!(
+            body.matches("fn ").count(),
+            1,
+            "run_migrations slice contains more than its own signature: it swallowed the \
+                 methods that follow"
+        );
+        assert_eq!(
+            body.lines().last().map(str::trim),
+            Some("}"),
+            "run_migrations slice does not end at the function's closing brace"
+        );
+        // The strip below cuts each line at its first `//` and cannot see a
+        // block comment, so a migration wrapped in one would read as wired.
+        assert!(
+            !body.contains("/*"),
+            "run_migrations gained a block comment; the line-comment strip no \
+                 longer covers it"
+        );
+        // The same strip cannot see that a `//` sits inside a string literal,
+        // and would cut the rest of that line -- dropping a marker, or fusing
+        // two blocks. Nothing in the body does this today; assert the
+        // precondition rather than assume it.
+        assert!(
+                !body.lines().any(|line| {
+                    matches!((line.find('"'), line.find("//")), (Some(quote), Some(comment)) if quote < comment)
+                }),
+                "run_migrations has a `//` after a string literal on the same line; the \
+                 line-comment strip would cut inside the string"
+            );
+
+        // Comments dropped, then whitespace and the trailing comma rustfmt
+        // adds inside a wrapped array, so a marker matches whether or not
+        // rustfmt kept it on one line.
+        let squashed: String = body
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace(",]", "]");
+
+        const BLOCK: &str = "letalready_applied";
+        let mut failures: Vec<String> = Vec::new();
+
+        for (version, file_stem) in migrations_on_disk() {
+            let file_marker = format!("migrations/V{version}__{file_stem}.sql");
+
+            let hits = squashed.matches(&file_marker).count();
+            if hits != 1 {
+                failures.push(format!(
+                    "V{version}: named {hits} times in run_migrations, expected exactly once \
+                         by its own include_str!"
+                ));
+                continue;
+            }
+
+            // The block this migration owns: its own already_applied guard
+            // through the next one. All three markers must be inside it.
+            let at = squashed.find(&file_marker).expect("hit counted above");
+            let block_start = squashed[..at].rfind(BLOCK).unwrap_or(0);
+            let block_end = squashed[at..]
+                .find(BLOCK)
+                .map(|offset| at + offset)
+                .unwrap_or(squashed.len());
+            let block = &squashed[block_start..block_end];
+
+            let guard_marker = format!("&[&{version}_i32]");
+            if !block.contains(&guard_marker) {
+                failures.push(format!(
+                    "V{version}: its already_applied guard does not query version {version} -- \
+                         a block guarded on another version never runs, or runs on every boot"
+                ));
+            }
+
+            let insert_marker = format!("&[&{version}_i32,&\"{file_stem}\"]");
+            if !block.contains(&insert_marker) {
+                failures.push(format!(
+                    "V{version}: does not record itself in _trace_commons_migrations as \
+                         {file_stem:?} within its own block -- being gated by an already_applied \
+                         check for the same version is not the same thing"
+                ));
+            }
+
+            let readers = MIGRATION_READER_MINIMUMS
+                .iter()
+                .find(|(wanted, _)| *wanted == version)
+                .map(|(_, readers)| *readers)
+                .unwrap_or(1);
+            let references = THIS_FILE.matches(&file_marker).count();
+            if references < readers {
+                failures.push(format!(
+                    "V{version}: named {references} times in this file, expected at least \
+                         {readers} -- run_migrations' include_str! plus each test that reads the \
+                         migration. A missing one means such a test was deleted or now restates \
+                         the migration instead of reading it"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} migration(s) are not correctly wired into run_migrations:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
 
@@ -5906,6 +6734,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
@@ -5922,6 +6751,7 @@ mod tests {
             include_str!("../../../../migrations/V33__near_identities.sql"),
             include_str!("../../../../migrations/V34__account_consolidation.sql"),
             include_str!("../../../../migrations/V43__trace_withdrawal.sql"),
+            include_str!("../../../../migrations/V56__community_withdrawal_eviction_rls.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
@@ -5963,6 +6793,39 @@ mod tests {
             central_policy_count,
             TRACE_COMMONS_RLS_TABLES.len(),
             "central RLS policy migration and diagnostics registry drifted"
+        );
+    }
+
+    /// The eviction drain is the one write path on
+    /// `trace_community_withdrawal_evictions` that carries no tenant id. V55
+    /// gates it on a transaction-local GUC; without that `set_config` the
+    /// statement does not fail, it silently marks zero rows. Guard the line
+    /// here, since a database is not available in CI to catch its removal.
+    #[test]
+    fn community_snapshot_drain_enters_drain_scope() {
+        let source = include_str!("postgres.rs");
+        let drain = source
+            .split("async fn drain_community_snapshot_invalidation")
+            .nth(1)
+            .expect("drain_community_snapshot_invalidation must exist");
+        let body = drain
+            .split("async fn ")
+            .next()
+            .expect("drain body must be delimited by the next fn");
+        let guc_marker = concat!(
+            "set_config('trace_commons.",
+            "community_drain', 'on', true)"
+        );
+        let update_marker = "UPDATE trace_community_withdrawal_evictions";
+        let guc_at = body
+            .find(guc_marker)
+            .expect("the drain must enter transaction-local drain scope");
+        let update_at = body
+            .find(update_marker)
+            .expect("the drain must mark eviction receipts");
+        assert!(
+            guc_at < update_at,
+            "drain scope must be entered before the cross-tenant eviction UPDATE"
         );
     }
 
