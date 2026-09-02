@@ -82,6 +82,18 @@ public static class DaemonProtocol
         public const string ListAudit = "list_audit";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
 
+        /// <summary>
+        /// Asks IronWire which tools on this machine are set to send through
+        /// it, one row per tool it knows about.
+        ///
+        /// The only input to a per-tool word on the routing surface. The
+        /// declaration this app holds is not one: declaring IronWire here has
+        /// no causal relation to whether a tool is configured to use it.
+        /// Called only from a human pressing a switch or a button; nothing on
+        /// the submission path calls it.
+        /// </summary>
+        public const string ProbeRoutedTools = "probe_routed_tools";
+
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
         // this app could call any of them -- the gap on Windows was never
@@ -388,6 +400,19 @@ public sealed class DaemonStatus
 
     [JsonPropertyName("health")]
     public DaemonHealth? Health { get; set; }
+
+    /// <summary>
+    /// What the daemon is seeing from the local proxy it was told about.
+    /// Null on a daemon older than the block, which reads as the state that
+    /// claims nothing.
+    /// </summary>
+    [JsonPropertyName("routing")]
+    public RoutingStatusSnapshot? Routing { get; set; }
+
+    /// <summary>
+    /// The routing state, or empty when the daemon did not report the block.
+    /// </summary>
+    public string RoutingState => Routing?.State ?? string.Empty;
 
     /// <summary>
     /// The daily volume caps, and how much already-approved work they are

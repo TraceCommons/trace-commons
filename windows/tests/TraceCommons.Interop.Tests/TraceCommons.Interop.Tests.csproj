@@ -46,6 +46,22 @@
     the Windows CI runner — Condition keeps the missing ones from failing the
     build.
   -->
+  <!--
+    The routing surface's implementation source, copied next to the test
+    assembly.
+
+    NoWordingIsAuthoredInThisShell reads it and fails on any string literal
+    that is not a wire value. Asserted about the source rather than about
+    behaviour because a hand-written word that happened to match the Rust
+    would pass every behavioural test and then survive a rename in exactly
+    one of the three shells.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/RoutingTools.cs"
+          Link="RoutingTools.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
     <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/debug</TcFfiLibDir>
