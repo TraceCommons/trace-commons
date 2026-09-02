@@ -1028,6 +1028,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
     }
 

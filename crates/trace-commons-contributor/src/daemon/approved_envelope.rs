@@ -290,6 +290,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");

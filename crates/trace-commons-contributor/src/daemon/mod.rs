@@ -1342,6 +1342,7 @@ mod tests {
                 display_handle: Some("quiet-otter".to_string()),
                 public_bio: None,
                 public_since: None,
+                witness: None,
             })
             .unwrap();
         let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
