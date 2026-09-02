@@ -305,6 +305,19 @@ pub struct TraceContributionEvent {
     pub latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_counts: Option<TokenCounts>,
+    /// A **list price, not a bill**: what this step would have cost on the
+    /// provider's meter. Work served under a subscription is priced here and
+    /// was billed to nobody, so no surface may render this as money the
+    /// contributor spent. Honest: "would have cost", "priced at", "at list
+    /// price". Not honest: "you spent", "your bill", "your cost".
+    ///
+    /// `None` means not priced -- an unknown model, an incomplete usage
+    /// report, a source that reports no tokens -- and never zero. A zero here
+    /// is a real zero, so a reader must not substitute one for an absent
+    /// value, and a sum over these events is a sum over the priced ones only.
+    ///
+    /// A contributor reads this field's raw JSON in the approval preview,
+    /// which is shown verbatim and adds no prose around it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -2200,6 +2200,7 @@ mod tests {
     fn strip_reasoning_removes_only_reasoning_events() {
         use crate::source::{SessionEvent, SessionEventKind};
         let mk = |kind: SessionEventKind| SessionEvent {
+            served_by: None,
             kind,
             timestamp: None,
             content: Some("x".to_string()),

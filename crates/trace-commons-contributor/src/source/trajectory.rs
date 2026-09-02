@@ -139,6 +139,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                 // test results, command output -- and is redacted on the way
                 // out like every other content field.
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::Opaque,
                     timestamp: parse_timestamp(record)?,
                     content: Some(required_str(record, "content")?),
@@ -159,6 +160,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                 let timestamp = parse_timestamp(record)?;
                 let _ = required_str(record, "content")?;
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::Opaque,
                     timestamp,
                     content: None,
@@ -176,6 +178,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     SessionEventKind::Reasoning
                 };
                 events.push(SessionEvent {
+                    served_by: None,
                     kind,
                     timestamp: parse_timestamp(record)?,
                     content: Some(required_str(record, "content")?),
@@ -212,6 +215,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                                 bail!("duplicate_tool_call_id");
                             }
                             events.push(SessionEvent {
+                                served_by: None,
                                 kind: SessionEventKind::ToolCall,
                                 timestamp,
                                 content: None,
@@ -234,6 +238,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             bail!("malformed_record");
                         }
                         events.push(SessionEvent {
+                            served_by: None,
                             kind: SessionEventKind::Assistant,
                             timestamp,
                             content: Some(content),
@@ -252,6 +257,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     bail!("orphaned_tool_result");
                 }
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::ToolResult,
                     timestamp: parse_timestamp(record)?,
                     content: Some(required_str(record, "content")?),

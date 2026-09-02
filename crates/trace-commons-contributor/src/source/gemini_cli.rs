@@ -263,6 +263,7 @@ fn timestamp_of(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> 
 
 fn opaque(record_type: &str, timestamp: Option<chrono::DateTime<chrono::Utc>>) -> SessionEvent {
     SessionEvent {
+        served_by: None,
         kind: SessionEventKind::Opaque,
         timestamp,
         content: None,
@@ -298,6 +299,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
                 continue;
             }
             events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::Reasoning,
                 timestamp: timestamp_of(thought.get("timestamp")).or(turn_timestamp),
                 content: Some(parts.join("\n")),
@@ -323,6 +325,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
 
     if let Some(content) = text_of(message.get("content")).filter(|c| !c.is_empty()) {
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::Assistant,
             timestamp: turn_timestamp,
             content: Some(content),
@@ -344,6 +347,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::ToolCall,
             timestamp,
             content: None,
@@ -372,6 +376,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             .and_then(|v| v.as_str())
             .map(|status| status == "success");
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::ToolResult,
             timestamp,
             content,
@@ -419,6 +424,7 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
         let message_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match message_type {
             "user" => events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::User,
                 timestamp: timestamp_of(message.get("timestamp")),
                 content: text_of(message.get("content")),
