@@ -615,6 +615,30 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             }
         };
 
+        // Only a real upload counts toward the arming offer. The offer's
+        // whole claim is "you have contributed from here N times", so N
+        // counts sends, not settled entries. `AlreadySubmitted` means the
+        // content hash was already held and nothing went out.
+        //
+        // Defensive rather than a live fix, and worth saying so: this arm is
+        // not currently reachable through the watcher. A queue entry's id is
+        // `entry_id_for(&transcript.session_hash)` (`watcher.rs`), so two
+        // sessions with identical bytes collapse into one entry before
+        // anything is uploaded, and the duplicate that would have produced
+        // `AlreadySubmitted` never becomes a second entry. Verified by
+        // trying to provoke it end to end, both with the twin written after
+        // the first upload and with both present from the start: one entry,
+        // one send, either way.
+        //
+        // It is gated anyway because the reachability is a property of the
+        // watcher's id scheme, not of this decision, and nothing here would
+        // notice if that scheme changed. No test accompanies it for the same
+        // reason -- one would pass with or without the gate, which is a
+        // claim of coverage rather than coverage.
+        //
+        // The queue bookkeeping below still treats the two alike: either way
+        // the entry is settled server-side and should leave the queue.
+        let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
             uploader::UploadDecision::Uploaded { submission_id }
@@ -631,9 +655,11 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 // A failed save is not worth failing an upload that already
                 // succeeded: the worst outcome is that an offer arrives one
                 // contribution later than it might have.
-                let mut policy = shared.policy.lock().expect("policy lock");
-                policy.record_contribution(&entry.project_key);
-                let _ = policy.save(&shared.store);
+                if newly_uploaded {
+                    let mut policy = shared.policy.lock().expect("policy lock");
+                    policy.record_contribution(&entry.project_key);
+                    let _ = policy.save(&shared.store);
+                }
             }
             uploader::UploadDecision::Superseded { new_hash } => {
                 let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
