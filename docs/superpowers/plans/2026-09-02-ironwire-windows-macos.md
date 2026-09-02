@@ -56,12 +56,20 @@ a defect.
 
 ## Global Constraints
 
-- **Say nothing the evidence does not support.** `wired` is true for any
-  loopback host on any port whose path is `/anthropic`, so it cannot
-  distinguish our daemon from another local proxy. **"Via IronWire" asserts a
-  property of the local hop; "Private" asserts one of the destination.** Only
-  the first is supported. The words "Private" and "Not private" must not
-  reappear in any shell.
+- **The wired word is "Private", and it is the only word that may claim
+  privacy.** This reverses an earlier constraint, deliberately, on the
+  contributor's instruction (PR #549): "Via IronWire" is a vendor name, not an
+  answer to what a person came to learn. Copy the four words verbatim from
+  `crates/trace-commons-contributor-gtk/src/copy.rs` -- `Private`,
+  `Sends direct`, `Not known`, `Not used` -- and copy the doc comment on
+  `TOOL_PRIVATE` with them: it records that `wired` is true for **any** loopback
+  host on any port whose path is `/anthropic`, so the word is about the first
+  hop and cannot today distinguish our daemon from another local proxy.
+- **No word may *deny* privacy.** "Private" is a substring of "Not private", the
+  same shape that let `contains("reachable")` match `"unreachable"` on this
+  surface. `Sends direct` is the not-wired word in every shell, and each shell
+  needs the test that holds it there -- see
+  `only_the_wired_word_claims_privacy_and_none_denies_it` in `copy.rs`.
 - **No money, anywhere.** There is no rate: emission is a flat constant the
   pilot sets to zero, the graded score is shadow-only, settlement is disabled,
   and credits are documented as non-transferable.
