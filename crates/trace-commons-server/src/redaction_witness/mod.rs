@@ -38,5 +38,6 @@
 //! found, so it is if anything more sensitive than the text it describes.
 
 pub mod certificate;
+pub mod config;
 pub mod correspondence;
 pub mod verification;
