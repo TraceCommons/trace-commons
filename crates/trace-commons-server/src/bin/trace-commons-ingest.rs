@@ -203,7 +203,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
-    TraceWorkerKind as StorageTraceWorkerKind, safe_residual_risk_basis_labels,
+    TraceWorkerKind as StorageTraceWorkerKind, WITNESS_ADMITTED_STATUS_REASON,
+    safe_residual_risk_basis_labels, safe_status_reason_label,
 };
 use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
@@ -13121,6 +13122,13 @@ async fn submit_trace_handler(
     // consumer/Accepted gates enforce the hold purely off the stored status.
     // No enrol row is written: the `awaiting_pii_backstop` status is the
     // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+    let held_without_a_witness = corpus_status_with_pii_backstop_hold(
+        corpus_status,
+        &envelope.consent,
+        state.pii_backstop_driver.is_some(),
+        None,
+        None,
+    );
     let corpus_status = corpus_status_with_pii_backstop_hold(
         corpus_status,
         &envelope.consent,
@@ -13128,6 +13136,12 @@ async fn submit_trace_handler(
         witness.as_ref(),
         state.witness_bypass.as_ref(),
     );
+    // The certificate changed the outcome only if the same inputs WITHOUT it
+    // would have held. Derived by comparing the two decisions rather than by
+    // re-deriving the five conditions here: a second copy of that predicate
+    // would eventually disagree with the one that decides the status, and the
+    // receipt would then describe a pass that did not happen.
+    let witness_admitted = corpus_status != held_without_a_witness;
 
     let artifact_label = if remediating_prior.is_some() {
         "remediated-envelope"
@@ -13186,7 +13200,11 @@ async fn submit_trace_handler(
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
-        last_status_reason: None,
+        // Which pass admitted this trace, when it was not the ordinary one.
+        // `safe_status_reason_label` is the allowlist choke point: a label
+        // that is not on it becomes "other" rather than reaching the column.
+        last_status_reason: witness_admitted
+            .then(|| safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON).to_string()),
         residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
@@ -56959,16 +56977,52 @@ fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
     trace_commons_server::credit_numbers::settlement_status_sentence(mode.as_label())
 }
 
+/// Whether this row was admitted by a verified witness certificate rather
+/// than by the ordinary path.
+///
+/// Reads the allowlisted status-reason label the submit handler wrote. It is
+/// deliberately not a re-derivation of the bypass conditions: the receipt has
+/// no certificate to inspect, and a second copy of that predicate would drift
+/// from the one that decided the status.
+fn witness_admitted_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    record
+        .last_status_reason
+        .as_deref()
+        .is_some_and(|reason| reason == WITNESS_ADMITTED_STATUS_REASON)
+}
+
 fn receipt_from_record(
     record: &TraceCommonsSubmissionRecord,
     settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionReceipt {
     let explanation = match record.status {
-        TraceCorpusStatus::Accepted => vec![
-            "Accepted into the private redacted corpus.".to_string(),
-            settlement_posture_explanation(settlement_mode).to_string(),
-            format!("Attributed to tenant {}", record.tenant_storage_ref),
-        ],
+        TraceCorpusStatus::Accepted => {
+            let mut lines = vec!["Accepted into the private redacted corpus.".to_string()];
+            // #445's argument, applied to a second indistinguishable pair of
+            // outcomes: a trace admitted on a witness certificate was admitted
+            // on a DIFFERENT BASIS from one admitted on the server's own
+            // queued re-check, and a contributor is entitled to know which.
+            //
+            // The sentence deliberately claims nothing about cleanliness. It
+            // says a pinned enclave's redaction was accepted in place of the
+            // server's queued re-check, which is exactly what happened, and it
+            // carries no measurement and no address -- those are operator
+            // configuration and have no business on a contributor surface.
+            if witness_admitted_record(record) {
+                lines.push(
+                    "Admitted on an attested redaction witness certificate, in place of the \
+                     server's queued privacy re-check. The deterministic redaction sweep and \
+                     residual scan ran on this submission as they do on every submission."
+                        .to_string(),
+                );
+            }
+            lines.push(settlement_posture_explanation(settlement_mode).to_string());
+            lines.push(format!(
+                "Attributed to tenant {}",
+                record.tenant_storage_ref
+            ));
+            lines
+        }
         TraceCorpusStatus::Quarantined => vec![
             "Quarantined for privacy review; credit is pending review.".to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),

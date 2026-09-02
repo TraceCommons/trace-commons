@@ -854,7 +854,26 @@ const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
     // Retention lifecycle.
     "retention_purged",
     "retention_expired",
+    // A verified redaction-witness certificate kept this submission out of
+    // the PII-backstop hold. It records WHICH pass admitted the trace, which
+    // is a different basis from the server's own queued re-check and is what
+    // the contributor's receipt reports. It is NOT a claim that the trace is
+    // clean, and nothing may read it as one.
+    WITNESS_ADMITTED_STATUS_REASON,
 ];
+
+/// Status reason recorded when an attested redaction witness admitted a
+/// submission in place of the server's queued PII-backstop re-check.
+///
+/// A separate label rather than an entry in `residual_risk_basis`: that
+/// column is the set of `ResidualRiskCondition`s that held when the risk was
+/// decided, every reader parses it back through
+/// `ResidualRiskCondition::from_label`, and an empty basis there means Low and
+/// only Low. A witness admission is neither a risk condition nor a change to
+/// the risk, so putting it in that column would make the basis contradict the
+/// risk stored beside it -- and a basis that contradicts its own row is worse
+/// than an absent one, because it will be believed.
+pub const WITNESS_ADMITTED_STATUS_REASON: &str = "witness_admitted";
 
 /// Reduce a status-transition reason to a label safe to store in a
 /// plainly-readable column.

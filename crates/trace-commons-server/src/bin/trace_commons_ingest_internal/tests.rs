@@ -90107,3 +90107,152 @@ mod witness_receipt {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Telling the contributor which pass admitted their trace.
+//
+// #445's argument applied a second time: a trace admitted on a witness
+// certificate was admitted on a DIFFERENT BASIS from one admitted on the
+// server's own queued re-check, and every accepted trace was getting the same
+// explanation. The sentence must not claim clean, and must carry no
+// measurement and no address.
+// ---------------------------------------------------------------------
+
+mod witness_receipt_wording {
+    use super::*;
+
+    fn record_with(status: &str, reason: Option<&str>) -> TraceCommonsSubmissionRecord {
+        let mut record = submission_record_with_principal("principal-a");
+        record.status = match status {
+            "accepted" => TraceCorpusStatus::Accepted,
+            "held" => TraceCorpusStatus::AwaitingPiiBackstop,
+            "quarantined" => TraceCorpusStatus::Quarantined,
+            other => panic!("unhandled status {other}"),
+        };
+        record.last_status_reason = reason.map(str::to_string);
+        record
+    }
+
+    fn witness_admitted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", Some(WITNESS_ADMITTED_STATUS_REASON))
+    }
+
+    fn ordinary_accepted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", None)
+    }
+
+    fn held_record() -> TraceCommonsSubmissionRecord {
+        record_with("held", None)
+    }
+
+    #[test]
+    fn a_witness_admitted_receipt_says_so() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        assert!(
+            receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("attested redaction witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    #[test]
+    fn an_ordinarily_accepted_receipt_is_unchanged() {
+        let receipt =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains("witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    /// The lines an ordinary receipt already carried must all still be there,
+    /// in order. A new sentence that displaced the settlement posture would
+    /// re-open #445 while fixing its sibling.
+    #[test]
+    fn the_witness_sentence_is_added_and_displaces_nothing() {
+        let ordinary =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        let witnessed =
+            receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        assert_eq!(
+            witnessed.len(),
+            ordinary.len() + 1,
+            "exactly one line is added: {witnessed:?}",
+        );
+        for line in &ordinary {
+            assert!(witnessed.contains(line), "{line} was displaced");
+        }
+    }
+
+    /// The rule that outranks every other sentence on this surface. A witness
+    /// certificate says a known program in a pinned enclave reached a `Low`
+    /// verdict. It never says the trace is clean, and no receipt line may
+    /// imply otherwise.
+    #[test]
+    fn no_receipt_line_claims_the_trace_is_clean() {
+        for record in [
+            witness_admitted_record(),
+            ordinary_accepted_record(),
+            held_record(),
+        ] {
+            for line in receipt_from_record(&record, NearSettlementMode::Disabled).explanation {
+                let lower = line.to_ascii_lowercase();
+                for claim in [
+                    "verified clean",
+                    "no pii",
+                    "free of",
+                    "guaranteed",
+                    "contains no",
+                    "is clean",
+                ] {
+                    assert!(!lower.contains(claim), "{line}");
+                }
+            }
+        }
+    }
+
+    /// A measurement and a signing address are operator configuration. They
+    /// have no business on a contributor surface, and the repo's hash-only
+    /// rule puts them out of bounds regardless.
+    #[test]
+    fn no_receipt_line_carries_a_measurement_or_an_address() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        for line in receipt.explanation {
+            assert!(!line.contains("mrtd:"), "{line}");
+            assert!(!line.contains("0x"), "{line}");
+        }
+    }
+
+    /// The label the receipt keys on has to survive the storage allowlist,
+    /// or the submit handler writes "other" and the sentence never appears
+    /// on a real row.
+    #[test]
+    fn the_witness_status_reason_is_allowlisted_for_storage() {
+        assert_eq!(
+            safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON),
+            WITNESS_ADMITTED_STATUS_REASON,
+            "an unallowlisted label becomes \"other\" and the receipt sentence is lost",
+        );
+    }
+
+    /// The label is not a residual-risk condition and must never be read as
+    /// one. Putting it in `residual_risk_basis` would make that column's
+    /// invariant -- an empty basis means Low, and only Low -- contradict the
+    /// risk stored beside it.
+    #[test]
+    fn the_witness_status_reason_is_not_a_residual_risk_condition() {
+        assert!(
+            ResidualRiskCondition::from_label(WITNESS_ADMITTED_STATUS_REASON).is_none(),
+            "a witness admission is not a risk condition",
+        );
+    }
+}
