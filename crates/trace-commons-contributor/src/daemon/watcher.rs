@@ -548,6 +548,7 @@ fn visit_session(
         entry_id: entry_id_for(&transcript.session_hash),
         session_hash: transcript.session_hash.clone(),
         source: session_ref.source.to_string(),
+        declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
         project_label: disambiguated_label(&project_key, &known),
         path: obs.path.clone(),
