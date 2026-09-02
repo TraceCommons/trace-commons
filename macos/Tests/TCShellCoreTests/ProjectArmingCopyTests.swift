@@ -71,6 +71,36 @@ final class ProjectArmingCopyTests: XCTestCase {
         )
     }
 
+    /// The whole body, pinned exactly, byte for byte against the Linux
+    /// shell's `ARMING_BODY` in `crates/trace-commons-contributor-gtk/src/
+    /// copy.rs`.
+    ///
+    /// The three tests below check the body says particular things, and each
+    /// is a `contains`. That is the right shape for "this idea is present"
+    /// but it cannot see the shape of the text around it: a paragraph break
+    /// collapsing to a single newline, a double space, a trailing space, a
+    /// sentence reordered so the cost lands before the reassurance -- every
+    /// one of those keeps all three substrings and changes what the sheet
+    /// reads like. "Verbatim with GTK" is a claim about the whole string, so
+    /// it takes an assertion about the whole string.
+    ///
+    /// If this fails, the fix is almost never to edit the literal here.
+    /// Either GTK moved and this shell should follow, or this shell moved
+    /// and should not have -- two shells wording the same
+    /// irreversible-feeling switch differently is worse than either wording
+    /// alone.
+    func testTheBodyIsVerbatimTheLinuxWording() {
+        XCTAssertEqual(
+            ProjectArmingCopy.confirmationBody,
+            """
+            Every future session in this project will be scrubbed and contributed \
+            without asking you. You won't review them first.
+
+            You can turn this off at any time.
+            """
+        )
+    }
+
     /// The body has to say the part a contributor would otherwise discover by
     /// noticing traces they never saw: that review stops. The Linux shell's
     /// `ARMING_BODY` says it in these words and this shell says the same
