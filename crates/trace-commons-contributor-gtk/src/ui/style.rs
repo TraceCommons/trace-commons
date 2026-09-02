@@ -324,7 +324,7 @@ pub mod space {
 /// and white.
 ///
 /// The mapping is the site's.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Ordinary, nothing to weigh.
     Neutral,
