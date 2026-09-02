@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
-    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_scrub_detector_names,
-    tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
+    tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -812,8 +812,13 @@ fn cross_type_free_of_a_preview_as_a_string_is_refused_not_ub() {
             .map(|e| e.contains("cross-type-free") || e.contains("unknown-pointer"))
             .unwrap_or(false)
     );
-    // The handle itself must still be intact: freeing it for real still
-    // works.
+    // The handle itself must still be intact. A refusal must not
+    // unregister it: `stop` alone asserts nothing, so prove the handle is
+    // still live by using it.
+    assert!(
+        !call(h, "status", "{}").contains("invalid-handle-pointer"),
+        "a refused cross-type free must leave the handle usable"
+    );
     stop(h);
 }
 
@@ -878,6 +883,323 @@ fn preview_search_refuses_a_pointer_that_is_not_a_preview() {
             .unwrap_or(false)
     );
     stop(h);
+}
+
+// --- Handle entry points must consult the registry before dereferencing -
+//
+// The registry detected invalid frees, and (see above) invalid preview-
+// accessor reads. It was not consulted by any of the six `tc_handle*`-
+// borrowing entry points below -- they null-checked and then dereferenced
+// directly. A stale (already freed by `tc_handle_free`) or cross-type (a
+// `tc_preview*`, or any other kind of pointer this crate allocated)
+// handle was therefore a use-after-free or a type confusion rather than
+// the fixed error the rest of this ABI promises. Each test below passes a
+// live pointer of the WRONG registry kind (a `tc_string*`, obtained from
+// an ordinary `tc_call` and deliberately not yet freed) where a
+// `tc_handle*` is expected -- the same shape of mistake
+// `preview_body_refuses_a_pointer_that_is_not_a_preview` and its siblings
+// already exercise for the preview accessors, mirrored onto the handle
+// entry points. None of these dereference the bad pointer if the fix
+// holds, so none of them may crash.
+
+#[test]
+fn tc_daemon_stop_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // A live `tc_string*` deliberately passed where a `tc_handle*` is
+    // expected.
+    unsafe { tc_daemon_stop(out as *mut tc_handle) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false),
+        "{:?}",
+        last_error()
+    );
+    unsafe { tc_string_free(out) };
+    // The real handle is untouched by the refusal and still usable.
+    let status = call(h, "status", "{}");
+    assert!(status.contains("\"logged_in\""), "{status}");
+    stop(h);
+}
+
+#[test]
+fn tc_call_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // `tc_call` never returns NULL: a stale handle must still produce a
+    // JSON error frame, not a null pointer or a crash.
+    let bad = unsafe {
+        tc_call(
+            out as *mut tc_handle,
+            cstr_str("status").as_ptr(),
+            cstr_str("{}").as_ptr(),
+        )
+    };
+    assert!(!bad.is_null());
+    let s = unsafe { CStr::from_ptr(bad) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(bad) };
+    assert!(s.contains("invalid-handle-pointer"), "{s}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_subscribe_refuses_a_pointer_that_is_not_a_handle() {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let token = unsafe { tc_subscribe(out as *mut tc_handle, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "a stale handle must not yield a subscription token"
+    );
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    // Any nonzero token: the pointer-liveness check runs before the token
+    // is ever looked up, so no real subscription is needed here.
+    unsafe { tc_unsubscribe(out as *mut tc_handle, 1) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_preview_open_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_open(
+            out as *mut tc_handle,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_pointer_that_is_not_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_turns_json(
+            out as *mut tc_handle,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+    unsafe { tc_string_free(out) };
+    stop(h);
+}
+
+// --- ...and the other shape the doc comment above names: a freed handle -
+//
+// The block above exercises the cross-type half of the threat
+// `handle_pointer_is_live`'s doc names; this one exercises the other half
+// named there -- a handle already freed by `tc_handle_free`. Each test
+// below starts a real handle, stops and frees it exactly as
+// `double_free_of_a_handle_is_refused_not_ub` does, then reuses the same
+// pointer VALUE -- never dereferenced unless the guard under test fails
+// -- as the argument to the entry point under test. For `tc_daemon_stop`,
+// the second stop after the free (the same shape of reuse
+// `double_free_of_a_handle_is_refused_not_ub` makes with
+// `tc_handle_free`) is that call under test.
+
+#[test]
+fn tc_daemon_stop_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // The call under test: a second stop against the same, now-freed,
+    // handle pointer.
+    unsafe { tc_daemon_stop(h) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false),
+        "{:?}",
+        last_error()
+    );
+}
+
+#[test]
+fn tc_call_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // `tc_call` never returns NULL: a freed handle must still produce a
+    // JSON error frame, not a null pointer or a crash.
+    let bad = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!bad.is_null());
+    let s = unsafe { CStr::from_ptr(bad) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(bad) };
+    assert!(s.contains("invalid-handle-pointer"), "{s}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_subscribe_refuses_a_freed_handle() {
+    extern "C" fn noop_cb(_event_json: *const c_char, _ctx: *mut c_void) {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let token = unsafe { tc_subscribe(h, Some(noop_cb), std::ptr::null_mut()) };
+    assert_eq!(
+        token, 0,
+        "a freed handle must not yield a subscription token"
+    );
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // Any nonzero token: the pointer-liveness check runs before the token
+    // is ever looked up, so no real subscription is needed here.
+    unsafe { tc_unsubscribe(h, 1) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_preview_open_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_open(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn tc_preview_turns_json_refuses_a_freed_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = unsafe {
+        tc_preview_turns_json(
+            h,
+            cstr_str("00000000-0000-0000-0000-000000000000").as_ptr(),
+            cstr_str("sha256:irrelevant").as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(p.is_null());
+    assert!(!err.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(err) };
+    assert!(msg.contains("invalid-handle-pointer"), "{msg}");
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false)
+    );
 }
 
 // --- Discriminating token uniqueness for tc_subscribe -------------------
@@ -1624,4 +1946,52 @@ fn the_detector_export_never_carries_a_pattern() {
             );
         }
     }
+}
+
+#[test]
+fn a_refused_cross_type_free_leaves_the_handle_live_and_freeable() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    // A caller mistakes the handle for a string. The ABI promises to refuse
+    // this harmlessly -- the handle is NOT freed, so it must still work.
+    unsafe { tc_string_free(h as *mut c_char) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("cross-type-free"))
+            .unwrap_or(false),
+        "the refusal itself must still be reported"
+    );
+    let out = unsafe { tc_call(h, cstr_str("status").as_ptr(), cstr_str("{}").as_ptr()) };
+    assert!(!out.is_null());
+    let s = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+    assert!(
+        !s.contains("invalid-handle-pointer"),
+        "a REFUSED cross-type free must not unregister the live handle: {s}"
+    );
+    stop(h);
+}
+
+/// A zero token must not shadow the liveness refusal: the contract promises
+/// `invalid-handle-pointer` for every non-null handle that is not live, and
+/// a binding is told to read `tc_last_error` after every `tc_unsubscribe`.
+#[test]
+fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+    // No read of tc_last_error clears it, so there is no way to prove the
+    // label below was recorded by this call rather than left over. What
+    // makes the assertion mean something is that nothing earlier in this
+    // test records "invalid-handle-pointer": the free above succeeds.
+    unsafe { tc_unsubscribe(h, 0) };
+    assert!(
+        last_error()
+            .map(|e| e.contains("invalid-handle-pointer"))
+            .unwrap_or(false),
+        "a zero token must not skip the liveness refusal"
+    );
 }
