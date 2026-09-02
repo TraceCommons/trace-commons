@@ -8109,6 +8109,22 @@ mod tests {
         assert!(provider.regex.is_match("xoxb-BjLhV6l8mlJ7rzgnlpCQ"));
         assert!(!provider.regex.is_match(key));
 
+        // The regex source itself, not only two probe strings. The pair above
+        // is satisfied by a broad family of edits -- widening the tail class,
+        // dropping a boundary, adding an arm -- each of which changes what
+        // `provider_token` claims while still matching a Slack token and
+        // still not matching a Cursor key. The claim being made is that this
+        // pattern did not move, so assert the pattern.
+        //
+        // A failure here is not automatically a bug: it means someone changed
+        // what "Stripe, GitLab and Slack tokens" covers, and the label and
+        // this literal both have to be brought along deliberately.
+        assert_eq!(
+            provider.regex.as_str(),
+            r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b",
+            "provider_token's regex moved; this change was supposed to leave it alone"
+        );
+
         // The detector's own bookkeeping key must be allowlisted, or the
         // contextual-entropy pass flags `secret:cursor_api_key` in the
         // finished envelope and fail-closes the session that was scrubbed
