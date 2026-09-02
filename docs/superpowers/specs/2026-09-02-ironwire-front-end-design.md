@@ -285,13 +285,32 @@ most likely to overclaim.
 is shared unless the person says so, they choose who may use it, and withdrawal
 pulls a trace from every corpus while they keep what it earned.
 
-**It may not promise an amount unless the amount is real.** Credit scoring runs
-server-side after submission, from perplexity and novelty against the existing
-corpus. A pre-share figure would either be estimated client-side from data the
-client does not have, or fetched in a round trip that reveals scoring inputs.
-**Establish which is possible before any shell renders a number.** If neither
-is, the card promises ownership and says nothing about worth until after the
-first share -- a weaker card, and an honest one.
+**It may not promise an amount, and the question is now settled: there is no
+rate.** Investigated 2026-09-02 against the running code, not the design docs:
+
+- Credit on gate-pass is a flat per-pass constant, and the pilot sets
+  `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0`
+  (`deploy/pilot-gcp/ingest.env.template:91`, "Credits stay zero during
+  calibration").
+- The graded quality score is shadow-only and says so in its own module:
+  "nothing here settles or pays" (`crates/trace-commons-server/src/credit_quality.rs:7`).
+- Settlement is `disabled` (`ingest.env.template:172`) and needs a deployed
+  contract, a funded issuer key and an external signing adapter this repo does
+  not contain. Credit "accrues as `pending` indefinitely" (`:178`).
+- A grep for `redeem|exchange_rate|price_per|usd_per` matches only invite-code
+  redemption. There is no price table, no conversion, no redemption route.
+- `docs/trace-commons.md` records credits as **non-transferable**, so a
+  "cash out" affordance contradicts a documented property rather than merely
+  being unbuilt.
+
+**So: no currency symbol on the earn side until a rate exists.** Three things
+may be shown instead -- counts, points named as points with the unsettled
+posture attached, or the scorecard's qualitative explanation lines.
+
+The one honest dollar is what inference **cost**, which is measured rather than
+promised. Even that is a *list price*, not a bill: work served on a subscription
+is priced at what it would have cost on the meter, and no surface may render it
+as money the contributor spent.
 
 The same rule governs the post-session moment, which is the screen most people
 will actually read.
@@ -331,6 +350,31 @@ That reuses machinery this spec already needs -- the probe from section 2 and
 the status block from section 4 -- so it costs little beyond the offer copy.
 Revisit a dedicated step only if IronWire ships bundled, where the assumption
 inverts.
+
+## Two facts from IronWire, verified against a live daemon
+
+**The tool list is IronWire's to answer, and it already does.**
+`GET /_ironwire/settings` returns each tool with `id`, `name`, `config_path`,
+`installed`, `wired` and `connect_command`, bearer-authenticated and read-only,
+and it is re-read from disk per request rather than cached at boot. We do not
+detect tools ourselves: `ironwire connect` is what edits the config files, so a
+second detector on our side would be a second answer on one machine, and ours
+would be the wrong one.
+
+**But `wired` does not mean "our traffic".** It is true for any loopback host on
+any port whose path is `/anthropic` -- deliberately, so `connect` can follow a
+port change. Nothing on the response carries a port or a URL, so a consumer
+cannot today distinguish this daemon from another local proxy. **A surface that
+renders `wired` as "your work is private" would be making a claim the field does
+not support.** Raised upstream; until it is answered, treat `wired` as "declared
+and pointed somewhere local", not as evidence.
+
+**Discovery exists upstream but nothing here reads it yet.** The daemon now
+publishes `~/.ironwire/endpoint.json` -- control URL and token *path*, never the
+token -- at a fixed location regardless of `$IRONWIRE_HOME`, which is what makes
+a GUI able to find it. No code in this repo consumes it. Until something does,
+the front door is the conventional port pre-filled plus the `~/.ironwire`
+fallback, and **no copy may claim a discovery the app does not perform.**
 
 ## Per-shell notes
 
