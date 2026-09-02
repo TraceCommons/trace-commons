@@ -137,7 +137,21 @@ public sealed class NativeRoundTripTests : IDisposable
             project_label = "windows-preview",
             path = sessionPath,
             size_bytes = new FileInfo(sessionPath).Length,
-            discovered_at = "2026-08-18T10:01:00Z",
+            // Relative to now, never a fixed calendar date.
+            //
+            // This was "2026-08-18T10:01:00Z". The daemon expires a Pending
+            // entry once `discovered_at < now - queue_ttl_days`, and that
+            // default is 14 days, so the fixture worked for exactly a
+            // fortnight and then began expiring before the test could
+            // approve it. It went off at 10:01 UTC on 2026-09-01: CI runs
+            // that morning at 09:08 and 09:54 passed, and every run after
+            // 10:01 failed, on three unrelated PRs at once.
+            //
+            // The symptom gave none of that away. `approve` reported
+            // `not-pending`, the assertion that failed was about an approval
+            // deadline, and the failure looked like a flake because it was
+            // intermittent for one morning while runs straddled the cutoff.
+            discovered_at = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("o"),
             state = "pending",
             reason_label = (string?)null,
             attempts = 0,
@@ -168,6 +182,45 @@ public sealed class NativeRoundTripTests : IDisposable
             // A daemon that leaked its lock file on a failing test must not
             // turn into a second, confusing failure in teardown.
         }
+    }
+
+    /// <summary>
+    /// The seeded queue entry must be dated from the clock, never from the
+    /// calendar.
+    ///
+    /// This fixture once carried <c>discovered_at = "2026-08-18T10:01:00Z"</c>.
+    /// The daemon expires a Pending entry once
+    /// <c>discovered_at &lt; now - queue_ttl_days</c>, and that default is 14,
+    /// so the fixture worked for exactly a fortnight and then began expiring
+    /// before the test could approve it. It went off at 10:01 UTC on
+    /// 2026-09-01 and took three unrelated PRs red within the hour.
+    ///
+    /// Nothing caught it earlier because nothing was looking: the failure
+    /// surfaced several steps downstream, as an assertion about an approval
+    /// deadline, and it was intermittent for one morning while CI runs
+    /// straddled the cutoff, which reads exactly like a flake.
+    ///
+    /// So the guard is recency, not validity. A hardcoded date fails this on
+    /// the day it is written rather than a fortnight later, which is the only
+    /// version of the check worth having: one tied to the TTL would pass for
+    /// two weeks and then fail in somebody else's unrelated PR.
+    /// </summary>
+    [Fact]
+    public void TheSeededQueueEntryIsDatedFromTheClockNotTheCalendar()
+    {
+        SeedEnrolledQueuedSession();
+
+        string line = File.ReadAllLines(Path.Combine(_configDir, "daemon-queue.jsonl"))[0];
+        using JsonDocument entry = JsonDocument.Parse(line);
+        string raw = entry.RootElement.GetProperty("discovered_at").GetString()!;
+
+        DateTimeOffset discoveredAt = DateTimeOffset.Parse(
+            raw,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind);
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        Assert.InRange(discoveredAt, now.AddMinutes(-10), now.AddMinutes(1));
     }
 
     [Fact]
@@ -561,14 +614,57 @@ public sealed class NativeRoundTripTests : IDisposable
         }
 
         string entryParams = JsonSerializer.Serialize(new { entry_id = entryId });
+        DateTimeOffset beforeApprove = DateTimeOffset.UtcNow;
         DaemonResponse approved = DaemonResponse.Parse(
             daemon.Call(DaemonProtocol.Methods.Approve, entryParams));
+        DateTimeOffset afterApprove = DateTimeOffset.UtcNow;
         Assert.False(approved.IsError);
 
         ApprovalHold? hold = ApprovalHold.Parse(approved);
         Assert.NotNull(hold);
         Assert.True(hold!.HoldSecs >= 5);
-        Assert.True(hold.Deadline > DateTimeOffset.UtcNow);
+
+        // Check that something was actually approved BEFORE reading the
+        // deadline, because `hold_until` is legitimately null when nothing
+        // was -- "no undo may be offered" is a real answer, not a fault.
+        //
+        // This ordering is the point of the rework. The single assertion
+        // that used to stand here, `hold.Deadline > DateTimeOffset.UtcNow`,
+        // was false in two completely different worlds: a deadline that had
+        // already passed, and no deadline at all because the entry was
+        // skipped. It carried no message, so Windows CI reported only
+        // "Expected: True / Actual: False" and could not distinguish a
+        // stalled runner from an entry the daemon declined to approve.
+        // Running it here shows the second world is reachable: on this macOS
+        // checkout the entry comes back skipped, approved=0, hold_until
+        // null, and the old assertion fails exactly as it did on CI for what
+        // may be an entirely different reason.
+        //
+        // So name the precondition and report the daemon's own reason when
+        // it does not hold.
+        Assert.True(
+            hold.Skipped.Count == 0,
+            "the daemon skipped the entry instead of approving it: "
+                + string.Join(
+                    ", ",
+                    hold.Skipped.ConvertAll(skip => skip.ReasonLabel)));
+        Assert.Equal(1UL, hold.Approved);
+
+        // Now the deadline, bracketed rather than raced. The daemon stamps
+        // hold_until as its own clock plus hold_secs while handling the call
+        // above, so it must land between "the call had started" and "the
+        // call had returned", each plus hold_secs. That holds no matter how
+        // long this test then takes to reach this line, which the old form
+        // did not: it required the test to get here within hold_secs of the
+        // stamp, so a runner that stalled failed a daemon that had behaved.
+        //
+        // The one-second slack absorbs RFC 3339 formatting, which does not
+        // necessarily preserve sub-second precision.
+        Assert.NotNull(hold.Deadline);
+        Assert.InRange(
+            hold.Deadline!.Value,
+            beforeApprove.AddSeconds(hold.HoldSecs - 1),
+            afterApprove.AddSeconds(hold.HoldSecs + 1));
 
         PendingList? whileApproved = DaemonResponse
             .Parse(daemon.Call(DaemonProtocol.Methods.ListPending))

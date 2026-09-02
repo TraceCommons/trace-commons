@@ -1707,6 +1707,7 @@ mod tests {
             message_text_included: message_text,
             tool_payloads_included: tool_payloads,
             correction_included: correction,
+            routing_metadata_included: false,
             revocable: true,
         }
     }

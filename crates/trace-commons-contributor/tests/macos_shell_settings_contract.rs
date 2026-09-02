@@ -33,6 +33,19 @@ const BOTH_WATCHED: &str = r#"{"claude_source":{"mode":"watch","path":"/Users/so
 
 const BOTH_OFF: &str = r#"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#;
 
+/// Emitted by the macOS screen once it offers a Gemini row: Claude watched,
+/// Codex declined, Gemini watched.
+///
+/// Pasted from what `SessionRoots.settingsJSON()` actually printed, per this
+/// file's rule -- including `JSONSerialization`'s escaped forward slashes and
+/// its key order, neither of which is what a hand-written literal would have
+/// guessed. Key order is not stable across processes and does not matter to
+/// the parser; the escaping is what this pinning is really for.
+const WITH_GEMINI_WATCHED: &str = r#"{"gemini_source":{"mode":"watch","path":"\/Users\/someone\/.gemini\/tmp"},"claude_source":{"path":"\/Users\/someone\/.claude\/projects","mode":"watch"},"codex_source":{"mode":"off"}}"#;
+
+/// The same screen when the contributor says they do not use Gemini.
+const WITH_GEMINI_DECLINED: &str = r#"{"gemini_source":{"mode":"off"},"claude_source":{"path":"\/Users\/someone\/.claude\/projects","mode":"watch"},"codex_source":{"mode":"off"}}"#;
+
 #[test]
 fn the_macos_watch_and_decline_payload_is_accepted_and_clears_the_refusal() {
     let settings = apply(WATCH_AND_OFF);
@@ -90,4 +103,45 @@ fn a_half_answered_screen_would_not_clear_the_refusal() {
     // to still be there.
     let settings = apply(r#"{"claude_source":{"mode":"watch","path":"/p"}}"#);
     assert!(!roots_declared(&settings));
+}
+
+#[test]
+fn the_macos_gemini_payload_is_accepted_and_carries_the_declaration() {
+    // The macOS screen did not offer a Gemini row at all until this change,
+    // so nothing here had ever exercised the payload it now sends. The
+    // escaped forward slashes come from `JSONSerialization` and have to
+    // survive into a real path.
+    let settings = apply(WITH_GEMINI_WATCHED);
+
+    assert_eq!(
+        settings.gemini_source,
+        Some(SourceDeclaration::Watch {
+            path: "/Users/someone/.gemini/tmp".into()
+        })
+    );
+    assert_eq!(
+        settings.claude_source,
+        Some(SourceDeclaration::Watch {
+            path: "/Users/someone/.claude/projects".into()
+        })
+    );
+    assert_eq!(settings.codex_source, Some(SourceDeclaration::Off));
+}
+
+#[test]
+fn declining_gemini_is_recorded_as_off_not_as_absent() {
+    let settings = apply(WITH_GEMINI_DECLINED);
+    assert_eq!(settings.gemini_source, Some(SourceDeclaration::Off));
+}
+
+#[test]
+fn a_gemini_answer_does_not_change_whether_the_roots_are_declared() {
+    // `roots_declared` stays two-conjunct on purpose: an absent Gemini
+    // declaration constructs no adapter, so requiring one would re-onboard
+    // every contributor upgrading from a build that never asked. Answering
+    // it must not be what clears the refusal, and neither must leaving it
+    // blank be what causes one.
+    assert!(roots_declared(&apply(WATCH_AND_OFF)));
+    assert!(roots_declared(&apply(WITH_GEMINI_WATCHED)));
+    assert!(roots_declared(&apply(WITH_GEMINI_DECLINED)));
 }

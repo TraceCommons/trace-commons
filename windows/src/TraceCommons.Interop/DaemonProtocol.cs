@@ -278,8 +278,21 @@ public sealed class QueueEntry
     [JsonPropertyName("session_hash")]
     public string? SessionHash { get; set; }
 
+    /// <summary>Which ADAPTER produced this. Not always the tool the
+    /// contributor used -- see <see cref="DeclaredSource"/>.</summary>
     [JsonPropertyName("source")]
     public string? Source { get; set; }
+
+    /// <summary>
+    /// What the transcript declares itself to be, when the daemon knew it.
+    ///
+    /// An imported Antigravity conversation is stored as a trajectory file,
+    /// so <see cref="Source"/> says <c>trajectory</c>: the storage format,
+    /// and not the word the contributor typed to collect it. Null for every
+    /// native adapter, and for a daemon predating the field.
+    /// </summary>
+    [JsonPropertyName("declared_source")]
+    public string? DeclaredSource { get; set; }
 
     [JsonPropertyName("project_id")]
     public string? ProjectId { get; set; }

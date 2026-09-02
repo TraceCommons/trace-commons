@@ -194,6 +194,7 @@ mod tests {
             entry_id: entry_id_for(label),
             session_hash: format!("sha256:{label}"),
             source: "claude-code".into(),
+            declared_source: None,
             project_key: format!("/Users/z/code/{label}"),
             project_label: label.into(),
             path: PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),

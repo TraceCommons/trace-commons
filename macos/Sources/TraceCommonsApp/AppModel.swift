@@ -1155,6 +1155,7 @@ final class AppModel: ObservableObject {
             entryID: "entry_screenshot_fixture",
             sessionHash: "sha256:0000000000000000",
             source: "claude-code",
+            declaredSource: nil,
             projectID: "project_screenshot_fixture",
             projectLabel: "northwind-billing",
             sizeBytes: 1615,

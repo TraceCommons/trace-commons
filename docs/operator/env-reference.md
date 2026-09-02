@@ -496,6 +496,22 @@ Running on loopback makes it more reliable, not less required.
 No API key variable exists for this backend by design; the transport never
 leaves the machine.
 
+## 16. NEAR AI attestation drill
+
+`POST /v1/admin/near-attestation-drill` reuses the gate's NEAR AI endpoint
+credentials and adds two of its own. See
+[`near-attestation-drill.md`](near-attestation-drill.md), and note the
+`near-attestation-collateral` build feature below.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `TRACE_COMMONS_NEAR_AI_BASE_URL` | R for the drill | (none) | Shared with the gate scorer. Missing, and the drill refuses with `missing_control:near_ai_base_url`. |
+| `TRACE_COMMONS_NEAR_AI_MODEL` | R for the drill | (none) | Shared with the gate scorer. |
+| `TRACE_COMMONS_NEAR_AI_API_KEY` | R for the drill | (none) | Shared with the gate scorer. Never logged; the drill's evidence carries no part of it. |
+| `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | **R for the drill to mean anything** | (none) | Comma-separated `key=value` pins over `mrtd`, `rtmr0`..`rtmr3`, each 96 hex characters. Unset, the drill runs and **fails** with `missing_control:near_ai_expected_measurements` -- an unpinned drill proves the endpoint is *an* enclave, not *the* enclave. Take the values from a verified quote, never from the report's own `info.tcb_info` JSON. |
+| `TRACE_COMMONS_NEAR_AI_PCCS_URL` | optional | `https://api.trustedservices.intel.com` | Where Intel DCAP collateral is fetched from. Defaults to Intel's own PCS rather than a caching mirror: the collateral is what a quote is verified against. |
+| `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | optional | `60` | Shared with the gate scorer; bounds each of the drill's four calls. |
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.
@@ -506,6 +522,7 @@ These aren't env vars but they gate which envs even matter at runtime.
 | `gcp-kms` | Compiles `google-cloud-kms`. Required for `TRACE_COMMONS_KEK_PROVIDER=gcp_kms`. |
 | `local-gpu-models` | Compiles the mistralrs perplexity scorer + fastembed embedder + usearch vector index. Required for `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu`. A2.3 migrated the scorer off candle-direct; architecture is auto-detected from `config.json`. |
 | `local-gpu-models-cuda` | Implies `local-gpu-models`, adds the mistralrs CUDA backend. Required when `TRACE_COMMONS_PERPLEXITY_DEVICE=cuda*`. |
+| `near-attestation-collateral` | Compiles the Intel DCAP collateral client (`dcap-qvl/report`). Required for the collateral fetch in `POST /v1/admin/near-attestation-drill`; without it that drill's `quote_verified` step refuses with `missing_control:near_ai_attestation_collateral_client`. Off by default because it pulls a second async HTTP stack (reqwest 0.13) into the build. |
 | `near-ai-privacy-filter` | Compiles the NEAR AI Cloud privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=near-ai`. Pilot builds enable this feature. |
 | `self-hosted-privacy-filter` | Compiles the loopback privacy-filter backend. Required when `TRACE_PRIVACY_FILTER_BACKEND=self-hosted`. Pilot builds enable this feature. |
 
