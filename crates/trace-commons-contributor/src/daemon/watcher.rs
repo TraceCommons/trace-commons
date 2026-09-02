@@ -542,7 +542,21 @@ fn visit_session(
         known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
     };
 
-    let armed = mode == ProjectMode::AutoUpload;
+    // A staged trajectory is never armed, whatever the project mode says.
+    //
+    // The daemon's only trajectory scope is the staging directory (see
+    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
+    // point IS an import. It was invisible to this daemon until the staging
+    // scope existed, and auto-uploading on first sight would send something
+    // the contributor may not remember importing, with no prompt. They
+    // armed a watched source they had declared; this is not one.
+    //
+    // The check is on the adapter rather than on `declared_source` on
+    // purpose: it must hold for every staged trajectory, including one a
+    // contributor dropped in by hand, not only for the ones that name
+    // themselves.
+    let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
+    let armed = mode == ProjectMode::AutoUpload && !from_staging;
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
