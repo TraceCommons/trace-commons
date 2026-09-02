@@ -941,14 +941,8 @@ struct RoutingModes {
 /// [`copy::ToolWiring::Unknown`], whatever the switch says.
 struct RoutingEvidence {
     outcome: ProbeOutcome,
-    /// When this answer was taken.
-    ///
-    /// Evidence has to expire. A machine where nothing in this app changes
-    /// but the proxy stops running would otherwise keep printing the last
-    /// good word indefinitely -- which is the same defect as the one this
-    /// change removes, arrived at by waiting instead of by declaring. A
-    /// bound short enough that a card left open re-asks, long enough that
-    /// a stream of daemon events does not become a stream of connections.
+    /// When this answer was taken, for [`EVIDENCE_BACKSTOP_TTL`]. The
+    /// primary invalidation is the probe, not this stamp.
     taken_at: std::time::Instant,
     /// One entry per tool IronWire listed, keyed by its own stable id.
     /// A tool absent from the list -- Gemini CLI on every machine today --
@@ -1175,7 +1169,7 @@ fn ask_routed_tools(app: &Rc<App>, settings: &Settings) {
         .routing_evidence
         .borrow()
         .as_ref()
-        .is_some_and(|held| held.taken_at.elapsed() < ROUTED_TOOLS_MAX_AGE);
+        .is_some_and(|held| held.taken_at.elapsed() < EVIDENCE_BACKSTOP_TTL);
     if fresh {
         return;
     }
@@ -1241,8 +1235,42 @@ fn parse_routed_tools(value: &serde_json::Value) -> RoutingEvidence {
     }
 }
 
-/// How long an answer about the tool list stands before it is re-asked.
-const ROUTED_TOOLS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+/// A backstop, and **not** a freshness policy.
+///
+/// The two invalidation signals that matter are causal and are not this
+/// one: a probe that does not reach the proxy drops the evidence outright
+/// (see `check_routing`), and the evidence is dropped again before any
+/// declaration is written (see `send_routing`). Between them, every way a
+/// contributor can make the held answer wrong already clears it.
+///
+/// This timer exists only for the case where **neither fires and no probe
+/// result arrives at all** -- a machine that slept, a settings card left
+/// open overnight, a daemon that stopped ticking. Without it the last good
+/// answer stands forever, which is the same defect this change removes,
+/// reached by waiting instead of by declaring.
+///
+/// # Why five minutes, and why it is a multiple rather than a round number
+///
+/// The interval is only defensible relative to how often this card is
+/// re-rendered, because a call can only be made from a render. Every daemon
+/// event runs `App::refresh`, and the daemon's own poll loop
+/// (`daemon::mod::supervise`) ticks at `poll_interval_secs`, which defaults
+/// to 60. So the render cadence is one a minute at rest, and faster when
+/// anything is happening.
+///
+/// A 60-second bound against a 60-second poll is the degenerate case: it
+/// expires at the same rate the card re-renders, so it would re-ask on
+/// essentially every tick, forever, on a card nobody is touching. Five
+/// minutes is five ticks at the default -- long enough that this is a
+/// backstop rather than a poll, short enough that a card left open notices
+/// a proxy that went away. `the_backstop_is_a_multiple_of_the_poll_it_backs`
+/// pins the relationship against the daemon's own default, so a change to
+/// either side fails rather than drifts.
+///
+/// Expiry cannot flicker the word. `ask_routed_tools` does **not** clear the
+/// cache when it re-asks -- the stale answer stays on screen until a new one
+/// lands -- so an expiry is invisible unless the answer actually changed.
+const EVIDENCE_BACKSTOP_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Ask the daemon whether the proxy is there, and print what it answered.
 fn check_routing(app: &Rc<App>, port: u16, token_dir: String) {
@@ -2812,6 +2840,54 @@ mod tests {
         assert_eq!(
             tool_wiring(Some(&strange), IRONWIRE_TOOL_CLAUDE),
             copy::ToolWiring::Unknown
+        );
+    }
+
+    /// The backstop is a multiple of the render cadence it backs.
+    ///
+    /// Both halves are read rather than restated: the daemon's default
+    /// `poll_interval_secs` is what sets how often a daemon event re-renders
+    /// this card, and a backstop at or below that would re-ask on every
+    /// tick forever rather than backstopping anything. Four ticks is the
+    /// floor asserted; the constant is five.
+    #[test]
+    fn the_backstop_is_a_multiple_of_the_poll_it_backs() {
+        let poll = std::time::Duration::from_secs(
+            trace_commons_contributor::daemon::settings::DaemonSettings::default()
+                .poll_interval_secs,
+        );
+        assert_eq!(poll, std::time::Duration::from_secs(60), "the poll moved");
+        assert!(
+            EVIDENCE_BACKSTOP_TTL >= poll * 4,
+            "a backstop at {EVIDENCE_BACKSTOP_TTL:?} against a {poll:?} poll re-asks every tick"
+        );
+        // And not so long that a card left open never notices a proxy that
+        // went away. Half an hour is already far past useful.
+        assert!(EVIDENCE_BACKSTOP_TTL <= std::time::Duration::from_secs(30 * 60));
+    }
+
+    /// A re-ask does not blank the word.
+    ///
+    /// `ask_routed_tools` reads the cache to decide whether to call and
+    /// never clears it, so an expiry is invisible on screen unless the
+    /// answer that comes back actually differs. Read from the source,
+    /// because "this function does not clear that cache" is not a
+    /// value-level assertion and is exactly what a later edit breaks.
+    #[test]
+    fn expiring_the_evidence_does_not_flicker_the_word() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn ask_routed_tools(")
+            .expect("the asker exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+        assert!(
+            body.contains("EVIDENCE_BACKSTOP_TTL"),
+            "the asker must be the thing that reads the backstop"
+        );
+        assert!(
+            !body.contains("routing_evidence.replace(None)"),
+            "re-asking must not clear the answer that is on screen"
         );
     }
 
