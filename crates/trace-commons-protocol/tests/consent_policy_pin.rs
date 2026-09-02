@@ -127,6 +127,14 @@ const PINNED_CONTENT_FLAGS: &[(&str, &str)] = &[
         "a contributor-authored correction is present, and unlike the two \
          above it is stored AS WRITTEN -- only secret detection runs over it",
     ),
+    (
+        "routing_metadata_included",
+        "routing and cost metadata about the inference hops that produced the \
+         session is present -- a backend id, a rung, a token count, a price. \
+         It is numbers and labels, not prose from the session, so unlike the \
+         three above it does not enrol the trace in the PII backstop hold and \
+         does not floor residual risk",
+    ),
 ];
 
 /// A `ConsentMetadata` with every content flag set, so the serialised form
@@ -138,6 +146,7 @@ fn all_flags_declared() -> ConsentMetadata {
         message_text_included: true,
         tool_payloads_included: true,
         correction_included: true,
+        routing_metadata_included: true,
         revocable: true,
     }
 }
@@ -163,6 +172,7 @@ fn no_content_flag_exists_that_the_document_does_not_describe() {
             message_text_included,
             tool_payloads_included,
             correction_included,
+            routing_metadata_included,
             revocable: _,
         } = consent;
 
@@ -175,6 +185,9 @@ fn no_content_flag_exists_that_the_document_does_not_describe() {
         }
         if *correction_included {
             declared.push("correction_included");
+        }
+        if *routing_metadata_included {
+            declared.push("routing_metadata_included");
         }
         declared
     }
