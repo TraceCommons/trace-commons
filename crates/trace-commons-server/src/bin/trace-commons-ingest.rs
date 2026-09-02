@@ -51,6 +51,8 @@ use trace_commons_server::account_session::{
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
+use trace_commons_server::redaction_witness::config::WitnessBypassConfig;
+use trace_commons_server::redaction_witness::verification::VerifiedWitnessCertificate;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -12955,6 +12957,8 @@ async fn submit_trace_handler(
         corpus_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        None,
+        None,
     );
 
     let artifact_label = if remediating_prior.is_some() {
@@ -19700,10 +19704,15 @@ async fn operator_rescrub_quarantined_submission(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+    // No witness on this path: the quarantine re-scrub has no request-borne
+    // certificate to verify, and a certificate over the ORIGINAL submission
+    // would say nothing about the bytes this pass has just rewritten.
     let target_status = corpus_status_with_pii_backstop_hold(
         target_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        None,
+        None,
     );
     let changed = target_status != prior_status
         || envelope.privacy.residual_pii_risk != prior_privacy_risk
@@ -56682,19 +56691,80 @@ fn status_for_risk(
 /// `reconcile_consent_declarations` (both call sites run
 /// `rescrub_trace_envelope` first, which does it), or an under-reported flag
 /// skips the hold -- the case that function's own comment exists to prevent.
+///
+/// # The witness bypass
+///
+/// `witness` and `bypass_config` are the redaction-witness bypass, and they
+/// are consulted at exactly this one call site. When an operator has pinned a
+/// witness and a certificate over the submitted bytes verified against that
+/// pin, a trace that would have been held is left `Accepted` instead.
+///
+/// **What that skips is the async backstop's CLASSIFIER stage, and only
+/// that.** It is not a wholesale bypass and it needs no exemption from the
+/// deterministic sweep, because the sweep has already run: both call sites
+/// invoke `rescrub_trace_envelope` -- the deterministic pass over
+/// `redacted_content` and `structured_payload`, plus `residual_envelope_scan`
+/// -- synchronously before reaching this function. That ordering is the
+/// entire safety argument, and
+/// `the_synchronous_rescrub_runs_before_the_hold_is_decided` pins it against
+/// the handler source. Moving this call above the rescrub turns the feature
+/// into a wholesale bypass and must turn that test red.
+///
+/// **A verified certificate never means the trace is clean.** It means a known
+/// program in a pinned enclave reached a `Low` verdict over the originating
+/// redaction pass. A credential the prose classifier itself emitted survives
+/// that verdict -- which is why the `risk_status == Accepted` precondition
+/// below is load-bearing rather than free tidiness: it is what keeps the
+/// server's own residual scan authoritative, so a certificate can never lift a
+/// quarantine the synchronous pass just imposed.
+///
+/// Five conditions, all required: the bypass is configured, a certificate
+/// verified, its verdict is `Low`, its policy alias is allowlisted, and the
+/// risk-derived status is already `Accepted`. The alias check is its own
+/// condition because a `deterministic-only` witness never ran a classifier, so
+/// admitting its alias would mean no classifier ever reads that trace's prose.
 fn corpus_status_with_pii_backstop_hold(
     risk_status: TraceCorpusStatus,
     consent: &ConsentMetadata,
     backstop_enabled: bool,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
 ) -> TraceCorpusStatus {
     let carries_raw_content = consent.message_text_included
         || consent.tool_payloads_included
         || consent.correction_included;
     if risk_status == TraceCorpusStatus::Accepted && carries_raw_content && backstop_enabled {
+        if witness_admits_trace(risk_status, witness, bypass_config) {
+            return TraceCorpusStatus::Accepted;
+        }
         TraceCorpusStatus::AwaitingPiiBackstop
     } else {
         risk_status
     }
+}
+
+/// Whether a verified witness certificate lets this trace skip the hold.
+///
+/// Split out from the decision above so the five conditions read as one list
+/// rather than as a nested `if`, and so the ingest tests can name it. It is
+/// not a public seam: the only caller is
+/// [`corpus_status_with_pii_backstop_hold`].
+///
+/// `risk_status` is re-checked here even though the caller has already
+/// established it. That is deliberate duplication: this predicate is the thing
+/// a future reader will lift to a second call site, and it must not be safe to
+/// lift only when the caller happens to have checked first.
+fn witness_admits_trace(
+    risk_status: TraceCorpusStatus,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
+) -> bool {
+    let (Some(witness), Some(config)) = (witness, bypass_config) else {
+        return false;
+    };
+    risk_status == TraceCorpusStatus::Accepted
+        && witness.residual_risk_verdict() == ResidualPiiRisk::Low
+        && config.policy_version_allowed(witness.redaction_policy_version())
 }
 
 /// The contributor-facing sentence describing what will happen to the credit

@@ -82175,7 +82175,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop
     );
@@ -82184,7 +82186,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            false
+            false,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -82194,7 +82198,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -82204,7 +82210,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Quarantined,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Quarantined
     );
@@ -82222,7 +82230,9 @@ fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, true, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "tool payloads are raw content and must be re-examined before the corpus"
@@ -82249,7 +82259,9 @@ fn any_content_flag_alone_is_enough_to_hold() {
             corpus_status_with_pii_backstop_hold(
                 TraceCorpusStatus::Accepted,
                 &backstop_consent(message_text, tool_payloads, correction),
-                true
+                true,
+                None,
+                None,
             ),
             expected,
             "message_text={message_text} tool_payloads={tool_payloads} \
@@ -82270,7 +82282,9 @@ fn pii_backstop_holds_a_correction_bearing_trace_with_no_other_content() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, true),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "an unredacted correction must be re-examined before the corpus"
@@ -89187,4 +89201,346 @@ fn a_configured_near_attestation_check_cannot_be_opted_out_of_by_failing() {
     );
     assert!(summary.not_applicable_checks.is_empty());
     assert_eq!(summary.evidence_status, "failed_rehearsal_evidence");
+}
+
+// ---------------------------------------------------------------------
+// The redaction-witness PII-backstop bypass.
+//
+// A verified certificate keeps a submission OUT OF THE HOLD and does nothing
+// else. It changes no risk tier, lifts no quarantine, and never means the
+// trace is clean.
+//
+// The whole safety argument is an ORDERING: `rescrub_trace_envelope` -- the
+// deterministic sweep over `redacted_content` and `structured_payload`, plus
+// `residual_envelope_scan` -- runs synchronously in the submit handler before
+// the hold is decided. So the only thing skipping the hold removes is the
+// async backstop's classifier stage. The first test below is the one that
+// pins that, and it is the most important test in this section.
+// ---------------------------------------------------------------------
+
+mod witness_bypass {
+    use super::*;
+    use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
+    use trace_commons_server::redaction_witness::certificate::{
+        CertificateDetails, WitnessCertificate,
+    };
+    use trace_commons_server::redaction_witness::config::{
+        WitnessBypassConfig, witness_bypass_config_from_values,
+    };
+    use trace_commons_server::redaction_witness::correspondence::check_correspondence;
+    use trace_commons_server::redaction_witness::verification::{
+        VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
+    };
+
+    /// The measurement the pin admits. Nothing here depends on its value; it
+    /// only has to be the same on both sides.
+    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+    /// A `full-pipeline` alias -- deterministic pass AND prose classifier.
+    /// The only kind an operator should ever allowlist.
+    const FULL_PIPELINE_ALIAS: &str =
+        "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
+
+    /// The bytes every certificate in this module covers, unless the test is
+    /// about a mismatch.
+    const ARTIFACT: &str = "the submitted envelope bytes";
+
+    fn signing_key() -> SigningKey {
+        let bytes = Keccak256::digest(b"witness-bypass-test-witness");
+        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
+    }
+
+    fn signing_address() -> String {
+        let key = signing_key();
+        let point = key.verifying_key().to_encoded_point(false);
+        let digest = Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    /// Sign as the witness enclave would: EIP-191 over the canonical signing
+    /// bytes, 65-byte hex with a 27/28 recovery byte.
+    fn sign(certificate: &WitnessCertificate) -> String {
+        let message = certificate.signing_bytes();
+        let mut hasher = Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(&message);
+        let (signature, recovery) = signing_key()
+            .sign_prehash_recoverable(&hasher.finalize())
+            .expect("prehash signs");
+        format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        )
+    }
+
+    /// A genuinely verified certificate over [`ARTIFACT`].
+    ///
+    /// Built the only way one can be: a correspondence proof, a real
+    /// signature, and a real `verify_witness_certificate` call against a real
+    /// pin. There is no test constructor for `VerifiedWitnessCertificate` and
+    /// there must not be -- a fake would let these tests pass over a
+    /// verification path that does not work.
+    fn verified_certificate(
+        verdict: ResidualPiiRisk,
+        policy_version: &str,
+    ) -> VerifiedWitnessCertificate {
+        let proof =
+            check_correspondence(ARTIFACT, ARTIFACT, &[]).expect("an empty span list applies");
+        let certificate = WitnessCertificate::from_proof(
+            proof,
+            CertificateDetails {
+                residual_risk_verdict: verdict,
+                redaction_policy_version: policy_version.to_string(),
+                witness_measurement: MEASUREMENT.to_string(),
+                timestamp: 1_788_000_000,
+            },
+        );
+        let signature = sign(&certificate);
+        let pin = WitnessPin::new(&signing_address(), [MEASUREMENT.to_string()])
+            .expect("the pin is well formed");
+        verify_witness_certificate(certificate, &signature, Some(&pin), ARTIFACT.as_bytes())
+            .expect("the certificate verifies against the artifact it covers")
+    }
+
+    fn low_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, FULL_PIPELINE_ALIAS)
+    }
+
+    fn medium_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Medium, FULL_PIPELINE_ALIAS)
+    }
+
+    fn certificate_with_policy(alias: &str) -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, alias)
+    }
+
+    fn bypass_config_allowing(aliases: &[&str]) -> WitnessBypassConfig {
+        witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signing_address()),
+            Some(MEASUREMENT),
+            Some(&aliases.join(",")),
+        )
+        .expect("the bypass configures")
+        .expect("the switch is on")
+    }
+
+    fn bypass_config() -> WitnessBypassConfig {
+        bypass_config_allowing(&[FULL_PIPELINE_ALIAS])
+    }
+
+    fn content_bearing_consent() -> ConsentMetadata {
+        backstop_consent(true, false, false)
+    }
+
+    /// THE test of this slice.
+    ///
+    /// The bypass is only safe because `rescrub_trace_envelope` -- the
+    /// deterministic sweep over `redacted_content` and `structured_payload`,
+    /// plus `residual_envelope_scan` -- has already run on these bytes by the
+    /// time the hold is decided. Read the handler source and assert the
+    /// order, because no runtime observation distinguishes "ran before" from
+    /// "ran at all".
+    ///
+    /// If a future change moves the hold decision above the rescrub, this
+    /// feature becomes a wholesale backstop bypass and this test must go red.
+    #[test]
+    fn the_synchronous_rescrub_runs_before_the_hold_is_decided() {
+        let source = include_str!("../trace-commons-ingest.rs");
+        let rescrub = source
+            .find("rescrub_trace_envelope(&mut envelope)")
+            .expect("submit rescrubs");
+        let hold = source
+            .find("corpus_status_with_pii_backstop_hold(")
+            .expect("submit decides the hold");
+        // `find` takes the FIRST occurrence, so this test would quietly start
+        // measuring the function's own definition if every call site were
+        // removed or moved below it -- and then it would pass while proving
+        // nothing. Require the occurrence it found to be a call.
+        let definition = source
+            .find("fn corpus_status_with_pii_backstop_hold(")
+            .expect("the decision function is defined here");
+        assert!(
+            hold < definition,
+            "the first occurrence must be a call site, not the definition; this test \
+             measures the order of the submit handler, not of the file",
+        );
+        assert!(
+            rescrub < hold,
+            "the hold decision must follow the synchronous rescrub; moving it above turns \
+             this feature into a wholesale backstop bypass",
+        );
+    }
+
+    /// Ground truth from outside the decision function: an envelope carrying a
+    /// credential of exactly the kind the prose classifier writes back into a
+    /// field it was handed. The synchronous pass must raise the risk, so
+    /// `status_for_risk` yields a non-Accepted status and the bypass never
+    /// sees an `Accepted` to skip the hold on.
+    ///
+    /// This is what makes "the certificate can never lift a quarantine" a
+    /// measured fact rather than a claim about the code's shape.
+    #[tokio::test]
+    async fn a_witness_emitted_credential_is_caught_before_the_bypass_can_act() {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, "aws key AKIAIOSFODNN7EXAMPLE in output");
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        let risk_status = status_for_risk(envelope.privacy.residual_pii_risk, false);
+        assert_ne!(
+            risk_status,
+            TraceCorpusStatus::Accepted,
+            "the synchronous pass must have raised the risk off Low, or this test \
+             proves nothing about the bypass",
+        );
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                risk_status,
+                &envelope.consent,
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            risk_status,
+            "a verified certificate must never lift a quarantine",
+        );
+    }
+
+    #[test]
+    fn a_verified_low_certificate_with_an_allowlisted_alias_skips_the_hold() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::Accepted,
+        );
+    }
+
+    /// A `Medium` verdict is the witness reporting that it found and removed
+    /// PII. That is exactly the population the server's own classifier pass
+    /// exists to re-examine, so it holds.
+    #[test]
+    fn a_medium_verdict_still_holds() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&medium_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The sharpest edge in the design: a `deterministic-only` witness never
+    /// ran a classifier, so skipping the server's would mean no classifier
+    /// ever reads this trace's prose. The allowlist is what stops it, and it
+    /// is a separate control from the measurement pin for that reason.
+    #[test]
+    fn a_deterministic_only_policy_alias_is_not_allowlisted_and_still_holds() {
+        let config = bypass_config_allowing(&[FULL_PIPELINE_ALIAS]);
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&certificate_with_policy(
+                    "ironclaw-deterministic-secret-path-v3"
+                )),
+                Some(&config),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// Ship-disabled, at the decision. With no configured bypass an arriving
+    /// certificate is ignored entirely and the trace holds exactly as today.
+    #[test]
+    fn no_configured_bypass_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                None,
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The mirror case: configured, but no certificate arrived. An ordinary
+    /// unwitnessed submission on a deployment that has the bypass on.
+    #[test]
+    fn a_configured_bypass_with_no_certificate_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                None,
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The bypass must not reach past the hold. With the backstop driver
+    /// switched off entirely there is no hold to skip, and the answer is the
+    /// risk-derived status either way -- a certificate must not turn a
+    /// non-Accepted risk into an acceptance.
+    #[test]
+    fn a_certificate_changes_nothing_when_the_backstop_is_disabled() {
+        for risk_status in [TraceCorpusStatus::Accepted, TraceCorpusStatus::Quarantined] {
+            assert_eq!(
+                corpus_status_with_pii_backstop_hold(
+                    risk_status,
+                    &content_bearing_consent(),
+                    false,
+                    Some(&low_verdict_certificate()),
+                    Some(&bypass_config()),
+                ),
+                risk_status,
+                "{risk_status:?}",
+            );
+        }
+    }
+
+    /// Group D in the spec. The credit-zeroing branch in the submit handler
+    /// keys on `!= Accepted`, so a bypassed trace takes the non-zeroing path
+    /// and keeps its pending credit. Silent failure otherwise: a contributor
+    /// whose trace was admitted on a certificate would be paid zero.
+    #[tokio::test]
+    async fn a_bypassed_trace_keeps_its_pending_credit() {
+        let mut envelope = sample_envelope().await;
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let before = envelope.value.credit_points_pending;
+        assert!(before > 0.0, "the fixture must have credit to lose");
+
+        let status = corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &content_bearing_consent(),
+            true,
+            Some(&low_verdict_certificate()),
+            Some(&bypass_config()),
+        );
+
+        assert_eq!(status, TraceCorpusStatus::Accepted);
+        assert_eq!(
+            envelope.value.credit_points_pending, before,
+            "the credit-zeroing branch keys on != Accepted, so a bypassed trace must \
+             keep the credit an ordinarily-accepted one keeps",
+        );
+    }
 }

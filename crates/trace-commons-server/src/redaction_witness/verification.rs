@@ -55,6 +55,7 @@ use sha2::{Digest, Sha256};
 
 use super::certificate::{CertificateError, WitnessCertificate};
 use crate::near_attestation::receipt::decode_address;
+use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
 /// Missing-control name reported when the operator has pinned no witness.
 pub const EXPECTED_MEASUREMENT_CONTROL: &str = "witness_expected_measurement";
@@ -246,6 +247,33 @@ impl VerifiedWitnessCertificate {
         self.certificate.claimed_redacted_sha256()
     }
 
+    /// The residual-PII verdict the witness reached over the artifact.
+    ///
+    /// Lands with its caller, as this module's standing rule below requires:
+    /// `corpus_status_with_pii_backstop_hold` in the ingest binary reads it,
+    /// and nothing else may.
+    ///
+    /// **This is a pass over the ORIGINATING redaction pass, not a clean
+    /// bill.** A `Low` here says a known program in a pinned enclave reached
+    /// `Low` over these bytes. It does not say the artifact is clean, and no
+    /// caller may render it as though it did -- see the standing note below
+    /// for the credential case that survives it.
+    pub fn residual_risk_verdict(&self) -> ResidualPiiRisk {
+        self.certificate.residual_risk_verdict()
+    }
+
+    /// The redaction-policy alias the witness reported.
+    ///
+    /// **An alias, never an authority.** `redaction_pipeline_version()`
+    /// concatenates hardcoded constants selected by backend family, so every
+    /// self-hosted deployment reports the same string regardless of which
+    /// checkpoint loaded. A caller checks it against
+    /// [`WitnessBypassConfig::policy_version_allowed`](super::config::WitnessBypassConfig::policy_version_allowed)
+    /// and trusts [`Self::witness_measurement`]. Lands with that caller.
+    pub fn redaction_policy_version(&self) -> &str {
+        self.certificate.claimed_redaction_policy_version()
+    }
+
     /// The measurement the witness reported, which verification has proven is
     /// one the operator pinned. A caller reporting the strength of the check
     /// wants this.
@@ -254,16 +282,17 @@ impl VerifiedWitnessCertificate {
     }
 }
 
-// There are deliberately no accessors for `residual_risk_verdict`,
-// `redaction_policy_version` or `timestamp`. Nothing consumes them yet, and
-// adding a getter per field would hand back exactly the unverified-read
-// surface that making the certificate's fields private just closed. The
-// moment something legitimately needs one is the moment to add it -- with a
-// caller in the same commit. `residual_risk_verdict` is the one that will:
-// the PII-backstop bypass reads it, and it gets its accessor in the commit
-// that introduces that caller, not before.
+// There is deliberately no accessor for `timestamp`, and the rule that kept
+// the two above from existing still stands for it: adding a getter per field
+// would hand back exactly the unverified-read surface that making the
+// certificate's fields private just closed. The moment something legitimately
+// needs one is the moment to add it -- with a caller in the same commit.
 //
-// WHOEVER WRITES THAT BYPASS: read this first. A verified certificate does
+// `residual_risk_verdict` and `redaction_policy_version` got theirs under
+// that rule, in the commit that landed the PII-backstop bypass. Their one
+// caller is `corpus_status_with_pii_backstop_hold` in the ingest binary.
+//
+// WHOEVER TOUCHES THAT BYPASS: read this first. A verified certificate does
 // NOT license skipping the backstop wholesale, and the reason is not
 // conservatism.
 //
@@ -281,6 +310,18 @@ impl VerifiedWitnessCertificate {
 // bypass may therefore skip the backstop's CLASSIFIER stage on a verified
 // certificate; it must still run the trailing sweep, or it re-opens exactly
 // the hole the sweep exists to close.
+//
+// HOW THE LANDED BYPASS SATISFIES THAT, so nobody re-derives it wrongly: the
+// bypass needs no exemption from the sweep, because the sweep has already
+// run. `rescrub_trace_envelope` -- the deterministic pass over
+// `redacted_content` and `structured_payload`, plus `residual_envelope_scan`
+// -- runs synchronously in the submit handler BEFORE the hold is decided, and
+// a credential it finds raises the risk so the trace never reaches the
+// `Accepted` status the bypass is gated on. The only thing skipping the hold
+// removes is the async backstop's classifier stage. That ordering is the
+// entire safety argument, and the ingest binary pins it with a source-order
+// test. If the hold decision is ever moved above the rescrub, this stops
+// being true and the feature becomes a wholesale bypass.
 //
 // `deploy/witness/README.md` states the same limit for operators, and
 // `witness_service::mod`'s doc states it on the issuing side. It is repeated
@@ -353,7 +394,6 @@ mod tests {
     use crate::redaction_witness::certificate::CertificateDetails;
     use k256::ecdsa::SigningKey;
     use sha3::Keccak256;
-    use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
     /// The artifact bytes every test verifies against, unless it is about a
     /// mismatch.
