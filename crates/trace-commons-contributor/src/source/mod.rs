@@ -493,6 +493,16 @@ impl SourceRoots {
         self.declared.contains_key(name)
     }
 
+    /// The trajectory scope this root set carries.
+    ///
+    /// Read by callers that need to assert WHICH scope is in play, not
+    /// merely that a trajectory source was constructed: the daemon takes
+    /// the staging directory and deliberately not the working directory,
+    /// and `all_sources` collapses both into the same source type.
+    pub fn trajectory_selection(&self) -> &TrajectorySelection {
+        &self.trajectory
+    }
+
     /// Every native store at its conventional per-user location, declared
     /// explicitly.
     ///

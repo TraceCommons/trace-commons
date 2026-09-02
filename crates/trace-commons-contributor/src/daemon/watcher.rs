@@ -117,7 +117,7 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
     let (max_queue_entries, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        (s.max_queue_entries, s.source_roots(&shared.store))
     };
     tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
 }
@@ -191,7 +191,7 @@ pub async fn tick_paths(
     }
     let (max_queue_entries, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        (s.max_queue_entries, s.source_roots(&shared.store))
     };
     super::run_blocking(|| {
         tick_over_paths(
@@ -1010,7 +1010,7 @@ mod tests {
         fn tick_counted(&self, now: DateTime<Utc>, loads: &Arc<AtomicUsize>) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()
@@ -1042,7 +1042,7 @@ mod tests {
         ) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()
@@ -2023,7 +2023,7 @@ mod tests {
         fn tick_refusing(&self, now: DateTime<Utc>, err: fn() -> anyhow::Error) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()

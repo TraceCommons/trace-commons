@@ -488,7 +488,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     };
     let (near_ai, source_roots) = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.source_roots())
+        (s.near_ai.clone(), s.source_roots(&shared.store))
     };
     // These options are envelope-determining and are NOT covered by
     // `preview::input_fingerprint`, which fingerprints the config. They are
