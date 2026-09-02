@@ -161,8 +161,14 @@ correct.
 
 **Pin `MRTD` and `MRCONFIGID`. Do not pin RTMR3. Treat RTMR0 as advisory.**
 
-- `MRCONFIGID` is the stable identity of what code runs: V2 commits to the
-  compose hash, the 20-byte app id, and the key-provider identity.
+- `MRCONFIGID` is the stable identity of what code runs. **Which fields it
+  commits to depends on the config-id version, and this was measured rather than
+  assumed:** the live NEAR AI fixture we verify against emits **v1** -- `01`
+  followed by the compose hash and fifteen zero bytes. V2 additionally commits
+  to the 20-byte app id and the key-provider identity. Either version pins the
+  compose hash, which is the code identity we need, so the pin is sound today.
+  **Do not write an operator doc claiming app-id binding until the witness's own
+  dstack version is confirmed to emit v2.**
 - **RTMR3 is unpinnable across instances**, not merely across upgrades -- it is
   extended with an `instance-id` seeded from `getrandom` at deployment.
 - **RTMR0 is a function of VM shape, not only the image**: its event chain
