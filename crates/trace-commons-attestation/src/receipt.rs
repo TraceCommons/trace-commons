@@ -1,14 +1,12 @@
-// Copyright (C) 2026 K&Z Partners LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
-
 //! Verification of a NEAR AI inference receipt.
 //!
-//! [`super::quote`] establishes that the *endpoint* is a genuine Intel TDX
-//! enclave running an image we pinned. That says nothing about any particular
-//! inference. A receipt is the other half: alongside a completion, NEAR AI
-//! returns a short `text` carrying the SHA-256 of the request body and of the
-//! response body, signed by the enclave's signing key. Verifying it binds one
-//! specific request/response pair to that key.
+//! Quote verification (the server's `near_attestation::quote`) establishes
+//! that the *endpoint* is a genuine Intel TDX enclave running an image we
+//! pinned. That says nothing about any particular inference. A receipt is the
+//! other half: alongside a completion, NEAR AI returns a short `text` carrying
+//! the SHA-256 of the request body and of the response body, signed by the
+//! enclave's signing key. Verifying it binds one specific request/response
+//! pair to that key.
 //!
 //! The mechanism follows NEAR AI's own reference verifier
 //! (`nearai/nearai-cloud-verifier`, `py/chat_verifier.py`):
@@ -208,7 +206,7 @@ fn eip191_digest(message: &[u8]) -> [u8; 32] {
 
 /// Recover the 20-byte Ethereum address that produced `signature_hex` over
 /// `message` under EIP-191.
-pub(crate) fn recover_eip191_signer(
+pub fn recover_eip191_signer(
     message: &[u8],
     signature_hex: &str,
 ) -> Result<[u8; 20], ReceiptError> {
@@ -260,7 +258,7 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
 }
 
 /// Decode a `0x`-prefixed 20-byte hex address, in either case.
-pub(crate) fn decode_address(s: &str) -> Option<[u8; 20]> {
+pub fn decode_address(s: &str) -> Option<[u8; 20]> {
     let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     if body.len() != 40 {
         return None;
@@ -350,6 +348,101 @@ mod tests {
             signature: sign(&k, text, VEncoding::Ethereum),
             signing_address: address_string(&k),
         }
+    }
+
+    // ---- Known answers -------------------------------------------------
+    //
+    // Everything else in this module is self-consistent: the tests sign with
+    // `sign`, which calls `eip191_digest`, and compare against
+    // `address_string`, which calls `address_of`. A receipt signed and
+    // verified by the same two wrong functions still round-trips, so the
+    // whole suite passed with `address_of` slicing `digest[..20]` instead of
+    // `digest[12..]`, and again with the EIP-191 preamble removed. The
+    // workspace caught both -- but only through a server-side test that
+    // checks recovery against a real NEAR AI address, and that test is behind
+    // the AGPL boundary. A third party vendoring this crate on its own, which
+    // is the reason it exists, had nothing.
+    //
+    // The constants below are therefore taken from published sources and not
+    // produced by this code. A vector we generated ourselves would move the
+    // circularity rather than break it.
+
+    /// Published key/address pair: the `privateKeyToAccount` example in the
+    /// web3.js documentation.
+    const WEB3_DOCS_KEY: &str = "348ce564d427a3311b6536bbcff9390d69395b06ed6c486954e971d960fe8709";
+    /// The address that example prints, EIP-55 checksummed as published.
+    const WEB3_DOCS_ADDRESS: &str = "0xb8CE9ab6943e0eCED004cDe8e3bBed6568B2Fa01";
+
+    /// Second, independent key/address pair: Hardhat Network's account #0,
+    /// derived from the published mnemonic "test test test test test test
+    /// test test test test test junk" at m/44'/60'/0'/0/0.
+    const HARDHAT_ACCOUNT_0_KEY: &str =
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const HARDHAT_ACCOUNT_0_ADDRESS: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+    /// Published `personal_sign` digests: `web3.eth.accounts.hashMessage`
+    /// examples from the web3.js documentation.
+    const HASH_MESSAGE_HELLO_WORLD_CAPS: &str =
+        "a1de988600a42c4b4ab089b619297c17d53cffae5d5120d82d8a92d0bb3b78f2";
+    const HASH_MESSAGE_HELLO_WORLD: &str =
+        "8144a6fa26be252b86456491fbcd43c1de7e022241845ffea1c3df066f7cfede";
+    /// The same documentation's `skipPrefix: true` output for "Hello world":
+    /// the bare keccak256 of the message, with no EIP-191 preamble. This is
+    /// what `eip191_digest` must *not* produce.
+    const KECCAK_HELLO_WORLD_UNPREFIXED: &str =
+        "ed6c11b0b5b808960df26f5bfc471d04c1995b0ffd2055925ad1be28d6baadfd";
+
+    #[test]
+    fn address_derivation_matches_published_key_address_pairs() {
+        // Two pairs from two unrelated sources. One could in principle be
+        // mistranscribed; two agreeing with the same derivation could not.
+        for (label, key_hex, published) in [
+            ("web3.js docs", WEB3_DOCS_KEY, WEB3_DOCS_ADDRESS),
+            (
+                "hardhat account #0",
+                HARDHAT_ACCOUNT_0_KEY,
+                HARDHAT_ACCOUNT_0_ADDRESS,
+            ),
+        ] {
+            let derived = address_string(&key(key_hex));
+            // The published forms are EIP-55 checksummed and `address_of`
+            // emits lowercase hex; the bytes are what is being asserted.
+            assert!(
+                derived.eq_ignore_ascii_case(published),
+                "{label}: derived {derived}, published {published}"
+            );
+        }
+        // And the two are different addresses, so the loop cannot be passing
+        // by comparing one value against itself.
+        assert!(!WEB3_DOCS_ADDRESS.eq_ignore_ascii_case(HARDHAT_ACCOUNT_0_ADDRESS));
+    }
+
+    #[test]
+    fn eip191_digest_matches_published_personal_sign_hashes() {
+        // `hashMessage` is `personal_sign`'s digest: what every wallet hashes
+        // before signing. If ours differs by so much as the preamble, we
+        // recover a different address from a real signature and reject an
+        // honest signer.
+        for (message, published) in [
+            ("Hello World", HASH_MESSAGE_HELLO_WORLD_CAPS),
+            ("Hello world", HASH_MESSAGE_HELLO_WORLD),
+        ] {
+            assert_eq!(
+                hex::encode(eip191_digest(message.as_bytes())),
+                published,
+                "personal_sign digest of {message:?}"
+            );
+        }
+        // The two messages differ only in one letter and hash differently, so
+        // neither constant can be standing in for the other.
+        assert_ne!(HASH_MESSAGE_HELLO_WORLD_CAPS, HASH_MESSAGE_HELLO_WORLD);
+        // And the preamble is doing work: the same documentation's
+        // skipPrefix output is the bare keccak256, which is what a digest
+        // with the prefix dropped would collapse to.
+        assert_ne!(
+            hex::encode(eip191_digest(b"Hello world")),
+            KECCAK_HELLO_WORLD_UNPREFIXED
+        );
     }
 
     #[test]

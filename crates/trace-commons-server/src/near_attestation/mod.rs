@@ -20,8 +20,12 @@
 pub mod client;
 pub mod drill;
 pub mod measurements;
-pub mod quote;
-pub mod receipt;
+
+/// Receipt and quote verification moved to the permissive
+/// `trace-commons-attestation` crate so that client-side code can verify an
+/// attestation before sending raw bytes. Re-exported here so existing
+/// `crate::near_attestation::{receipt, quote}` paths keep working.
+pub use trace_commons_attestation::{quote, receipt};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -149,7 +153,9 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../../tests/fixtures/near_ai_attestation_report.json");
+    const FIXTURE: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+    );
 
     #[test]
     fn parses_a_real_report() {

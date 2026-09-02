@@ -26,11 +26,14 @@ chrono = { version = "0.4", features = ["serde"] }
 cookie = "0.18"
 clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
-# Intel DCAP quote verification, for NEAR AI's TDX attestation reports.
-# Not the default feature set: `report` pulls a second async HTTP stack for
-# fetching collateral, and `rustcrypto` a second crypto backend, where `ring`
-# is already a dependency here. `danger-allow-tcb-override` must stay off --
-# it does exactly what its name says.
+# Quote verification itself moved to `trace-commons-attestation`, which is
+# where this dependency is now declared. It stays here too because
+# `near_attestation::client` names `dcap_qvl::collateral::CollateralClient`
+# directly, and that collateral fetch is server-side and stays AGPL. Same
+# version and same feature set, so cargo unifies them into one build of the
+# crate; the reasoning for the feature set is repeated there.
+# `danger-allow-tcb-override` must stay off -- it does exactly what its name
+# says.
 dcap-qvl = { version = "0.6", default-features = false, features = [
     "std",
     "ring",
@@ -70,6 +73,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1"
 zstd = "0.13"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+trace-commons-attestation = { path = "../trace-commons-attestation" }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
@@ -122,7 +126,7 @@ near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
 # named cause rather than an absent route. Fetching the PCS endpoints by hand
 # is not the alternative: FMSPC extraction and CRL handling are exactly what
 # `dcap-qvl` gets right.
-near-attestation-collateral = ["dcap-qvl/report"]
+near-attestation-collateral = ["trace-commons-attestation/collateral-client"]
 
 [[bin]]
 name = "trace-commons-gate-calibrate"
