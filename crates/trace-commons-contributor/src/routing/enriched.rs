@@ -61,10 +61,73 @@ impl TraceSource for RoutingEnrichedSource {
             .ledger
             .exchanges_since(from)
             .into_iter()
-            .filter(|row| row.client_session_id.as_deref() == Some(session_id.as_str()))
+            .filter(|row| {
+                row.client_session_id
+                    .as_deref()
+                    .is_some_and(|id| names_the_same_session(id, &session_id))
+            })
             .collect::<Vec<RoutedExchange>>();
         Ok(transcript)
     }
+}
+
+/// Whether a ledger row's session id and our `conversation_id` name the same
+/// session.
+///
+/// Equality first, which is the Claude Code case: it sends its session UUID on
+/// `x-claude-code-session-id`, and our transcript is addressed by the same
+/// UUID -- the session file's own stem.
+///
+/// Codex does not line up that way. Our `conversation_id` is the rollout
+/// file's stem, `rollout-<timestamp>-<uuid>`, because that is the identifier
+/// discovery and the queue already address the session by. The client sends
+/// the bare UUID. Two spellings of one session, and an equality join matches
+/// nothing.
+///
+/// **Nothing about that failure is visible.** IronWire cannot see our
+/// spelling, so it cannot detect the mismatch; we would see an empty routing
+/// list, which is exactly what a contributor who never used Codex sees. The
+/// whole path can be correct and produce nothing, permanently.
+///
+/// So a bare UUID also matches a stem that ends with `-<that UUID>`. The
+/// suffix must be a *whole* UUID and must sit on a `-` boundary: 36 characters
+/// of `8-4-4-4-12` hex is globally unique, so a full-UUID suffix match cannot
+/// collide, while a looser suffix rule could join two unrelated sessions.
+///
+/// Deliberately not fixed by changing `conversation_id`: it is the address
+/// discovery, the queue and the envelope already use, and moving it would move
+/// identity for every Codex session ever recorded.
+fn names_the_same_session(row_id: &str, conversation_id: &str) -> bool {
+    if row_id == conversation_id {
+        return true;
+    }
+    if !is_uuid(row_id) {
+        return false;
+    }
+    conversation_id
+        .len()
+        .checked_sub(row_id.len() + 1)
+        .is_some_and(|boundary| {
+            conversation_id.as_bytes()[boundary] == b'-' && conversation_id.ends_with(row_id)
+        })
+}
+
+/// The canonical `8-4-4-4-12` hyphenated form, lowercase or upper.
+///
+/// Strict on purpose: this is what makes a suffix match safe, so a looser
+/// reading here would quietly widen the join.
+fn is_uuid(value: &str) -> bool {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    for width in GROUPS {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != width || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
 }
 
 #[cfg(test)]
@@ -196,5 +259,79 @@ mod tests {
         let t = source.load(&a_ref()).expect("loads");
         assert!(t.routing.is_empty());
         assert_eq!(t.conversation_id.as_deref(), Some("s-1"));
+    }
+}
+
+#[cfg(test)]
+mod session_id_matching {
+    use super::{is_uuid, names_the_same_session};
+
+    const UUID: &str = "5db811ed-ce4a-45a7-ab00-56890e111668";
+    const STEM: &str = "rollout-2026-09-02T10-14-22-5db811ed-ce4a-45a7-ab00-56890e111668";
+
+    /// Claude Code: the client's header and our transcript stem are the same
+    /// UUID, so equality already worked and must keep working.
+    #[test]
+    fn an_identical_id_matches() {
+        assert!(names_the_same_session(UUID, UUID));
+    }
+
+    /// Codex: the bug this exists for. The client sends the bare UUID; we
+    /// address the session by the rollout stem.
+    #[test]
+    fn a_bare_uuid_matches_the_rollout_stem_that_ends_with_it() {
+        assert!(
+            names_the_same_session(UUID, STEM),
+            "a Codex row must join the session it came from"
+        );
+    }
+
+    /// The safety property. A full UUID is globally unique, so a whole-UUID
+    /// suffix cannot collide -- but a partial one could, and must not match.
+    #[test]
+    fn a_partial_uuid_suffix_does_not_match() {
+        assert!(!names_the_same_session("56890e111668", STEM));
+        assert!(!names_the_same_session("ab00-56890e111668", STEM));
+    }
+
+    /// The suffix has to sit on a separator, so a stem that merely *ends with*
+    /// the characters does not join.
+    #[test]
+    fn a_suffix_that_is_not_on_a_boundary_does_not_match() {
+        let glued = format!("rollout-2026x{UUID}");
+        assert!(!names_the_same_session(UUID, &glued));
+    }
+
+    /// A different session's UUID inside a stem is still a different session.
+    #[test]
+    fn a_different_uuid_does_not_match() {
+        assert!(!names_the_same_session(
+            "00000000-0000-0000-0000-000000000000",
+            STEM
+        ));
+    }
+
+    /// Only a UUID earns the suffix rule. An arbitrary short id must not join
+    /// every stem that happens to end with it.
+    #[test]
+    fn a_non_uuid_row_id_never_suffix_matches() {
+        assert!(!names_the_same_session("22", "rollout-2026-09-02T10-14-22"));
+        assert!(!names_the_same_session("session", "a-session"));
+    }
+
+    #[test]
+    fn uuid_recognition_is_strict() {
+        assert!(is_uuid(UUID));
+        assert!(
+            is_uuid("5DB811ED-CE4A-45A7-AB00-56890E111668"),
+            "upper case"
+        );
+        assert!(
+            !is_uuid("5db811ed-ce4a-45a7-ab00-56890e11166"),
+            "short group"
+        );
+        assert!(!is_uuid("5db811edce4a45a7ab0056890e111668"), "unhyphenated");
+        assert!(!is_uuid(&format!("{UUID}-extra")), "trailing group");
+        assert!(!is_uuid("5db811ed-ce4a-45a7-ab00-56890e11166g"), "non-hex");
     }
 }
