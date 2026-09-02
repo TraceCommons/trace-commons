@@ -1148,10 +1148,11 @@ mod tests {
         let endpoint = d.path().join("endpoint.json");
         std::fs::write(
             &endpoint,
-            format!(
-                r#"{{"control_url":"http://127.0.0.1:8463","token_path":"{}"}}"#,
-                token.display()
-            ),
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:8463",
+                "token_path": token,
+            }))
+            .expect("pointer serialises"),
         )
         .expect("write pointer");
         let _at = PointerAt::set(&endpoint);
@@ -1174,10 +1175,11 @@ mod tests {
         let endpoint = d.path().join("endpoint.json");
         std::fs::write(
             &endpoint,
-            format!(
-                r#"{{"control_url":"http://127.0.0.1:9999","token_path":"{}"}}"#,
-                token.display()
-            ),
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9999",
+                "token_path": token,
+            }))
+            .expect("pointer serialises"),
         )
         .expect("write pointer");
         let _at = PointerAt::set(&endpoint);
@@ -1207,10 +1209,11 @@ mod tests {
         let endpoint = d.path().join("endpoint.json");
         std::fs::write(
             &endpoint,
-            format!(
-                r#"{{"control_url":"http://127.0.0.1:8463","token_path":"{}"}}"#,
-                token.display()
-            ),
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:8463",
+                "token_path": token,
+            }))
+            .expect("pointer serialises"),
         )
         .expect("write pointer");
         let _at = PointerAt::set(&endpoint);

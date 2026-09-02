@@ -6644,12 +6644,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let token_path = dir.path().join("control.token");
         std::fs::write(&token_path, token).expect("write token");
+        // Built with serde, not by interpolation: a Windows temp path is
+        // full of backslashes, which are invalid JSON escapes, so a
+        // hand-formatted document parses on Unix and fails on Windows --
+        // and the failure looks exactly like "no proxy is running".
         std::fs::write(
             dir.path().join("endpoint.json"),
-            format!(
-                r#"{{"control_url":"http://127.0.0.1:{port}","token_path":"{}"}}"#,
-                token_path.display()
-            ),
+            serde_json::to_string(&serde_json::json!({
+                "control_url": format!("http://127.0.0.1:{port}"),
+                "token_path": token_path,
+            }))
+            .expect("pointer serialises"),
         )
         .expect("write pointer");
         dir
