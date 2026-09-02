@@ -165,6 +165,10 @@ path = "src/bin/trace-commons-tenant.rs"
 name = "trace-commons-smoke-envelope"
 path = "src/bin/trace-commons-smoke-envelope.rs"
 
+[[bin]]
+name = "trace-commons-witness"
+path = "src/bin/trace-commons-witness.rs"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
