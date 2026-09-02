@@ -151,13 +151,28 @@ AGPL section 13 obliges a network operator to offer the Corresponding Source.
 `trace-commons-ingest` does this at `GET /v1/source` -- unauthenticated, no
 tenant context, outside every fail-closed gate. Do not put it behind auth.
 
-`cargo deny check licenses` audits dependency licenses against `deny.toml`; run
-it with `--features near-ai-scorer` and `--features local-gpu-models` too, since
-those pull in different trees. A new dependency must be combinable into an
-AGPL-3.0 work: GPL-2.0-only, SSPL, or proprietary is a hard conflict. CI now
-covers all three at once by running `check licenses` and `check sources`
+`cargo deny check licenses` audits dependency licenses against `deny.toml`.
+`--features` is a **global** flag on `cargo deny`, not a `check` flag -- it goes
+before the subcommand. `cargo deny check licenses --features near-ai-scorer`
+errors with `unexpected argument '--features' found`. Run all four:
+
+```bash
+cargo deny check licenses
+cargo deny --features near-ai-scorer check licenses
+cargo deny --features local-gpu-models check licenses
+cargo deny --all-features check licenses
+```
+
+The `--all-features` run is not redundant with the other three: 54 crates
+resolve only under it -- the whole `google-cloud-*` tree behind `gcs-client` /
+`gcp-kms`, the `cudarc` / `ug-cuda` stack behind `local-gpu-models-cuda`, and
+`dcap-qvl`'s collateral client behind `near-attestation-collateral`. Do not
+delete it as duplicated coverage.
+
+A new dependency must be combinable into an AGPL-3.0 work: GPL-2.0-only, SSPL,
+or proprietary is a hard conflict. CI runs `check licenses` and `check sources`
 under `--all-features`, and runs `check advisories` under `--all-features`
-too, so the manual run above is a pre-flight, not the only enforcement.
+too, so the manual runs above are a pre-flight, not the only enforcement.
 
 If the boundary test fails, remove the dependency. Do not edit the expected sets
 in `license_boundary.rs` to match your diff -- those sets are the specification.
