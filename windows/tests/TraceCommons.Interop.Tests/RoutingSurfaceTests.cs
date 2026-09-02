@@ -1,0 +1,762 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using TraceCommons.Interop;
+using Xunit;
+
+namespace TraceCommons.Interop.Tests;
+
+/// <summary>
+/// The routing surface this shell renders: one word per tool, the
+/// declaration it writes, what the probe answered, and what the daemon is
+/// seeing.
+///
+/// Every word compared against here comes from <see cref="RoutingSurface.Copy"/>
+/// -- that is, across the real ABI from the Rust -- and never from a literal
+/// in this file. <see cref="RoutingCopyTests"/> owns the one deliberate
+/// literal pin on the vocabulary; if a word is renamed in the Rust, that test
+/// goes red and every assertion here follows the new word.
+/// </summary>
+public class RoutingSurfaceTests
+{
+    private static RoutingCopy Copy()
+    {
+        RoutingCopy? copy = RoutingSurface.Copy();
+        Assert.NotNull(copy);
+        return copy!;
+    }
+
+    private static RoutingEvidence Reachable(string json) =>
+        RoutingEvidence.Parse(json);
+
+    /// <summary>Every tool in use, nothing declared about any of them.</summary>
+    private static RoutingModes AllWatched() =>
+        new() { Claude = "watch", Codex = "watch", Gemini = "watch" };
+
+    // --- One tool, one word ---------------------------------------------
+
+    /// <summary>
+    /// The three states IronWire's answer can put a tool in, each mapping to
+    /// exactly one shared word.
+    /// </summary>
+    [Fact]
+    public void EachToolReadsExactlyOneOfTheFourSharedWords()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(copy.WordPrivate, RoutingTools.ToolWord(copy, "watch", ToolWiring.Wired));
+        Assert.Equal(copy.WordDirect, RoutingTools.ToolWord(copy, "watch", ToolWiring.NotWired));
+        Assert.Equal(copy.WordUnknown, RoutingTools.ToolWord(copy, "watch", ToolWiring.Unknown));
+
+        // "unset" watches the conventional location, which is a tool in use.
+        Assert.Equal(copy.WordPrivate, RoutingTools.ToolWord(copy, "unset", ToolWiring.Wired));
+        // A mode this build has never heard of is still a tool in use, and
+        // still gets no verdict without evidence.
+        Assert.Equal(copy.WordUnknown, RoutingTools.ToolWord(copy, "", ToolWiring.Unknown));
+    }
+
+    /// <summary>
+    /// A tool the contributor said they do not use reads "Not used" whatever
+    /// IronWire says: nothing of theirs is being read either way.
+    /// </summary>
+    [Fact]
+    public void ANotUsedToolReadsNotUsedWhateverIronWireSaid()
+    {
+        RoutingCopy copy = Copy();
+        foreach (ToolWiring wiring in new[] { ToolWiring.Wired, ToolWiring.NotWired, ToolWiring.Unknown })
+        {
+            Assert.Equal(copy.WordNotUsed, RoutingTools.ToolWord(copy, "off", wiring));
+        }
+    }
+
+    /// <summary>
+    /// The case the old single-switch word got confidently wrong, and the one
+    /// this surface exists for.
+    ///
+    /// IronWire has no <c>gemini</c> row upstream at all -- neither built in
+    /// nor in its catalogue -- so Gemini CLI reads "Not known" on a machine
+    /// where it is installed and in daily use, while the two tools IronWire
+    /// does list get real verdicts from the same answer.
+    /// </summary>
+    [Fact]
+    public void GeminiIsUnknownEvenOnAMachineWhereItIsInstalledAndInUse()
+    {
+        RoutingCopy copy = Copy();
+        RoutingEvidence evidence = Reachable(
+            """
+            {"outcome":"reachable","tools":[
+              {"id":"claude","installed":true,"wired":true},
+              {"id":"codex","installed":true,"wired":false}
+            ]}
+            """);
+
+        IReadOnlyList<RoutingToolRow> rows = RoutingTools.Rows(copy, AllWatched(), evidence);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(copy.ToolClaude, rows[0].Name);
+        Assert.Equal(copy.WordPrivate, rows[0].Word);
+        Assert.Equal(copy.ToolCodex, rows[1].Name);
+        Assert.Equal(copy.WordDirect, rows[1].Word);
+        Assert.Equal(copy.ToolGemini, rows[2].Name);
+        Assert.Equal(copy.WordUnknown, rows[2].Word);
+    }
+
+    /// <summary>
+    /// A row is read as one statement, not as a name and a stray word beside
+    /// it.
+    /// </summary>
+    [Fact]
+    public void ARowIsAnnouncedAsOneStatement()
+    {
+        RoutingCopy copy = Copy();
+        RoutingToolRow row = RoutingTools.Rows(copy, AllWatched(), null)[0];
+        Assert.Equal($"{copy.ToolClaude}: {copy.WordUnknown}", row.AccessibleLabel);
+    }
+
+    /// <summary>
+    /// The word never claims privacy from a stale answer. On anything but
+    /// <c>reachable</c> every tool reads "Not known", even when the payload
+    /// carried rows saying otherwise.
+    /// </summary>
+    [Fact]
+    public void NothingUsableAnsweredMeansNoVerdictForAnyTool()
+    {
+        RoutingCopy copy = Copy();
+        foreach (string payload in new[]
+        {
+            """{"outcome":"unreachable","port":8463,"tools":[{"id":"claude","installed":true,"wired":true}]}""",
+            """{"outcome":"token_unreadable","token_path":"C:\\Users\\x\\.ironwire\\control.token","tools":[{"id":"claude","installed":true,"wired":true}]}""",
+            """{"outcome":"something-this-build-has-never-heard-of","tools":[{"id":"claude","installed":true,"wired":true}]}""",
+        })
+        {
+            RoutingEvidence evidence = Reachable(payload);
+            Assert.Equal(ToolWiring.Unknown, evidence.WiringFor(RoutingTools.ClaudeId));
+            Assert.Equal(
+                copy.WordUnknown,
+                RoutingTools.Rows(copy, AllWatched(), evidence)[0].Word);
+        }
+    }
+
+    /// <summary>
+    /// The last line, reached directly.
+    ///
+    /// <see cref="RoutingEvidence.Parse"/> keeps no rows unless the outcome is
+    /// reachable, so this shape cannot arrive off the wire today -- which is
+    /// exactly why the guard in <c>WiringFor</c> needs a test that can build
+    /// it. Without this, deleting that guard changes no test result, and the
+    /// surface's protection against a stale verdict rests on one function
+    /// instead of two.
+    /// </summary>
+    [Fact]
+    public void RowsHeldBesideAnOutcomeThatIsNotReachableStillGetNoVerdict()
+    {
+        var rows = new Dictionary<string, RoutedTool>(StringComparer.Ordinal)
+        {
+            [RoutingTools.ClaudeId] = new RoutedTool(Installed: true, Wired: true),
+        };
+
+        foreach (RoutingProbeKind kind in new[]
+                 { RoutingProbeKind.Unreachable, RoutingProbeKind.TokenUnreadable, RoutingProbeKind.Unknown })
+        {
+            var evidence = new RoutingEvidence(new RoutingProbe(kind, null, null), rows);
+            Assert.Equal(ToolWiring.Unknown, evidence.WiringFor(RoutingTools.ClaudeId));
+            Assert.Equal(
+                Copy().WordUnknown,
+                RoutingTools.Rows(Copy(), AllWatched(), evidence)[0].Word);
+        }
+    }
+
+    /// <summary>
+    /// No answer held at all is the same amount of evidence about every tool:
+    /// none.
+    /// </summary>
+    [Fact]
+    public void NoEvidenceHeldMeansNoVerdict()
+    {
+        RoutingCopy copy = Copy();
+        foreach (RoutingToolRow row in RoutingTools.Rows(copy, AllWatched(), null))
+        {
+            Assert.Equal(copy.WordUnknown, row.Word);
+        }
+    }
+
+    /// <summary>
+    /// IronWire saying a tool is not present, while this app is watching that
+    /// tool's sessions, is two detectors disagreeing about one machine. That
+    /// is not evidence for a verdict.
+    /// </summary>
+    [Fact]
+    public void AToolIronWireSaysIsAbsentGetsNoVerdict()
+    {
+        RoutingEvidence evidence = Reachable(
+            """{"outcome":"reachable","tools":[{"id":"claude","installed":false,"wired":false}]}""");
+        Assert.Equal(ToolWiring.Unknown, evidence.WiringFor(RoutingTools.ClaudeId));
+    }
+
+    /// <summary>
+    /// An answer that arrives but lists nothing -- a body over the daemon's
+    /// size bound, or one it cannot parse -- is <c>reachable</c> with no
+    /// rows. The proxy answered, and that is no evidence about any tool.
+    /// </summary>
+    [Fact]
+    public void AReachableAnswerWithNoRowsIsStillNoVerdict()
+    {
+        RoutingEvidence evidence = Reachable("""{"outcome":"reachable","tools":[]}""");
+        Assert.Equal(RoutingProbeKind.Reachable, evidence.Outcome.Kind);
+        foreach (string id in new[] { RoutingTools.ClaudeId, RoutingTools.CodexId, RoutingTools.GeminiId })
+        {
+            Assert.Equal(ToolWiring.Unknown, evidence.WiringFor(id));
+        }
+    }
+
+    /// <summary>
+    /// The declaration is not an input to any word. Declaring IronWire in
+    /// this app has no causal relation to whether a tool is configured to
+    /// send through it, and reading the switch is exactly what let a
+    /// contributor see the wired word on the same card as "Nothing answered
+    /// on port 8463".
+    ///
+    /// Structural, because the failure was a *reachable* input rather than a
+    /// wrong branch: <see cref="RoutingTools.Rows"/> takes the modes and the
+    /// evidence, and there is no overload that takes a declaration.
+    /// </summary>
+    [Fact]
+    public void TheDeclarationSwitchIsNotAnInputToAnyWord()
+    {
+        var parameters = typeof(RoutingTools)
+            .GetMethod(nameof(RoutingTools.Rows))!
+            .GetParameters()
+            .Select(p => p.ParameterType)
+            .ToArray();
+        Assert.Equal(
+            new[] { typeof(RoutingCopy), typeof(RoutingModes), typeof(RoutingEvidence) },
+            parameters);
+
+        var wordParameters = typeof(RoutingTools)
+            .GetMethod(nameof(RoutingTools.ToolWord))!
+            .GetParameters()
+            .Select(p => p.ParameterType)
+            .ToArray();
+        Assert.Equal(
+            new[] { typeof(RoutingCopy), typeof(string), typeof(ToolWiring) },
+            wordParameters);
+    }
+
+    // --- What the probe answered -----------------------------------------
+
+    [Fact]
+    public void TheThreeProbeOutcomesAreReadWithTheDaemonsOwnVocabulary()
+    {
+        Assert.Equal(
+            RoutingProbeKind.Reachable,
+            RoutingProbe.Parse("""{"outcome":"reachable","tools":[]}""").Kind);
+
+        RoutingProbe unreachable = RoutingProbe.Parse("""{"outcome":"unreachable","port":8463}""");
+        Assert.Equal(RoutingProbeKind.Unreachable, unreachable.Kind);
+        Assert.Equal((ushort)8463, unreachable.Port);
+
+        RoutingProbe token = RoutingProbe.Parse(
+            """{"outcome":"token_unreadable","token_path":"C:\\Users\\x\\.ironwire\\control.token"}""");
+        Assert.Equal(RoutingProbeKind.TokenUnreadable, token.Kind);
+        Assert.Equal(@"C:\Users\x\.ironwire\control.token", token.TokenPath);
+    }
+
+    /// <summary>
+    /// An answer this build cannot read claims nothing about the proxy in
+    /// either direction, and neither does no answer at all.
+    /// </summary>
+    [Fact]
+    public void AnUnreadableAnswerClaimsNothing()
+    {
+        foreach (string payload in new[] { null!, "", "   ", "{ not json", "{}", """{"outcome":"vintage"}""" })
+        {
+            RoutingProbe probe = RoutingProbe.Parse(payload);
+            Assert.Equal(RoutingProbeKind.Unknown, probe.Kind);
+            Assert.Null(probe.Port);
+            Assert.Null(probe.TokenPath);
+        }
+    }
+
+    /// <summary>
+    /// A port the daemon did not report must not become port 0. The Rust
+    /// sentence for "no port was tried" names none, and a 0 here would send
+    /// somebody to check a port that does not exist.
+    /// </summary>
+    [Fact]
+    public void AnUnreachableOutcomeWithNoPortDoesNotInventOne()
+    {
+        RoutingProbe probe = RoutingProbe.Parse("""{"outcome":"unreachable"}""");
+        Assert.Equal(RoutingProbeKind.Unreachable, probe.Kind);
+        Assert.Null(probe.Port);
+
+        string line = RoutingTools.ProbeLine(Copy(), probe);
+        Assert.DoesNotContain("0", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The token-unreadable outcome names the absolute path the daemon
+    /// reported. That path is the one fact that makes this fixable: a GUI
+    /// never sees IRONWIRE_HOME, so it reads the conventional folder whatever
+    /// a shell profile says.
+    /// </summary>
+    [Fact]
+    public void TheTokenOutcomeNamesTheAbsolutePathTheDaemonReported()
+    {
+        RoutingCopy copy = Copy();
+        const string Path = @"C:\Users\x\.ironwire\control.token";
+        string line = RoutingTools.ProbeLine(
+            copy,
+            RoutingProbe.Parse($$"""{"outcome":"token_unreadable","token_path":"C:\\Users\\x\\.ironwire\\control.token"}"""));
+        Assert.Contains(Path, line, StringComparison.Ordinal);
+
+        // Absent, not empty, when nothing resolved at all: a different
+        // sentence, and it names no path.
+        string unnamed = RoutingTools.ProbeLine(
+            copy,
+            RoutingProbe.Parse("""{"outcome":"token_unreadable"}"""));
+        Assert.DoesNotContain(@"C:\Users", unnamed, StringComparison.Ordinal);
+        Assert.NotEqual(line, unnamed);
+    }
+
+    /// <summary>
+    /// One outcome, one sentence, and the two failures that are not facts
+    /// about IronWire say so rather than sending anyone to look at a port or
+    /// a file that is fine.
+    /// </summary>
+    [Fact]
+    public void EachOutcomeGetsItsOwnSentence()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(
+            copy.ProbeReachable,
+            RoutingTools.ProbeLine(copy, RoutingProbe.Parse("""{"outcome":"reachable","tools":[]}""")));
+        Assert.Equal(
+            copy.CheckUnavailable,
+            RoutingTools.ProbeLine(copy, RoutingProbe.Parse("{ not json")));
+
+        string unreachable = RoutingTools.ProbeLine(
+            copy,
+            RoutingProbe.Parse("""{"outcome":"unreachable","port":8463}"""));
+        Assert.Contains("8463", unreachable, StringComparison.Ordinal);
+
+        foreach (string sentence in new[] { copy.ProbeReachable, copy.CheckUnavailable, unreachable })
+        {
+            Assert.NotEmpty(sentence);
+        }
+    }
+
+    // --- What the daemon is seeing ---------------------------------------
+
+    [Fact]
+    public void TheDaemonsThreeStatesEachGetTheirOwnSentence()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(copy.StateWaiting, RoutingTools.StateLine(copy, RoutingTools.AwaitingRows));
+        Assert.Equal(copy.StateReading, RoutingTools.StateLine(copy, RoutingTools.RowsSeen));
+        Assert.Equal(copy.StateOff, RoutingTools.StateLine(copy, RoutingTools.NotDeclared));
+        // A state this build has never heard of says what the off state says:
+        // it claims nothing.
+        Assert.Equal(copy.StateOff, RoutingTools.StateLine(copy, "brand-new-state"));
+        Assert.Equal(copy.StateOff, RoutingTools.StateLine(copy, ""));
+    }
+
+    /// <summary>
+    /// <c>awaiting_rows</c> is not a fault. A reader built a moment ago
+    /// starts cold by construction, so this is the state a contributor sees
+    /// immediately after turning the switch on or changing the port. Painting
+    /// it as an error would accuse a working proxy of being broken at exactly
+    /// that moment.
+    /// </summary>
+    [Fact]
+    public void AwaitingRowsIsHeldAndNeverAFault()
+    {
+        RoutingCopy copy = Copy();
+        Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.Equal(copy.StateWaiting, RoutingTools.StateLine(copy, RoutingTools.AwaitingRows));
+        Assert.NotEqual(copy.CheckUnavailable, RoutingTools.StateLine(copy, RoutingTools.AwaitingRows));
+
+        Assert.Equal(RoutingTone.Clear, RoutingTools.StateTone(RoutingTools.RowsSeen));
+        Assert.Equal(RoutingTone.Neutral, RoutingTools.StateTone(RoutingTools.NotDeclared));
+    }
+
+    /// <summary>
+    /// "Last checked" is a per-process stamp on the running daemon: it starts
+    /// empty again every time that process comes back up. Never an install
+    /// date and never a "connected since".
+    /// </summary>
+    [Fact]
+    public void LastCheckedReadsTheTimestampGivenAndNothingElse()
+    {
+        var now = new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(
+            "Last checked an hour ago",
+            RoutingTools.LastCheckedLine(now.AddHours(-1), now));
+        Assert.Equal(
+            "Last checked yesterday",
+            RoutingTools.LastCheckedLine(now.AddDays(-1), now));
+    }
+
+    /// <summary>
+    /// The stamp is only shown where it says something: never on a state that
+    /// has had no answer at all, and never rendered as a half-sentence.
+    /// </summary>
+    [Fact]
+    public void LastCheckedIsWithheldWhereThereHasBeenNoAnswer()
+    {
+        var now = new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero);
+        Assert.Null(RoutingTools.LastCheckedLine(null, now));
+
+        RoutingStatusLine undeclared =
+            RoutingTools.StatusLine(Copy(), RoutingTools.NotDeclared, now.AddHours(-1), now);
+        Assert.Null(undeclared.LastChecked);
+
+        RoutingStatusLine waiting =
+            RoutingTools.StatusLine(Copy(), RoutingTools.AwaitingRows, now.AddHours(-1), now);
+        Assert.Equal("Last checked an hour ago", waiting.LastChecked);
+    }
+
+    // --- What this shell writes ------------------------------------------
+
+    /// <summary>
+    /// One <c>set_settings</c> key per edit, and the key is the daemon's.
+    /// <c>set_settings</c> refuses an object holding a key it does not
+    /// recognise, so a drift here is a silent no-write.
+    /// </summary>
+    [Fact]
+    public void TheDeclarationIsWrittenAsExactlyOneKey()
+    {
+        using JsonDocument doc = JsonDocument.Parse(
+            RoutingTools.SerializeDeclaration(true, 8463, tokenDir: null));
+        Assert.Single(doc.RootElement.EnumerateObject());
+        JsonElement declaration = doc.RootElement.GetProperty("ironwire");
+        Assert.Equal("watch", declaration.GetProperty("mode").GetString());
+        Assert.Equal(8463, declaration.GetProperty("port").GetInt32());
+        Assert.False(declaration.TryGetProperty("token_dir", out _));
+    }
+
+    /// <summary>
+    /// Off is <c>null</c>, and the key is still there.
+    /// </summary>
+    /// <remarks>
+    /// Two distinct assertions. Off is not an object with a mode: there is no
+    /// conventional fallback for a local service, so absence of a declaration
+    /// is the off state. But the KEY must still be written, because
+    /// <c>set_settings</c> changes only the keys it is given -- an object with
+    /// no <c>ironwire</c> key reads as "never asked" and leaves whatever was
+    /// declared before in place, so a contributor turning the switch off would
+    /// have nothing happen. The macOS shell pins the same pair in
+    /// <c>testTurningItOffWritesNullAndNotAnAbsentKey</c>.
+    /// </remarks>
+    [Fact]
+    public void TurningItOffWritesNullAndNotAnAbsentKey()
+    {
+        using JsonDocument doc = JsonDocument.Parse(
+            RoutingTools.SerializeDeclaration(false, 8463, @"C:\ironwire"));
+        Assert.True(
+            doc.RootElement.TryGetProperty("ironwire", out JsonElement declaration),
+            "off must write the key, not omit it: an omitted key leaves the old declaration standing");
+        Assert.Equal(JsonValueKind.Null, declaration.ValueKind);
+    }
+
+    /// <summary>
+    /// A displayed default must never become a declaration. The port field
+    /// shows IronWire's conventional number so nobody has to know it, and
+    /// nothing is written until the contributor turns the switch on: a
+    /// default that wrote itself would have this window announce a local
+    /// service nobody mentioned.
+    /// </summary>
+    [Fact]
+    public void TheDisplayedDefaultPortIsNotADeclaration()
+    {
+        Assert.Equal((ushort)8463, RoutingTools.DefaultPort);
+        using JsonDocument doc = JsonDocument.Parse(
+            RoutingTools.SerializeDeclaration(false, RoutingTools.DefaultPort, null));
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("ironwire").ValueKind);
+    }
+
+    /// <summary>
+    /// An empty folder box is left out rather than sent as an empty string:
+    /// the daemon refuses an empty string outright, and absence is what falls
+    /// back to the conventional location.
+    /// </summary>
+    [Fact]
+    public void AnEmptyFolderBoxIsOmittedRatherThanSentEmpty()
+    {
+        foreach (string? empty in new[] { null, "", "   " })
+        {
+            using JsonDocument declaration = JsonDocument.Parse(
+                RoutingTools.SerializeDeclaration(true, 8463, empty));
+            Assert.False(
+                declaration.RootElement.GetProperty("ironwire").TryGetProperty("token_dir", out _));
+
+            using JsonDocument probe = JsonDocument.Parse(
+                RoutingTools.SerializeProbeParams(8463, empty));
+            Assert.False(probe.RootElement.TryGetProperty("token_dir", out _));
+        }
+
+        using JsonDocument named = JsonDocument.Parse(
+            RoutingTools.SerializeDeclaration(true, 8463, @"  C:\ironwire  "));
+        Assert.Equal(
+            @"C:\ironwire",
+            named.RootElement.GetProperty("ironwire").GetProperty("token_dir").GetString());
+    }
+
+    [Fact]
+    public void TheProbeIsAskedAboutTheDeclaredPort()
+    {
+        using JsonDocument doc = JsonDocument.Parse(
+            RoutingTools.SerializeProbeParams(9001, @"C:\ironwire"));
+        Assert.Equal(9001, doc.RootElement.GetProperty("port").GetInt32());
+        Assert.Equal(@"C:\ironwire", doc.RootElement.GetProperty("token_dir").GetString());
+    }
+
+    /// <summary>
+    /// The method name is the daemon's. A name that is not in its pinned
+    /// METHODS array is a call that can only ever be refused.
+    /// </summary>
+    [Fact]
+    public void TheProbeMethodIsTheDaemonsOwn()
+    {
+        Assert.Equal("probe_routed_tools", DaemonProtocol.Methods.ProbeRoutedTools);
+    }
+
+    // --- What the daemon told us -----------------------------------------
+
+    /// <summary>
+    /// The <c>get_settings</c> fields this surface reads. <c>*_root_configured</c>
+    /// cannot carry the distinction: it is false both for a source pointed at
+    /// the conventional location and for one the contributor said they do not
+    /// use, and only the second reads "Not used".
+    /// </summary>
+    [Fact]
+    public void TheSettingsSnapshotCarriesTheSourceModesAndTheDeclaration()
+    {
+        DaemonSettingsSnapshot? settings = JsonSerializer.Deserialize<DaemonSettingsSnapshot>(
+            """
+            {"claude_source_mode":"watch","codex_source_mode":"off","gemini_source_mode":"unset",
+             "ironwire":{"mode":"watch","port":9001,"token_dir":"C:\\ironwire"}}
+            """);
+        Assert.NotNull(settings);
+        Assert.Equal("watch", settings!.ClaudeSourceMode);
+        Assert.Equal("off", settings.CodexSourceMode);
+        Assert.Equal("unset", settings.GeminiSourceMode);
+        Assert.True(settings.RoutingDeclared);
+        Assert.Equal((ushort)9001, settings.Routing!.Port);
+        Assert.Equal(@"C:\ironwire", settings.Routing.TokenDir);
+    }
+
+    /// <summary>
+    /// No block at all, and a block that says off, are both off. Absent means
+    /// off: there is no conventional fallback for a local service.
+    /// </summary>
+    [Fact]
+    public void AnAbsentOrOffDeclarationIsOff()
+    {
+        foreach (string payload in new[] { "{}", """{"ironwire":null}""", """{"ironwire":{"mode":"off"}}""" })
+        {
+            DaemonSettingsSnapshot? settings =
+                JsonSerializer.Deserialize<DaemonSettingsSnapshot>(payload);
+            Assert.NotNull(settings);
+            Assert.False(settings!.RoutingDeclared);
+        }
+    }
+
+    /// <summary>
+    /// <c>status.routing</c>. A daemon that predates the block reports
+    /// nothing, and that reads as the state that claims nothing.
+    /// </summary>
+    [Fact]
+    public void TheStatusCarriesTheRoutingStateAndTheStamp()
+    {
+        DaemonStatus? status = JsonSerializer.Deserialize<DaemonStatus>(
+            """{"routing":{"state":"rows_seen","last_refresh_at":"2026-09-02T11:00:00Z"}}""");
+        Assert.NotNull(status);
+        Assert.Equal(RoutingTools.RowsSeen, status!.Routing!.State);
+        Assert.Equal(
+            new DateTimeOffset(2026, 9, 2, 11, 0, 0, TimeSpan.Zero),
+            status.Routing.LastRefreshAt);
+
+        DaemonStatus? older = JsonSerializer.Deserialize<DaemonStatus>("{}");
+        Assert.NotNull(older);
+        Assert.Equal(string.Empty, older!.RoutingState);
+        Assert.Equal(Copy().StateOff, RoutingTools.StateLine(Copy(), older.RoutingState));
+    }
+
+    // --- Sweeps -----------------------------------------------------------
+
+    /// <summary>
+    /// Everything this surface can say, in one list, for the sweeps below.
+    /// </summary>
+    private static IReadOnlyList<string> EverythingThisSurfaceSays()
+    {
+        RoutingCopy copy = Copy();
+        var now = new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero);
+        var said = new List<string>();
+        foreach (var property in typeof(RoutingCopy).GetProperties()
+                     .Where(p => p.PropertyType == typeof(string)))
+        {
+            said.Add((string)property.GetValue(copy)!);
+        }
+
+        foreach (string outcome in new[]
+        {
+            """{"outcome":"reachable","tools":[]}""",
+            """{"outcome":"unreachable","port":8463}""",
+            """{"outcome":"unreachable"}""",
+            """{"outcome":"token_unreadable","token_path":"C:\\Users\\x\\.ironwire\\control.token"}""",
+            """{"outcome":"token_unreadable"}""",
+            "{ not json",
+        })
+        {
+            said.Add(RoutingTools.ProbeLine(copy, RoutingProbe.Parse(outcome)));
+        }
+
+        foreach (string state in new[]
+                 { RoutingTools.NotDeclared, RoutingTools.AwaitingRows, RoutingTools.RowsSeen, "vintage" })
+        {
+            RoutingStatusLine line = RoutingTools.StatusLine(copy, state, now.AddHours(-1), now);
+            said.Add(line.Text);
+            if (line.LastChecked is not null)
+            {
+                said.Add(line.LastChecked);
+            }
+        }
+
+        RoutingEvidence evidence = Reachable(
+            """
+            {"outcome":"reachable","tools":[
+              {"id":"claude","installed":true,"wired":true},
+              {"id":"codex","installed":true,"wired":false}
+            ]}
+            """);
+        foreach (RoutingToolRow row in RoutingTools.Rows(copy, AllWatched(), evidence))
+        {
+            said.Add(row.Name);
+            said.Add(row.Word);
+            said.Add(row.AccessibleLabel);
+        }
+
+        return said;
+    }
+
+    /// <summary>
+    /// No restart notice. Declarations apply on the next poll, and nothing
+    /// here waits on the app being started again -- a sentence implying
+    /// otherwise would be false as well as discouraging.
+    /// </summary>
+    [Fact]
+    public void NothingOnThisSurfaceAsksForARestart()
+    {
+        foreach (string said in EverythingThisSurfaceSays())
+        {
+            string lower = said.ToLowerInvariant();
+            foreach (string word in new[]
+                     { "restart", "relaunch", "reopen", "reboot", "sign out", "log out", "quit and" })
+            {
+                Assert.DoesNotContain(word, lower, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
+    /// This surface is for somebody with no invite. Nothing about corpora,
+    /// credits, ownership, contribution or money appears on it -- not greyed
+    /// out, and not as a teaser.
+    /// </summary>
+    [Fact]
+    public void NothingOnThisSurfaceMentionsCorporaCreditsOrMoney()
+    {
+        foreach (string said in EverythingThisSurfaceSays())
+        {
+            string lower = said.ToLowerInvariant();
+            foreach (string word in new[]
+                     {
+                         "credit", "corpus", "corpora", "reward", "payment", "paid", "money",
+                         "earn", "invite", "ownership", "royalt", "dataset", "$",
+                     })
+            {
+                Assert.DoesNotContain(word, lower, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
+    /// No word on this surface denies privacy. "Private" is a substring of
+    /// "Not private", the same shape that let a <c>Contains</c> on
+    /// "reachable" match "unreachable" on this surface, so the not-wired word
+    /// is "Sends direct" and this is what stops anybody tidying it back.
+    ///
+    /// Swept over everything the surface can say, not just the four words: a
+    /// sentence is as capable of carrying the denial as a chip.
+    /// </summary>
+    [Fact]
+    public void NothingOnThisSurfaceDeniesPrivacy()
+    {
+        RoutingCopy copy = Copy();
+        foreach (string said in EverythingThisSurfaceSays())
+        {
+            string lower = said.ToLowerInvariant();
+            foreach (string denial in new[] { "not private", "isn't private", "is not private", "no privacy" })
+            {
+                Assert.DoesNotContain(denial, lower, StringComparison.Ordinal);
+            }
+        }
+
+        Assert.Contains("privat", copy.WordPrivate.ToLowerInvariant(), StringComparison.Ordinal);
+        foreach (string word in new[] { copy.WordDirect, copy.WordUnknown, copy.WordNotUsed })
+        {
+            Assert.DoesNotContain("privat", word.ToLowerInvariant(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// This shell authors no wording on this surface.
+    ///
+    /// Read from the implementation's own source rather than asserted about
+    /// its behaviour: a hand-written word that happened to match the Rust
+    /// would pass every other test in this file, and would then survive a
+    /// rename on the Rust side in exactly one of the three shells. Every
+    /// string literal in <c>RoutingTools.cs</c> must be a wire value -- a
+    /// JSON key, a daemon state name, an IronWire tool id -- and the
+    /// allow-list below is the whole of what that may be.
+    /// </summary>
+    [Fact]
+    public void NoWordingIsAuthoredInThisShell()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "RoutingTools.cs.txt");
+        Assert.True(File.Exists(path), $"the implementation source was not copied to {path}");
+        string source = File.ReadAllText(path);
+
+        // Strip doc comments and line comments: prose about the wire may
+        // quote it, and nothing in a comment is ever rendered.
+        var uncommented = string.Join(
+            "\n",
+            source.Split('\n').Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            // set_settings / probe_routed_tools wire keys and values.
+            "ironwire", "mode", "watch", "off", "port", "token_dir",
+            "outcome", "reachable", "unreachable", "token_unreadable",
+            "token_path", "tools", "id", "installed", "wired",
+            // The daemon's routing states, and the status block they arrive in.
+            "not_declared", "awaiting_rows", "rows_seen",
+            "state", "last_refresh_at",
+            // IronWire's own stable tool ids.
+            "claude", "codex", "gemini",
+            // Punctuation, not wording.
+            ": ",
+        };
+
+        foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))
+        {
+            string literal = match.Value[1..^1];
+            Assert.True(
+                allowed.Contains(literal),
+                $"\"{literal}\" is a string literal in RoutingTools.cs that is not a wire value. "
+                + "Wording on this surface comes from routing_copy.rs across the ABI.");
+        }
+    }
+}

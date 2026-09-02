@@ -67,6 +67,33 @@ public sealed partial class SettingsView : UserControl
         }
     }
 
+    /// <summary>
+    /// The declaration switch. Written the moment it moves, like every other
+    /// knob on this screen.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here waits on a restart: the daemon picks the declaration up on
+    /// its next poll, which is what the line under the switch says.
+    /// </remarks>
+    private async void OnRoutingToggled(object sender, RoutedEventArgs e)
+    {
+        if (sender is ToggleSwitch toggle && Settings.IsLoaded)
+        {
+            await Settings.SetRoutingEnabledAsync(toggle.IsOn);
+        }
+    }
+
+    /// <summary>
+    /// Rewrites the declaration from the port and folder boxes and asks
+    /// again. Those two are written on this button rather than on every
+    /// keystroke, which is why they are the only controls on this screen that
+    /// are not live.
+    /// </summary>
+    private async void OnRoutingApply(object sender, RoutedEventArgs e)
+    {
+        await Settings.ApplyRoutingAsync();
+    }
+
     private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
         if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))

@@ -145,6 +145,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// predates the field reports an unspent budget blocking nothing, which
     /// is the only safe reading of silence here.
     let dailyBudget: DailyBudget
+    /// What the daemon is seeing from the declared local proxy, in three
+    /// states. Not part of `health`: none of the three is a fault.
+    let routing: RoutingStatus
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -156,6 +159,7 @@ struct DaemonStatus: Decodable, Equatable {
         case nextDigestAt = "next_digest_at"
         case health
         case dailyBudget = "daily_budget"
+        case routing
     }
 
     init(
@@ -167,7 +171,8 @@ struct DaemonStatus: Decodable, Equatable {
         queueDepth: Int,
         nextDigestAt: Date?,
         health: DaemonHealth,
-        dailyBudget: DailyBudget = .unknown
+        dailyBudget: DailyBudget = .unknown,
+        routing: RoutingStatus = .notDeclared
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -178,6 +183,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.nextDigestAt = nextDigestAt
         self.health = health
         self.dailyBudget = dailyBudget
+        self.routing = routing
     }
 
     init(from decoder: Decoder) throws {
@@ -192,6 +198,9 @@ struct DaemonStatus: Decodable, Equatable {
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)
         dailyBudget = try c.decodeIfPresent(DailyBudget.self, forKey: .dailyBudget) ?? .unknown
+        // A daemon that predates this field has declared no proxy, which is
+        // exactly what the fallback says.
+        routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
     }
 
     static let unknown = DaemonStatus(
@@ -204,6 +213,41 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt: nil,
         health: DaemonHealth(lastErrorLabel: nil, since: nil)
     )
+}
+
+/// `status`'s `routing` sub-object: what the daemon is seeing from the
+/// declared proxy, and when it last got an answer.
+///
+/// `lastRefreshAt` is a per-process stamp on the running daemon. It is
+/// never an install date and never a connected-since: it starts empty again
+/// every time that process comes back up, which is why the surface only
+/// shows it on a state that has actually had an answer.
+struct RoutingStatus: Decodable, Equatable {
+    let state: String
+    let lastRefreshAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case lastRefreshAt = "last_refresh_at"
+    }
+
+    init(state: String, lastRefreshAt: Date?) {
+        self.state = state
+        self.lastRefreshAt = lastRefreshAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decodeIfPresent(String.self, forKey: .state) ?? RoutingStatus.notDeclaredState
+        lastRefreshAt = try c.decodeIfPresent(Date.self, forKey: .lastRefreshAt)
+    }
+
+    /// The daemon's own spelling, from `daemon::ipc`'s
+    /// `ROUTING_NOT_DECLARED`. Taken from `RoutingSurface` rather than
+    /// respelled here: the surface maps this state to a line, and two
+    /// spellings of it would be two readings of silence.
+    static let notDeclaredState = RoutingSurface.State.notDeclared
+    static let notDeclared = RoutingStatus(state: notDeclaredState, lastRefreshAt: nil)
 }
 
 // MARK: - Preview
@@ -430,6 +474,29 @@ struct DaemonSettingsView: Decodable, Equatable {
     let nearAIConfigured: Bool
     let claudeRootConfigured: Bool
     let codexRootConfigured: Bool
+    /// What the contributor said about each agent's sessions: `watch`,
+    /// `off`, or `unset`. Optional because a daemon that predates them
+    /// answers neither, and the surface that reads them treats silence as
+    /// `unset` -- a tool in use -- rather than as "not used".
+    let claudeSourceMode: String?
+    let codexSourceMode: String?
+    let geminiSourceMode: String?
+    /// The local-proxy declaration this daemon is holding, or nil for none.
+    /// Nil means off, with no fallback: connecting to a loopback port
+    /// because nobody said otherwise would probe a service the contributor
+    /// never mentioned.
+    let ironwire: IronWireDeclarationView?
+
+    /// The three source modes as the routing surface takes them. Absent
+    /// means `unset`, which watches the conventional location and is
+    /// therefore a tool in use -- never "not used".
+    var routingSourceModes: RoutingSourceModes {
+        RoutingSourceModes(
+            claude: claudeSourceMode ?? "unset",
+            codex: codexSourceMode ?? "unset",
+            gemini: geminiSourceMode ?? "unset"
+        )
+    }
 
     enum CodingKeys: String, CodingKey {
         case quiescenceSecs = "quiescence_secs"
@@ -441,6 +508,28 @@ struct DaemonSettingsView: Decodable, Equatable {
         case nearAIConfigured = "near_ai_configured"
         case claudeRootConfigured = "claude_root_configured"
         case codexRootConfigured = "codex_root_configured"
+        case claudeSourceMode = "claude_source_mode"
+        case codexSourceMode = "codex_source_mode"
+        case geminiSourceMode = "gemini_source_mode"
+        case ironwire
+    }
+}
+
+/// The `ironwire` declaration as `get_settings` reports it back.
+///
+/// Serialized by the daemon tagged on `mode`, so `off` can never be
+/// mistaken for a port. `token_dir` is a directory the contributor named --
+/// never the credential inside it, which is read at call time and never
+/// enters the settings file.
+struct IronWireDeclarationView: Decodable, Equatable {
+    let mode: String
+    let port: UInt16?
+    let tokenDir: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case port
+        case tokenDir = "token_dir"
     }
 }
 
