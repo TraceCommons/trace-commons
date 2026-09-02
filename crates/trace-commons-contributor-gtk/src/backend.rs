@@ -268,6 +268,60 @@ impl Backend {
 pub struct DaemonEvent {
     pub name: String,
     pub entry_id: Option<String>,
+    /// Populated for exactly one event, `digest_due`, and `None` for every
+    /// other.
+    ///
+    /// This is the second narrow exception to "names only", added for the
+    /// same shape of reason as `entry_id` and held to the same limit. A
+    /// digest can now be about traces that were contributed without ever
+    /// being queued, and an armed project queues nothing -- so the shell
+    /// cannot recover these numbers by looking at its own entries, the way
+    /// it recovers the waiting count. It is counts and labels: no path, no
+    /// id, no state the shell then reasons from. Everything else on the
+    /// payload stays unread.
+    pub digest: Option<DigestFacts>,
+}
+
+/// What a `digest_due` event says happened since the last digest.
+///
+/// Labels, not keys: these are the daemon's own display strings, already
+/// reduced from paths, and they go straight into notification text that a
+/// desktop environment may persist.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DigestFacts {
+    pub contributed: usize,
+    pub contributed_projects: Vec<String>,
+    pub credit_pending: f32,
+}
+
+/// `digest_due`'s `data` is built in `daemon::tick`. Absent fields decode as
+/// zero and an empty list, which degrades this to the waiting-only digest
+/// that shipped before rather than to a wrong number -- the case that
+/// matters when a new shell attaches to an older daemon.
+fn digest_facts(name: &str, data: &serde_json::Value) -> Option<DigestFacts> {
+    if name != trace_commons_contributor::daemon::ipc::EVENT_DIGEST_DUE {
+        return None;
+    }
+    Some(DigestFacts {
+        contributed: data
+            .get("contributed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        contributed_projects: data
+            .get("contributed_projects")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        credit_pending: data
+            .get("credit_pending")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32,
+    })
 }
 
 /// `preview_ready`'s `data` is always `PreviewOutcome::to_value`, which
@@ -298,6 +352,7 @@ impl EventStream for BroadcastEvents {
         match self.rx.blocking_recv() {
             Ok(event) => Some(DaemonEvent {
                 entry_id: preview_ready_entry_id(&event.event, &event.data),
+                digest: digest_facts(&event.event, &event.data),
                 name: event.event,
             }),
             // Lagged: the shell's answer to a missed event is the same as
@@ -305,6 +360,7 @@ impl EventStream for BroadcastEvents {
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Some(DaemonEvent {
                 name: "resync_required".to_string(),
                 entry_id: None,
+                digest: None,
             }),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
         }
@@ -348,13 +404,13 @@ impl EventStream for SocketEvents {
             // Events carry no `id`; that is how the contract says to tell
             // them from the `subscribe` response sharing this connection.
             if let Some(name) = value.get("event").and_then(|v| v.as_str()) {
-                let entry_id = preview_ready_entry_id(
-                    name,
-                    value.get("data").unwrap_or(&serde_json::Value::Null),
-                );
+                let data = value.get("data").unwrap_or(&serde_json::Value::Null);
+                let entry_id = preview_ready_entry_id(name, data);
+                let digest = digest_facts(name, data);
                 return Some(DaemonEvent {
                     name: name.to_string(),
                     entry_id,
+                    digest,
                 });
             }
         }

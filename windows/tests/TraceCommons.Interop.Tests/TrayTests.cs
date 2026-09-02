@@ -65,7 +65,7 @@ public class DigestCadenceTests
     public void NothingWaitingMeansNoNotificationAtAll()
     {
         var cadence = new DigestCadence();
-        Assert.False(cadence.TryClaim(0, Now(0)));
+        Assert.False(cadence.TryClaim(0, 0, Now(0)));
         Assert.Null(cadence.LastClaimedAt);
     }
 
@@ -75,30 +75,30 @@ public class DigestCadenceTests
         // The promise is "none at all if there's nothing waiting", not "the
         // empty one counts as your notification for the next four hours".
         var cadence = new DigestCadence();
-        Assert.False(cadence.TryClaim(0, Now(0)));
-        Assert.True(cadence.TryClaim(3, Now(1)));
+        Assert.False(cadence.TryClaim(0, 0, Now(0)));
+        Assert.True(cadence.TryClaim(3, 0, Now(1)));
     }
 
     [Fact]
     public void TheFirstDigestWithPendingWorkIsAllowed()
     {
         var cadence = new DigestCadence();
-        Assert.True(cadence.TryClaim(1, Now(0)));
+        Assert.True(cadence.TryClaim(1, 0, Now(0)));
     }
 
     [Fact]
     public void AtMostOneNotificationEveryFourHours()
     {
         var cadence = new DigestCadence();
-        Assert.True(cadence.TryClaim(3, Now(0)));
+        Assert.True(cadence.TryClaim(3, 0, Now(0)));
 
         // Every minute for just under four hours: not one of them may pass.
         for (int minutes = 1; minutes < 240; minutes++)
         {
-            Assert.False(cadence.TryClaim(3, Now(minutes)));
+            Assert.False(cadence.TryClaim(3, 0, Now(minutes)));
         }
 
-        Assert.True(cadence.TryClaim(3, Now(240)));
+        Assert.True(cadence.TryClaim(3, 0, Now(240)));
     }
 
     [Fact]
@@ -111,18 +111,18 @@ public class DigestCadenceTests
     public void AClockThatWentBackwardsCanOnlySuppress()
     {
         var cadence = new DigestCadence();
-        Assert.True(cadence.TryClaim(2, Now(600)));
+        Assert.True(cadence.TryClaim(2, 0, Now(600)));
 
         // A manual clock change or a bad RTC after a resume. The wrong
         // answer here is a burst of notifications.
-        Assert.False(cadence.TryClaim(2, Now(0)));
+        Assert.False(cadence.TryClaim(2, 0, Now(0)));
     }
 
     [Fact]
     public void ClaimingStampsSoAForgottenRecordCannotHappen()
     {
         var cadence = new DigestCadence();
-        cadence.TryClaim(1, Now(0));
+        cadence.TryClaim(1, 0, Now(0));
         Assert.Equal(Now(0), cadence.LastClaimedAt);
     }
 

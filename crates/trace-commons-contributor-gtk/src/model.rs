@@ -387,6 +387,21 @@ impl ApproveResult {
     }
 }
 
+/// `arming_suggestion`: the one project worth offering to arm right now.
+///
+/// The daemon answers with an empty object when there is nothing to suggest,
+/// which deserializes to `None` at the call site rather than to a
+/// zero-filled offer -- a shell that receives no suggestion must draw no
+/// card.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct ArmingOffer {
+    pub project_id: String,
+    #[serde(default)]
+    pub project_label: String,
+    #[serde(default)]
+    pub contributed_count: u32,
+}
+
 /// `list_projects`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Project {

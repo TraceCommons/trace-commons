@@ -623,6 +623,30 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             }
         };
 
+        // Only a real upload counts toward the arming offer. The offer's
+        // whole claim is "you have contributed from here N times", so N
+        // counts sends, not settled entries. `AlreadySubmitted` means the
+        // content hash was already held and nothing went out.
+        //
+        // Defensive rather than a live fix, and worth saying so: this arm is
+        // not currently reachable through the watcher. A queue entry's id is
+        // `entry_id_for(&transcript.session_hash)` (`watcher.rs`), so two
+        // sessions with identical bytes collapse into one entry before
+        // anything is uploaded, and the duplicate that would have produced
+        // `AlreadySubmitted` never becomes a second entry. Verified by
+        // trying to provoke it end to end, both with the twin written after
+        // the first upload and with both present from the start: one entry,
+        // one send, either way.
+        //
+        // It is gated anyway because the reachability is a property of the
+        // watcher's id scheme, not of this decision, and nothing here would
+        // notice if that scheme changed. No test accompanies it for the same
+        // reason -- one would pass with or without the gate, which is a
+        // claim of coverage rather than coverage.
+        //
+        // The queue bookkeeping below still treats the two alike: either way
+        // the entry is settled server-side and should leave the queue.
+        let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
             uploader::UploadDecision::Uploaded { submission_id }
@@ -630,6 +654,20 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
                 q.set_submission_id(entry.entry_id, submission_id);
                 uploaded_this_pass = true;
+                // Counted here, against the project KEY, because this is the
+                // last point that still holds one -- history is label-only by
+                // design and two projects can share a final path segment. The
+                // count is what backs the arming offer; see
+                // `ProjectPolicy::arming_suggestion`.
+                //
+                // A failed save is not worth failing an upload that already
+                // succeeded: the worst outcome is that an offer arrives one
+                // contribution later than it might have.
+                if newly_uploaded {
+                    let mut policy = shared.policy.lock().expect("policy lock");
+                    policy.record_contribution(&entry.project_key);
+                    let _ = policy.save(&shared.store);
+                }
             }
             uploader::UploadDecision::Superseded { new_hash } => {
                 let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
@@ -1040,13 +1078,69 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     }
 
     let last_digest_at = shared.state.lock().expect("state lock").last_digest_at;
-    if notify::digest_due(last_digest_at, now, digest_interval_secs, pending_count) {
+    // What went out unasked since the last digest. An armed project never
+    // queues anything, so without this an armed contributor is told nothing
+    // ever -- see `notify::digest_due`. A cache that cannot be read is not a
+    // reason to skip the digest: it degrades to the queue-only digest that
+    // shipped before, rather than to silence.
+    //
+    // Behind the interval check, because this runs on every poll tick and the
+    // poll is far more frequent than the digest interval. No contribution
+    // count can make a digest fire early, so reading and parsing the history
+    // file before the clock is even close is work whose result is discarded.
+    // `interval_elapsed` is the same expression `digest_due` applies, not a
+    // second opinion about it.
+    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+        history::contributed_since(
+            &history::HistoryCache::load(&shared.store).unwrap_or_default(),
+            last_digest_at,
+        )
+    } else {
+        // Only reachable when `digest_due` is about to be false anyway: the
+        // interval has not elapsed, so neither half of the digest can fire.
+        history::ContributedSince::default()
+    };
+    if notify::digest_due(
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        pending_count,
+        contributed.count,
+    ) {
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. Joined rather than merged because
+        // they are about different things and a contributor acts on only one
+        // of them.
+        let contribution = (contributed.count > 0).then(|| {
+            notify::contribution_text(
+                contributed.count,
+                &contributed.project_labels,
+                contributed.credit_pending,
+            )
+        });
+        let body = match (pending_count > 0, contribution.as_deref()) {
+            (true, Some(c)) => format!("{digest}\n{c}"),
+            (true, None) => digest.clone(),
+            (false, Some(c)) => c.to_string(),
+            // `digest_due` cannot return true here, but a body built by
+            // exhaustion cannot be wrong later if it can.
+            (false, None) => digest.clone(),
+        };
         shared.publish(
             ipc::EVENT_DIGEST_DUE,
-            serde_json::json!({ "pending": pending_count, "text": digest }),
+            serde_json::json!({
+                "pending": pending_count,
+                "contributed": contributed.count,
+                // Labels, never keys. A shell composes its own sentence from
+                // these (each platform's notification centre words things
+                // differently), so it needs the names and not just the count.
+                "contributed_projects": contributed.project_labels,
+                "credit_pending": contributed.credit_pending,
+                "text": body,
+            }),
         );
         if local_notifications {
-            notify::emit_local(&digest);
+            notify::emit_local(&body);
         }
         let mut state = shared.state.lock().expect("state lock");
         state.last_digest_at = Some(now);

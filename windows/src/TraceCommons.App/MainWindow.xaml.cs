@@ -432,24 +432,47 @@ public sealed partial class MainWindow : Window
     /// of transcript, reaches a notification.
     /// </para>
     /// </remarks>
-    private void OnDigestDue(int pending)
+    private void OnDigestDue(DigestFacts facts)
     {
-        if (!_digestCadence.TryClaim(pending, DateTimeOffset.UtcNow))
+        if (!_digestCadence.TryClaim(facts.PendingCount, facts.ContributedCount, DateTimeOffset.UtcNow))
         {
             return;
         }
 
-        var labels = new List<string>();
-        foreach (QueueEntryViewModel entry in ViewModel.Pending)
+        // Two sentences, either of which may be absent: what is waiting for
+        // you, and what went without you. Separate lines because they are
+        // about different things and a contributor acts on only one of them.
+        var lines = new List<string>();
+
+        if (facts.PendingCount > 0)
         {
-            if (entry.ProjectLabel.Length > 0 && !labels.Contains(entry.ProjectLabel))
+            var labels = new List<string>();
+            foreach (QueueEntryViewModel entry in ViewModel.Pending)
             {
-                labels.Add(entry.ProjectLabel);
+                if (entry.ProjectLabel.Length > 0 && !labels.Contains(entry.ProjectLabel))
+                {
+                    labels.Add(entry.ProjectLabel);
+                }
             }
+
+            labels.Sort(StringComparer.Ordinal);
+            lines.Add(DigestText.Body(facts.PendingCount, labels));
         }
 
-        labels.Sort(StringComparer.Ordinal);
-        _tray.ShowDigest(DigestText.Body(pending, labels));
+        // The contributed labels come off the frame, not off ViewModel.Pending:
+        // an armed project's traces were never in that list.
+        if (DigestText.ContributionLine(
+                facts.ContributedCount,
+                facts.ContributedProjects,
+                facts.CreditPending) is { } contributed)
+        {
+            lines.Add(contributed);
+        }
+
+        if (lines.Count > 0)
+        {
+            _tray.ShowDigest(string.Join("\n", lines));
+        }
     }
 
     /// <summary>
@@ -651,6 +674,58 @@ public sealed partial class MainWindow : Window
     /// asked for the screen, and returning them silently to the queue would
     /// make it the dead button this banner must never have.
     /// </remarks>
+    /// <summary>
+    /// "Not now" against the arming offer.
+    /// </summary>
+    /// <remarks>
+    /// The daemon silences the offer for thirty days and remembers that
+    /// across relaunches and across shells; this is not a local dismissal.
+    /// The card is cleared here as well so it does not linger for a round
+    /// trip, and the daemon's next answer will agree.
+    /// </remarks>
+    private async void OnDeclineArming(object sender, RoutedEventArgs e)
+    {
+        string projectId = ViewModel.ArmingOfferProjectId;
+        if (projectId.Length == 0)
+        {
+            return;
+        }
+
+        ViewModel.SetArmingOffer(null);
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.DeclineArming,
+                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}}}""")
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Arms the offered project.
+    /// </summary>
+    /// <remarks>
+    /// No confirmation sheet: this card IS the confirmation. It names the
+    /// project, states the evidence, and asks the question outright, so a
+    /// second dialog saying the same thing would be a step rather than a
+    /// safeguard. Settings, where arming is picked from a list rather than
+    /// offered, does confirm.
+    /// </remarks>
+    private async void OnAcceptArming(object sender, RoutedEventArgs e)
+    {
+        string projectId = ViewModel.ArmingOfferProjectId;
+        if (projectId.Length == 0)
+        {
+            return;
+        }
+
+        ViewModel.SetArmingOffer(null);
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.SetProjectMode,
+                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}},"mode":"auto_upload"}""")
+            .ConfigureAwait(true);
+        await ViewModel.RefreshAsync().ConfigureAwait(true);
+    }
+
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var onboarding = new OnboardingWindow(_host, OnboardingState.Default());
