@@ -1,0 +1,231 @@
+//! Verifying a redaction witness before handing it a raw session.
+//!
+//! # The property this module exists to hold
+//!
+//! The contributor sends the enclave a **raw, unredacted session**. That is
+//! the largest disclosure in this system, and it is acceptable only because
+//! the enclave's measurement was verified first. A design that sent and then
+//! checked would not have a weakened version of this property; it would have
+//! none, because the bytes are gone before the check runs.
+//!
+//! So the ordering is not asserted in a comment. [`verify::VerifiedWitness`]
+//! has private fields and exactly one constructor, and that constructor *is*
+//! the verification. The only function that transmits raw bytes takes a
+//! `&VerifiedWitness`. There is no path from "we have a witness URL" to "we
+//! sent raw bytes" that does not pass through the verification, and that is a
+//! property of the types rather than of a review.
+//!
+//! # Ship disabled
+//!
+//! [`WitnessSettings`] reaches `ContributorConfig` as an
+//! `Option<_>` with `#[serde(default)]`, absent. **Absent means this module is
+//! not entered at all** and the local redaction runs byte for byte as it does
+//! today -- not "runs and falls back". There is no discovery, no
+//! server-pushed enablement, and no default that could move under a
+//! contributor.
+//!
+//! # Configured but unsatisfiable refuses
+//!
+//! Never a silent fall back to local redaction. The contributor's bytes would
+//! stay home, which sounds like the safe outcome, but the envelope would then
+//! carry a self-reported risk while the contributor believed it carried a
+//! certificate, and the operator would see an uncertified submission from
+//! someone enrolled as certified. Silence about a downgrade is the failure
+//! this design is aimed at.
+//!
+//! # What a pin proves, and what it does not
+//!
+//! A matching measurement proves the deployment has not changed under the
+//! contributor, and that two contributors are talking to the same enclave. It
+//! does **not** prove the running code is the code in this repository: the
+//! image is not reproducibly buildable and has never been reproduced. No text
+//! in this module may say "verifiable against source".
+
+pub mod transport;
+pub mod verify;
+
+use trace_commons_attestation::measurements::ExpectedMeasurements;
+
+/// The missing-control name for an unpinned witness.
+///
+/// One constant, used by the refusal and by the config error, so an operator
+/// greps once.
+pub const WITNESS_EXPECTED_MEASUREMENT_CONTROL: &str = "witness_expected_measurement";
+
+/// The 8-byte domain tag at the front of a witness quote's report data.
+///
+/// **Duplicated from `trace_commons_server::witness_service::enclave`**, which
+/// is AGPL and which this permissive crate must not depend on. The layout is
+/// therefore pinned on both sides by tests rather than by a shared constant,
+/// and `the_report_data_layout_matches_the_witness_service` in `verify.rs`
+/// states it explicitly so a change on either side is visible here.
+pub const WITNESS_QUOTE_DOMAIN: &[u8; 8] = b"tcwitns1";
+/// Offset of the signing address within the report data.
+pub const WITNESS_ADDRESS_AT: usize = 8;
+/// Offset of the contributor nonce within the report data.
+pub const WITNESS_NONCE_AT: usize = 28;
+/// The nonce length. 32 bytes, fresh per verification.
+pub const WITNESS_NONCE_LEN: usize = 32;
+/// TDX report data is 64 bytes.
+pub const WITNESS_REPORT_DATA_LEN: usize = 64;
+
+/// What the client pins about a witness.
+///
+/// # Why the measurements are a *list* of sets
+///
+/// dstack derives an enclave's signing key from a stable app id, so an image
+/// upgrade moves the measurement and leaves the signing address where it is.
+/// A pin that held one measurement would break every client on every upgrade.
+/// Holding several sets means an operator can allowlist the new measurement
+/// *before* the fleet rolls; if they do not, every correctly-pinned
+/// contributor refuses the new deployment and it looks like an outage.
+///
+/// A set that only ever grows stops being a pin, which is a documentation
+/// problem rather than a code one, and is named in the operator text.
+///
+/// # What to pin
+///
+/// `mrtd` and `mrconfigid`. **Not `rtmr3`** -- it carries a per-deployment
+/// random instance-id, so two byte-identical replicas differ and pinning it
+/// fails closed on the second one. **Not `rtmr0`** -- it hashes SMBIOS tables
+/// that change when the VM is resized. `ExpectedMeasurements` will accept
+/// either, so this is the only place the policy is written down in code.
+///
+/// `mrconfigid` commits to the compose hash directly in the signed quote
+/// body, which is why none of this needs the RTMR3 event log replayed.
+/// Under config-id **v1** -- `01` followed by the compose hash and fifteen
+/// zero bytes -- it pins the compose hash and says nothing about app id, so
+/// no text here may claim app-id binding until a deployment is confirmed to
+/// emit v2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessTrust {
+    /// The address whose signature this client will accept on a certificate,
+    /// and which the quote's report data must name.
+    pub signing_address: String,
+    /// Every measurement set that is admitted. Empty means nothing is
+    /// pinned, which is a refusal and never a pass.
+    pub measurements: Vec<ExpectedMeasurements>,
+}
+
+impl WitnessTrust {
+    /// True when at least one measurement set is pinned.
+    ///
+    /// Read by the config gate so an unpinned witness refuses *before* any
+    /// network call, rather than after fetching a quote it could not judge.
+    pub fn is_pinned(&self) -> bool {
+        !self.measurements.is_empty()
+    }
+}
+
+/// Why the client would not trust, or would not use, a witness.
+///
+/// Every variant names one specific condition. `Debug` delegates to `Display`
+/// for the variants that could carry caller data, and no variant carries a
+/// witness URL, a signature, a raw byte, a redacted byte, or any count
+/// derived from session content.
+///
+/// `reported` on [`Self::WitnessMeasurementUnpinned`] is the exception and is
+/// deliberate: a measurement is a public image identifier, not a secret, and
+/// an operator holding both halves can go straight to the image. That is the
+/// whole point of naming the field.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WitnessTrustError {
+    /// The witness host is not on the contributor's allowlist. Raised before
+    /// any request is made.
+    #[error("the witness host is not on the allowed-hosts list")]
+    WitnessHostNotAllowed,
+    /// `/v1/attestation` could not be reached, or did not answer with a
+    /// quote.
+    #[error("the witness attestation endpoint is unavailable")]
+    WitnessAttestationUnavailable,
+    /// Intel collateral could not be obtained. A refusal, never a
+    /// verification without it.
+    #[error("attestation collateral is unavailable")]
+    WitnessCollateralUnavailable,
+    /// DCAP verification failed. The quote is not a genuine TDX quote, or it
+    /// does not verify against this collateral as of this clock.
+    #[error("the witness quote did not verify")]
+    WitnessQuoteUnverified,
+    /// The quote's report data does not carry the nonce this client just
+    /// generated. A quote for someone else's nonce proves nothing about now,
+    /// which is exactly what a replay looks like.
+    #[error("the witness quote is not bound to this client's nonce")]
+    WitnessQuoteReplayed,
+    /// The quote's report data names an address other than the pinned one. A
+    /// quote for a machine that did not sign proves nothing about the
+    /// certificate.
+    #[error("the witness quote names a different signer than the pinned one")]
+    WitnessSignerUnexpected,
+    /// No measurement set is configured, or none matched.
+    ///
+    /// One variant for both because they are the same instruction to a
+    /// contributor -- pin the measurement this deployment reports -- and two
+    /// names would only tell them which half of the configuration to blame.
+    /// `reported` distinguishes them: `None` means nothing was pinned.
+    #[error("the witness measurement is not pinned")]
+    WitnessMeasurementUnpinned {
+        control: &'static str,
+        reported: Option<String>,
+    },
+    /// The contribution is larger than this client will send. Refused
+    /// locally, before anything is offered.
+    #[error("the contribution is larger than the witness path will carry")]
+    WitnessPayloadTooLarge,
+    /// The certificate's digest does not cover the bytes the witness
+    /// returned. Only the client can catch this: it is the only party holding
+    /// both the input and the returned artifact.
+    #[error("the witness certificate does not cover the artifact it returned")]
+    WitnessCertificateMismatched,
+    /// The certificate's signature does not recover to the pinned address.
+    #[error("the witness certificate did not verify")]
+    WitnessCertificateUnverified,
+    /// A witness response could not be read as a certificate and an envelope.
+    #[error("the witness response was malformed")]
+    WitnessResponseMalformed,
+    /// A claim is required for a witnessed submission and none was
+    /// available.
+    #[error("a claim is required before a session can be witnessed")]
+    WitnessClaimUnavailable,
+}
+
+impl std::fmt::Debug for WitnessTrustError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `reported` is public image identity and is worth rendering; every
+        // other variant is a bare label. Written out rather than derived so
+        // that a variant which gains a content-bearing field is a visible
+        // decision here rather than a silent widening of every `?err`.
+        match self {
+            Self::WitnessMeasurementUnpinned { control, reported } => formatter
+                .debug_struct("WitnessMeasurementUnpinned")
+                .field("control", control)
+                .field("reported", reported)
+                .finish(),
+            other => std::fmt::Display::fmt(other, formatter),
+        }
+    }
+}
+
+impl WitnessTrustError {
+    /// The refusal label a submission surface reports.
+    ///
+    /// A closed set of constants, matching the spelling `submit.rs` uses for
+    /// its own refusals. Exhaustive rather than a catch-all, so a new variant
+    /// is a compile error here and gets a deliberate label instead of
+    /// inheriting one that reads as something else.
+    pub fn refusal_label(&self) -> &'static str {
+        match self {
+            Self::WitnessHostNotAllowed => "witness_host_not_allowed",
+            Self::WitnessAttestationUnavailable => "witness_attestation_unavailable",
+            Self::WitnessCollateralUnavailable => "witness_collateral_unavailable",
+            Self::WitnessQuoteUnverified => "witness_quote_unverified",
+            Self::WitnessQuoteReplayed => "witness_quote_replayed",
+            Self::WitnessSignerUnexpected => "witness_signer_unexpected",
+            Self::WitnessMeasurementUnpinned { control, .. } => control,
+            Self::WitnessPayloadTooLarge => "witness_payload_too_large",
+            Self::WitnessCertificateMismatched => "witness_certificate_mismatched",
+            Self::WitnessCertificateUnverified => "witness_certificate_unverified",
+            Self::WitnessResponseMalformed => "witness_response_malformed",
+            Self::WitnessClaimUnavailable => "witness_claim_unavailable",
+        }
+    }
+}

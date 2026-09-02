@@ -7817,11 +7817,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",
+ "trace-commons-attestation",
  "trace-commons-build-info",
  "trace-commons-operator-client",
  "trace-commons-protocol",
  "trace-commons-server",
  "tracing",
+ "url",
  "uuid 1.23.1",
  "windows-sys 0.61.2",
 ]

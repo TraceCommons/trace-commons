@@ -20,3 +20,4 @@ pub mod submit;
 pub mod update;
 pub mod watch_events;
 pub mod withdraw;
+pub mod witness;

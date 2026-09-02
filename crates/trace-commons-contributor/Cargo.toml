@@ -10,7 +10,24 @@ repository.workspace = true
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
+# DCAP quote verification and EIP-191 signer recovery, for the redaction
+# witness: this client verifies an enclave's measurement BEFORE handing it a
+# raw session, and verifies the certificate it gets back before forwarding it.
+#
+# Default features, deliberately: `receipt` stays off because this client
+# makes no inference calls and holds no receipts. It saves nothing -- `k256`
+# and `sha3` are unconditional in that crate because certificate verification
+# needs them -- and the flag is off because it is accurate, not because it is
+# cheap.
+#
+# Measured cost, `cargo tree -p trace-commons-contributor -e normal`:
+# 162 packages before, 227 after. Approved at that figure.
+trace-commons-attestation = { path = "../trace-commons-attestation" }
 anyhow = "1"
+# Promoted from dev-dependencies: the witness transport is a trait object so
+# a recording double can assert the verify-then-send ordering. Adds no
+# packages -- it was already in this crate's dev graph.
+async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -35,6 +52,11 @@ tracing = "0.1"
 # workspace's 1.92 floor.
 sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# Direct rather than reached through trace-commons-operator-client, because
+# the witness transport parses a URL to run it past the same HostAllowlist
+# `issuer_url` and `ingest_url` pass. Adds no packages -- it is already in
+# this crate's graph through that client.
+url = "2"
 
 # Windows only. The daemon's transport there is a named pipe in the
 # machine-wide namespace, whose DACL is the sole access control on it (the
@@ -51,7 +73,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-async-trait = "0.1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["net"] }
