@@ -45,6 +45,10 @@ public enum ScrubDetectors {
         // Naming them beats "provider tokens", which tells a contributor
         // nothing about whether their own provider is covered.
         case "provider_token": return "Stripe, GitLab and Slack tokens"
+        // Named separately from `provider_token` for the same reason that
+        // entry names its providers: a Cursor user reading this list has to
+        // be able to see their own key in it.
+        case "cursor_api_key": return "Cursor API keys"
         case "jwt": return "JSON Web Tokens"
         case "npm_token": return "npm tokens"
         case "google_api_key": return "Google API keys"

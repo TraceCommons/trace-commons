@@ -3213,11 +3213,18 @@ fn token_shannon_entropy(s: &str) -> f64 {
 /// symmetric. It cannot on its own cause a redaction: everything the cue
 /// admits still has to clear the length, allowlist, and entropy gates in
 /// [`is_cued_secret`], so a low-entropy value after a cue stays untouched.
+///
+/// The `pass*` family is spelled as one arm — `pass(?:word|wd|phrase|code)` —
+/// rather than as loose alternatives appended to the end. `password` and
+/// `passwd` were the only two named originally, and `passphrase`/`passcode`
+/// are not substrings of them or of any other cue, so a value cued only by
+/// those two words was never examined. Keeping the family in a single arm is
+/// what makes the next omission visible instead of silent.
 fn secret_cue_regex() -> &'static Regex {
     static SECRET_CUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
         Regex::new(
-            r"(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$",
+            r"(?i)(authorization|bearer|api[_-]?key|secret|pass(?:word|wd|phrase|code)|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$",
         )
         .expect("hardcoded secret cue regex must compile")
     });
@@ -3275,6 +3282,7 @@ const REPORT_METRIC_LABELS: &[&str] = &[
     "github_token",
     "aws_access_key",
     "provider_token",
+    "cursor_api_key",
     "npm_token",
     "google_api_key",
     "pem_header_orphan",
@@ -3483,6 +3491,35 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                 severity: SecretLeakSeverity::Critical,
                 regex: Regex::new(r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
                     .expect("hardcoded provider token regex must compile"),
+            },
+            SecretLeakPattern {
+                // Its own entry rather than another arm inside
+                // `provider_token`, for two independent reasons.
+                //
+                // The naming one: this table is published to contributors by
+                // name (`secret_leak_pattern_names`), and the shells render
+                // `provider_token` as "Stripe, GitLab and Slack tokens". A
+                // Cursor key folded in there would be scrubbed while the
+                // screen said nothing about it, so a Cursor user reading the
+                // list would conclude their key is not covered. That is the
+                // drift `secret_leak_pattern_names` exists to prevent.
+                //
+                // The shape one: `provider_token`'s arms share one loose
+                // `[-_a-z0-9]{8,}` tail, which is safe only because those
+                // prefixes are one to five characters of narrow provenance
+                // AND carry no separator. `crsr_` does carry one, and
+                // `crsr_` plus eight or more word characters is the spelling
+                // of every non-trivial snake_case identifier in a terminal,
+                // TUI or editor codebase -- `crsr_state_machine` and
+                // `CRSR_ESCAPE_PREFIX` included. A Cursor key's body is a
+                // long run of hex, so anchoring on that shape keeps every
+                // observed true positive and drops the identifier class
+                // whole. Sharing the tail was tried and measured; it is not
+                // an option here.
+                name: "cursor_api_key",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"(?i)\bcrsr_[0-9a-f]{40,}")
+                    .expect("hardcoded Cursor API key regex must compile"),
             },
             SecretLeakPattern {
                 name: "jwt",
@@ -7819,6 +7856,299 @@ mod tests {
             assert!(!out.contains(secret), "{name} glued secret survived: {out}");
             assert!(rep.blocked_secret_detected);
         }
+    }
+
+    /// Every literal in this test is SYNTHETIC -- generated for the fixture,
+    /// never a real credential.
+    #[test]
+    fn contextual_entropy_redacts_passphrase_and_passcode_cues() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // `passphrase` and `passcode` are the two members of the `pass*`
+        // credential family that the cue alternation did not name, and
+        // neither is a substring of a cue that was named. The value below
+        // clears ENTROPY_MIN_LEN and ENTROPY_BITS_MIN comfortably, so the
+        // only thing that ever kept it was the missing cue word -- which is
+        // why `password` is asserted alongside as a regression guard rather
+        // than in a test of its own.
+        let secret = "AaIC59jtM0w5ZxhM0CRktUQbqzbmgMPP";
+        for name in ["passphrase", "passcode", "password", "passwd"] {
+            for text in [
+                format!("{name}: {secret}"),
+                format!("{name}={secret}"),
+                // A trailing qualifier must not push the cue out of reach of
+                // the anchor, the same way it does not for `password`.
+                format!("VAULT_{name}_VALUE={secret}"),
+            ] {
+                let (out, rep) = r.redact_text(&text);
+                assert!(!out.contains(secret), "{name} secret survived: {out}");
+                assert!(
+                    rep.blocked_secret_detected,
+                    "{name} did not set blocked_secret_detected: {text}"
+                );
+            }
+        }
+    }
+
+    /// NEGATIVE GUARD for the two cues added above: prose and ordinary
+    /// identifiers that merely contain the word must stay untouched.
+    #[test]
+    fn passphrase_and_passcode_cues_do_not_redact_innocent_text() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        for text in [
+            // The English word, with no value after it at all.
+            "the user forgot their passphrase and had to reset it",
+            "enter the passcode shown on the hardware token screen",
+            // A cue-named variable holding a number, not a credential. The
+            // cue matches; nothing after it is a candidate.
+            "passphrase_length = 32",
+            "passcode_digits=6",
+            // A cue-named boolean.
+            "passcode_required = true",
+            "passphrase_enabled: false",
+            // A cued value that is long enough to be a candidate but sits
+            // below ENTROPY_BITS_MIN -- the entropy gate, not the cue, is
+            // what has to hold here.
+            "passphrase: aaaaaaaaaaaaaaaa",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "innocent passphrase/passcode text rewritten");
+            assert!(
+                !rep.blocked_secret_detected,
+                "innocent text flagged as a secret: {text}"
+            );
+        }
+    }
+
+    /// Every literal in this test is SYNTHETIC -- a shape-preserving fake
+    /// generated for the fixture, never a real credential.
+    #[test]
+    fn cursor_api_key_redacts_uncued_cursor_key() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // A cue word in front already redacted this via the contextual
+        // entropy sweep. The gap was the bare, standing-alone spelling: no
+        // named pattern claimed the `crsr_` prefix and it is not an
+        // allowlisted structural ID prefix, so with no cue in the window
+        // nothing looked at it.
+        let token = "crsr_7fc20d00d4afeaf00fd02ad76c7b11dca3e01ff6a1d81e0fa8ba77a2ab95a899";
+        for text in [
+            token.to_string(),
+            format!("run it as {token} and retry"),
+            format!("[\"{token}\"]"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(token), "uncued cursor key survived: {out}");
+            assert!(
+                rep.blocked_secret_detected,
+                "uncued cursor key did not set blocked_secret_detected: {text}"
+            );
+        }
+    }
+
+    /// Regression test for the trailing `\b` that used to close
+    /// `crsr_[0-9a-f]{40,}\b`. `\b` requires a transition between a word
+    /// character and a non-word one; when 40+ hex digits are immediately
+    /// followed by more `[A-Za-z0-9_]` characters (no separator), every
+    /// position from the 40th hex digit onward is a word-to-word
+    /// non-boundary, so the match failed outright and the key survived
+    /// byte-for-byte. Confirmed empirically before the fix:
+    /// `redact_text("crsr_1234567890abcdef1234567890abcdef12345678gremlin")`
+    /// returned `blocked_secret_detected == false` with the key untouched in
+    /// the output. Dropping the trailing `\b` fixes this without widening
+    /// the pattern: `[0-9a-f]{40,}` is a character class, so the match still
+    /// stops on its own at the first non-hex byte (`g`, here) whether or not
+    /// a `\b` is asserted there.
+    ///
+    /// The literal below is SYNTHETIC -- shape-preserving, never a real key.
+    #[test]
+    fn cursor_api_key_redacts_a_bare_key_abutted_by_more_identifier_chars() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let secret = "crsr_1234567890abcdef1234567890abcdef12345678";
+        let text = format!("{secret}gremlin");
+        let (out, rep) = r.redact_text(&text);
+        assert!(
+            !out.contains(secret),
+            "bare key abutted by more identifier chars survived: {out}"
+        );
+        assert!(
+            rep.blocked_secret_detected,
+            "bare key abutted by more identifier chars did not set blocked_secret_detected: {text}"
+        );
+    }
+
+    /// NEGATIVE GUARD for `cursor_api_key`.
+    ///
+    /// The snake_case cases below are the ones that matter and they are here
+    /// because an earlier draft redacted every one of them. That draft made
+    /// `crsr_` an arm of `provider_token`, reusing the shared
+    /// `[-_a-z0-9]{8,}` tail and pinning only the underscore, on the
+    /// reasoning that the underscore is what separates a key from an
+    /// identifier. The reasoning is backwards: the underscore is exactly
+    /// what snake_case has, so pinning it selects FOR ordinary code rather
+    /// than against it. A guard built only from the camelCase and dotted
+    /// spellings passed against that draft while the whole snake_case class
+    /// failed, which is why both spellings are asserted here.
+    ///
+    /// Deliberately NOT covered here: `crsr_` followed by 40+ hex digits
+    /// then more identifier characters (the mirror image of the regression
+    /// test above, e.g. a hash-derived name like
+    /// `crsr_<40-hex-chars>_cache`). Dropping the trailing `\b` means that
+    /// shape now redacts too, and it is not a false positive to fix -- it is
+    /// the documented tradeoff a few lines up on `cursor_api_key`'s own
+    /// `regex` field ("anchoring on that shape keeps every observed true
+    /// positive and drops the identifier class whole"). No natural-language
+    /// identifier reaches 40 consecutive characters drawn only from
+    /// `[0-9a-f]`; every case in this guard is ordinary English or
+    /// abbreviation-shaped snake_case, camelCase, or dotted text, none of
+    /// which gets anywhere near that alphabet restriction. A name that did
+    /// would have to embed an actual hash, which is indistinguishable from
+    /// the key shape being matched on purpose -- so asserting non-redaction
+    /// for it here would be asserting against the pattern's own design.
+    #[test]
+    fn cursor_api_key_leaves_ordinary_crsr_identifiers_alone() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        for text in [
+            // snake_case and SCREAMING_SNAKE -- the class the loose tail ate.
+            "crsr_state_machine handles the escape sequences",
+            "crsr_position_after_wrap = 0",
+            "let crsr_render_target = surface.target();",
+            "crsr_blink_interval_ms = 530",
+            "fn crsr_advance_column(state: &mut CrsrState)",
+            "crsr_visible_flag is reset on resize",
+            "static crsr_default_shape = Shape::Block;",
+            "CRSR_ESCAPE_PREFIX is defined in ansi.h",
+            "docs/crsr_terminal_notes.md was updated",
+            "the crsr_state field is private",
+            // Short snake_case forms, below the old eight-character tail.
+            "crsr_row = 12",
+            "crsr_col = 0",
+            "crsr_hide()",
+            // camelCase, dotted, hyphenated and bare spellings.
+            "crsrenderer.pipeline was rebuilt",
+            "call crsrParseHeader before the flush",
+            "the crsr abbreviation is used throughout",
+            "crsrState was cleared",
+            "crsrRenderer.flush() is called once per frame",
+            "CrsrGlyphCache is keyed by glyph id",
+            "crsr-position-indicator is the CSS hook",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "ordinary crsr identifier rewritten");
+            assert!(
+                !rep.blocked_secret_detected,
+                "ordinary crsr identifier flagged as a secret: {text}"
+            );
+        }
+    }
+
+    /// `cursor_api_key` is anchored on a long hex body, so the pattern alone
+    /// stops short of a key whose body is not hex or is not long enough. That
+    /// is deliberate and it is not a hole: the contextual entropy sweep
+    /// already covers those, because in practice they appear after a cue
+    /// word. This pins the division of labour so a later widening has to
+    /// argue against a stated boundary rather than an unstated one.
+    ///
+    /// Every literal here is SYNTHETIC.
+    #[test]
+    fn cued_cursor_key_is_covered_even_when_the_pattern_does_not_fire() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // Not hex, and shorter than the pattern's floor: no named pattern
+        // may claim this on its own.
+        let short = "crsr_PuUTI2Xcjsw9A8eWgo0E";
+        assert!(
+            !secret_leak_patterns()
+                .iter()
+                .any(|p| p.regex.is_match(short)),
+            "a named pattern claimed a short non-hex body"
+        );
+        // With a cue in front, the entropy sweep still redacts it.
+        let text = format!("CURSOR_API_KEY={short}");
+        let (out, rep) = r.redact_text(&text);
+        assert!(!out.contains(short), "cued cursor key survived: {out}");
+        assert!(rep.blocked_secret_detected, "cued cursor key not flagged");
+    }
+
+    /// Cursor gets its OWN detector name, and `provider_token` is left as it
+    /// was.
+    ///
+    /// The name is the published surface: [`secret_leak_pattern_names`] is
+    /// what the shells render under "these are found and replaced", and the
+    /// shells spell `provider_token` out as Stripe, GitLab and Slack. Folding
+    /// Cursor into that entry would scrub the key while telling a Cursor user
+    /// the opposite, and nothing would fail -- no new slug means the shells'
+    /// own "every detector has a human label" gate never fires. So the name
+    /// is asserted here, next to the assertion that the older entry did not
+    /// quietly widen.
+    #[test]
+    fn cursor_keys_are_published_under_their_own_detector_name() {
+        use super::*;
+        assert!(
+            secret_leak_pattern_names().contains(&"cursor_api_key"),
+            "cursor coverage must be published under its own name"
+        );
+        // SYNTHETIC value.
+        let key = "crsr_07e88b3a63ca733f0225335bcd9b7b58db9efbfc48722194ad4b258bcb0b1710";
+        let claimants: Vec<&str> = secret_leak_patterns()
+            .iter()
+            .filter(|p| p.regex.is_match(key))
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(claimants, vec!["cursor_api_key"]);
+
+        // `provider_token` is untouched by this change: it still claims the
+        // prefixes its label names, and it never claims `crsr_`.
+        let provider = secret_leak_patterns()
+            .iter()
+            .find(|p| p.name == "provider_token")
+            .expect("provider_token must still exist");
+        assert!(provider.regex.is_match("xoxb-BjLhV6l8mlJ7rzgnlpCQ"));
+        assert!(!provider.regex.is_match(key));
+
+        // The detector's own bookkeeping key must be allowlisted, or the
+        // contextual-entropy pass flags `secret:cursor_api_key` in the
+        // finished envelope and fail-closes the session that was scrubbed
+        // correctly.
+        assert!(REPORT_METRIC_LABELS.contains(&"cursor_api_key"));
+    }
+
+    /// A `cursor_api_key` hit is Critical, and [`residual_risk`] floors a
+    /// contribution's residual-PII classification at Medium whenever
+    /// `blocked_secret_detected` is set. So a false positive here does
+    /// not merely mangle an identifier -- it reclassifies the whole
+    /// contribution as higher-risk on a match that is pure noise. This
+    /// asserts the consequence directly rather than only the redacted string,
+    /// so a regression shows up as the thing that actually costs something.
+    #[test]
+    fn ordinary_crsr_identifiers_do_not_raise_residual_risk() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let (out, rep) = r.redact_text(
+            "crsr_state_machine advances crsr_position_after_wrap; \
+             CRSR_ESCAPE_PREFIX is defined in ansi.h",
+        );
+        assert!(out.contains("crsr_state_machine"));
+        assert!(out.contains("CRSR_ESCAPE_PREFIX"));
+        assert!(!rep.blocked_secret_detected);
+        assert_eq!(
+            residual_risk(&clean_consent(), &rep),
+            ResidualPiiRisk::Low,
+            "an ordinary terminal trace must not be reclassified"
+        );
+
+        // The paired positive: a real key SHOULD floor the risk at Medium.
+        // SYNTHETIC value.
+        let (_, key_rep) =
+            r.redact_text("crsr_f9d6d6980568da97c0cdb49ed450baa915567e96e833d1b3188ec300e8923cf1");
+        assert!(key_rep.blocked_secret_detected);
+        assert_eq!(
+            residual_risk(&clean_consent(), &key_rep),
+            ResidualPiiRisk::Medium
+        );
     }
 
     #[test]
