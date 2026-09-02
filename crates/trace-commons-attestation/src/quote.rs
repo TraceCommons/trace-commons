@@ -17,6 +17,10 @@
 //! pinning (Task 3) must consume [`VerifiedQuote`], never the server's
 //! `UnverifiedJsonMeasurements`.
 //!
+//! `MRCONFIGID` is exposed alongside MRTD and the RTMRs because it, not
+//! they, is the stable identity of the software a dstack CVM was asked to
+//! run -- see [`crate::measurements::MeasurementField::MrConfigId`].
+//!
 //! `compose_hash`, `os_image_hash` and `mr_aggregated` are deliberately
 //! absent here. They exist only in the unsigned JSON and are not recoverable
 //! from the quote without reproducing dstack's RTMR extension derivation,
@@ -72,6 +76,14 @@ pub struct VerifiedQuote {
     pub report_data: Vec<u8>,
     /// MRTD -- the measurement of the TD's initial memory image, hex-encoded.
     pub mrtd: String,
+    /// MRCONFIGID -- the TD owner's configuration commitment, hex-encoded.
+    ///
+    /// dstack writes a version tag followed by the compose hash here, so this
+    /// is the register that identifies *what code the CVM was asked to run*
+    /// and is stable across instances and VM resizes. See
+    /// [`crate::measurements::MeasurementField::MrConfigId`] for why that
+    /// makes it the register a deployment pins.
+    pub mr_config_id: String,
     /// RTMR0..RTMR3, hex-encoded, in index order.
     pub rtmr: [String; 4],
     /// Intel's TCB verdict for the platform, e.g. `UpToDate`.
@@ -112,6 +124,7 @@ pub fn verify_quote(
     Ok(VerifiedQuote {
         report_data: td.report_data.to_vec(),
         mrtd: hex::encode(td.mr_td),
+        mr_config_id: hex::encode(td.mr_config_id),
         rtmr: [
             hex::encode(td.rt_mr0),
             hex::encode(td.rt_mr1),
@@ -145,9 +158,21 @@ mod tests {
     /// MRTD as read out of the verified fixture quote.
     const VERIFIED_MRTD: &str = "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217";
 
+    /// MRCONFIGID as read out of the verified fixture quote.
+    ///
+    /// Its structure is not opaque: byte 0 is dstack's config-id version tag
+    /// (`01`), bytes 1..33 are the compose hash, and the remaining 15 bytes
+    /// are zero padding. `mr_config_id_commits_to_the_reports_compose_hash`
+    /// below is what keeps that reading honest.
+    const VERIFIED_MR_CONFIG_ID: &str = "019385918de0a73b861ae833d99fb5be6f7e1c8a50487a835df4f277497c206825000000000000000000000000000000";
+
     /// Byte offset of `report_data` inside a v4 TDX quote: 48-byte quote
     /// header, then TDReport10's 520 bytes of SVNs and measurements.
     const REPORT_DATA_OFFSET: usize = 568;
+
+    /// Byte offset of MRCONFIGID inside a v4 TDX quote: the 48-byte header,
+    /// then TDReport10 up to and including MRTD (which starts at 184).
+    const MR_CONFIG_ID_OFFSET: usize = 232;
 
     fn fixture_collateral() -> Collateral {
         parse_collateral(COLLATERAL).expect("collateral fixture parses")
@@ -199,11 +224,21 @@ mod tests {
 
     #[test]
     fn tampering_with_a_measurement_register_does_not_verify() {
-        // Task 3 pins MRTD and the RTMRs. Pinning is only worth doing if the
-        // signature actually covers them, so prove it does.
-        let mut q = fixture_quote();
-        q[184] ^= 0x01; // first byte of MRTD
-        assert!(verify_quote(&q, &fixture_collateral(), FIXTURE_CAPTURED_AT).is_err());
+        // Task 3 pins MRTD and the RTMRs and Task 4 adds MRCONFIGID. Pinning
+        // is only worth doing if the signature actually covers what is
+        // pinned, so prove it does -- and name the variant, because a
+        // mutation that made the quote fail to *parse* would satisfy a bare
+        // is_err() while proving nothing about the signature.
+        for (label, offset) in [("MRTD", 184usize), ("MRCONFIGID", MR_CONFIG_ID_OFFSET)] {
+            let mut q = fixture_quote();
+            q[offset] ^= 0x01;
+            let err = verify_quote(&q, &fixture_collateral(), FIXTURE_CAPTURED_AT)
+                .expect_err("a flipped measurement bit must not verify");
+            assert!(
+                matches!(err, QuoteVerifyError::VerificationFailed { .. }),
+                "{label}: expected a signature failure, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -265,14 +300,22 @@ mod tests {
 
     #[test]
     fn a_truncated_quote_does_not_verify() {
+        // Named, not is_err(): a half-quote that fails to *parse* and one
+        // whose signature does not check out are the same bare assertion and
+        // very different facts. `dcap_qvl` reports both through its own error
+        // type, which this crate collapses into `VerificationFailed` -- so
+        // that is what must be seen here, and never `NotTdx`, which would
+        // mean the truncated bytes had verified as some other report shape.
         let q = fixture_quote();
+        let err = verify_quote(
+            &q[..q.len() / 2],
+            &fixture_collateral(),
+            FIXTURE_CAPTURED_AT,
+        )
+        .expect_err("half a quote must not verify");
         assert!(
-            verify_quote(
-                &q[..q.len() / 2],
-                &fixture_collateral(),
-                FIXTURE_CAPTURED_AT
-            )
-            .is_err()
+            matches!(err, QuoteVerifyError::VerificationFailed { .. }),
+            "{err:?}"
         );
     }
 
@@ -296,6 +339,53 @@ mod tests {
     }
 
     #[test]
+    fn a_verified_quote_carries_mr_config_id() {
+        // The register the witness deployment pins. It is on the parsed TD10
+        // report and was simply never copied out, so this asserts the literal
+        // rather than a length: a length assertion would be satisfied by any
+        // other 48-byte register on the same struct.
+        let v = verify_quote(&fixture_quote(), &fixture_collateral(), FIXTURE_CAPTURED_AT).unwrap();
+        assert_eq!(v.mr_config_id.len(), 96, "48 bytes, hex-encoded");
+        assert_eq!(v.mr_config_id, VERIFIED_MR_CONFIG_ID);
+        // And it is a register of its own, not a second copy of one already
+        // exposed. Without this, `mr_config_id: hex::encode(td.mr_td)` would
+        // satisfy everything above.
+        assert_ne!(v.mr_config_id, v.mrtd);
+        for (i, r) in v.rtmr.iter().enumerate() {
+            assert_ne!(&v.mr_config_id, r, "mr_config_id must not be rtmr{i}");
+        }
+    }
+
+    #[test]
+    fn mr_config_id_commits_to_the_reports_compose_hash() {
+        // Why MRCONFIGID is the stable identity of *what code runs*: dstack
+        // builds it as a version tag followed by the compose hash, so two
+        // instances of the same compose file share it while RTMR3 (per-boot
+        // instance id) and RTMR0 (VM sizing) do not.
+        //
+        // The compose hash read here comes from the report's *unsigned* JSON
+        // and is untrusted; the point of the assertion is precisely that the
+        // signed register commits to it, which is what lets an operator go
+        // from a compose file to a pin.
+        let v = verify_quote(&fixture_quote(), &fixture_collateral(), FIXTURE_CAPTURED_AT).unwrap();
+        let report: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        let compose_hash = report["info"]["compose_hash"].as_str().unwrap();
+        assert_eq!(compose_hash.len(), 64, "a 32-byte hash, hex-encoded");
+        assert_eq!(
+            &v.mr_config_id[..2],
+            "01",
+            "dstack config-id version tag, {}",
+            v.mr_config_id
+        );
+        assert_eq!(&v.mr_config_id[2..66], compose_hash);
+        assert_eq!(
+            &v.mr_config_id[66..],
+            "0".repeat(30),
+            "the remaining 15 bytes are zero padding in this (v1) layout"
+        );
+    }
+
+    #[test]
     fn collateral_expiry_is_measured_against_the_passed_clock() {
         // The reason a checked-in collateral fixture is not a time bomb. The
         // fixture's tcbInfo covers 2026-08-31T23:45:01Z .. 2026-09-30T23:45:01Z
@@ -303,10 +393,21 @@ mod tests {
         // are reachable from a test on any future date.
         let q = fixture_quote();
         let c = fixture_collateral();
-        // 2026-08-01, a month before the collateral was issued.
-        assert!(verify_quote(&q, &c, 1_785_542_400).is_err());
-        // 2026-10-02, a day after it expired.
-        assert!(verify_quote(&q, &c, 1_790_899_200).is_err());
+        for (label, clock) in [
+            // 2026-08-01, a month before the collateral was issued.
+            ("before issue", 1_785_542_400u64),
+            // 2026-10-02, a day after it expired.
+            ("after expiry", 1_790_899_200),
+        ] {
+            let err = verify_quote(&q, &c, clock)
+                .expect_err("collateral outside its validity window must not verify");
+            // Named rather than bare, so a fixture that stopped parsing
+            // altogether could not masquerade as a clock refusal.
+            assert!(
+                matches!(err, QuoteVerifyError::VerificationFailed { .. }),
+                "{label}: {err:?}"
+            );
+        }
         // And the pinned time in between still works, so the two failures
         // above are about the clock and not about the fixture being broken.
         assert!(verify_quote(&q, &c, FIXTURE_CAPTURED_AT).is_ok());

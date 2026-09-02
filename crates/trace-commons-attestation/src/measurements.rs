@@ -10,8 +10,9 @@
 //! Two properties are load-bearing.
 //!
 //! **The comparison is against the verified quote, never a report JSON.**
-//! [`check_measurements`] takes a [`VerifiedQuote`], whose `mrtd` and `rtmr`
-//! were read out of the signature-covered quote structure. The same registers
+//! [`check_measurements`] takes a [`VerifiedQuote`], whose `mrtd`,
+//! `mr_config_id` and `rtmr` were read out of the signature-covered quote
+//! structure. The same registers
 //! also appear in a NEAR AI report's unsigned `info.tcb_info`, and pinning
 //! against *those* would amount to asking the server whether it is running
 //! what it says it is running. That JSON copy has exactly one legitimate use
@@ -19,11 +20,13 @@
 //! hardware signed -- and it lives with the type that describes that
 //! envelope, not here.
 //!
-//! **Only `mrtd` and `rtmr0..3` are pinnable.** A NEAR AI report also carries
+//! **Only `mrtd`, `mrconfigid` and `rtmr0..3` are pinnable.** A NEAR AI report also carries
 //! `compose_hash`, `os_image_hash` and `mr_aggregated`, but those exist only
 //! in the unsigned JSON and are not recoverable from the quote without
 //! reproducing dstack's RTMR extension derivation, which this crate does not
-//! do. Naming one of them in the expected set is therefore a *config error*
+//! do. (`MRCONFIGID` commits to `compose_hash`, but this crate does not
+//! reproduce that derivation either; it compares the register itself.)
+//! Naming one of them in the expected set is therefore a *config error*
 //! ([`ExpectedMeasurementsError::NotVerifiableFromQuote`]) and not a quietly
 //! skipped key -- a value labelled "pinned" that nothing verifies is worse
 //! than no pinning at all, because it reads as a control that is present.
@@ -51,6 +54,29 @@ const MEASUREMENT_HEX_LEN: usize = 96;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MeasurementField {
     Mrtd,
+    /// MRCONFIGID -- the TD owner's configuration commitment.
+    ///
+    /// **This is the register a dstack deployment should pin.** It is written
+    /// once, before the TD starts, as a version tag followed by the compose
+    /// hash (a v2 layout additionally commits to the 20-byte app id and the
+    /// key-provider identity), so two instances of the same compose file
+    /// carry the same value.
+    ///
+    /// The RTMRs do not have that property, and the two obvious candidates
+    /// fail it in opposite ways:
+    ///
+    /// - **RTMR3** is extended at boot with an `instance-id` seeded from
+    ///   `getrandom`, so two instances of *identical* code differ. Pinning it
+    ///   pins one deployment of the image, and any redeploy is a mismatch.
+    /// - **RTMR0** hashes the virtual firmware's event log, which includes
+    ///   SMBIOS tables that scale with `-m` and `-cpu`. Resizing the CVM
+    ///   changes it with no code change at all, so a pin on it reads as an
+    ///   image mismatch when nothing about the image moved.
+    ///
+    /// Both remain pinnable -- an operator who wants to nail down a single
+    /// instance or a single machine shape may still want them -- but neither
+    /// answers "is this the code I audited".
+    MrConfigId,
     Rtmr0,
     Rtmr1,
     Rtmr2,
@@ -61,6 +87,7 @@ impl MeasurementField {
     pub fn as_str(self) -> &'static str {
         match self {
             MeasurementField::Mrtd => "mrtd",
+            MeasurementField::MrConfigId => "mrconfigid",
             MeasurementField::Rtmr0 => "rtmr0",
             MeasurementField::Rtmr1 => "rtmr1",
             MeasurementField::Rtmr2 => "rtmr2",
@@ -71,6 +98,7 @@ impl MeasurementField {
     fn parse(key: &str) -> Option<Self> {
         match key {
             "mrtd" => Some(MeasurementField::Mrtd),
+            "mrconfigid" => Some(MeasurementField::MrConfigId),
             "rtmr0" => Some(MeasurementField::Rtmr0),
             "rtmr1" => Some(MeasurementField::Rtmr1),
             "rtmr2" => Some(MeasurementField::Rtmr2),
@@ -87,6 +115,7 @@ impl MeasurementField {
     pub fn read(self, quote: &VerifiedQuote) -> &str {
         match self {
             MeasurementField::Mrtd => &quote.mrtd,
+            MeasurementField::MrConfigId => &quote.mr_config_id,
             MeasurementField::Rtmr0 => &quote.rtmr[0],
             MeasurementField::Rtmr1 => &quote.rtmr[1],
             MeasurementField::Rtmr2 => &quote.rtmr[2],
@@ -95,8 +124,9 @@ impl MeasurementField {
     }
 
     /// Every field, in canonical order.
-    pub const ALL: [MeasurementField; 5] = [
+    pub const ALL: [MeasurementField; 6] = [
         MeasurementField::Mrtd,
+        MeasurementField::MrConfigId,
         MeasurementField::Rtmr0,
         MeasurementField::Rtmr1,
         MeasurementField::Rtmr2,
@@ -129,12 +159,13 @@ pub enum ExpectedMeasurementsError {
     #[error("expected-measurement entry {index} has an empty key")]
     EmptyKey { index: usize },
     #[error(
-        "unknown expected-measurement key {key:?}; expected one of mrtd, rtmr0, rtmr1, rtmr2, rtmr3"
+        "unknown expected-measurement key {key:?}; expected one of mrtd, mrconfigid, rtmr0, \
+         rtmr1, rtmr2, rtmr3"
     )]
     UnknownField { key: String },
     #[error(
         "expected-measurement key {key:?} appears only in the report's unsigned JSON and cannot be \
-         checked against the signed quote; pin mrtd and rtmr0..rtmr3 instead"
+         checked against the signed quote; pin mrconfigid, mrtd or rtmr0..rtmr3 instead"
     )]
     NotVerifiableFromQuote { key: String },
     #[error("expected-measurement key {key} is set more than once")]
@@ -390,6 +421,13 @@ mod tests {
     /// asserting something this module cannot get wrong.
     const TEST_CONTROL: &str = "test_expected_measurements";
 
+    /// MRCONFIGID as read out of the verified fixture quote, asserted as a
+    /// literal rather than read back from the quote under test. A pin built
+    /// from `v.mr_config_id` compares the implementation against itself and
+    /// stays green if the field is wired to the wrong register; this does
+    /// not. Same value as `quote::tests::VERIFIED_MR_CONFIG_ID`.
+    const FIXTURE_MR_CONFIG_ID: &str = "019385918de0a73b861ae833d99fb5be6f7e1c8a50487a835df4f277497c206825000000000000000000000000000000";
+
     /// The raw quote bytes out of the fixture report.
     ///
     /// The hosted server reaches these through
@@ -412,8 +450,8 @@ mod tests {
     /// An expected set built from the quote's own verified values.
     fn expected_matching(v: &VerifiedQuote) -> ExpectedMeasurements {
         let raw = format!(
-            "mrtd={},rtmr0={},rtmr1={},rtmr2={},rtmr3={}",
-            v.mrtd, v.rtmr[0], v.rtmr[1], v.rtmr[2], v.rtmr[3]
+            "mrtd={},mrconfigid={},rtmr0={},rtmr1={},rtmr2={},rtmr3={}",
+            v.mrtd, v.mr_config_id, v.rtmr[0], v.rtmr[1], v.rtmr[2], v.rtmr[3]
         );
         ExpectedMeasurements::from_env_value(Some(&raw))
             .expect("the quote's own values are a valid pin set")
@@ -726,6 +764,105 @@ mod tests {
     }
 
     #[test]
+    fn mr_config_id_parses_as_a_measurement_field() {
+        // There is no FromStr on MeasurementField -- the operator-facing
+        // parse is the config path -- so this exercises that path, which is
+        // the one an operator's typo actually meets.
+        let expected =
+            ExpectedMeasurements::from_env_value(Some(&format!("mrconfigid={}", "a".repeat(96))))
+                .expect("mrconfigid is a known key")
+                .expect("and yields a set");
+        assert_eq!(expected.pinned_fields(), vec![MeasurementField::MrConfigId]);
+        assert_eq!(MeasurementField::MrConfigId.as_str(), "mrconfigid");
+        // The spelling round-trips: whatever `as_str` renders must be a key
+        // the parser accepts, or an operator copying a verdict back into
+        // config gets an UnknownField.
+        for field in MeasurementField::ALL {
+            let raw = format!("{}={}", field.as_str(), "b".repeat(96));
+            assert_eq!(
+                ExpectedMeasurements::from_env_value(Some(&raw))
+                    .unwrap_or_else(|e| panic!("{field} does not round-trip: {e}"))
+                    .unwrap()
+                    .pinned_fields(),
+                vec![field]
+            );
+        }
+    }
+
+    #[test]
+    fn a_pinned_mr_config_id_that_matches_is_accepted() {
+        // The positive half, pinned to the fixture's literal value. This is
+        // the assertion that goes red if `mr_config_id` is ever sourced from
+        // some other register.
+        let v = verified();
+        let expected = ExpectedMeasurements::from_env_value(Some(&format!(
+            "mrconfigid={FIXTURE_MR_CONFIG_ID}"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            check_measurements(&expected, &v),
+            MeasurementVerdict::Pinned {
+                fields: vec![MeasurementField::MrConfigId]
+            }
+        );
+    }
+
+    #[test]
+    fn a_pinned_mr_config_id_that_does_not_match_is_refused() {
+        // A witness image that is not the pinned one must be named, not
+        // merely refused. The mutation here is a single nibble of the
+        // fixture's real value, so the refusal cannot be about length,
+        // hex-ness or an unknown key.
+        let v = verified();
+        let mut tampered = FIXTURE_MR_CONFIG_ID.to_string();
+        tampered.replace_range(0..1, "f");
+        assert_ne!(tampered, FIXTURE_MR_CONFIG_ID);
+        assert_eq!(tampered.len(), FIXTURE_MR_CONFIG_ID.len());
+
+        let expected =
+            ExpectedMeasurements::from_env_value(Some(&format!("mrconfigid={tampered}")))
+                .unwrap()
+                .unwrap();
+        let verdict = check_measurements(&expected, &v);
+        let MeasurementVerdict::Mismatch { fields, mismatches } = &verdict else {
+            panic!("expected a mismatch, got {verdict}");
+        };
+        assert_eq!(fields, &vec![MeasurementField::MrConfigId]);
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].field, MeasurementField::MrConfigId);
+        assert_eq!(mismatches[0].expected, tampered);
+        // The value reported as actual is the quote's, asserted as a literal
+        // so the comparison is not against whatever the field happens to
+        // hold.
+        assert_eq!(mismatches[0].actual, FIXTURE_MR_CONFIG_ID);
+        assert!(verdict.to_string().contains("mrconfigid"), "{verdict}");
+        assert!(!verdict.is_pinned());
+    }
+
+    #[test]
+    fn mr_config_id_is_a_register_of_its_own() {
+        // MeasurementField::read must not alias another register: a pin on
+        // mrconfigid that silently compared mrtd would pass every
+        // deployment's config unchanged while checking the wrong thing.
+        let v = verified();
+        assert_eq!(MeasurementField::MrConfigId.read(&v), FIXTURE_MR_CONFIG_ID);
+        assert_ne!(MeasurementField::MrConfigId.read(&v), v.mrtd);
+        for field in [
+            MeasurementField::Rtmr0,
+            MeasurementField::Rtmr1,
+            MeasurementField::Rtmr2,
+            MeasurementField::Rtmr3,
+        ] {
+            assert_ne!(
+                MeasurementField::MrConfigId.read(&v),
+                field.read(&v),
+                "mrconfigid must not alias {field}"
+            );
+        }
+    }
+
+    #[test]
     fn field_read_returns_the_quotes_own_registers() {
         // `read` is public so that a caller comparing an endpoint's unsigned
         // self-description against the signed values has the trustworthy
@@ -733,6 +870,7 @@ mod tests {
         // would silently compare the wrong pair.
         let v = verified();
         assert_eq!(MeasurementField::Mrtd.read(&v), v.mrtd);
+        assert_eq!(MeasurementField::MrConfigId.read(&v), v.mr_config_id);
         for (i, field) in [
             MeasurementField::Rtmr0,
             MeasurementField::Rtmr1,

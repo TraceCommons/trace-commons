@@ -41,14 +41,22 @@ pub fn expected_measurements_from_env()
     ExpectedMeasurements::from_env_value(std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref())
 }
 
-/// The value of a register as a NEAR AI report *claims* it in unsigned JSON.
-fn read_claim(field: MeasurementField, claim: &UnverifiedJsonMeasurements) -> &str {
+/// The value of a register as a NEAR AI report *claims* it in unsigned JSON,
+/// or `None` where the report makes no such claim.
+///
+/// `Option` rather than a placeholder: a NEAR AI report's `info.tcb_info`
+/// carries mrtd and rtmr0..3 and nothing else, so MRCONFIGID has no claimed
+/// counterpart to disagree with. Returning `""` for it would make every
+/// honest endpoint report an anomaly on that register, which is exactly the
+/// kind of noise that gets an anomaly list ignored.
+fn read_claim(field: MeasurementField, claim: &UnverifiedJsonMeasurements) -> Option<&str> {
     match field {
-        MeasurementField::Mrtd => &claim.mrtd,
-        MeasurementField::Rtmr0 => &claim.rtmr0,
-        MeasurementField::Rtmr1 => &claim.rtmr1,
-        MeasurementField::Rtmr2 => &claim.rtmr2,
-        MeasurementField::Rtmr3 => &claim.rtmr3,
+        MeasurementField::Mrtd => Some(&claim.mrtd),
+        MeasurementField::Rtmr0 => Some(&claim.rtmr0),
+        MeasurementField::Rtmr1 => Some(&claim.rtmr1),
+        MeasurementField::Rtmr2 => Some(&claim.rtmr2),
+        MeasurementField::Rtmr3 => Some(&claim.rtmr3),
+        MeasurementField::MrConfigId => None,
     }
 }
 
@@ -79,8 +87,9 @@ impl fmt::Display for JsonClaimAnomaly {
 /// means is that the endpoint is describing itself inaccurately in a way the
 /// quote exposes -- worth surfacing to an operator on its own terms.
 ///
-/// Only `mrtd` and `rtmr0..3` are comparable; `compose_hash`, `os_image_hash`
-/// and `mr_aggregated` have no verified counterpart and are not examined.
+/// Only `mrtd` and `rtmr0..3` are comparable. `compose_hash`, `os_image_hash`
+/// and `mr_aggregated` have no verified counterpart, and `mrconfigid` is the
+/// mirror case -- verified but not claimed -- so neither side is examined.
 pub fn json_claim_anomalies(
     claim: &UnverifiedJsonMeasurements,
     verified: &VerifiedQuote,
@@ -88,7 +97,7 @@ pub fn json_claim_anomalies(
     MeasurementField::ALL
         .iter()
         .filter_map(|field| {
-            let claimed = read_claim(*field, claim);
+            let claimed = read_claim(*field, claim)?;
             let actual = field.read(verified);
             (!claimed.eq_ignore_ascii_case(actual)).then(|| JsonClaimAnomaly {
                 field: *field,
@@ -172,16 +181,20 @@ mod tests {
             EXPECTED_MEASUREMENTS_ENV,
             "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS"
         );
-        // And the loader is exactly `from_env_value` applied to that
-        // variable's current value, whatever it happens to be. Unconditional
-        // on purpose: a `if var.is_err()` guard would make this assertion
-        // skippable by the ambient environment, which is the same
-        // never-runs defect the pinning code exists to avoid.
-        let current = std::env::var(EXPECTED_MEASUREMENTS_ENV).ok();
-        assert_eq!(
-            expected_measurements_from_env(),
-            ExpectedMeasurements::from_env_value(current.as_deref())
-        );
+        // A second assertion used to stand here comparing
+        // `expected_measurements_from_env()` against
+        // `from_env_value(std::env::var(EXPECTED_MEASUREMENTS_ENV).ok())`,
+        // claiming to prove the loader reads *this* name. It could not: with
+        // the variable unset -- which is how it is in CI and in every local
+        // run -- both sides are `Ok(None)` no matter which name the loader
+        // consults, so a loader reading TRACE_COMMONS_WITNESS_... would have
+        // passed it unchanged. It is deleted rather than repaired because
+        // the only repair is to set the variable, and `set_var` is
+        // process-wide and unsound under a parallel test runner that has
+        // other tests reading the environment. The spelling assertion above
+        // is what is actually falsifiable here; that the loader is
+        // `from_env_value` of that constant is one line, visible at the call
+        // site.
     }
 
     #[test]
@@ -221,6 +234,44 @@ mod tests {
         assert_eq!(
             check_measurements(&expected, &v).mismatched_fields(),
             vec![MeasurementField::Rtmr1]
+        );
+    }
+
+    #[test]
+    fn mrconfigid_is_verified_here_but_never_claimed_so_it_is_not_an_anomaly() {
+        // MRCONFIGID is pinnable against the quote but a NEAR AI report's
+        // info.tcb_info does not carry it. `read_claim` therefore returns
+        // None for it. An arm returning `""` instead would make every honest
+        // endpoint report an mrconfigid anomaly forever -- so assert it is
+        // absent even when every register the report *does* claim is a lie,
+        // which is the case where a spurious extra entry would hide.
+        assert!(
+            MeasurementField::ALL.contains(&MeasurementField::MrConfigId),
+            "the field must be in ALL, or this test proves nothing"
+        );
+        let v = verified();
+        let mut claim = fixture_report().unverified_json_measurements();
+        claim.mrtd = "1".repeat(96);
+        claim.rtmr0 = "2".repeat(96);
+        claim.rtmr1 = "3".repeat(96);
+        claim.rtmr2 = "4".repeat(96);
+        claim.rtmr3 = "5".repeat(96);
+
+        let fields: Vec<MeasurementField> = json_claim_anomalies(&claim, &v)
+            .iter()
+            .map(|a| a.field)
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                MeasurementField::Mrtd,
+                MeasurementField::Rtmr0,
+                MeasurementField::Rtmr1,
+                MeasurementField::Rtmr2,
+                MeasurementField::Rtmr3,
+            ],
+            "every claimed register lies and must be reported; mrconfigid is \
+             not claimed and must not be"
         );
     }
 

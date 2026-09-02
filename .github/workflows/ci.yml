@@ -253,13 +253,18 @@ jobs:
       # `--lib near_attestation` used to sweep the whole attestation module:
       # receipt, quote and measurement verification included. All three moved
       # to the permissive `trace-commons-attestation` crate, so that filter
-      # silently stopped matching them -- the filter matched 46 before the
-      # measurement move and 36 after, having already lost receipt and quote
+      # silently stopped matching them -- the filter matched 45 before the
+      # measurement move and 36 today, having already lost receipt and quote
       # -- while the job's name went on claiming otherwise. `cargo test
       # --workspace` still runs them, but not in the feature configuration
-      # this job exists to cover. This restores that: the 40 that now live in
+      # this job exists to cover. This restores that: the 46 that now live in
       # the permissive crate, built with the feature that
       # `near-attestation-collateral` forwards to.
+      #
+      # Every count here is measured by running the job's own command with
+      # `-- --list`, never by grepping `#[test]`: client.rs carries a test
+      # behind `#[cfg(not(feature = "near-attestation-collateral"))]`, which
+      # this job excludes, so the source-attribute count is always one high.
       - run: cargo test -p trace-commons-attestation --features collateral-client
 
   cargo-test-default:
