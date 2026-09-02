@@ -313,6 +313,42 @@ pub(crate) async fn import_with<A: AntigravityApi>(
     }
 }
 
+/// What to actually do about a discovery failure, or `None` for a failure
+/// that already reads as a sentence.
+///
+/// The two labels below are the ones a contributor meets before anything
+/// else works, and both were reported as bare slugs: `Error:
+/// antigravity-not-running` told someone neither that the IDE has to be
+/// running nor that the project has to be open in it, which are the two
+/// things this command needs and cannot arrange for itself.
+///
+/// The equivalent confusion on the other side -- running the import from
+/// the wrong directory -- has had a real sentence since the command shipped
+/// (`zero_import_explanation` in `commands`). This is the same courtesy for
+/// the failure that comes first.
+///
+/// **This does not weaken the content-free error rule.** That rule exists
+/// because the endpoint holds a live CSRF token and a port, so its errors
+/// are fixed `&'static str` labels that cannot carry either. Mapping a
+/// known fixed label to fixed prose at the boundary adds no runtime value
+/// to the message: nothing here interpolates anything.
+pub(crate) fn discovery_guidance(error: &anyhow::Error) -> Option<&'static str> {
+    match error.to_string().as_str() {
+        super::endpoint::ERR_NOT_RUNNING => Some(
+            "Antigravity does not appear to be running. Its conversations are only \
+             readable through the local API the IDE serves, so start Antigravity, \
+             open the project you want to import, and run this again.",
+        ),
+        super::endpoint::ERR_API_NOT_FOUND => Some(
+            "Antigravity is running, but its local API did not answer on any port \
+             this looked at. If the IDE has just started, give it a moment and try \
+             again; if it stays unreachable, the running build may not serve the \
+             API this command needs.",
+        ),
+        _ => None,
+    }
+}
+
 /// Create the staging directory at 0700.
 fn create_staging_dir(staging: &Path) -> Result<()> {
     std::fs::create_dir_all(staging)?;
@@ -355,6 +391,45 @@ pub async fn import_antigravity(
 mod tests {
     use super::*;
     use crate::antigravity::client::{FixtureApi, desc_fixture};
+
+    /// The failure a contributor is most likely to hit first says what to
+    /// do about it.
+    ///
+    /// `import-antigravity` reported `Error: antigravity-not-running` and
+    /// stopped -- a label, with no hint that the IDE has to be started, or
+    /// that the project has to be open in it before its conversations are
+    /// readable. The neighbouring confusion, running the import from the
+    /// wrong directory, has had a real sentence since the command shipped
+    /// (`zero_import_explanation`); this one had nothing, and it is the
+    /// one a first attempt is most likely to produce.
+    #[test]
+    fn the_two_discovery_failures_say_what_to_do_about_them() {
+        for label in [
+            crate::antigravity::endpoint::ERR_NOT_RUNNING,
+            crate::antigravity::endpoint::ERR_API_NOT_FOUND,
+        ] {
+            let guidance = discovery_guidance(&anyhow!(label))
+                .unwrap_or_else(|| panic!("{label} must carry guidance"));
+            assert!(
+                guidance.contains("Antigravity"),
+                "{label}: guidance must name the application: {guidance}"
+            );
+            assert!(
+                guidance.len() > label.len(),
+                "{label}: guidance must say more than the label did"
+            );
+        }
+    }
+
+    /// Only those two. Every other failure already reads as a sentence --
+    /// the `--project` check added later says what is wrong with the path
+    /// it was given -- and wrapping one in a second explanation would bury
+    /// it.
+    #[test]
+    fn other_failures_are_left_to_speak_for_themselves() {
+        assert!(discovery_guidance(&anyhow!(ERR_NO_PROJECT)).is_none());
+        assert!(discovery_guidance(&anyhow!("--project path /nope does not exist")).is_none());
+    }
 
     /// The project the step fixtures' conversation was recorded in.
     const FIXTURE_PROJECT: &str = "/Users/anonymized/code/trace-commons-server";
