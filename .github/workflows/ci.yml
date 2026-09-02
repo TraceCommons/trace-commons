@@ -257,7 +257,7 @@ jobs:
       # measurement move and 36 today, having already lost receipt and quote
       # -- while the job's name went on claiming otherwise. `cargo test
       # --workspace` still runs them, but not in the feature configuration
-      # this job exists to cover. This restores that: the 46 that now live in
+      # this job exists to cover. This restores that: the 48 that now live in
       # the permissive crate, built with the feature that
       # `near-attestation-collateral` forwards to.
       #
