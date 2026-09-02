@@ -79,7 +79,7 @@ use trace_commons_server::near_attestation::drill::{
     run_near_attestation_drill as run_near_attestation_drill_steps,
 };
 use trace_commons_server::near_attestation::measurements::{
-    EXPECTED_MEASUREMENTS_ENV, ExpectedMeasurements,
+    EXPECTED_MEASUREMENTS_ENV, expected_measurements_from_env,
 };
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
@@ -73030,7 +73030,7 @@ async fn run_near_attestation_drill(
 
     // Fail closed on configuration before anything reaches the network, so a
     // misconfigured deployment gets a named control rather than a timeout.
-    let expected = match ExpectedMeasurements::from_env() {
+    let expected = match expected_measurements_from_env() {
         Ok(expected) => expected,
         Err(error) => {
             // The error names a key, never a value.

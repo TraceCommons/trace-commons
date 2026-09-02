@@ -50,8 +50,8 @@ use sha2::{Digest, Sha256};
 
 use super::client::{AttestationClient, AttestationClientError};
 use super::measurements::{
-    ExpectedMeasurements, MeasurementField, MeasurementVerdict, check_measurements_opt,
-    json_claim_anomalies,
+    EXPECTED_MEASUREMENTS_CONTROL, ExpectedMeasurements, MeasurementField, MeasurementVerdict,
+    check_measurements_opt, json_claim_anomalies,
 };
 use super::quote::{VerifiedQuote, verify_quote};
 use super::receipt::{ReceiptError, verify_receipt};
@@ -489,7 +489,9 @@ pub async fn run_near_attestation_drill(
     }
 
     // 6. The pinned image measurements.
-    let verdict = check_measurements_opt(expected, &verified);
+    // The control name is this deployment's, not the permissive crate's: a
+    // refusal must send an operator to TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS.
+    let verdict = check_measurements_opt(expected, &verified, EXPECTED_MEASUREMENTS_CONTROL);
     outcome.measurements = Some(measurement_evidence(&verdict));
     match &verdict {
         MeasurementVerdict::Pinned { .. } => log.pass(NearAttestationDrillStep::MeasurementsPinned),
@@ -754,9 +756,12 @@ mod tests {
     use crate::near_attestation::quote::{Collateral, parse_collateral};
     use crate::near_attestation::receipt::ReceiptPayload;
 
-    const REPORT: &str = include_str!("../../tests/fixtures/near_ai_attestation_report.json");
-    const COLLATERAL: &str =
-        include_str!("../../tests/fixtures/near_ai_attestation_collateral.json");
+    const REPORT: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+    );
+    const COLLATERAL: &str = include_str!(
+        "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+    );
     const OUTDATED_REPORT: &str =
         include_str!("../../tests/fixtures/near_ai_attestation_report_outdated_tcb.json");
     const OUTDATED_COLLATERAL: &str =

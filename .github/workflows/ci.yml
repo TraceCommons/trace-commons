@@ -155,6 +155,7 @@ jobs:
       # --no-default-features is the point: it is the configuration an
       # external consumer gets, and the one nothing else here exercises.
       - run: cargo check -p trace-commons-protocol --no-default-features
+      - run: cargo check -p trace-commons-attestation --no-default-features
       - run: cargo check -p trace-commons-contributor --no-default-features
       - run: cargo check -p trace-commons-contributor-ffi --no-default-features
       - run: cargo check -p trace-commons-operator-client --no-default-features
@@ -249,6 +250,22 @@ jobs:
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-attestation-collateral
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
       - run: cargo test -p trace-commons-server --features near-attestation-collateral --lib near_attestation
+      # `--lib near_attestation` used to sweep the whole attestation module:
+      # receipt, quote and measurement verification included. All three moved
+      # to the permissive `trace-commons-attestation` crate, so that filter
+      # silently stopped matching them -- the filter matched 45 before the
+      # measurement move and 36 today, having already lost receipt and quote
+      # -- while the job's name went on claiming otherwise. `cargo test
+      # --workspace` still runs them, but not in the feature configuration
+      # this job exists to cover. This restores that: the 48 that now live in
+      # the permissive crate, built with the feature that
+      # `near-attestation-collateral` forwards to.
+      #
+      # Every count here is measured by running the job's own command with
+      # `-- --list`, never by grepping `#[test]`: client.rs carries a test
+      # behind `#[cfg(not(feature = "near-attestation-collateral"))]`, which
+      # this job excludes, so the source-attribute count is always one high.
+      - run: cargo test -p trace-commons-attestation --features collateral-client
 
   cargo-test-default:
     name: cargo test (default features)

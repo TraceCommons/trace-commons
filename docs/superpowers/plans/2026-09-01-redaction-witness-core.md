@@ -8,7 +8,16 @@
 
 **Tech Stack:** Rust. Reuses `near_attestation::receipt` (already on `main`) for receipt verification, `sha2`, `k256`/`ed25519`, and the existing hash-only conventions.
 
-**Spec:** [`docs/superpowers/specs/2026-09-01-redaction-witness-design.md`](../specs/2026-09-01-redaction-witness-design.md) — read "The correspondence check", "The certificate", and "What the witness verifies before certifying" before starting.
+**Status: complete.** Shipped in #533. This plan is kept as the record of
+what was built and how it was proved; it is not a plan to execute.
+
+**Spec:** the design this plan was written against has been replaced by
+[`docs/superpowers/specs/2026-09-02-redaction-witness-service-design.md`](../specs/2026-09-02-redaction-witness-service-design.md).
+The verification core below shipped unchanged and is reused. What did not
+survive is the rationale: the witness no longer checks a client-supplied span
+list, because it performs the redaction itself, and it no longer binds a
+certificate to a NEAR AI inference receipt, because no trace population in this
+repo carries one.
 
 ## Why this slice, and what it deliberately excludes
 
