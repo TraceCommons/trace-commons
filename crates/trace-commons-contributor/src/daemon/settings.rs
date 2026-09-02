@@ -235,6 +235,10 @@ pub enum IronWireDeclaration {
     Off,
 }
 
+/// The file the proxy writes its control-API token to, inside whichever
+/// directory [`ironwire_token_path`] resolves.
+pub const IRONWIRE_TOKEN_FILE: &str = "control.token";
+
 impl IronWireDeclaration {
     /// The port to read, or `None` when the proxy is off.
     #[must_use]
@@ -253,6 +257,26 @@ impl IronWireDeclaration {
             IronWireDeclaration::Off => None,
         }
     }
+}
+
+/// The file `control.token` would be read from, given a declared directory.
+///
+/// Factored out of [`ironwire_ledger_for`] rather than duplicated because a
+/// probe that reports a different path from the one the reader actually uses
+/// is worse than no probe: it would send a contributor to fix a file nothing
+/// reads. Both callers resolve through this one function, so they cannot
+/// drift. The resolution order it encodes is documented on
+/// [`ironwire_ledger_for`].
+///
+/// `None` only when nothing at all resolves -- no declared directory, no
+/// `IRONWIRE_HOME`, and no discoverable home directory.
+#[must_use]
+pub fn ironwire_token_path(declared: Option<&std::path::Path>) -> Option<PathBuf> {
+    let home = declared
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("IRONWIRE_HOME").map(PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
+    Some(home.join(IRONWIRE_TOKEN_FILE))
 }
 
 /// Build a routing ledger for a declaration, or nothing.
@@ -281,12 +305,7 @@ pub fn ironwire_ledger_for(
 ) -> Option<std::sync::Arc<crate::routing::ironwire::IronWireLedger>> {
     let declaration = declaration?;
     let port = declaration.port()?;
-    let home = declaration
-        .token_dir()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("IRONWIRE_HOME").map(PathBuf::from))
-        .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
-    let token = std::fs::read_to_string(home.join("control.token")).ok()?;
+    let token = std::fs::read_to_string(ironwire_token_path(declaration.token_dir())?).ok()?;
     Some(std::sync::Arc::new(
         crate::routing::ironwire::IronWireLedger::new(port, token.trim().to_string()),
     ))

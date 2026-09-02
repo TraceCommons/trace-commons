@@ -403,6 +403,7 @@ history record, audit entry, notification text, or IPC response.
 | `refresh_history` | — | `requested: true` | |
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
+| `probe_routing` | `port` (required), `token_dir` (optional absolute directory) | `outcome`, plus `token_path` or `port` | asks a declared IronWire proxy whether it is there; performs real loopback I/O and **never returns the token**; see "`probe_routing`" below |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
@@ -1238,6 +1239,55 @@ that was quiesced is the process the swap replaces.
 On timeout the daemon answers `busy` / `quiesce-timeout` and un-parks itself.
 The caller leaves the update staged and retries later. There is no forced
 path.
+
+### `probe_routing`
+
+```json
+{ "outcome": "reachable" }
+{ "outcome": "token_unreadable", "token_path": "/Users/x/.ironwire/control.token" }
+{ "outcome": "unreachable", "port": 8463 }
+```
+
+Asks the IronWire proxy a contributor is about to declare whether it is
+actually there, so that declaring can answer instead of failing silently.
+
+The routing *reader* deliberately treats absence and failure as the same
+state: a proxy that vanished must never cost anyone a trace, so nothing on
+the submission path reports an error. That is right for reading and wrong
+for declaring. Without this method a contributor can name a wrong port or an
+unreachable token, see no error and no indicator, and have every trace carry
+no routing data. This method runs only when a human asks; it touches no
+daemon state and cannot affect a submission.
+
+`token_dir` is resolved exactly as the reader resolves it -- the declared
+directory, then `IRONWIRE_HOME`, then `~/.ironwire` -- through the same
+function, so the path reported is the file that would actually be read.
+
+The three outcomes:
+
+- **`reachable`** -- the proxy answered and the token was accepted.
+- **`token_unreadable`** -- carries `token_path`, the absolute path that was
+  tried. Covers no readable `control.token` there and a proxy that answered
+  and refused the one that was. A GUI-launched daemon never sees
+  `IRONWIRE_HOME`, so it reads `~/.ironwire/control.token` whatever the
+  contributor set in a shell; that produces a missing file on one machine
+  and a stale token on another, and naming the directory fixes both.
+  `token_path` is absent only when nothing resolves at all -- no declared
+  directory, no `IRONWIRE_HOME`, no discoverable home.
+- **`unreachable`** -- carries `port`, the port that was tried. Also the
+  answer when something answered but did not serve the ledger (a 404, a
+  500): the usual cause is a number naming some other local service, so the
+  port is still the actionable fact.
+
+**No outcome ever carries the token.** It is a credential for an API that
+can rewrite the contributor's agent configuration, and this answer crosses a
+socket to a shell. The token *directory* is not the token, and the path is
+the whole point.
+
+Refusals are `bad_params` / `port-invalid` (missing, non-integer, `0`, or
+above 65535) and `bad_params` / `token-dir-invalid` (present but not a
+non-empty string -- refused rather than treated as absent, which would
+answer about a path the caller did not ask about).
 
 ### `set_settings`
 
