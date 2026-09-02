@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use crate::daemon::settings::SourceDeclaration;
 
@@ -128,7 +129,13 @@ pub struct SessionEvent {
     pub success: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+/// `Default` exists for tests that only care about one or two fields and
+/// want to fill the rest with something rather than hand-write every field
+/// every time -- see the `..Default::default()` construction pattern used
+/// throughout this crate's test modules. A defaulted transcript (empty
+/// events, no source, no session hash) is not a real session and must never
+/// be treated as one in production code.
+#[derive(Debug, Clone, Default)]
 pub struct SessionTranscript {
     /// Provenance: the harness that produced this session. For the native
     /// adapters this equals the adapter name; for trajectory files it is the
@@ -160,6 +167,15 @@ pub struct SessionTranscript {
     /// than being decided again at send time.
     pub subagent_count: u32,
     pub subagents_dropped: u32,
+    /// Routing and cost data for the inference hops behind this session, when
+    /// a local proxy recorded them and the session could be joined to them.
+    ///
+    /// Empty is the normal state, not a failure: most contributors run no
+    /// proxy, and a session that predates one is only partly covered even
+    /// where one exists. The transcript is the single carrier of everything
+    /// the envelope builder needs, which is why this lives here rather than
+    /// being threaded through the four builders separately.
+    pub routing: Vec<crate::routing::RoutedExchange>,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across
@@ -457,15 +473,48 @@ pub enum TrajectorySelection {
 ///   equal to watching the real `~/.codex`.
 /// - absent -- never asked. What happens then is the adapter's own
 ///   [`Undeclared`] policy, not one rule for everybody.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SourceRoots {
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
+    /// A routing overlay to attach to every adapter these roots build.
+    /// `None` -- the majority case -- leaves adapters bare. Not `Debug`: a
+    /// trait object can hold anything a proprietary ledger implementation
+    /// wants, so `SourceRoots` implements `Debug` by hand below rather than
+    /// deriving it and requiring `dyn RoutingLedger: Debug`.
+    routing: Option<Arc<dyn crate::routing::RoutingLedger>>,
+}
+
+impl std::fmt::Debug for SourceRoots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceRoots")
+            .field("declared", &self.declared)
+            .field("trajectory", &self.trajectory)
+            .field("routing", &self.routing.is_some())
+            .finish()
+    }
 }
 
 impl SourceRoots {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a routing ledger, so every source built from these roots
+    /// carries the routing overlay. `None` leaves sources bare -- the
+    /// majority case.
+    pub fn with_routing(mut self, ledger: Option<Arc<dyn crate::routing::RoutingLedger>>) -> Self {
+        self.routing = ledger;
+        self
+    }
+
+    /// Whether a routing ledger is attached. Test-only: production code has
+    /// no reason to branch on this, only to build sources from it, but a
+    /// test pinning "nothing attaches a ledger yet" needs to see the field
+    /// without constructing a session to prove it indirectly.
+    #[cfg(test)]
+    pub(crate) fn is_routed(&self) -> bool {
+        self.routing.is_some()
     }
 
     /// Record what the contributor said about one source. `None` leaves it
@@ -576,7 +625,22 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
             staging_dir.clone(),
         ))),
     }
+
+    // One insertion point for the whole overlay. Without a declared proxy the
+    // adapters are returned bare, which is the majority case and costs one
+    // branch.
+    let Some(routing) = roots.routing.clone() else {
+        return sources;
+    };
     sources
+        .into_iter()
+        .map(|source| {
+            Box::new(crate::routing::enriched::RoutingEnrichedSource::new(
+                source,
+                Arc::clone(&routing),
+            )) as Box<dyn TraceSource>
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -647,6 +711,123 @@ mod tests {
             "declaring every source off is a legitimate answer and must \
              watch nothing, not fall back to everything"
         );
+    }
+
+    /// A minimal, real Claude Code session file: one line, one project dir.
+    /// Mirrors the record shape `claude_code.rs`'s own fixtures use, so this
+    /// is a real adapter round trip (discover + load), not a stub.
+    fn claude_code_fixture(session: &str) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let project_dir = root.path().join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let file = project_dir.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"sessionId\":\"{session}\",\
+                 \"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        (root, file)
+    }
+
+    #[test]
+    fn without_a_declared_proxy_the_adapters_are_returned_bare() {
+        // "Bare" has to be observed, not assumed from an empty source list --
+        // the old version of this test declared both sources Off and checked
+        // `is_empty()`, which passes whether or not the decoration branch
+        // exists and never actually looks at a returned source.
+        //
+        // Declare one real source and load a real session through it twice:
+        // once with no proxy declared, once with a proxy declared whose
+        // ledger holds an exchange for exactly that session. `load` is the
+        // only place a `RoutingEnrichedSource` differs observably from its
+        // inner adapter -- it overwrites `transcript.routing` from the
+        // ledger. So the routing-declared case must come back non-empty
+        // (proving the wrapper ran and can see this session) while the
+        // no-proxy case must come back empty -- proving only that no overlay
+        // is attached in the bare case, not that the returned source is some
+        // different concrete type: a wrapper over an empty ledger would pass
+        // this half identically. The contrast with the wrapped arm below is
+        // what actually carries the test.
+        let session = "33333333-3333-3333-3333-333333333333";
+        let (root, _file) = claude_code_fixture(session);
+        let root_path = root.path().to_str().unwrap();
+
+        let bare_sources = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch(root_path))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off)),
+        );
+        assert_eq!(bare_sources.len(), 1);
+        let bare_refs = bare_sources[0].discover().expect("discover succeeds");
+        assert_eq!(
+            bare_refs.len(),
+            1,
+            "fixture must produce exactly one session"
+        );
+        let bare_transcript = bare_sources[0].load(&bare_refs[0]).expect("load succeeds");
+        assert!(
+            bare_transcript.routing.is_empty(),
+            "without a declared proxy the returned source must not attach \
+             any routing overlay"
+        );
+
+        let ledger: Arc<dyn crate::routing::RoutingLedger> =
+            Arc::new(crate::routing::FixedLedger::new(vec![
+                crate::routing::RoutedExchange {
+                    id: None,
+                    started_at: chrono::Utc::now(),
+                    client_session_id: Some(session.to_string()),
+                    total_ms: Some(1200),
+                    facade: "anthropic".to_string(),
+                    backend: "claude-sub".to_string(),
+                    requested_model: None,
+                    served_model: None,
+                    rung: "same_model".to_string(),
+                    attempts: 1,
+                    input_tokens: Some(1000),
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tokens: Some(200),
+                    cost_usd: Some(0.02),
+                    status: 200,
+                },
+            ]));
+        let wrapped_sources = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch(root_path))
+                .declare(SOURCE_CODEX, Some(SourceDeclaration::Off))
+                .with_routing(Some(ledger)),
+        );
+        assert_eq!(wrapped_sources.len(), 1);
+        let wrapped_refs = wrapped_sources[0].discover().expect("discover succeeds");
+        let wrapped_transcript = wrapped_sources[0]
+            .load(&wrapped_refs[0])
+            .expect("load succeeds");
+        assert_eq!(
+            wrapped_transcript.routing.len(),
+            1,
+            "with a declared proxy the same session must come back enriched"
+        );
+    }
+
+    #[test]
+    fn a_declared_proxy_decorates_every_adapter_without_adding_one() {
+        let ledger: Arc<dyn crate::routing::RoutingLedger> =
+            Arc::new(crate::routing::FixedLedger::new(Vec::new()));
+        let bare =
+            all_sources(&SourceRoots::new().declare(SOURCE_CLAUDE_CODE, watch("/declared/claude")))
+                .len();
+        let wrapped = all_sources(
+            &SourceRoots::new()
+                .declare(SOURCE_CLAUDE_CODE, watch("/declared/claude"))
+                .with_routing(Some(ledger)),
+        )
+        .len();
+        assert_eq!(bare, wrapped, "decorating must not add or drop a source");
     }
 
     #[test]
