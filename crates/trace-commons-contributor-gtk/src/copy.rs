@@ -1354,6 +1354,10 @@ pub fn scrub_detector_label(slug: &str) -> String {
         // Naming them beats "provider tokens", which tells a contributor
         // nothing about whether their own provider is covered.
         "provider_token" => "Stripe, GitLab and Slack tokens".to_string(),
+        // Named separately from `provider_token` for the same reason that
+        // entry names its providers: a Cursor user reading this list has to
+        // be able to see their own key in it.
+        "cursor_api_key" => "Cursor API keys".to_string(),
         "jwt" => "JSON Web Tokens".to_string(),
         "npm_token" => "npm tokens".to_string(),
         "google_api_key" => "Google API keys".to_string(),

@@ -22,6 +22,29 @@ public class ScrubDetectorCopyTests
     }
 
     /// <summary>
+    /// Cursor keys are named in their own words, not folded into the
+    /// provider-token line.
+    ///
+    /// <c>EveryDetectorTheScrubberReportsHasAHumanLabel</c> already fails if
+    /// this detector reaches the dialog unlabelled, so what this adds is the
+    /// wording: the whole reason <c>cursor_api_key</c> is a separate detector
+    /// rather than a fifth arm of <c>provider_token</c> is that a Cursor user
+    /// has to be able to find their own key in this list. A label reading
+    /// "cursor api key", or one quietly merged into the Stripe/GitLab/Slack
+    /// line, satisfies the coverage guard and loses the point. macOS pins the
+    /// same two strings in <c>ScrubDetectorsTests</c>; this is the Windows
+    /// half of that pair.
+    /// </summary>
+    [Fact]
+    public void CursorKeysAreNamedInTheirOwnWords()
+    {
+        Assert.Equal("Cursor API keys", ScrubDetectorCopy.LabelFor("cursor_api_key"));
+        Assert.Equal(
+            "Stripe, GitLab and Slack tokens",
+            ScrubDetectorCopy.LabelFor("provider_token"));
+    }
+
+    /// <summary>
     /// The list renders in the order the scrubber reports, and blank entries
     /// are skipped rather than becoming empty rows.
     /// </summary>
