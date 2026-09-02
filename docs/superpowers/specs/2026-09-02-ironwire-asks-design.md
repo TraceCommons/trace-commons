@@ -81,6 +81,42 @@ and already prints `unknown` rather than guessing. A balance is squarely in the
 first category. If NEAR AI does not report one, `unknown` is the right answer
 and we will render it as such.
 
+### Decided: the app holds a session JWT
+
+Probed against NEAR AI's published schema (`cloud-api.near.ai/api-docs/openapi.json`)
+on 2026-09-02, so this is measured rather than assumed.
+
+`GET /v1/organizations/{org_id}/usage/balance` returns exactly what a balance
+card wants -- `remaining`, `remaining_display`, `spend_limit`, `total_spent`,
+`total_tokens`, `last_usage_at` -- and is secured by **`session_token`**, a
+short-lived JWT minted from a long-lived `rt_` refresh token obtained by OAuth
+login. **IronWire's API key cannot read it**, so this is not something IronWire
+can hand us; it is a login flow in our own app.
+
+**Decision: we do the login and hold the JWT.** A read-only `rpt-` reporting
+token exists and is the lighter credential, but it opens only `usage/summary`
+and `usage/export` -- what has been *used*, never what is *left* -- and the
+number people care about is what is left.
+
+**State plainly what that credential grants**, because it is more than a
+balance. A session JWT also opens `POST /v1/workspaces/{id}/api-keys`,
+`PATCH .../spend-limit`, and token revocation. So the refresh token we store is,
+in effect, the ability to mint inference credentials and change spending limits
+on the contributor's organisation. That is a materially heavier thing to hold on
+a laptop than an inference key, and the design must treat it that way:
+
+- Store the refresh token in the OS keychain, never in our settings file, and
+  never in a trace.
+- Mint a JWT on demand and hold it in memory only. Never persist one.
+- Use it for the read-only calls this design needs and nothing else.
+- Offer a visible disconnect that revokes the refresh token upstream, not one
+  that merely forgets it locally.
+
+**Open, and not ours to answer:** reporting tokens are created by organisation
+owners and admins. If contributors are not each their own organisation, some of
+them cannot mint one -- and it is worth checking whether the same is true of the
+balance endpoint before a card is built on it for everyone.
+
 ## 4. Keep the attestation, and hand it over
 
 **This is the ask that changes a roadmap rather than a screen.**
