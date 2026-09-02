@@ -1,0 +1,83 @@
+# The redaction witness, as a dstack application.
+#
+# THIS FILE IS MEASURED. dstack hashes app-compose.json -- which embeds this
+# file verbatim -- into MRCONFIGID. Every value below, including the redaction
+# mode and the body bound, is therefore part of the enclave's identity: an
+# operator cannot change one without changing the measurement, and a client
+# pinning the measurement will refuse the changed deployment until it is
+# re-allowlisted. That is the intended property, not a side effect.
+#
+# After editing, regenerate app-compose.json:
+#
+#     ./build-app-compose.sh
+#
+# A change here that is not carried into app-compose.json deploys the OLD
+# configuration. The script is how the two are kept from drifting.
+
+services:
+  witness:
+    # REPLACE THIS. There is no default that is safe to inherit: a tag is a
+    # moving target and pinning a measurement over one is pinning nothing.
+    # Push the image built from ./Dockerfile and reference it by digest.
+    image: ghcr.io/OWNER/trace-commons-witness@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+    # A restart re-derives the same signing key: dstack's KMS derives the app
+    # key from the app id, which does not move. So a restart is invisible to a
+    # client that has pinned the signing address, and the witness holds no
+    # state that a restart could lose.
+    restart: always
+
+    # The witness writes nothing. A writable root filesystem would be a place
+    # for a raw transcript to land.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # The guest agent's unix socket. This is the only mount, and it is what
+    # GetKey and GetQuote are reached through. It is not network-reachable;
+    # the witness proxies GetQuote on /v1/attestation precisely because a
+    # contributor cannot call it directly.
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+
+    environment:
+      # 0.0.0.0, not the binary's 127.0.0.1 default. The default is correct for
+      # a host where something else terminates TLS in the same netns; inside a
+      # container it makes the witness unreachable from dstack-gateway, and the
+      # symptom is a healthy-looking process that no request ever arrives at.
+      TRACE_COMMONS_WITNESS_BIND: "0.0.0.0:8088"
+
+      # `deterministic-only` or `full-pipeline`, and the binary refuses to start
+      # if it is neither -- there is no default in either direction.
+      #
+      # This reference deployment ships `deterministic-only` because
+      # `full-pipeline` needs a prose-PII classifier, and neither way of
+      # supplying one is free: a sibling container inside this CVM adds a
+      # multi-gigabyte model and runs it on CVM vCPUs, and an external endpoint
+      # sends partially-redacted text out of the enclave. See the README's
+      # "Choosing a redaction mode" -- the choice has a consequence for what a
+      # certificate is worth, and it is not a default anyone should inherit
+      # without reading it.
+      TRACE_COMMONS_WITNESS_REDACTION: "deterministic-only"
+
+      # 64 MiB. The redacted-envelope cap is 16 MiB and the measured
+      # raw-to-envelope ratio on this pilot is about 3.4:1.
+      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "67108864"
+
+      # Path prefixes the deterministic pass treats as known, so they are not
+      # reported as findings. Empty reports more, never less.
+      TRACE_COMMONS_WITNESS_KNOWN_PATH_PREFIXES: ""
+
+      # `info` is what the witness logs at, and what it logs is two lines at
+      # boot: the signing address and the measurement. Both are public values
+      # an operator pins. Do not raise this to `debug` on a deployment that
+      # sees real transcripts.
+      RUST_LOG: "info"
+
+    ports:
+      - "8088:8088"

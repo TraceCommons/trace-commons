@@ -52,6 +52,7 @@ the link.
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
+| Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
@@ -111,6 +112,14 @@ Every runbook in this directory, with a one-line description.
   next `app-v*` tag.
 - [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
   the authoritative top-of-funnel doc.
+- [`../../deploy/witness/README.md`](../../deploy/witness/README.md) — deploying
+  the redaction witness in a dstack TDX guest. The project's first
+  trusted-execution deployment, and the doc lives beside its compose files
+  rather than here because the manifest, the image and the procedure have to
+  stay in step. Covers what to pin (MRTD and MRCONFIGID, not RTMR0 or RTMR3),
+  the allowlist-before-deploy upgrade order, why a guest-API surface migration
+  is a key rotation and not an upgrade, that the image is **not** reproducibly
+  buildable, and the limit on what a witness certificate attests.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
 - [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI

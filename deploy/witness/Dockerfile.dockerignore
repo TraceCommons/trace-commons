@@ -1,0 +1,32 @@
+# Build context for deploy/witness/Dockerfile.
+#
+# BuildKit reads `<dockerfile>.dockerignore` in preference to the context
+# root's `.dockerignore`, so this scopes the exclusions to this build without
+# changing what any other Dockerfile in the repository sees.
+#
+# The build context is the repository root, because the image builds the
+# workspace. Without this file that context includes `target/`, which is tens
+# of gigabytes of build output on a developer machine -- all of it uploaded to
+# the daemon and none of it used, since the image compiles from source.
+#
+# Kept deliberately short. Every entry is either build output or a directory no
+# workspace member reads, and the list is not extended for image size: an
+# exclusion that turns out to be wrong shows up as a confusing compile error
+# inside a container, which is a bad trade for a few megabytes of context.
+
+# Build output.
+target/
+**/target/
+
+# Not read by the build. The commit is passed in as TRACE_COMMONS_BUILD_COMMIT
+# instead of resolved from .git -- the same route Cloud Build takes, and the
+# reason `trace-commons-build-info` prefers that variable over `git rev-parse`.
+.git/
+.github/
+.claude/
+.superpowers/
+
+# The desktop shells. Neither is a workspace member (see the root Cargo.toml's
+# `members`), so neither is compiled by this build.
+macos/
+windows/
