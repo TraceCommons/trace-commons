@@ -1983,7 +1983,10 @@ fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
     let h = start(dir.path());
     unsafe { tc_daemon_stop(h) };
     unsafe { tc_handle_free(h) };
-    let _ = last_error();
+    // No read of tc_last_error clears it, so there is no way to prove the
+    // label below was recorded by this call rather than left over. What
+    // makes the assertion mean something is that nothing earlier in this
+    // test records "invalid-handle-pointer": the free above succeeds.
     unsafe { tc_unsubscribe(h, 0) };
     assert!(
         last_error()

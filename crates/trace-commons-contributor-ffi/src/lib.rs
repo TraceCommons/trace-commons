@@ -213,10 +213,21 @@ enum AllocKind {
 static REGISTRY: LazyLock<Mutex<HashMap<usize, AllocKind>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Records `ptr` as a live allocation of `kind`.
+///
+/// Recovers from a poisoned mutex the same way `registry_take` and
+/// `registry_is` do. Dropping the insert instead used to cost a leak -- the
+/// allocation still worked, only its free was refused as unknown. Now that
+/// the six borrowing entry points consult the registry too, a dropped insert
+/// would hand the caller a handle that every one of them refuses forever, so
+/// the one accessor that silently gave up is the one that can least afford
+/// to.
 fn registry_insert(ptr: usize, kind: AllocKind) {
-    if let Ok(mut r) = REGISTRY.lock() {
-        r.insert(ptr, kind);
-    }
+    let mut r = match REGISTRY.lock() {
+        Ok(r) => r,
+        Err(p) => p.into_inner(),
+    };
+    r.insert(ptr, kind);
 }
 
 /// Removes `ptr` from the registry if, and only if, it is currently
@@ -234,13 +245,13 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
     // unregister a live allocation: the pointer stays valid but every
     // `registry_is` check on it fails from then on, and its real free is
     // refused as unknown. A refusal must leave the registry untouched.
-    match r.get(&ptr) {
-        Some(found) if *found == kind => {
-            r.remove(&ptr);
+    match r.entry(ptr) {
+        std::collections::hash_map::Entry::Occupied(found) if *found.get() == kind => {
+            found.remove();
             Ok(())
         }
-        Some(_) => Err("cross-type-free"),
-        None => Err("double-free-or-unknown-pointer"),
+        std::collections::hash_map::Entry::Occupied(_) => Err("cross-type-free"),
+        std::collections::hash_map::Entry::Vacant(_) => Err("double-free-or-unknown-pointer"),
     }
 }
 
@@ -767,6 +778,17 @@ fn stop_embedded(handle: &tc_handle) {
 /// that is not a live `tc_handle*`.
 const ERR_INVALID_HANDLE_POINTER: &str = "invalid-handle-pointer";
 
+/// The three other reasons `tc_subscribe` returns 0.
+///
+/// `tc_subscribe` returns 0 for a NULL handle, a non-live handle, a NULL
+/// callback, and a stopped daemon. Only the non-live case recorded a label,
+/// so a host following "token == 0, read `tc_last_error`" got a stale,
+/// unrelated label for the other three. Labelling all four makes that
+/// contract total.
+const ERR_NULL_HANDLE: &str = "null-handle";
+const ERR_NULL_CALLBACK: &str = "null-callback";
+const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
+
 /// Validate a borrowed `tc_handle*` before any dereference, recording the
 /// fixed label itself.
 ///
@@ -930,7 +952,7 @@ pub unsafe extern "C" fn tc_call(
                 return error_frame(ERR_BAD_PARAMS, "null-handle");
             }
             if !handle_pointer_is_live(handle) {
-                return error_frame(ERR_BAD_PARAMS, "invalid-handle-pointer");
+                return error_frame(ERR_BAD_PARAMS, ERR_INVALID_HANDLE_POINTER);
             }
             let handle = unsafe { &*handle };
             let method = match unsafe { borrow_str(method) } {
@@ -1019,10 +1041,14 @@ pub unsafe extern "C" fn tc_invite_issuer_host(invite: *const c_char) -> *mut c_
 /// synthetic `{"event":"lagged","data":{"skipped":N}}` frame rather than
 /// silently dropped with no signal.
 ///
-/// Returns 0 on failure (a NULL `handle`, a `handle` that is not a live
-/// `tc_handle*`, a NULL `cb`, or a stopped daemon) -- 0 is never a valid
-/// subscription token. On success, returns a nonzero token identifying
-/// this subscription for `tc_unsubscribe`.
+/// Returns 0 on failure -- 0 is never a valid subscription token. On
+/// success, returns a nonzero token identifying this subscription for
+/// `tc_unsubscribe`.
+///
+/// Every zero return records a fixed label retrievable with
+/// `tc_last_error`, so "token == 0, read `tc_last_error`" is a total
+/// contract: `"null-handle"`, `"invalid-handle-pointer"` (not a live
+/// `tc_handle*`), `"null-callback"`, or `"daemon-not-running"`.
 ///
 /// The callback runs on a background thread and is not itself unwind-safe
 /// across languages: a callback that panics on the Swift/C# side is that
@@ -1042,6 +1068,7 @@ pub unsafe extern "C" fn tc_subscribe(
 ) -> u64 {
     let outcome = guard(|| {
         if handle.is_null() {
+            set_last_error(ERR_NULL_HANDLE);
             return Ok(0u64);
         }
         if !handle_pointer_is_live(handle) {
@@ -1049,9 +1076,11 @@ pub unsafe extern "C" fn tc_subscribe(
         }
         let handle_ref = unsafe { &*handle };
         let Some(cb) = cb else {
+            set_last_error(ERR_NULL_CALLBACK);
             return Ok(0u64);
         };
         let Some(shared) = shared_of(handle_ref) else {
+            set_last_error(ERR_DAEMON_NOT_RUNNING);
             return Ok(0u64);
         };
         // Raw pointers are not `Send`; `ctx` is a caller-supplied opaque
@@ -1251,7 +1280,7 @@ pub unsafe extern "C" fn tc_preview_open(
             anyhow::bail!("null-handle");
         }
         if !handle_pointer_is_live(handle) {
-            anyhow::bail!("invalid-handle-pointer");
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;
@@ -1369,7 +1398,7 @@ pub unsafe extern "C" fn tc_preview_turns_json(
             anyhow::bail!("null-handle");
         }
         if !handle_pointer_is_live(handle) {
-            anyhow::bail!("invalid-handle-pointer");
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;

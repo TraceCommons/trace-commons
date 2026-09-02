@@ -356,11 +356,13 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * reported to cb as a synthetic `{"event":"lagged","data":{"skipped":N}}`
  * frame rather than silently dropped.
  *
- * Returns 0 on failure (NULL handle, a handle that is not a live
- * tc_handle*, NULL cb, or a stopped daemon) -- 0 is never a valid token.
- * A handle that is not live also records the fixed tc_last_error label
- * "invalid-handle-pointer" before returning 0. On success, returns a
- * nonzero token for tc_unsubscribe.
+ * Returns 0 on failure -- 0 is never a valid token. On success, returns
+ * a nonzero token for tc_unsubscribe.
+ *
+ * Every zero return records a fixed tc_last_error label, so "token == 0,
+ * read tc_last_error" is a total contract: "null-handle",
+ * "invalid-handle-pointer" (not a live tc_handle*), "null-callback", or
+ * "daemon-not-running".
  */
 uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
 
