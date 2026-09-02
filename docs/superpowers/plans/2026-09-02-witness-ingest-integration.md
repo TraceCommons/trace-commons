@@ -116,17 +116,27 @@ certificate's digest against bytes the server holds, and the server never holds
 that string. There is no mapping between them anywhere in the tree and, because
 the envelope splits and canonicalises content, none is constructible.
 
-So the witness must take a serialised envelope and return the serialised
-redacted envelope, and the contributor must POST exactly those bytes. Then
-`redacted_bytes` is the request body and the binding is trivial.
+So the witness must **build** the envelope and return the exact bytes the
+contributor will POST. Then `redacted_bytes` is the request body and the
+binding is trivial.
 
-**What changes.** `witness()` currently runs `DeterministicTraceRedactor` over
-its input as flat text. It must instead deserialise the input as a
-`TraceContributionEnvelope`, run the envelope redaction path
-(`rescrub_trace_envelope_with`, plus the classifier in `full-pipeline` mode via
-the same two-stage order the originating pass uses), and serialise the result.
-`check_correspondence` stays exactly where it is and keeps its current job:
-binding the certificate's digest to the bytes actually being returned.
+**What changes.** `WitnessRequest` carries a `RawTraceContribution`
+(`trace_contribution.rs:1568`) plus the grant lists, not a transcript string.
+`witness()` calls `DeterministicTraceRedactor::redact_trace`
+(`trace_contribution.rs:4102`) -- the originating pass, which is exactly what
+the certificate is supposed to describe -- serialises the resulting
+`TraceContributionEnvelope` **once**, and returns those bytes.
+`check_correspondence` stays where it is and keeps its current job: binding the
+certificate's digest to the bytes actually being returned.
+
+**The client is a courier and stamps nothing afterwards.** Grant-derived fields
+that a client would ordinarily write onto the envelope after redaction travel
+in the witness request instead, so they are inside the digest. A re-mint on the
+witnessed path refuses with `witness_claim_expired` rather than rewriting the
+body: any post-witness rewrite is a digest mismatch that would fail closed on a
+perfectly honest submission. Nothing on the server changes for this -- the
+existing grant enforcement reads the same fields -- but no task here may assume
+a client-assembled envelope.
 
 **Serialisation is part of the contract.** Two serialisations of the same
 envelope that differ by one byte produce different digests and the server
@@ -138,9 +148,10 @@ unmodified; nothing re-encodes in between. State this in the module doc.
 ```rust
 #[tokio::test]
 async fn the_certified_artifact_deserialises_as_the_envelope_the_server_will_receive() {
-    let raw = serde_json::to_vec(&envelope_with_a_secret()).expect("raw envelope serialises");
+    let raw = raw_contribution_with_a_secret();
+    let submission_id = raw.submission_id;
     let response = witness(
-        WitnessRequest { raw_transcript: String::from_utf8(raw).unwrap(), consent: consent_with_message_text() },
+        WitnessRequest { trace: raw, grants: grants_fixture() },
         &TestSigner::default(),
         &TestEnclave::default(),
     )
@@ -151,7 +162,24 @@ async fn the_certified_artifact_deserialises_as_the_envelope_the_server_will_rec
     // as an envelope, because the server will parse exactly these bytes.
     let parsed: TraceContributionEnvelope =
         serde_json::from_str(&response.redacted_artifact).expect("artifact is an envelope");
-    assert_eq!(parsed.submission_id, envelope_with_a_secret().submission_id);
+    assert_eq!(parsed.submission_id, submission_id);
+}
+
+#[tokio::test]
+async fn the_certified_envelope_carries_the_grants_from_the_witness_request() {
+    // The client stamps nothing after witnessing, so a grant that did not
+    // travel in the request can never reach the envelope without breaking the
+    // digest. Assert it arrived inside the certified bytes.
+    let response = witness(
+        WitnessRequest { trace: raw_contribution_with_a_secret(), grants: grants_fixture() },
+        &TestSigner::default(),
+        &TestEnclave::default(),
+    )
+    .await
+    .expect("witness succeeds");
+    let parsed: TraceContributionEnvelope =
+        serde_json::from_str(&response.redacted_artifact).expect("artifact is an envelope");
+    assert_eq!(parsed.consent.scopes, grants_fixture().scopes);
 }
 
 #[tokio::test]
@@ -170,15 +198,15 @@ async fn the_certificate_digest_is_over_the_returned_bytes_exactly() {
 }
 
 #[tokio::test]
-async fn an_input_that_is_not_an_envelope_refuses_by_name() {
+async fn a_redaction_failure_refuses_rather_than_certifying_what_it_has() {
     let err = witness(
-        WitnessRequest { raw_transcript: "not json".to_string(), consent: ConsentMetadata::default() },
+        WitnessRequest { trace: raw_contribution_the_redactor_rejects(), grants: grants_fixture() },
         &TestSigner::default(),
         &TestEnclave::default(),
     )
     .await
-    .expect_err("a non-envelope input must refuse");
-    assert_eq!(err, WitnessError::MalformedTranscript, "{err}");
+    .expect_err("a failed redaction must refuse");
+    assert_eq!(err, WitnessError::RedactionFailed, "{err}");
 }
 ```
 
@@ -462,6 +490,18 @@ rejection behaviour for malformed JSON must be preserved -- this is the busiest
 handler in the binary and a changed error shape there is a client-visible
 regression.
 
+**And it must verify at receipt, before anything mutates the envelope.** This
+is the half that is easy to build wrong. `rescrub_trace_envelope` takes
+`&mut envelope` and rewrites `privacy.residual_pii_risk`
+(`trace_contribution.rs:4350`), `redaction_counts`, `pii_labels_present`,
+`redaction_pipeline_version`, `warnings` and `redaction_hash`, so **the stored
+bytes are never the received bytes.** Verification must run before
+`trace-commons-ingest.rs:12911` and never off storage or any later
+serialisation; the `VerifiedWitnessCertificate` is then carried forward as a
+value to Task 3's decision. Taking the body as `Bytes` is necessary and not
+sufficient: a handler that took `Bytes` and verified after the rescrub would
+fail every honest witnessed submission.
+
 **Decode the certificate field by field.** The certificate deliberately has no
 `Serialize` impl: a `serde_json/preserve_order` change moved every untyped-JSON
 digest in this workspace on 2026-09-01, and the length-prefixed encoder exists
@@ -526,6 +566,36 @@ async fn a_submission_with_an_unverifiable_certificate_is_still_accepted() {
 }
 
 #[tokio::test]
+async fn an_honest_witnessed_submission_verifies_despite_the_rescrub_mutating_the_envelope() {
+    // The regression this test exists for: rescrub rewrites risk, counts,
+    // labels, pipeline version and redaction_hash in place. Verify off the
+    // stored or re-serialised envelope and this honest submission fails.
+    // Ground truth from outside: assert the envelope really was mutated, so
+    // the test cannot pass by the rescrub having been a no-op on this fixture.
+    let body = witnessed_body_the_rescrub_will_rewrite();
+    let (cert, sig) = certificate_over(&body);
+    let response = submit_through_the_real_router(body.clone(), headers_for(&cert, &sig)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(
+        serde_json::to_vec(&stored_envelope()).expect("stored envelope serialises"),
+        body,
+        "the fixture must actually be rewritten by the rescrub, or this test proves nothing",
+    );
+    assert_eq!(stored_status(), TraceCorpusStatus::Accepted);
+}
+
+#[test]
+fn the_certificate_is_verified_before_the_rescrub_runs() {
+    let source = include_str!("../trace-commons-ingest.rs");
+    let verify = source.find("verify_witness_certificate(").expect("submit verifies");
+    let rescrub = source.find("rescrub_trace_envelope(&mut envelope)").expect("submit rescrubs");
+    assert!(
+        verify < rescrub,
+        "the certificate must be verified against the body as received; rescrub mutates it",
+    );
+}
+
+#[tokio::test]
 async fn the_digest_is_taken_over_the_body_as_received() {
     // A re-serialised envelope has a different digest. Feed a body with
     // non-canonical key order and a matching certificate, and require it to
@@ -542,7 +612,12 @@ async fn the_digest_is_taken_over_the_body_as_received() {
 - [ ] **Step 2-4: Run, implement, run**
 - [ ] **Step 5: Mutation-check** -- re-serialise the deserialised envelope and
   digest that instead of the received body; confirm
-  `the_digest_is_taken_over_the_body_as_received` goes red. Make a missing
+  `the_digest_is_taken_over_the_body_as_received` goes red. Move the
+  verification below `rescrub_trace_envelope` and confirm **both**
+  `an_honest_witnessed_submission_verifies_despite_the_rescrub_mutating_the_envelope`
+  and `the_certificate_is_verified_before_the_rescrub_runs` go red -- if the
+  first stays green, the fixture is not actually rewritten by the rescrub and
+  the test is documentation. Make a missing
   signature fall through to `Ok(None)`; confirm
   `a_certificate_without_a_signature_refuses_by_name` goes red. Turn the
   unverifiable-certificate path into a `400`; confirm

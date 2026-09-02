@@ -178,26 +178,57 @@ Three ways out were considered.
   exists to remove. Rejected.
 - **Carry the witnessed artifact inside the envelope.** The digest cannot cover
   a structure that contains it. Rejected.
-- **Make the witnessed artifact the submitted bytes.** The witness takes the
-  serialised raw envelope and returns the serialised redacted envelope; the
-  contributor POSTs exactly those bytes; the server digests the raw request
-  body. Chosen.
+- **Make the witnessed artifact the submitted bytes.** The witness builds the
+  envelope itself and returns the exact bytes the contributor will POST; the
+  server digests the raw request body. Chosen.
 
 The third is the only one where the certificate binds what the server actually
 holds, and it is what the certificate's own doc already assumes -- "Any
 re-encoding, wrapper or added trailing newline between here and the server
 fails closed."
 
-Two consequences the plan must carry:
+### The witness builds the envelope; the client is a courier
 
-- **The witness service needs a change.** `witness()` currently runs
-  `DeterministicTraceRedactor` over its input as flat text. To certify an
-  envelope it must run the envelope redaction path instead. That is a
-  prerequisite task in the plan, not an assumption.
-- **The submit handler must read raw bytes.** `Json<T>` consumes the body and
-  the exact bytes are then unrecoverable. The handler takes `Bytes`, digests
-  it, then deserialises. This is a change to the busiest handler in the binary
-  and its own task.
+Settled jointly with the client plan. The witness takes a
+`RawTraceContribution` (`trace_contribution.rs:1568`) plus the grant lists,
+calls `DeterministicTraceRedactor::redact_trace`
+(`trace_contribution.rs:4102`) -- the originating pass, which is what the
+certificate is supposed to describe -- serialises the resulting
+`TraceContributionEnvelope` **once**, digests those bytes, and returns them
+verbatim. The contributor forwards them unmodified.
+
+**So the server does not receive a client-assembled envelope**, and nothing in
+this design may assume it does. Two consequences reach the server side:
+
+- **The client stamps nothing after witnessing.** The grant-derived fields a
+  client would ordinarily write onto the envelope after redaction travel in the
+  witness request instead, so they are inside the digest. A re-mint on the
+  witnessed path refuses with `witness_claim_expired` rather than rewriting the
+  body -- any post-witness rewrite is a digest mismatch and would fail closed on
+  a perfectly honest submission. The server's existing grant enforcement is
+  unchanged; it reads the same fields, which now arrived witnessed.
+- **The witness service changes.** `witness()` currently runs
+  `DeterministicTraceRedactor` over its input as flat text. It must call
+  `redact_trace` instead. That is a prerequisite task in the plan, not an
+  assumption.
+
+### The digest must be taken at receipt, before anything mutates the envelope
+
+**This is the constraint that most easily gets built wrong.**
+`rescrub_trace_envelope` takes `&mut envelope` and rewrites
+`privacy.residual_pii_risk` (`trace_contribution.rs:4350`),
+`redaction_counts`, `pii_labels_present`, `redaction_pipeline_version`,
+`warnings` and `redaction_hash`. **The stored bytes are therefore never the
+received bytes.** A certificate verified against a stored or re-serialised
+envelope fails on a perfectly honest submission.
+
+So verification happens at receipt: digest the raw body, verify the
+certificate, and carry the resulting `VerifiedWitnessCertificate` forward as a
+value. It must run **before** `trace-commons-ingest.rs:12911`, and never off
+storage or off any later serialisation. Taking the body as `Bytes` rather than
+`Json` is necessary for this and is not sufficient on its own -- a handler that
+took `Bytes` and then verified after the rescrub would be just as wrong.
+
 
 ---
 
@@ -293,7 +324,7 @@ At `corpus_status_with_pii_backstop_hold`
 2. a certificate and a signature both arrived;
 3. `verify_witness_certificate` returned `Ok` -- signature against the pinned
    address, measurement in the pinned set, digest against the exact request
-   body;
+   body **as received, before `rescrub_trace_envelope` mutated it**;
 4. the certificate's `residual_risk_verdict` is `Low`;
 5. the certificate's `redaction_policy_version` is in the allowlist;
 6. **and the server's own post-rescrub `risk_status` is already `Accepted`** --
@@ -309,6 +340,27 @@ submission outage. It is logged hash-only and counted.
 Condition 6 is what makes this design's safety argument load-bearing rather
 than decorative, and it is free: `corpus_status_with_pii_backstop_hold` already
 takes `risk_status` and already returns it unchanged unless it is `Accepted`.
+
+### What the certificate buys, stated as narrowly as it is true
+
+Two things, and no third.
+
+**Classifier evidence the synchronous pass structurally cannot have.**
+`rescrub_trace_envelope` runs `resolve_post_scrub_risk` with
+`useful_classifier_result: false`, so it can only ever raise risk -- it has no
+classifier and therefore no evidence that could license lowering a floor. The
+hold exists to go and get that evidence asynchronously. A `full-pipeline`
+witness already produced it, over the originating pass, and signed the verdict.
+That is the whole of what the hold is being excused from.
+
+**Attribution to a known program.** The verdict comes from an image whose
+measurement the operator pinned and the contributor verified before sending,
+rather than from an unauthenticated field on a submission.
+
+It buys **no** licence to skip the trailing deterministic sweep, the structured
+pass or the residual scan -- and does not need to, because all three already
+ran synchronously on these bytes before the decision is reached. Any wording
+broader than the two paragraphs above is over-claiming.
 
 ---
 
