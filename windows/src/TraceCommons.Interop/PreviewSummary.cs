@@ -41,6 +41,23 @@ public sealed class PreviewSummary
     [JsonPropertyName("redactions")]
     public Dictionary<string, int> Redactions { get; set; } = new();
 
+    /// <summary>
+    /// The same category labels, counting DISTINCT VALUES rather than
+    /// occurrences.
+    /// </summary>
+    /// <remarks>
+    /// The redactor mints one placeholder per distinct value and reuses it,
+    /// so one path referenced two hundred times is two hundred occurrences
+    /// and one value. <c>185 local path</c> is the first number;
+    /// <c>185 local path (12 distinct)</c> is the one a person is actually
+    /// trying to estimate risk from.
+    ///
+    /// Empty against a daemon predating the field, which reads as "no
+    /// distinct figure to show" and never as zero distinct values.
+    /// </remarks>
+    [JsonPropertyName("redactions_distinct")]
+    public Dictionary<string, int> RedactionsDistinct { get; set; } = new();
+
     [JsonPropertyName("pii_labels_present")]
     public List<string> PiiLabelsPresent { get; set; } = new();
 

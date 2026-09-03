@@ -289,10 +289,14 @@ public sealed class PendingList
 /// <summary>
 /// One queue entry, mirroring <c>entry_value</c> in ipc.rs.
 ///
-/// Note what is absent: no file path and no transcript text. The entry names a
-/// project and a size, and the content is reachable only by opening a preview.
-/// Keep it that way -- a field added here because it was convenient is a field
-/// that ends up in a log.
+/// Note what is absent: no session file path and no transcript text. The entry
+/// names a project and a size, and the content is reachable only by opening a
+/// preview. Keep it that way -- a field added here because it was convenient is
+/// a field that ends up in a log.
+///
+/// <see cref="ProjectPath"/> and <see cref="SessionPath"/> are the two
+/// deliberate exceptions, and they are display-only: renderable, never logged,
+/// audited, notified, or persisted to history. See their own remarks.
 /// </summary>
 public sealed class QueueEntry
 {
@@ -323,6 +327,35 @@ public sealed class QueueEntry
 
     [JsonPropertyName("project_label")]
     public string? ProjectLabel { get; set; }
+
+    /// <summary>
+    /// The project's folder, <c>~</c>-abbreviated, for display only.
+    /// </summary>
+    /// <remarks>
+    /// The daemon relaxed its path rule in exactly one place to send this
+    /// (<c>ipc::display_path</c>), because <see cref="ProjectLabel"/> can keep
+    /// two projects distinct but can never make them identifiable, and the
+    /// queue's folder rows are where that difference is decided. Never
+    /// logged, never in a notification, never in a history record.
+    ///
+    /// Empty against a daemon predating the field; a folder row with no path
+    /// renders its label alone.
+    /// </remarks>
+    [JsonPropertyName("project_path")]
+    public string ProjectPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Where this session actually ran, when that is not the project root.
+    /// </summary>
+    /// <remarks>
+    /// Null both when the daemon predates the field and when the session ran
+    /// at the root -- the daemon sends null in the second case rather than
+    /// repeating <see cref="ProjectPath"/>, so a row draws this line only
+    /// when it says something. Display only, exactly as
+    /// <see cref="ProjectPath"/> is.
+    /// </remarks>
+    [JsonPropertyName("session_path")]
+    public string? SessionPath { get; set; }
 
     [JsonPropertyName("size_bytes")]
     public long SizeBytes { get; set; }
