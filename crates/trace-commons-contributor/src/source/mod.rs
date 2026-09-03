@@ -461,6 +461,16 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
         // to the contributor's real `~/.gemini`.
         undeclared: Undeclared::Nothing,
     },
+    SourceSpec {
+        name: SOURCE_CLINE,
+        conventional_root: cline::conventional_root_this_machine,
+        build: |path| Box::new(cline::ClineSource::new(path)),
+        // Same reasoning as Gemini: every shipped shell declares claude and
+        // codex and carries no cline field, so an absent declaration must
+        // construct nothing rather than watch the contributor's real
+        // `~/.cline`.
+        undeclared: Undeclared::Nothing,
+    },
 ];
 
 /// The subdirectory of the contributor state directory that trajectory
@@ -956,10 +966,27 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI],
+            vec![
+                SOURCE_CLAUDE_CODE,
+                SOURCE_CODEX,
+                SOURCE_GEMINI_CLI,
+                SOURCE_CLINE
+            ],
             "adding an adapter to the table must reach the CLI without a \
              call-site change"
         );
+    }
+
+    /// Cline shipped after Gemini did and on the same terms: no shell
+    /// carries a cline field, so an absent declaration constructs nothing.
+    #[test]
+    fn an_undeclared_cline_source_constructs_nothing() {
+        let roots = SourceRoots::new();
+        let names: Vec<&str> = all_sources(&roots).iter().map(|s| s.name()).collect();
+        assert!(!names.contains(&SOURCE_CLINE), "{names:?}");
+        let roots = roots.declare(SOURCE_CLINE, watch("/declared/cline"));
+        let names: Vec<&str> = all_sources(&roots).iter().map(|s| s.name()).collect();
+        assert!(names.contains(&SOURCE_CLINE), "{names:?}");
     }
 
     /// Trajectory is asked for, never inferred: the daemon's working

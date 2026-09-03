@@ -413,7 +413,7 @@ history record, audit entry, notification text, or IPC response.
 | `discover_routing` | — | `found`, plus `port` and optionally `token_path` when found | reads the pointer a running IronWire published, so the declaring flow can pre-fill instead of asking; no network I/O and **never returns the token**; see "`discover_routing`" below |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `ironwire`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `ironwire`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -1387,8 +1387,8 @@ connection, which is what a daemon that never ran would cost.
 Takes a JSON object of settings to change. Every top-level key must be one
 of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
-`codex_source`, `gemini_source`, `ironwire`, `max_uploads_per_day`,
-`max_bytes_per_day` -- a key this method does
+`codex_source`, `gemini_source`, `cline_source`, `ironwire`,
+`max_uploads_per_day`, `max_bytes_per_day` -- a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
 ignored, so a caller that mistypes a key gets a definite signal rather than

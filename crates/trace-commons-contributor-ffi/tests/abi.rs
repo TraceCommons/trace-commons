@@ -1841,7 +1841,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 3, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 4, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
@@ -1852,7 +1852,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // an absent Gemini answer is not disqualifying, so the shells prompt for
     // it without refusing to start. Adding a source belongs here; adding one
     // to that gate would stop the daemon on every installed client.
-    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli"]);
+    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli", "cline"]);
 
     for item in items {
         // The fields a consent prompt needs to be specific rather than

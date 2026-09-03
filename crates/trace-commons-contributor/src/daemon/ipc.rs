@@ -2843,11 +2843,13 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         let claude_mode = mode_of(&s.claude_source);
         let codex_mode = mode_of(&s.codex_source);
         let gemini_mode = mode_of(&s.gemini_source);
+        let cline_mode = mode_of(&s.cline_source);
         obj.remove("claude_root");
         obj.remove("codex_root");
         obj.remove("claude_source");
         obj.remove("codex_source");
         obj.remove("gemini_source");
+        obj.remove("cline_source");
         obj.insert(
             "claude_root_configured".to_string(),
             serde_json::Value::Bool(claude_mode == "watch"),
@@ -2871,6 +2873,10 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         obj.insert(
             "gemini_source_mode".to_string(),
             serde_json::Value::String(gemini_mode.to_string()),
+        );
+        obj.insert(
+            "cline_source_mode".to_string(),
+            serde_json::Value::String(cline_mode.to_string()),
         );
     }
     v
@@ -3658,6 +3664,8 @@ mod tests {
         assert_eq!(v["codex_source_mode"], "off");
         assert_eq!(v["gemini_source_mode"], "watch");
         assert!(v.get("gemini_source").is_none());
+        assert_eq!(v["cline_source_mode"], "unset");
+        assert!(v.get("cline_source").is_none());
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {

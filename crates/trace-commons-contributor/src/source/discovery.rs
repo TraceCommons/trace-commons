@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
+use super::cline::{
+    CLINE_DATA_DIR_ENV, CLINE_DIR_ENV, CLINE_SESSION_DATA_DIR_ENV, conventional_root as cline_root,
+};
 use super::gemini_cli::{GEMINI_CLI_HOME_ENV, conventional_root};
-use super::{SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
+use super::{SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
 
 /// The environment variable Claude Code uses to relocate its config
 /// directory, and therefore its `projects/` session store.
@@ -36,12 +39,17 @@ pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 /// machine, which documents `$CODEX_HOME/<name>.config.toml`.
 pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 
-/// The session-file extension the Claude Code and Codex stores use.
-const JSONL_EXTENSION: &str = "jsonl";
+/// The session-file suffix the Claude Code and Codex stores use.
+const JSONL_SUFFIX: &str = ".jsonl";
 
 /// Gemini CLI writes one JSON document per session rather than JSONL, so
 /// counting `.jsonl` under its store would report every machine as empty.
-const JSON_EXTENSION: &str = "json";
+const JSON_SUFFIX: &str = ".json";
+
+/// Cline writes `<id>.messages.json` beside a `<id>.json` manifest. Counting
+/// `.json` would report two sessions for every one, so the suffix names the
+/// messages file specifically.
+const MESSAGES_JSON_SUFFIX: &str = ".messages.json";
 
 /// One candidate session store, described well enough to consent to.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -81,6 +89,13 @@ where
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
     let gemini_relocated = env(GEMINI_CLI_HOME_ENV).is_some_and(|v| !v.is_empty());
+    let cline_relocated = [
+        CLINE_SESSION_DATA_DIR_ENV,
+        CLINE_DATA_DIR_ENV,
+        CLINE_DIR_ENV,
+    ]
+    .iter()
+    .any(|key| env(key).is_some_and(|v| !v.trim().is_empty()));
 
     vec![
         describe(
@@ -94,7 +109,7 @@ where
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("projects"),
             claude_base.is_some(),
-            JSONL_EXTENSION,
+            JSONL_SUFFIX,
         ),
         describe(
             SOURCE_CODEX,
@@ -103,7 +118,7 @@ where
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("sessions"),
             codex_base.is_some(),
-            JSONL_EXTENSION,
+            JSONL_SUFFIX,
         ),
         // Appended rather than inserted: a shell written before this source
         // existed indexes the first two rows by position.
@@ -113,7 +128,16 @@ where
             // per project; the session documents are two levels below it.
             conventional_root(home, &env),
             gemini_relocated,
-            JSON_EXTENSION,
+            JSON_SUFFIX,
+        ),
+        // Appended: shells index the first rows by position.
+        describe(
+            SOURCE_CLINE,
+            // One directory per session, each holding the messages document
+            // and, usually, a manifest beside it.
+            cline_root(home, &env),
+            cline_relocated,
+            MESSAGES_JSON_SUFFIX,
         ),
     ]
 }
@@ -124,14 +148,9 @@ pub fn probe_this_machine() -> Vec<SourceCandidate> {
     probe(&home, |key| std::env::var(key).ok())
 }
 
-fn describe(
-    source: &str,
-    path: PathBuf,
-    relocated_by_env: bool,
-    extension: &str,
-) -> SourceCandidate {
+fn describe(source: &str, path: PathBuf, relocated_by_env: bool, suffix: &str) -> SourceCandidate {
     let (exists, session_count, most_recent) = if path.is_dir() {
-        let (count, recent) = count_sessions(&path, extension);
+        let (count, recent) = count_sessions(&path, suffix);
         (true, count, recent)
     } else {
         (false, 0, None)
@@ -146,13 +165,16 @@ fn describe(
     }
 }
 
-/// Count `.jsonl` files under `root`, and note the most recent mtime.
+/// Count files whose name ends in `suffix` under `root`, and note the most
+/// recent mtime. A suffix rather than an extension, because one store's
+/// session file is told apart from its sibling manifest by more than the
+/// part after the last dot.
 ///
 /// Walks with an explicit stack rather than recursion, and follows no
 /// symlinks: a symlinked directory could point anywhere, and this is a
 /// counting pass whose whole justification is that it stays inside the store
 /// it is describing.
-fn count_sessions(root: &Path, extension: &str) -> (u64, Option<DateTime<Utc>>) {
+fn count_sessions(root: &Path, suffix: &str) -> (u64, Option<DateTime<Utc>>) {
     let mut count = 0_u64;
     let mut most_recent: Option<DateTime<Utc>> = None;
     let mut stack = vec![root.to_path_buf()];
@@ -173,7 +195,11 @@ fn count_sessions(root: &Path, extension: &str) -> (u64, Option<DateTime<Utc>>) 
                 stack.push(path);
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some(extension) {
+            let is_session = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(suffix));
+            if !is_session {
                 continue;
             }
             count += 1;
@@ -279,6 +305,35 @@ mod tests {
         assert_eq!(gemini.path, elsewhere.path().join("tmp"));
         assert!(gemini.relocated_by_env);
         assert_eq!(gemini.session_count, 1);
+    }
+
+    #[test]
+    fn probes_the_cline_store_fourth_and_counts_its_sessions() {
+        let home = Scratch::new("cline");
+        let session = home.path().join(".cline/data/sessions/1756900000000_k3x9q");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("1756900000000_k3x9q.messages.json"), "{}").unwrap();
+        std::fs::write(session.join("1756900000000_k3x9q.json"), "{}").unwrap();
+        let found = probe(home.path(), no_env);
+        assert_eq!(
+            found[3].source, SOURCE_CLINE,
+            "appended, so older shells indexing by position are unaffected"
+        );
+        assert_eq!(found[3].path, home.path().join(".cline/data/sessions"));
+        assert!(found[3].exists);
+        assert_eq!(found[3].session_count, 1, "the manifest is not a session");
+        assert!(found[3].most_recent.is_some());
+        assert!(!found[3].relocated_by_env);
+    }
+
+    #[test]
+    fn a_cline_environment_variable_relocates_the_store_and_says_so() {
+        let home = Scratch::new("cline-env");
+        let found = probe(home.path(), |k| {
+            (k == CLINE_SESSION_DATA_DIR_ENV).then(|| "/elsewhere".to_string())
+        });
+        assert_eq!(found[3].path, PathBuf::from("/elsewhere"));
+        assert!(found[3].relocated_by_env);
     }
 
     /// The first two rows are what every shell written before this source
