@@ -85,22 +85,6 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public const string ScrubbingCaveat =
         "Scrubbing is pattern-based. It misses things it hasn't seen before.";
 
-    /// <summary>
-    /// Recent searches, kept for the life of the process and never written to
-    /// disk.
-    /// </summary>
-    /// <remarks>
-    /// The shared spec asks for these to persist so the second trace is one
-    /// keystroke, and the macOS shell persists them. This one deliberately
-    /// does not: a recent search is the contributor's own list of the things
-    /// they are worried about leaking -- a client's name, an internal code
-    /// name, an address -- and writing that list to disk creates a small file
-    /// of exactly the material the rest of the app works to keep on the
-    /// machine's own terms. In-session recall covers the case the spec argues
-    /// for, which is checking several traces for the same term in one sitting.
-    /// </remarks>
-    private static readonly List<string> ProcessRecentSearches = new();
-
     private readonly DaemonHost _host;
 
     private TcPreview? _preview;
@@ -548,10 +532,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         // to it. The gate holds Contribute shut and says so.
         Gate.SetPinnedPreview(summary.Enrolled);
 
-        foreach (string term in ProcessRecentSearches)
-        {
-            RecentSearches.Add(term);
-        }
+        RefillRecentSearches();
 
         IsLoading = false;
     }
@@ -566,7 +547,21 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// check narrows accidental misuse to an error; it does not make concurrent
     /// use safe.
     /// </remarks>
-    public void RunSearch()
+    public void RunSearch() => RunSearch(remember: false);
+
+    /// <summary>
+    /// Runs the search, recording the term only when the contributor
+    /// committed it.
+    /// </summary>
+    /// <remarks>
+    /// Live search on every keystroke is the good part and stays. Recording
+    /// there is what filled the six-slot strip with the prefixes of one word:
+    /// typing "xyz" recorded "x", "xy", and "xyz". A recent search is a
+    /// question the contributor asked, and they ask it by pressing Enter or
+    /// the button, not by passing through a prefix on the way. The GTK shell
+    /// has taken the intent as a parameter from the start; this matches it.
+    /// </remarks>
+    public void RunSearch(bool remember)
     {
         _searched = true;
         _searchFailed = false;
@@ -603,7 +598,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             Excerpts.Add(excerpt);
         }
 
-        if (_matches.Count > 0)
+        if (remember && _matches.Count > 0)
         {
             Remember(Needle);
         }
@@ -802,17 +797,21 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         HasFailed = true;
     }
 
+    /// <summary>
+    /// Records a committed term. Trimming, the blank guard, dedupe and the cap
+    /// live in <see cref="TraceCommons.Interop.RecentSearches"/>, where they
+    /// are tested, along with the reason the list is never written to disk.
+    /// </summary>
     private void Remember(string term)
     {
-        ProcessRecentSearches.Remove(term);
-        ProcessRecentSearches.Insert(0, term);
-        while (ProcessRecentSearches.Count > 6)
-        {
-            ProcessRecentSearches.RemoveAt(ProcessRecentSearches.Count - 1);
-        }
+        TraceCommons.Interop.RecentSearches.Remember(term);
+        RefillRecentSearches();
+    }
 
+    private void RefillRecentSearches()
+    {
         RecentSearches.Clear();
-        foreach (string recent in ProcessRecentSearches)
+        foreach (string recent in TraceCommons.Interop.RecentSearches.Current)
         {
             RecentSearches.Add(recent);
         }

@@ -191,7 +191,8 @@
                              Grid.Column="0"
                              PlaceholderText="Client name, hostname, anything"
                              Text="{x:Bind ViewModel.Needle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             TextChanged="OnNeedleChanged" />
+                             TextChanged="OnNeedleChanged"
+                             KeyDown="OnSearchKeyDown" />
                     <Button Grid.Column="1"
                             Style="{StaticResource TcSecondaryButtonStyle}"
                             Content="Search"
