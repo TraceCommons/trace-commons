@@ -201,17 +201,6 @@ pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) ->
     ))
 }
 
-/// A project group's header line: the label and how many are waiting under
-/// it. Deliberately plain -- the manifest strip already carries the figures
-/// a contributor weighs; this is only what tells the sessions below apart
-/// from the ones above.
-pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
-    match waiting {
-        1 => format!("{project_label} -- 1 waiting"),
-        n => format!("{project_label} -- {n} waiting"),
-    }
-}
-
 /// The four things a search can find, in the words the sheet says them.
 ///
 /// The search scans the REDACTED body, so a value that was removed returns
