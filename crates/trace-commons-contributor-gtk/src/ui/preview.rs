@@ -87,6 +87,12 @@ struct Sheet {
     recent_row: gtk::Box,
 
     whats_in_it: gtk::Box,
+    /// The removed-summary panel, above the transcript on the same tab.
+    ///
+    /// Rebuilt from the pinned preview on every `fill`, like `whats_in_it`
+    /// and `permissions`: it describes one session and must never survive
+    /// the sheet advancing to the next one.
+    removed_summary: gtk::Box,
     /// The transcript tab's body, chunked and evicting. See
     /// `crate::transcript_paging` for why it is not one text view.
     transcript: Rc<TranscriptPane>,
@@ -329,6 +335,13 @@ impl Sheet {
         body_head.append(&copy_all);
         let body_panel = style::card(gtk::Orientation::Vertical, 0);
         body_panel.append(&transcript.scroller);
+        // Above the marks rather than below them: it is the at-a-glance
+        // half, and a person who reads only the top of this tab should
+        // still have been told what left.
+        let removed_summary = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::S)
+            .build();
         let body_page = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(space::M)
@@ -338,6 +351,7 @@ impl Sheet {
             .margin_end(space::L)
             .build();
         body_page.append(&body_head);
+        body_page.append(&removed_summary);
         body_page.append(&body_panel);
         stack.add_titled(&body_page, Some(TRANSCRIPT_TAB), copy::TAB_WOULD_BE_SENT);
 
@@ -613,6 +627,7 @@ impl Sheet {
             search_summary,
             recent_row,
             whats_in_it,
+            removed_summary,
             transcript: Rc::clone(&transcript),
             copy_all: copy_all.clone(),
             permissions,
@@ -802,6 +817,54 @@ impl Sheet {
         self.contribute.set_sensitive(self.pinned.get());
     }
 
+    /// The removed-summary panel: one row per redaction family, and -- only
+    /// when there is one -- what scrubbing found and left in.
+    ///
+    /// The caveat sits under both. A panel that enumerates categories makes
+    /// the app look more thorough than it is, which is exactly when that
+    /// sentence earns its place.
+    fn fill_removed_summary(&self, summary: &PreviewSummary) {
+        while let Some(child) = self.removed_summary.first_child() {
+            self.removed_summary.remove(&child);
+        }
+        let (removed, still_present) =
+            crate::redaction_summary::rows(&summary.redactions, &summary.redactions_distinct);
+
+        let panel = style::card(gtk::Orientation::Vertical, space::S);
+        panel.append(&style::section(copy::REDACTION_PANEL_REMOVED));
+        if removed.is_empty() {
+            let none = gtk::Label::builder()
+                .label(copy::NOTHING_MATCHED)
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            none.add_css_class("tc-meta");
+            panel.append(&none);
+        }
+        for row in &removed {
+            panel.append(&summary_row(row, Tone::Neutral));
+        }
+
+        if !still_present.is_empty() {
+            panel.append(&style::section(copy::REDACTION_PANEL_STILL_PRESENT));
+            for row in &still_present {
+                panel.append(&summary_row(row, Tone::Attention));
+            }
+        }
+
+        let caveat = gtk::Label::builder()
+            .label(copy::residual_risk_line(
+                crate::redaction_labels::removed_total(&summary.redactions),
+            ))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        caveat.add_css_class("tc-caveat");
+        panel.append(&caveat);
+
+        self.removed_summary.append(&panel);
+    }
+
     fn fill(self: &Rc<Self>, summary: &PreviewSummary, body: Option<String>) {
         self.set_manifest(Some(summary));
         // Approving is only allowed against a real, pinned preview. An
@@ -832,6 +895,8 @@ impl Sheet {
                 self.transcript.show_sentence(copy::BODY_NOT_AVAILABLE_HERE);
             }
         }
+
+        self.fill_removed_summary(summary);
 
         // "What's in it", from what the contract actually reports. Files
         // touched, tools invoked and the model are not on this response --
@@ -1555,6 +1620,58 @@ impl TranscriptPane {
             },
         );
     }
+}
+
+/// One row of the removed-summary panel: what kind of thing, how much of it,
+/// what that kind IS, and which sub-labels it folded in.
+///
+/// Never a matched value. The row names a KIND -- the value is gone by
+/// construction, and a sub-label is a schema-shaped identifier the redactor
+/// minted, not contributor text.
+fn summary_row(row: &crate::redaction_summary::Row, tone: Tone) -> gtk::Box {
+    let container = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    if tone == Tone::Attention {
+        head.append(&style::tag(tone.glyph(), tone));
+    }
+    let name = gtk::Label::builder()
+        .label(&row.display)
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    name.add_css_class("tc-card-title");
+    head.append(&name);
+    let counts = gtk::Label::new(Some(&copy::redaction_row_counts(
+        row.occurrences,
+        row.distinct,
+    )));
+    counts.add_css_class("tc-meta");
+    counts.set_valign(gtk::Align::Center);
+    head.append(&counts);
+    container.append(&head);
+
+    let description = gtk::Label::builder()
+        .label(row.description)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    description.add_css_class("tc-meta");
+    container.append(&description);
+
+    if !row.detail.is_empty() {
+        let detail = gtk::Label::builder()
+            .label(row.detail.join(", "))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        detail.add_css_class("tc-meta");
+        detail.add_css_class("tc-tertiary");
+        container.append(&detail);
+    }
+
+    container
 }
 
 /// One chunk, laid out: a text view over that chunk's bytes with its

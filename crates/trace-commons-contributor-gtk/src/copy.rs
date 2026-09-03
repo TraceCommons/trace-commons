@@ -211,6 +211,45 @@ pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
     }
 }
 
+/// What each redaction family IS, in words -- the panel's actual value to a
+/// reader who has never seen these labels.
+///
+/// Deliberately not exhaustive. The vocabulary is generated and open, which
+/// is why `redaction_summary::describe` falls back rather than panicking.
+pub const REDACTION_CATEGORY_LOCAL_PATH: &str = "File paths from this machine.";
+pub const REDACTION_CATEGORY_SECRET: &str =
+    "API keys, tokens, private keys, and high-entropy strings found next to credential words.";
+pub const REDACTION_CATEGORY_PRIVACY_FILTER: &str =
+    "Names, emails, and other personal details found in prose.";
+pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
+    "Fields whose name marks them sensitive, like password or authorization.";
+pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
+    "Tool-call arguments whose name marks them sensitive.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str = "Found, and still in what would be sent. Either a credential inside a correction \
+     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
+
+/// The neutral description for a family this build has no words for. It must
+/// still appear: dropping an unrecognised category would understate what
+/// happened.
+pub const REDACTION_CATEGORY_UNKNOWN: &str =
+    "Removed by a pattern this version has no description for.";
+
+/// The two headings over the summary panel. The second is a sentence rather
+/// than a noun because it is the one a contributor must not skim past.
+pub const REDACTION_PANEL_REMOVED: &str = "Removed";
+pub const REDACTION_PANEL_STILL_PRESENT: &str = "Found, and still in what would be sent";
+
+/// One panel row's figures: how many times a family fired, and over how many
+/// distinct values. The distinct half is omitted when it repeats the first,
+/// for the same reason [`crate::redaction_labels::line`] omits it.
+pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
+    if distinct > 0 && distinct < occurrences {
+        format!("{occurrences} ({distinct} distinct)")
+    } else {
+        format!("{occurrences}")
+    }
+}
+
 /// What a redaction mark in the transcript is, named on hover.
 ///
 /// The spec asks for a LABELLED chip. A `GtkTextTag` colours a run and can
@@ -1893,6 +1932,25 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_panel_row_omits_a_distinct_count_that_repeats_the_occurrence_count() {
+        assert_eq!(redaction_row_counts(185, 12), "185 (12 distinct)");
+        assert_eq!(redaction_row_counts(3, 3), "3");
+        assert_eq!(redaction_row_counts(3, 0), "3");
+    }
+
+    /// The one direction this panel must not fail in is understating what
+    /// happened, and a survivor's description is where that is decided.
+    #[test]
+    fn the_residual_description_never_claims_a_removal() {
+        assert!(REDACTION_CATEGORY_RESIDUAL.contains("still in what would be sent"));
+        assert!(
+            !REDACTION_CATEGORY_RESIDUAL
+                .to_lowercase()
+                .contains("removed")
+        );
+    }
 
     #[test]
     fn a_redaction_mark_names_what_left() {

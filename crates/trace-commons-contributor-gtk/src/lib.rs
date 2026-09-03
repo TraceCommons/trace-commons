@@ -26,6 +26,7 @@ pub mod placeholders;
 pub mod portal;
 pub mod queue_folders;
 pub mod redaction_labels;
+pub mod redaction_summary;
 pub mod toast;
 pub mod transcript_paging;
 pub mod tray;
