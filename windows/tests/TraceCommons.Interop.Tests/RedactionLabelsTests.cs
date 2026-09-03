@@ -109,10 +109,10 @@ public class RedactionLabelsTests
     public void TheSurvivorLineInflectsAndNamesItsSites()
     {
         Assert.Equal(
-            "1 secret found here is still in what would be sent (events.x)",
+            "A secret found here is still in what would be sent (events.x)",
             RedactionLabels.SurvivorLine(Map(("residual_secret_at:events.x", 1))));
         Assert.StartsWith(
-            "2 secrets found here are",
+            "Secrets found in 2 places are",
             RedactionLabels.SurvivorLine(Map(
                 ("residual_secret_at:events.x", 1),
                 ("residual_secret_at:events.y", 1))));
@@ -144,7 +144,7 @@ public class RedactionLabelsTests
         Assert.Equal(0, RedactionLabels.RemovedTotal(counts));
         Assert.Empty(RedactionLabels.SurvivorSites(counts));
         Assert.Equal(
-            "1 secret found here is still in what would be sent",
+            "A secret found here is still in what would be sent",
             RedactionLabels.SurvivorLine(counts));
     }
 }
