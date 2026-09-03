@@ -24,12 +24,16 @@
 //! Image blocks are never copied: their `data` is base64 pixels, which is
 //! neither text a gate scores nor something a contributor reviewed.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::{SOURCE_CLINE, SessionRef, SessionTranscript, TraceSource, real_file_within_root};
+use super::{
+    SOURCE_CLINE, SessionEvent, SessionEventKind, SessionRef, SessionTranscript, TraceSource,
+    real_file_within_root, session_hash,
+};
 
 /// Overrides the whole Cline directory; sessions live under `data/sessions`.
 pub const CLINE_DIR_ENV: &str = "CLINE_DIR";
@@ -249,9 +253,178 @@ fn timestamp_rfc3339(value: Option<&Value>) -> Option<chrono::DateTime<chrono::U
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+/// `ts` is milliseconds since the epoch, as `Date.now()` writes it.
+fn timestamp_millis(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    value
+        .and_then(|v| v.as_i64())
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+}
+
+/// Text from a `content` field that may be a bare string or a block list.
+/// Only `text` blocks contribute; everything else in the list is mapped as
+/// its own event by the caller.
+fn text_parts(content: &Value) -> Option<String> {
+    match content {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => {
+            let joined = parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
+fn opaque(record_type: &str, timestamp: Option<chrono::DateTime<chrono::Utc>>) -> SessionEvent {
+    SessionEvent {
+        served_by: None,
+        kind: SessionEventKind::Opaque,
+        timestamp,
+        content: None,
+        structured: json!({ "record_type": record_type }),
+        tool_name: None,
+        token_counts: None,
+        tool_call_id: None,
+        success: None,
+    }
+}
+
+/// `metrics.inputTokens` and `metrics.outputTokens`, both or neither.
+fn token_counts_of(message: &Value) -> Option<(u32, u32)> {
+    let metrics = message.get("metrics")?;
+    let input = metrics.get("inputTokens")?.as_u64()?;
+    let output = metrics.get("outputTokens")?.as_u64()?;
+    Some((u32::try_from(input).ok()?, u32::try_from(output).ok()?))
+}
+
+/// One message expands to its blocks, in order. A bare-string `content` is
+/// one text block. The message's `ts` stamps every block: the SDK records
+/// one time per message, not per block.
+fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<SessionEvent>) {
+    let timestamp = timestamp_millis(message.get("ts"));
+    let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    if model.is_none() {
+        if let Some(id) = message
+            .get("modelInfo")
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+        {
+            *model = Some(id.to_string());
+        }
+    }
+    let text_kind = match role {
+        "user" => SessionEventKind::User,
+        "assistant" => SessionEventKind::Assistant,
+        other => {
+            events.push(opaque(other, timestamp));
+            return;
+        }
+    };
+    // Token counts belong to the assistant's step. They are attached to the
+    // first text block of the message, which is what `token_counts` means on
+    // every other adapter: the provider's count for the step that produced
+    // this text. A user message never carries them.
+    let mut token_counts = (text_kind == SessionEventKind::Assistant)
+        .then(|| token_counts_of(message))
+        .flatten();
+
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    let blocks: Vec<Value> = match content {
+        Value::String(s) => vec![json!({ "type": "text", "text": s })],
+        Value::Array(parts) => parts.clone(),
+        _ => return,
+    };
+
+    for block in &blocks {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match block_type {
+            "text" => {
+                let Some(text) = block.get("text").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                events.push(SessionEvent {
+                    served_by: None,
+                    kind: text_kind.clone(),
+                    timestamp,
+                    content: Some(text.to_string()),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: token_counts.take(),
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
+            "thinking" => {
+                let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if thinking.is_empty() {
+                    continue;
+                }
+                events.push(SessionEvent {
+                    served_by: None,
+                    kind: SessionEventKind::Reasoning,
+                    timestamp,
+                    content: Some(thinking.to_string()),
+                    structured: Value::Null,
+                    tool_name: None,
+                    token_counts: None,
+                    tool_call_id: None,
+                    success: None,
+                });
+            }
+            "tool_use" => events.push(SessionEvent {
+                served_by: None,
+                kind: SessionEventKind::ToolCall,
+                timestamp,
+                content: None,
+                structured: block.get("input").cloned().unwrap_or(Value::Null),
+                tool_name: block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                token_counts: None,
+                tool_call_id: block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                success: None,
+            }),
+            "tool_result" => events.push(SessionEvent {
+                served_by: None,
+                kind: SessionEventKind::ToolResult,
+                timestamp,
+                content: block.get("content").and_then(text_parts),
+                structured: Value::Null,
+                tool_name: None,
+                token_counts: None,
+                tool_call_id: block
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                // Only an explicit `is_error` is a verdict. Absent means the
+                // harness said nothing, which is not success.
+                success: block.get("is_error").and_then(|v| v.as_bool()).map(|e| !e),
+            }),
+            other => events.push(opaque(other, timestamp)),
+        }
+    }
+}
+
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
-    // Declined rather than truncated, and named rather than silent. The size
-    // is the contributor's own file's and safe to state; the path is not.
+    // Declined rather than truncated, and named rather than silent: a
+    // half-parsed transcript would upload as though it were the whole
+    // conversation. The size is the contributor's own file's and safe to
+    // state; the path is not, and is deliberately absent.
     let declared = std::fs::metadata(path)?.len();
     if declared > CLINE_SESSION_BUDGET {
         return Err(super::SessionTooLarge {
@@ -261,16 +434,68 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         }
         .into());
     }
-    // Task 3 replaces the rest of this body. Until then a load is a
-    // refusal, so the discovery tests can run against a compiling adapter.
-    let _ = read_manifest(path).model;
-    Err(anyhow!("malformed_cline_session"))
+    let bytes = std::fs::read(path)?;
+    let hash = session_hash(&bytes);
+    // One JSON document, so there is no streaming form to read it in: the
+    // budget above is what bounds this read.
+    let document: Value =
+        serde_json::from_slice(&bytes).map_err(|_| anyhow!("malformed_cline_session"))?;
+    // The tolerance is for block *types*, not for the document. A file with
+    // no `messages` array is not a session document at all, and accepting
+    // it would offer an empty transcript as though it were a conversation.
+    let messages = document
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("malformed_cline_session"))?;
+
+    let manifest = read_manifest(path);
+    let mut events = Vec::new();
+    let mut model: Option<String> = None;
+    for message in messages {
+        map_message(message, &mut model, &mut events);
+    }
+
+    let session_dir = path.parent();
+    let project = session_dir.and_then(|dir| project_label(dir, manifest.cwd.as_deref()));
+    let started_at = manifest
+        .started_at
+        .or_else(|| messages.first().and_then(|m| timestamp_millis(m.get("ts"))));
+    // The document's own id, which is what the store addresses it by; the
+    // directory name merely repeats it.
+    let conversation_id = document
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            session_dir
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        });
+
+    Ok(SessionTranscript {
+        source: Cow::Borrowed(SOURCE_CLINE),
+        // The manifest carries no extension version.
+        agent_version: None,
+        model: model.or(manifest.model),
+        project,
+        cwd: manifest.cwd,
+        started_at,
+        session_hash: hash,
+        conversation_id,
+        events,
+        // A subagent session is its own directory with a back-reference this
+        // adapter does not follow, so nothing is ever merged in.
+        subagent_count: 0,
+        subagents_dropped: 0,
+        routing: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{SOURCE_CLINE, TraceSource};
+    use crate::source::{SOURCE_CLINE, SessionEventKind, TraceSource};
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cline/sessions")
@@ -389,5 +614,183 @@ mod tests {
             assert_eq!(again.cwd, r.cwd);
             assert_eq!(again.project, r.project);
         }
+    }
+
+    fn load(name: &str) -> SessionTranscript {
+        let s = source();
+        let r = s
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.path.to_string_lossy().contains(name))
+            .unwrap();
+        s.load(&r).unwrap()
+    }
+
+    #[test]
+    fn transcript_fields_come_from_the_document_and_its_manifest() {
+        let t = load("k3x9q");
+        assert_eq!(t.source, SOURCE_CLINE);
+        assert_eq!(t.conversation_id.as_deref(), Some("1756900000000_k3x9q"));
+        assert_eq!(t.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(t.cwd.as_deref(), Some("/home/contributor/code/alpha"));
+        assert_eq!(t.project.as_deref(), Some("alpha"));
+        assert_eq!(
+            t.started_at.map(|ts| ts.to_rfc3339()),
+            Some("2026-09-03T11:20:00+00:00".to_string()),
+            "the manifest's start, not the first message"
+        );
+        assert_eq!(t.agent_version, None);
+        assert_eq!(t.subagent_count, 0);
+        assert!(t.routing.is_empty());
+        let bytes = std::fs::read(
+            fixture_root().join("1756900000000_k3x9q/1756900000000_k3x9q.messages.json"),
+        )
+        .unwrap();
+        assert_eq!(t.session_hash, crate::source::session_hash(&bytes));
+    }
+
+    #[test]
+    fn blocks_become_events_in_document_order() {
+        let t = load("k3x9q");
+        let kinds: Vec<&SessionEventKind> = t.events.iter().map(|e| &e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &SessionEventKind::User,
+                &SessionEventKind::Reasoning,
+                &SessionEventKind::Assistant,
+                &SessionEventKind::ToolCall,
+                &SessionEventKind::ToolResult,
+                &SessionEventKind::Assistant,
+            ]
+        );
+        let user = &t.events[0];
+        assert_eq!(user.content.as_deref(), Some("List the files in src"));
+        assert_eq!(
+            user.timestamp.map(|ts| ts.to_rfc3339()),
+            Some("2025-09-03T11:46:40+00:00".to_string()),
+            "ts is epoch milliseconds"
+        );
+        let reasoning = &t.events[1];
+        assert_eq!(
+            reasoning.content.as_deref(),
+            Some("The user wants a directory listing.")
+        );
+        let assistant = &t.events[2];
+        assert_eq!(
+            assistant.content.as_deref(),
+            Some("I'll list the directory.")
+        );
+        assert_eq!(assistant.token_counts, Some((1200, 85)));
+        assert_eq!(
+            assistant.served_by, None,
+            "Cline does not split cache writes by duration, so the step is unpriced rather than underpriced"
+        );
+        let call = &t.events[3];
+        assert_eq!(call.tool_name.as_deref(), Some("list_files"));
+        assert_eq!(call.tool_call_id.as_deref(), Some("toolu_01"));
+        assert_eq!(
+            call.structured,
+            serde_json::json!({ "path": "src", "recursive": false })
+        );
+        let result = &t.events[4];
+        assert_eq!(result.tool_call_id.as_deref(), Some("toolu_01"));
+        assert_eq!(result.content.as_deref(), Some("index.ts\nutil.ts"));
+        assert_eq!(
+            result.success, None,
+            "no is_error field means no verdict, not success"
+        );
+        let last = &t.events[5];
+        assert_eq!(last.token_counts, Some((1300, 20)));
+    }
+
+    #[test]
+    fn string_content_failed_results_and_unknown_blocks_are_handled() {
+        let t = load("p2m7z");
+        assert_eq!(
+            t.model.as_deref(),
+            Some("gpt-5.5"),
+            "from modelInfo when there is no manifest"
+        );
+        assert_eq!(t.cwd, None);
+        assert_eq!(
+            t.started_at.map(|ts| ts.to_rfc3339()),
+            Some("2025-09-03T11:48:20+00:00".to_string()),
+            "the first message's ts when there is no manifest"
+        );
+        let user = &t.events[0];
+        assert_eq!(user.kind, SessionEventKind::User);
+        assert_eq!(user.content.as_deref(), Some("Run the tests"));
+        let call = &t.events[1];
+        assert_eq!(call.kind, SessionEventKind::ToolCall);
+        assert_eq!(call.tool_name.as_deref(), Some("execute_command"));
+        assert_eq!(call.token_counts, None, "no metrics, no counts");
+        let result = &t.events[2];
+        assert_eq!(result.kind, SessionEventKind::ToolResult);
+        assert_eq!(result.success, Some(false));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("error: no such command"),
+            "text parts joined; the image part is dropped"
+        );
+        let image = &t.events[3];
+        assert_eq!(image.kind, SessionEventKind::Opaque);
+        assert_eq!(
+            image.structured,
+            serde_json::json!({ "record_type": "image" })
+        );
+        assert!(image.content.is_none());
+        let unknown = &t.events[4];
+        assert_eq!(unknown.kind, SessionEventKind::Opaque);
+        assert_eq!(
+            unknown.structured,
+            serde_json::json!({ "record_type": "future_block" })
+        );
+        assert!(
+            !t.events
+                .iter()
+                .filter_map(|e| e.content.as_deref())
+                .any(|c| c.contains("AAAA") || c.contains("BBBB")),
+            "image data never reaches an event"
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_messages_array_is_refused_with_a_label_only() {
+        let s = source();
+        let r = s
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.path.to_string_lossy().contains("bad00"))
+            .unwrap();
+        let err = s.load(&r).unwrap_err().to_string();
+        assert_eq!(err, "malformed_cline_session");
+    }
+
+    #[test]
+    fn a_document_over_budget_is_declined_by_size_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("1756900300000_big00");
+        std::fs::create_dir_all(&session).unwrap();
+        let path = session.join("1756900300000_big00.messages.json");
+        let mut body = String::from(
+            "{\"version\":1,\"sessionId\":\"1756900300000_big00\",\"messages\":[{\"role\":\"user\",\"content\":\"",
+        );
+        body.push_str(&"x".repeat(CLINE_SESSION_BUDGET as usize + 16));
+        body.push_str("\"}]}");
+        std::fs::write(&path, body).unwrap();
+        let s = ClineSource::new(dir.path().to_path_buf());
+        let r = s.discover().unwrap().into_iter().next().unwrap();
+        let err = s.load(&r).unwrap_err();
+        let too_large = err
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .expect("a size refusal");
+        assert_eq!(too_large.label, "cline-session-too-large");
+        assert!(
+            !err.to_string().contains("big00"),
+            "a refusal names no path"
+        );
     }
 }
