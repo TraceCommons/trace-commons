@@ -24,23 +24,11 @@ public readonly record struct TranscriptRun(int Start, int Length, bool IsMarker
 public static class TranscriptMarkers
 {
     /// <summary>
-    /// Every marker shape the pipeline emits, including the
+    /// Both marker families the pipeline emits, including the
     /// <c>[REDACTED:aws_secret_key]</c> form that carries a category label.
-    /// Three shells disagreeing about what a redaction looks like is three
-    /// different pictures of the same bytes.
-    ///
-    /// The redactor emits four shapes, and this arm exists because one of
-    /// them reached neither of the others. <c>apply_placeholder_regex</c>
-    /// mints the numbered <c>&lt;PRIVATE_LABEL_n&gt;</c> form for exactly two
-    /// labels, <c>local_path</c> and <c>private_email</c>. Everything else
-    /// gets a fixed token: <c>[REDACTED]</c> for secrets and sensitive
-    /// fields, <c>[REDACTED:{label}]</c> for tool arguments and
-    /// privacy-filter findings, and <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> for a
-    /// PEM key. That last one starts neither <c>&lt;PRIVATE_</c> nor a
-    /// bracket, so both other arms missed it and a private key the redactor
-    /// HAD removed drew as ordinary transcript text. Secrets are the category
-    /// a contributor most wants to see marked, and this was the shape that
-    /// was not.
+    /// Kept identical to the macOS sheet's pattern -- three shells disagreeing
+    /// about what a redaction looks like is three different pictures of the
+    /// same bytes.
     ///
     /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
     /// Without that, one unclosed bracket anywhere in a body would let a
@@ -48,8 +36,7 @@ public static class TranscriptMarkers
     /// this same pattern to avoid cutting through a marker -- would then
     /// refuse to cut anywhere inside it.
     /// </summary>
-    private const string Pattern =
-        @"<REDACTED_PRIVATE_KEY>|<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
+    private const string Pattern = @"<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
 
     /// <summary>
     /// A bound on how long the scan may run.
