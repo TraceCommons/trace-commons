@@ -63,7 +63,8 @@
   </ItemGroup>
 
   <!--
-    The app layer's routing surface, copied next to the test assembly.
+    The app layer's routing surface and settings view model, copied next to
+    the test assembly.
 
     TraceCommons.App is a WinUI project and cannot be built, let alone
     referenced, on the macOS and Linux machines this suite runs on, so
@@ -71,6 +72,11 @@
     surface a contributor actually looks at. Asserted about the source for
     the same reason NoWordingIsAuthoredInThisShell is: a view that recovered
     a tone from a rendered string would pass every behavioural test here.
+
+    TheSettingsScreenAsksForTheRowRatherThanWritingIt reads it for the same
+    reason at the call site: a shell can call the shared copy from one place
+    and go on hand-writing the same sentence in another, which is the state
+    this row was found in.
   -->
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs"

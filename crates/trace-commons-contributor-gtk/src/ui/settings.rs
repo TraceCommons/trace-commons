@@ -26,6 +26,7 @@ use super::App;
 use super::community_brand;
 use super::style::{self, Tone, space};
 use crate::copy;
+use crate::copy::SourceTool;
 use crate::model::{Project, Settings, Status};
 
 /// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
@@ -700,6 +701,31 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     render_routing_status(app, status);
 }
 
+/// The two session-source rows: the sentence, and whether the tone is the
+/// satisfied one.
+///
+/// Branches on `*_source_mode`, never on `*_root_configured`. That boolean
+/// is `mode == "watch"` and so is false for `off` as well as for `unset`,
+/// and this shell used to render one sentence on that false branch: a
+/// contributor who declared Claude Code OFF was told its sessions were being
+/// read from the usual place. Nothing is read from an `off` source.
+///
+/// Split out of the render so it can be asserted on without a GTK widget
+/// tree. The words themselves are `trace_commons_contributor::source_copy`'s,
+/// because the macOS and Windows shells print this same row.
+fn source_check_rows(settings: &Settings) -> Vec<(String, bool)> {
+    vec![
+        (
+            copy::source_check_line(SourceTool::Claude, &settings.claude_source_mode),
+            settings.claude_source_mode == "watch",
+        ),
+        (
+            copy::source_check_line(SourceTool::Codex, &settings.codex_source_mode),
+            settings.codex_source_mode == "watch",
+        ),
+    ]
+}
+
 /// §5.4's three check rows. Every one of them is a configured-or-not fact
 /// from `get_settings`; not one of them can carry a path or a credential,
 /// because the contract keeps both off the wire.
@@ -708,24 +734,9 @@ fn render_connection_checks(app: &Rc<App>, settings: &Settings) {
     while let Some(child) = view.first_child() {
         view.remove(&child);
     }
-    view.append(&check_row(
-        if settings.claude_root_configured {
-            copy::CHECK_CLAUDE_SET
-        } else {
-            copy::CHECK_CLAUDE_DEFAULT
-        },
-        settings.claude_root_configured,
-        None,
-    ));
-    view.append(&check_row(
-        if settings.codex_root_configured {
-            copy::CHECK_CODEX_SET
-        } else {
-            copy::CHECK_CODEX_DEFAULT
-        },
-        settings.codex_root_configured,
-        None,
-    ));
+    for (label, satisfied) in source_check_rows(settings) {
+        view.append(&check_row(&label, satisfied, None));
+    }
     // The scan's row keeps the sentence this shell already had under it.
     // "Configured" is not the fact a contributor needs -- that message text
     // leaves the machine is, and it is the kind of consequence this
@@ -2356,6 +2367,78 @@ fn brand_link(text: &str, url: &str) -> gtk::Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings_with_modes(claude: &str, codex: &str) -> Settings {
+        serde_json::from_value(serde_json::json!({
+            "claude_source_mode": claude,
+            "codex_source_mode": codex,
+            // Sent by the daemon and deliberately unread by this shell. Set
+            // to the value it carries for a watched source, so a row that
+            // went back to reading it would still look right for `watch`
+            // and wrong for the other two -- which is the bug, not a
+            // coincidence the test should hide.
+            "claude_root_configured": claude == "watch",
+            "codex_root_configured": codex == "watch",
+        }))
+        .expect("the settings blob parses")
+    }
+
+    /// The three modes are three different rows, and the `off` row does not
+    /// say what the `unset` row says.
+    ///
+    /// `off` and `unset` shared a sentence -- "sessions read from the usual
+    /// place" -- because the row branched on `*_root_configured`, which is
+    /// `mode == "watch"`. Nothing is read from an `off` source, so that was
+    /// a false statement on the one screen a contributor checks to confirm
+    /// it. `unset` is NOT the same fact: an undeclared claude or codex is
+    /// scanned at its conventional location, so its row must keep saying so.
+    #[test]
+    fn each_source_mode_gets_its_own_row() {
+        let watch = source_check_rows(&settings_with_modes("watch", "watch"));
+        let unset = source_check_rows(&settings_with_modes("unset", "unset"));
+        let off = source_check_rows(&settings_with_modes("off", "off"));
+
+        assert_eq!(watch[0].0, "Claude Code sessions folder set");
+        assert_eq!(unset[0].0, "Claude Code sessions read from the usual place");
+        assert_eq!(
+            off[0].0,
+            "Claude Code marked not used, so nothing is opened for it"
+        );
+        assert_eq!(
+            off[1].0,
+            "Codex marked not used, so nothing is opened for it"
+        );
+
+        for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
+            assert_ne!(a[0].0, b[0].0, "two modes render the same row");
+            assert!(
+                !b[0].0.contains(a[0].0.as_str()) && !a[0].0.contains(b[0].0.as_str()),
+                "one row's sentence contains another's: {:?} / {:?}",
+                a[0].0,
+                b[0].0
+            );
+        }
+        // Only `watch` is the satisfied tone. `off` is a choice rather than
+        // a fault, but it is not a folder this app was pointed at.
+        assert_eq!(
+            (watch[0].1, unset[0].1, off[0].1),
+            (true, false, false),
+            "the tone stopped tracking the mode"
+        );
+    }
+
+    /// The two sources are read independently. One tool declared off must
+    /// not change what the other tool's row says.
+    #[test]
+    fn one_source_being_off_does_not_speak_for_the_other() {
+        let rows = source_check_rows(&settings_with_modes("off", "unset"));
+        assert_eq!(
+            rows[0].0,
+            "Claude Code marked not used, so nothing is opened for it"
+        );
+        assert_eq!(rows[1].0, "Codex sessions read from the usual place");
+        assert_eq!((rows[0].1, rows[1].1), (false, false));
+    }
 
     #[test]
     fn a_knob_round_trips_through_the_unit_it_is_shown_in() {

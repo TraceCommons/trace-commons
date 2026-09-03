@@ -519,15 +519,16 @@ pub struct Settings {
     pub local_notifications: bool,
     #[serde(default)]
     pub near_ai_configured: bool,
-    #[serde(default)]
-    pub claude_root_configured: bool,
-    #[serde(default)]
-    pub codex_root_configured: bool,
-    /// `watch`, `off` or `unset`, per source. `*_root_configured` above
-    /// cannot carry the distinction the Tools surface needs: it is false
-    /// both for a source pointed at the conventional location and for one
-    /// the contributor said they do not use, and only the second of those
-    /// reads "Not used".
+    /// `watch`, `off` or `unset`, per source.
+    ///
+    /// `get_settings` also sends `claude_root_configured` /
+    /// `codex_root_configured`, and this shell deliberately does not read
+    /// them. That boolean is `mode == "watch"`, so it is false for `off` as
+    /// well as for `unset` -- and the settings screen printed one sentence
+    /// on that false branch, telling a contributor who declared a tool off
+    /// that its sessions were being read from the usual place. Only the mode
+    /// separates "watched somewhere else", "watched where it usually lives"
+    /// and "not used at all", and only the last of those reads "Not used".
     #[serde(default)]
     pub claude_source_mode: String,
     #[serde(default)]
