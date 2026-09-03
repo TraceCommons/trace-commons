@@ -953,6 +953,42 @@ public sealed partial class MainWindow : Window
             : null;
 
     /// <summary>
+    /// A folder row: shows that project's sessions.
+    /// </summary>
+    /// <remarks>
+    /// The location itself lives on the view model and is re-resolved through
+    /// <see cref="QueueNavigation.Resolve"/> on every queue snapshot, so a
+    /// folder that empties underneath the contributor returns them to the
+    /// list rather than leaving them on an empty pane. This handler only
+    /// routes the click to the folder it came from, the same Tag-first
+    /// pattern every other queue handler follows.
+    /// </remarks>
+    private void OnOpenFolder(object sender, RoutedEventArgs e)
+    {
+        if (GroupOf(sender) is QueueGroupViewModel group)
+        {
+            ViewModel.OpenFolder(group.ProjectId);
+        }
+    }
+
+    /// <summary>Back to the folder list.</summary>
+    private void OnCloseFolder(object sender, RoutedEventArgs e) => ViewModel.CloseFolder();
+
+    /// <summary>
+    /// The detail pane's scroll, watched for the same settle the folder
+    /// list's is.
+    /// </summary>
+    /// <remarks>
+    /// Declared in the markup rather than found by walking a template, which
+    /// is what <see cref="OnQueueListViewLoaded"/> has to do for a ListView:
+    /// this ScrollViewer is an element of the page, so it can say who handles
+    /// its own event. It matters because the session rows live here now, so
+    /// this is the scroller whose settling changes what is on screen.
+    /// </remarks>
+    private void OnQueueDetailScrolled(object sender, ScrollViewerViewChangedEventArgs e) =>
+        OnQueueScrollViewChanged(sender, e);
+
+    /// <summary>
     /// Finds the ScrollViewer once <see cref="QueueListView"/>'s template is
     /// realized, so its <c>ViewChanged</c> can be watched for a scroll
     /// settling. Runs at most once: a second Loaded (a theme change, a

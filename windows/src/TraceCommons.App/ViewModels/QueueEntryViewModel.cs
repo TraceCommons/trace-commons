@@ -129,6 +129,26 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
         : "Unknown project";
 
     /// <summary>
+    /// Where this session actually ran, when that is not the project root.
+    /// </summary>
+    /// <remarks>
+    /// Key normalization walks up to the enclosing repository, so two sibling
+    /// subdirectories of one repo become one folder. That is the merge the
+    /// folder-first queue wanted, and this line is what pays for it: the
+    /// sessions are grouped by repo and still say individually where they
+    /// ran.
+    ///
+    /// Empty both when the daemon predates the field and when the session ran
+    /// at the root -- the daemon sends null in the second case rather than
+    /// repeating the project's own path, so the row draws this only when it
+    /// says something. Display only, like every path on this surface.
+    /// </remarks>
+    public string SessionPath => _entry.SessionPath ?? string.Empty;
+
+    /// <summary>Whether there is a session path worth a line of its own.</summary>
+    public bool HasSessionPath => SessionPath.Length > 0;
+
+    /// <summary>
     /// The agent that produced the session, in the words a contributor uses
     /// for it rather than the raw source token.
     ///

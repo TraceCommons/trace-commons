@@ -74,6 +74,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private string _undoNoticeLine = string.Empty;
     private MainPane _pane = MainPane.Queue;
+    private QueueLocation _queueLocation = QueueLocation.Root;
+    private IReadOnlyList<ProjectQueueGroup> _groups = Array.Empty<ProjectQueueGroup>();
+    private QueueGroupViewModel? _openFolder;
     private HealthCopy? _health;
     private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
@@ -138,6 +141,88 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// there; this collection only carries that decision to the queue view.
     /// </summary>
     public ObservableCollection<QueueGroupViewModel> Groups { get; } = new();
+
+    /// <summary>
+    /// The sessions inside the folder currently open, or empty at the root.
+    /// </summary>
+    /// <remarks>
+    /// Its own collection rather than a nested binding into
+    /// <see cref="Groups"/>, so the detail pane has exactly one thing to bind
+    /// to and cannot end up rendering a folder that is no longer in
+    /// <see cref="Groups"/> at all. Refilled by
+    /// <see cref="SetQueueLocation"/>, which is the only thing that changes
+    /// the location.
+    /// </remarks>
+    public ObservableCollection<QueueEntryViewModel> OpenFolderEntries { get; } = new();
+
+    /// <summary>
+    /// Whether the queue is showing the folder list rather than one folder's
+    /// sessions.
+    /// </summary>
+    public bool IsAtQueueRoot => _queueLocation is not QueueLocation.Project;
+
+    /// <summary>The inverse of <see cref="IsAtQueueRoot"/>, for the detail pane.</summary>
+    public bool IsInQueueFolder => !IsAtQueueRoot;
+
+    /// <summary>The open folder's label, or empty at the root.</summary>
+    public string OpenFolderLabel => _openFolder?.ProjectLabel ?? string.Empty;
+
+    /// <summary>The open folder's display path, or empty when it has none.</summary>
+    public string OpenFolderPath => _openFolder?.ProjectPath ?? string.Empty;
+
+    /// <summary>Whether the detail heading has a path to draw beneath its label.</summary>
+    public bool HasOpenFolderPath => OpenFolderPath.Length > 0;
+
+    /// <summary>The open folder's id, which "Submit all" from the detail sends.</summary>
+    public string OpenFolderProjectId => _openFolder?.ProjectId ?? string.Empty;
+
+    /// <summary>Opens one folder's sessions.</summary>
+    public void OpenFolder(string projectId)
+    {
+        ArgumentNullException.ThrowIfNull(projectId);
+        SetQueueLocation(new QueueLocation.Project(projectId));
+    }
+
+    /// <summary>Returns to the folder list.</summary>
+    public void CloseFolder() => SetQueueLocation(QueueLocation.Root);
+
+    /// <summary>
+    /// Moves the queue to <paramref name="location"/>, after checking it is
+    /// somewhere that still exists.
+    /// </summary>
+    /// <remarks>
+    /// Every path that changes either the location or the queue's contents
+    /// goes through here, including <see cref="ReplacePending"/>. That is
+    /// what makes a folder emptying underneath the contributor -- their own
+    /// "Submit all", or an upload finishing in the background -- return them
+    /// to the list rather than leaving them on an empty pane with a back
+    /// button and no explanation. <see cref="QueueNavigation.Resolve"/> makes
+    /// that decision and is tested in TraceCommons.Interop.
+    /// </remarks>
+    private void SetQueueLocation(QueueLocation location)
+    {
+        _queueLocation = QueueNavigation.Resolve(location, _groups);
+        _openFolder = _queueLocation is QueueLocation.Project project
+            ? Groups.FirstOrDefault(group =>
+                string.Equals(group.ProjectId, project.ProjectId, StringComparison.Ordinal))
+            : null;
+
+        OpenFolderEntries.Clear();
+        if (_openFolder is not null)
+        {
+            foreach (QueueEntryViewModel row in _openFolder.Entries)
+            {
+                OpenFolderEntries.Add(row);
+            }
+        }
+
+        Raise(nameof(IsAtQueueRoot));
+        Raise(nameof(IsInQueueFolder));
+        Raise(nameof(OpenFolderLabel));
+        Raise(nameof(OpenFolderPath));
+        Raise(nameof(HasOpenFolderPath));
+        Raise(nameof(OpenFolderProjectId));
+    }
 
     /// <summary>
     /// Which of the rail's destinations is showing.
@@ -1181,7 +1266,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // under each group, using QueueGrouping.KeyOf so membership is
         // computed by the exact same rule the groups were bucketed with.
         Groups.Clear();
-        foreach (ProjectQueueGroup group in QueueGrouping.ByProject(entries))
+        _groups = QueueGrouping.ByProject(entries);
+        foreach (ProjectQueueGroup group in _groups)
         {
             var rows = new ObservableCollection<QueueEntryViewModel>();
             foreach (QueueEntry entry in entries)
@@ -1194,6 +1280,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             Groups.Add(new QueueGroupViewModel(group, rows));
         }
+
+        // Re-resolved on every snapshot, not only when the contributor
+        // navigates. A folder can be emptied by their own "Submit all" or by
+        // an upload finishing in the background, and this is what returns
+        // them to the list when it is.
+        SetQueueLocation(_queueLocation);
 
         Raise(nameof(IsEmpty));
 
