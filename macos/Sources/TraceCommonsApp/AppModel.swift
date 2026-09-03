@@ -185,6 +185,18 @@ final class AppModel: ObservableObject {
     /// this reshuffles nothing a contributor has already scanned.
     @Published private(set) var waitingByProject: [QueueGroup<QueueEntry>] = []
 
+    /// Sessions waiting whose preview reported that no pattern fired.
+    /// Drives `QueueShieldState` only, and never the badge: the count is
+    /// what a contributor with 149 sessions is reading, and this is a state
+    /// the count cannot carry.
+    ///
+    /// Stored rather than computed for the reason `awaitingDecision` is:
+    /// a SwiftUI body would otherwise walk the whole waiting list on every
+    /// redraw. It depends on `summaries`, which arrive asynchronously long
+    /// after the queue settles, so it is recomputed from both sides --
+    /// `recomputeWaiting` and `applyPreviewOutcome`.
+    @Published private(set) var nothingMatchedCount: Int = 0
+
     /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
     /// or no -- not sessions found and not queue total.
     var decisionsOwed: Int {
@@ -206,6 +218,20 @@ final class AppModel: ObservableObject {
                 sizeBytes: \.sizeBytes
             )
         )
+        recomputeNothingMatched()
+    }
+
+    /// How many waiting sessions have a preview that removed nothing.
+    ///
+    /// A session with no preview yet is NOT counted: nothing is known about
+    /// it, and "nothing matched" is a report, not a default. It starts
+    /// counting the moment its preview lands.
+    private func recomputeNothingMatched() {
+        let count = awaitingDecision.reduce(into: 0) { total, entry in
+            guard let summary = summaries[entry.entryID] else { return }
+            if RedactionLabels.removedTotal(summary.redactions) == 0 { total += 1 }
+        }
+        publishIfChanged(\.nothingMatchedCount, count)
     }
 
     var armedProjects: [ProjectRow] {
@@ -866,6 +892,7 @@ final class AppModel: ObservableObject {
         case .ready:
             if let summary = result.summary, summaries[result.entryID] != summary {
                 summaries[result.entryID] = summary
+                recomputeNothingMatched()
             }
         case .tooLarge:
             let refusal = PreviewTooLarge(
