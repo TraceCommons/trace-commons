@@ -77,13 +77,27 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>
     /// The scrubbing caveat, word for word as the queue window prints it and
     /// as the macOS and Linux shells print it.
-    ///
-    /// It has to be identical everywhere it appears, so that a person who read
-    /// it under the queue recognises it above Contribute rather than reading a
-    /// second, weaker message. Do not reword it here.
     /// </summary>
-    public const string ScrubbingCaveat =
-        "Scrubbing is pattern-based. It misses things it hasn't seen before.";
+    /// <remarks>
+    /// Bound from <see cref="ScrubbingCaveatCopy"/> rather than written here:
+    /// it has to be identical everywhere it appears, so that a person who read
+    /// it under the queue recognises it above Contribute rather than reading a
+    /// second, weaker message.
+    /// </remarks>
+    public static string ScrubbingCaveat => ScrubbingCaveatCopy.Sentence;
+
+    /// <summary>
+    /// The same sentence as an instance property, because x:Bind binds against
+    /// the view model instance and cannot reach a static member.
+    /// </summary>
+    public string ScrubbingCaveatSentence => ScrubbingCaveatCopy.Sentence;
+
+    /// <summary>
+    /// The gold chip's line: what a session where no pattern fired says, and
+    /// what to do about it.
+    /// </summary>
+    public string NothingMatchedLine => ScrubbingCaveatCopy.RowLine(
+        _summary is null ? 0 : RedactionLabels.Total(_summary.Redactions));
 
     private readonly DaemonHost _host;
 
@@ -94,6 +108,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     private IReadOnlyList<int> _matches = Array.Empty<int>();
     private bool _searched;
     private bool _searchFailed;
+    private OriginalSearchOutcome? _originalOutcome;
     private bool _loading = true;
     private bool _failed;
     private bool _deciding;
@@ -327,6 +342,37 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public string NothingMatchedNote =>
         "A search only finds what is written the way you typed it. If it matters, try the "
         + "other spellings you would worry about — a hostname, an internal code name, an address.";
+
+    /// <summary>
+    /// Whether a value the search found was actually taken out.
+    /// </summary>
+    /// <remarks>
+    /// Absent until a committed search has been answered, so the tab says
+    /// nothing rather than saying something it has not checked.
+    /// </remarks>
+    public bool HasOriginalOutcome => _originalOutcome is not null;
+
+    /// <summary>The sentence for that answer, from the shared outcome type.</summary>
+    public string OriginalOutcomeText => _originalOutcome?.Sentence ?? string.Empty;
+
+    /// <summary>
+    /// Whether that answer is the alarming one. True only for a value still in
+    /// what would be sent -- never for one the check could not be made about,
+    /// which is unproven rather than alarming and says so in its own words.
+    /// </summary>
+    public bool OriginalOutcomeIsAlarming => _originalOutcome?.IsAlarming == true;
+
+    /// <summary>
+    /// The same answer, in the ordinary tone.
+    /// </summary>
+    /// <remarks>
+    /// A second boolean rather than a converter, matching how every other
+    /// either/or on this window is drawn: two elements, each bound to the
+    /// condition under which it belongs on screen. Both are false before a
+    /// committed search has been answered, which is what keeps the line absent
+    /// rather than blank.
+    /// </remarks>
+    public bool OriginalOutcomeIsCalm => HasOriginalOutcome && !OriginalOutcomeIsAlarming;
 
     /// <summary>Whether there is a pinned preview to contribute, and no
     /// decision already in flight.</summary>
@@ -565,6 +611,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         _searched = true;
         _searchFailed = false;
+        SetOriginalOutcome(null);
         Excerpts.Clear();
 
         if (Needle.Length == 0 || _preview is null)
@@ -598,12 +645,73 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             Excerpts.Add(excerpt);
         }
 
-        if (remember && _matches.Count > 0)
+        if (remember)
         {
-            Remember(Needle);
+            if (_matches.Count > 0)
+            {
+                Remember(Needle);
+            }
+
+            // Only on a COMMITTED search, never on a keystroke. This one
+            // re-reads the whole session file on the daemon side, and it is
+            // the one call in the ABI that touches pre-redaction bytes; doing
+            // it per keystroke would spend that on every prefix of the word.
+            _ = CheckOriginalAsync(Needle, _matches.Count);
         }
 
         RaiseSearchResults();
+    }
+
+    /// <summary>
+    /// Asks the daemon how many times the needle appears in the session AS
+    /// RECORDED, and turns the pair of counts into the tab's answer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A count, never content. The redacted body is already in hand, so
+    /// matches in it are known; this supplies the only other number, and
+    /// <see cref="OriginalSearchOutcome.Classify"/> makes every decision about
+    /// what the two together mean, including what to do when the second one
+    /// cannot be had.
+    /// </para>
+    /// <para>
+    /// The needle is re-checked against <see cref="Needle"/> before the answer
+    /// lands: the contributor keeps typing while this runs, and an answer
+    /// about a term they have moved on from would be attached to the wrong
+    /// question.
+    /// </para>
+    /// </remarks>
+    private async Task CheckOriginalAsync(string needle, int remaining)
+    {
+        int? original;
+        try
+        {
+            original = await _host
+                .SearchOriginalAsync(Entry.EntryId, needle)
+                .ConfigureAwait(true);
+        }
+        catch (TcException)
+        {
+            // Null, not zero: a check that could not run must not render as a
+            // clean result.
+            original = null;
+        }
+
+        if (!string.Equals(needle, Needle, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        SetOriginalOutcome(OriginalSearchOutcome.Classify(remaining, original));
+    }
+
+    private void SetOriginalOutcome(OriginalSearchOutcome? outcome)
+    {
+        _originalOutcome = outcome;
+        Raise(nameof(HasOriginalOutcome));
+        Raise(nameof(OriginalOutcomeText));
+        Raise(nameof(OriginalOutcomeIsAlarming));
+        Raise(nameof(OriginalOutcomeIsCalm));
     }
 
     /// <summary>
@@ -780,6 +888,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         Raise(nameof(PiiLabelsText));
         Raise(nameof(HasPiiLabels));
         Raise(nameof(HasStillPresentCategories));
+        Raise(nameof(NothingMatchedLine));
         Raise(nameof(RedactionBadge));
         Raise(nameof(HasRedactionBadge));
         Raise(nameof(PermissionsBadge));

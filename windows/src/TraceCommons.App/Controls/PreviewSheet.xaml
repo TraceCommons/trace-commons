@@ -230,6 +230,32 @@
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap" />
 
+                    <!--
+                        Whether a value the search found was actually taken
+                        out. tc_preview_search scans the REDACTED body, so a
+                        value scrubbing removed returns zero matches there,
+                        which is indistinguishable from a value that was never
+                        present. Those are the two answers a worried
+                        contributor most needs to tell apart.
+
+                        Answered only for a COMMITTED search (Enter or the
+                        button), because it costs the daemon a re-read of the
+                        session file. Absent until then, so the tab says
+                        nothing rather than something it has not checked. The
+                        attention tone is reserved for a value still in what
+                        would be sent: a check that could not be made is
+                        unproven, not alarming, and its own sentence says so.
+                    -->
+                    <TextBlock Text="{x:Bind ViewModel.OriginalOutcomeText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.OriginalOutcomeIsCalm, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.OriginalOutcomeText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.OriginalOutcomeIsAlarming, Mode=OneWay}"
+                               Foreground="{ThemeResource TcGoldTextBrush}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+
                     <!-- A secret the scan FOUND and did not remove.
                          redaction_counts carries residual_secret_at:* in the
                          same map as every genuine removal, and the figures
@@ -274,19 +300,39 @@
                     <TextBlock Text="What scrubbing removed"
                                Style="{StaticResource TcTitleCardTextStyle}"
                                Margin="0,10,0,0" />
-                    <!-- The one card here drawn to be found. A session where
-                         no pattern fired is the session most worth a second
-                         look, and it is the case a count cannot state. -->
-                    <Border Visibility="{x:Bind ViewModel.NothingMatched, Mode=OneWay}"
+                    <!--
+                        The one card here drawn to be found. A session where no
+                        pattern fired is the session most worth a second look,
+                        and it is the case a count cannot state.
+
+                        It is a Button now, and the tone is unchanged: the
+                        complaint it answers was that the chip said nothing to
+                        DO, which is an affordance complaint and not a
+                        complaint about the colour. Activating it opens the
+                        search tab, which is the thing to do about it, and the
+                        line says so. A Button rather than a tapped Border for
+                        the same reason the navigation rail uses one: keyboard
+                        focus, the invoke pattern and a narrator announcement
+                        come with it.
+
+                        The sentence is bound from ScrubbingCaveatCopy, where
+                        three shells are kept from drifting into three wordings
+                        of it.
+                    -->
+                    <Button Visibility="{x:Bind ViewModel.NothingMatched, Mode=OneWay}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left"
                             Background="{ThemeResource TcSurfaceInsetBrush}"
                             BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
                             BorderThickness="1"
                             CornerRadius="{StaticResource TcCardCornerRadius}"
-                            Padding="12,10">
-                        <TextBlock Text="Nothing matched. On a session that touched credentials, that is itself worth a second look."
+                            Padding="12,10"
+                            Click="OnNothingMatchedChip"
+                            AutomationProperties.Name="Search this trace">
+                        <TextBlock Text="{x:Bind ViewModel.NothingMatchedLine, Mode=OneWay}"
                                    Style="{StaticResource TcBodyTextStyle}"
                                    TextWrapping="Wrap" />
-                    </Border>
+                    </Button>
                     <!--
                         One row per category, with what that category IS. The
                         card's one line figure is the only at a glance part
@@ -388,7 +434,7 @@
                          sentence earns its place. Word for word what the
                          footer and the queue print, so a person who read it
                          there recognises it here. -->
-                    <TextBlock Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
+                    <TextBlock Text="{x:Bind ViewModel.ScrubbingCaveatSentence}"
                                Style="{StaticResource TcCaptionTextStyle}"
                                Foreground="{ThemeResource TcInkSecondaryBrush}"
                                TextWrapping="Wrap"
@@ -540,7 +586,7 @@
                  has to be identical in both places, so that a person who read
                  it there recognises it here rather than reading a second,
                  weaker message. -->
-            <TextBlock Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
+            <TextBlock Text="{x:Bind ViewModel.ScrubbingCaveatSentence}"
                        Style="{StaticResource TcCaptionTextStyle}"
                        TextWrapping="Wrap" />
 

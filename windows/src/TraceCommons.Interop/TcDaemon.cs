@@ -242,6 +242,44 @@ public sealed class TcDaemon : IDisposable
     }
 
     /// <summary>
+    /// Counts occurrences of <paramref name="needle"/> in an entry's
+    /// PRE-redaction session text, or returns null when the count could not be
+    /// made.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the one call here that reads unredacted session bytes on behalf
+    /// of a caller, and <b>the count is the bound</b>: no offsets, no context,
+    /// no bytes. It exists because <see cref="TcPreview.Search"/> scans the
+    /// REDACTED body, so a value redaction removed returns zero there, which
+    /// is indistinguishable from a value that was never present.
+    /// </para>
+    /// <para>
+    /// Null rather than an exception or a sentinel, because "the check could
+    /// not be made" is an answer the caller has to render differently from
+    /// "not there" -- see <see cref="OriginalSearchOutcome.Classify"/>, which
+    /// takes exactly this nullable and fails toward what is certain.
+    /// </para>
+    /// <para>
+    /// Takes an entry id rather than a preview, matching the ABI: a preview
+    /// lives as long as its sheet, and an unredacted transcript must not.
+    /// Blocks the calling thread while the daemon re-reads the session, so
+    /// callers run it off the UI thread.
+    /// </para>
+    /// </remarks>
+    public int? SearchOriginal(string entryId, string needle)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(needle);
+
+        int count = WithHandle(
+            h => NativeMethods.tc_search_original(h, entryId, needle),
+            -1);
+
+        return count < 0 ? null : count;
+    }
+
+    /// <summary>
     /// Registers <paramref name="handler"/>, invoked with each JSON event
     /// frame the daemon publishes, ON A RUST BACKGROUND THREAD. The handler
     /// must therefore marshal to the UI thread itself before touching

@@ -472,6 +472,20 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     private void OnSearchClick(object sender, RoutedEventArgs e) =>
         ViewModel.RunSearch(remember: true);
 
+    /// <summary>
+    /// The nothing-matched chip: opens the search tab.
+    /// </summary>
+    /// <remarks>
+    /// The chip stays gold. The complaint it answers is that it said nothing
+    /// to DO about a session where no pattern fired, and searching it for the
+    /// things you would not want to send is the thing to do.
+    /// </remarks>
+    private void OnNothingMatchedChip(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectTab(PreviewTab.Search);
+        SearchBox.Focus(FocusState.Programmatic);
+    }
+
     private void OnRecentSearchClick(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Content: string term })
