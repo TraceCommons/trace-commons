@@ -596,6 +596,7 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+    use crate::daemon::test_paths::{abs, abs_key};
 
     fn now() -> DateTime<Utc> {
         "2026-08-08T12:00:00Z".parse().unwrap()
@@ -605,7 +606,7 @@ mod tests {
     fn an_unknown_project_defaults_to_notify_only() {
         let p = ProjectPolicy::new();
         assert_eq!(
-            p.resolve("/Users/z/code/never-seen"),
+            p.resolve(&abs("Users/z/code/never-seen")),
             ProjectMode::NotifyOnly
         );
     }
@@ -614,17 +615,14 @@ mod tests {
     fn sessions_without_a_cwd_land_in_the_unknown_bucket() {
         assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("   ")), UNKNOWN_PROJECT_KEY);
-        // Lowercase on the case-folding platforms, which is what
-        // `project_key::normalize_project_key` produces there.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        // Spelled for the host platform: `/Users/z/code/proj` has a root
+        // but no prefix on Windows, so it is not absolute there and would
+        // fall into the unknown bucket for a reason that has nothing to do
+        // with what this test is about. `abs_key` applies the case-folding
+        // rule directly rather than by calling normalization again.
         assert_eq!(
-            project_key_for(Some("/Users/z/code/proj")),
-            "/users/z/code/proj"
-        );
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_eq!(
-            project_key_for(Some("/Users/z/code/proj")),
-            "/Users/z/code/proj"
+            project_key_for(Some(&abs("Users/z/code/proj"))),
+            abs_key("Users/z/code/proj")
         );
     }
 
