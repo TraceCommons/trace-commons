@@ -449,7 +449,10 @@ struct QueueRow: View {
                             if redactionCount == 0 {
                                 nothingMatchedChip
                             } else {
-                                Text(Self.removedSummary(summary.redactions))
+                                Text(RedactionLabels.line(
+                                    occurrences: summary.redactions,
+                                    distinct: summary.redactionsDistinct
+                                ))
                                     .font(TC.Font_.ledger)
                                     .foregroundStyle(TC.inkPrimary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -541,7 +544,7 @@ struct QueueRow: View {
     private var nothingMatchedChip: some View {
         HStack(spacing: TC.Space.xxs) {
             QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
-            Text("nothing matched")
+            Text(RedactionLabels.nothingMatched)
                 .font(TC.Font_.monoChip)
                 .foregroundStyle(TC.goldText)
         }
@@ -566,16 +569,6 @@ struct QueueRow: View {
             value()
         }
         .accessibilityElement(children: .combine)
-    }
-
-    /// Category labels and counts only; the contract guarantees the map
-    /// never carries matched text. Ordered by count so the biggest number is
-    /// first, which is what a person is scanning for.
-    static func removedSummary(_ redactions: [String: Int]) -> String {
-        RedactionLabels.removals(redactions)
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
-            .joined(separator: "  ·  ")
     }
 
     // MARK: - Actions

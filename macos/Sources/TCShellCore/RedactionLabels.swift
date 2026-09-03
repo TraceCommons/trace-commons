@@ -29,6 +29,10 @@ public enum RedactionLabels {
     /// The label family marking a secret that was found and left in place.
     public static let residualPrefix = "residual_secret_at"
 
+    /// What the card shows when nothing fired. `ScrubbingCaveat` supplies
+    /// the sentence that says what that does and does not prove.
+    public static let nothingMatched = "nothing matched"
+
     /// The part of a label before its first `:`.
     ///
     /// The count vocabulary is namespaced and OPEN -- `secret:{pattern_name}`,
@@ -53,6 +57,42 @@ public enum RedactionLabels {
     /// Total occurrences removed. Never includes survivors.
     public static func removedTotal(_ counts: [String: Int]) -> Int {
         removals(counts).values.reduce(0, +)
+    }
+
+    /// "185 local path (12 distinct)  ·  3 secret"
+    ///
+    /// The daemon reports two maps. `redaction_counts` counts OCCURRENCES --
+    /// how many times a pattern fired. `redactions_distinct` counts VALUES --
+    /// how many different strings those firings covered, because the redactor
+    /// mints one placeholder per distinct value and reuses it. One path
+    /// referenced two hundred times is two hundred occurrences and one value,
+    /// and a card that reports only the first overstates how much of the
+    /// session was touched.
+    ///
+    /// Lives here rather than on the view because it is the only part of that
+    /// card with a right and a wrong answer, and `swift test` cannot reach a
+    /// SwiftUI body.
+    ///
+    /// Ordered by count so the biggest number is first, which is what a
+    /// person scanning a column of cards is looking for; ties break on the
+    /// label so the order is stable between two redraws.
+    public static func line(occurrences: [String: Int], distinct: [String: Int]) -> String {
+        let removed = removals(occurrences)
+        if removed.isEmpty { return nothingMatched }
+        return removed
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { label, count in
+                let words = label.replacingOccurrences(of: "_", with: " ")
+                // Only when it says something the occurrence count did not:
+                // equal counts are the same fact twice, and a distinct count
+                // above its occurrence count is impossible from a correct
+                // daemon and not worth rendering from an incorrect one.
+                guard let values = distinct[label], values > 0, values < count else {
+                    return "\(count) \(words)"
+                }
+                return "\(count) \(words) (\(values) distinct)"
+            }
+            .joined(separator: "  ·  ")
     }
 
     /// Where secrets were found and left in the payload, with how many at

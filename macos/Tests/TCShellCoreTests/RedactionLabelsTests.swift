@@ -93,4 +93,84 @@ final class RedactionLabelsTests: XCTestCase {
         XCTAssertEqual(RedactionLabels.removedTotal(counts), 0)
         XCTAssertEqual(RedactionLabels.survivors(counts).map(\.site), [""])
     }
+
+    // MARK: - The rendered line
+
+    /// The card's "removed by pattern" figure carries two different numbers
+    /// -- how many times a pattern fired, and how many distinct values that
+    /// was -- and conflating them overstates or understates the reach of
+    /// scrubbing depending on which one you drop.
+    func testAnEmptyTallyIsNothingMatched() {
+        XCTAssertEqual(RedactionLabels.line(occurrences: [:], distinct: [:]), "nothing matched")
+        XCTAssertEqual(RedactionLabels.line(occurrences: [:], distinct: [:]), RedactionLabels.nothingMatched)
+    }
+
+    func testLabelsAreHumanReadable() {
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["local_path": 3], distinct: [:]),
+            "3 local path"
+        )
+    }
+
+    func testDistinctCountsAreShownWhenTheyDifferFromOccurrences() {
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["local_path": 185], distinct: ["local_path": 12]),
+            "185 local path (12 distinct)"
+        )
+    }
+
+    func testDistinctIsOmittedWhenEveryOccurrenceIsItsOwnValue() {
+        // "3 secret (3 distinct)" is noise: it says the same thing twice.
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["secret": 3], distinct: ["secret": 3]),
+            "3 secret"
+        )
+    }
+
+    func testDistinctIsOmittedWhenTheDaemonDidNotReportIt() {
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["secret": 3], distinct: [:]),
+            "3 secret"
+        )
+    }
+
+    func testBiggestCountLeadsAndTiesBreakOnLabel() {
+        let line = RedactionLabels.line(
+            occurrences: ["secret": 3, "local_path": 185, "email": 3],
+            distinct: [:]
+        )
+        XCTAssertEqual(line, "185 local path  ·  3 email  ·  3 secret")
+    }
+
+    func testADistinctCountAboveItsOccurrenceCountIsIgnored() {
+        // Cannot happen from a correct daemon; if it ever does, saying
+        // "3 secret (9 distinct)" would be worse than saying nothing.
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["secret": 3], distinct: ["secret": 9]),
+            "3 secret"
+        )
+    }
+
+    /// The line renders under the heading "Removed by pattern", so a
+    /// survivor appearing in it states the exact opposite of what happened,
+    /// on the screen where someone is deciding whether to send the thing.
+    func testAResidualSurvivorIsNotInTheLine() {
+        XCTAssertEqual(
+            RedactionLabels.line(
+                occurrences: ["local_path": 3, "residual_secret_at:events.correction": 1],
+                distinct: [:]
+            ),
+            "3 local path"
+        )
+    }
+
+    /// A session whose ONLY count is a survivor removed nothing. Saying
+    /// "nothing matched" is true, and it is what puts the card in the tone
+    /// that asks someone to look.
+    func testASessionWithOnlyAResidualMatchedNothingInTheLine() {
+        XCTAssertEqual(
+            RedactionLabels.line(occurrences: ["residual_secret_at:events.x": 1], distinct: [:]),
+            "nothing matched"
+        )
+    }
 }
