@@ -736,6 +736,23 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
 
     card.append(&manifest_block(app, entry, index, state));
 
+    // A second route to `Look inside`, never a replacement for it. The
+    // button keeps its emphasis -- one-click submit added AVAILABILITY, and
+    // primary styling is a RECOMMENDATION. What this adds is that the
+    // obvious gesture on a card does the obvious thing.
+    let click = gtk::GestureClick::new();
+    let app_for_click = Rc::clone(app);
+    click.connect_released(move |gesture, n_press, _, _| {
+        if n_press != 1 {
+            return;
+        }
+        // Claimed so the gesture does not also reach the card's own
+        // buttons' parents.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        super::preview::open(&app_for_click, index);
+    });
+    card.add_controller(click);
+
     card.upcast()
 }
 
