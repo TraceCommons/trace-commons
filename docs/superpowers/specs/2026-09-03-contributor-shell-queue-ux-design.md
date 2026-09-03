@@ -175,40 +175,82 @@ with its current emphasis, for the reasons in "What is not changing".
 
 ## 3. The scrubber says what it removed (items 3, 5, 7)
 
-### 3.1 Redactions are already visible, and the app is hiding them
+### 3.1 Redactions are already marked, and this section used to say otherwise
 
-`DeterministicTraceRedactor` does not delete a matched value. It substitutes
-a typed placeholder from `PlaceholderMap::placeholder_for`:
-
-```
-<PRIVATE_LOCAL_PATH_1>   <PRIVATE_SECRET_3>   <PRIVATE_CONTEXTUAL_ENTROPY_2>
-```
-
-Those tokens are **already in the bytes `tc_preview_body` returns.** The
+**Correcting an error that survived this spec, four plans, and a review
+pass.** An earlier draft of this section claimed the redactor's placeholder
+tokens were "already in the bytes `tc_preview_body` returns" while "the
 shells render them as ordinary transcript text and the contributor scrolls
-past them.
+past them," and asked each shell to build a scan that marked them.
 
-So the whole of item 3's first half needs no protocol change, no FFI change,
-and no new data crossing any boundary. The shells scan the body for
-`<PRIVATE_([A-Z0-9_]+)_(\d+)>` and style each hit as a labelled chip in the
-transcript. The reporter's "show list of things that got removed" is
-answered by the transcript itself, in place, which is better than a list
-because it also answers *where*.
+The second half was never true. All three shells already mark them, and have
+for some time:
 
-The token numbering is per distinct value -- the same path twice gets the
-same token -- which the summary line should also use. `185 local path` is an
-occurrence count; `185 local path (12 distinct)` is the number a person is
-actually trying to estimate risk from, and it comes free from the highest
-index per label.
+| Shell | Where |
+|---|---|
+| macOS | `TCShellCore.TranscriptMarkerScan` (`TranscriptPaging.swift`), drawn as chips by `TranscriptMarkers.chipped` |
+| GTK | `transcript_paging.rs`, around the `MARKER` pattern |
+| Windows | `TraceCommons.Interop.TranscriptMarkers` |
 
-**A caveat the UI must carry, not bury.** Placeholders appear where
-redaction *rewrote* a typed field. The detector scans every leaf; the
-rewriter does not reach all of them. So a body with no placeholder in a
-region is not a body with nothing sensitive in that region, and the existing
-`ScrubbingCaveat` sentence is what says so. Highlighting makes the app look
-more thorough than it is, and that is precisely the moment the caveat earns
-its place -- it stays, next to the highlights, not at the bottom of the
-screen.
+All three carry the identical pattern
+`<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, which already covers BOTH
+marker families -- the numbered `<PRIVATE_LABEL_N>` form and every fixed
+`[REDACTED]` / `[REDACTED:label]` / `<REDACTED_PRIVATE_KEY>` form. The scan
+is deliberately shared with the chunker so a marker is never cut in half,
+and the chip styling is a considered choice recorded in its own doc comment:
+markers read as objects placed in the text, not as damage done to it.
+
+So item 3's "show me where" is **already shipped**, and a shell must not
+add a second marker pass, restyle the existing chips, or bypass the
+chunk-boundary contract.
+
+**What is actually missing is the naming.** Today every marker draws as the
+same anonymous chip. The tokens carry more than that: the numbered form
+carries a label and an ordinal, and `[REDACTED:label]` carries a category.
+A chip that says "local path removed", and that can tell a reader two chips
+stand for the same original value, is new information and restyles nothing.
+That -- plus the summary panel in §3.1b and the search in §3.2 -- is the
+whole of the scrubber work.
+
+Where a marker carries no ordinal, none is invented; where it carries no
+label, the chip says only that something was removed.
+
+**Which kinds carry what**, since the naming depends on it. Only
+`apply_placeholder_regex` mints the numbered form, for exactly two labels:
+`local_path` and `private_email`. Everything else is a fixed token:
+
+| Token | Covers |
+|---|---|
+| `[REDACTED]` | `secret`, `secret:{pattern}`, `secret:contextual_entropy`, `secret:split_literal`, `sensitive_field` |
+| `<REDACTED_PRIVATE_KEY>` | `secret:pem_private_key` -- angle-bracketed but carrying no index |
+| `[REDACTED:{label}]` | `tool_sensitive_field{:action}`, and every `privacy_filter:{label}` |
+
+Only the third names its own category. The first two can say that something
+left and not what, which is exactly the limit on how well a chip can be
+labelled.
+
+Distinct counts come from the placeholder map, so they exist for exactly the
+two labels that mint placeholders. `3 secret` will never carry a distinct
+suffix. That is correct rather than a gap -- there is no second number to
+report -- but no test may assert a distinct count for a secret fixture, and
+the rendering must omit the suffix rather than print `(0 distinct)`, which
+beside a non-zero occurrence count reads as "nothing was removed".
+
+The two layers differ on the wire and a shell must not confuse them.
+`PrivacyMetadata::redaction_distinct_counts` is
+`skip_serializing_if = "BTreeMap::is_empty"`, so on a secrets-only envelope
+the key is absent from the JSON entirely. `PreviewSummary` carries no such
+attribute, so a shell reading a preview always sees the key, as `{}`. Either
+way the renderer's rule is the same: no entry means no distinct count is
+available for that label, not that the count is zero.
+
+**The caveat this section must keep.** Markers appear where redaction
+*rewrote* a typed field. The detector scans every leaf; the rewriter does
+not reach all of them. A region with no marker is not a region with nothing
+sensitive in it, and `ScrubbingCaveat`'s sentence is what says so. Naming
+the chips makes the app look more thorough, which is precisely when that
+sentence earns its place.
+
 
 ### 3.1b The removed-summary panel
 
