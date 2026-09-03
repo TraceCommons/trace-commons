@@ -807,11 +807,27 @@
                                 the card is a 1px border, so the inside edge
                                 is one pixel tighter than the outside.
                             -->
+                            <!--
+                                The whole card is a second route to "Look
+                                inside". The button below keeps its accent: one
+                                click submit added AVAILABILITY, and accent
+                                styling is a RECOMMENDATION. What this adds is
+                                that the obvious gesture on a card does the
+                                obvious thing.
+
+                                A WinUI Button handles its own pointer press,
+                                so a footer button does not raise Tapped on this
+                                Border. OnCardTapped checks anyway, because
+                                being wrong about that would silently turn
+                                "Not this one" into "Look inside".
+                            -->
                             <Border Background="{ThemeResource TcSurfaceCardBrush}"
                                     BorderBrush="{ThemeResource TcHairlineBrush}"
                                     BorderThickness="1"
                                     CornerRadius="{StaticResource TcCardCornerRadius}"
-                                    Margin="0,0,0,14">
+                                    Margin="0,0,0,14"
+                                    Tag="{x:Bind}"
+                                    Tapped="OnCardTapped">
                                 <StackPanel>
                                     <!-- Header row: name, agent, then the time
                                          pushed to the far edge. -->
