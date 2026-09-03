@@ -3324,6 +3324,15 @@ const REPORT_METRIC_LABELS: &[&str] = &[
     "google_api_key",
     "pem_header_orphan",
     "pem_private_key",
+    // Inert today and listed anyway. `split_literal` measures 3.027
+    // bits/char, below `ENTROPY_BITS_MIN` (3.2), so a re-scan of a finished
+    // envelope would not flag `"secret:split_literal": 1` even without this
+    // entry -- unlike `contextual_entropy` at 3.572, which genuinely needs
+    // it. The invariant this list states is "every label this module emits",
+    // not "every label that would currently be flagged"; a label renamed or
+    // lengthened later must not have to rediscover that. Pinned by
+    // `a_split_secret_no_longer_defeats_the_cue_gate`.
+    "split_literal",
 ];
 
 fn is_pure_hex(s: &str) -> bool {
@@ -3500,6 +3509,146 @@ fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>
         }
     }
     ranges
+}
+
+/// Seam between two adjacent string literals that a source expression joins
+/// into one value: `"crsr_" + "<body>"`, Lua `"a" .. "b"`, PHP `"a" . "b"`,
+/// and plain implicit adjacency `"a" "b"`.
+///
+/// The match spans the closing quote of the first literal through the opening
+/// quote of the second, so DELETING it splices the two literal bodies
+/// together. That is exactly what [`LiteralJoinView`] does, and it is the
+/// whole mechanism: this module has no expression semantics and is not
+/// acquiring any here.
+///
+/// `,` is deliberately NOT a joiner, even though `["crsr_", "<body>"]
+/// .join("")` is a real split shape and admitting it would close that case.
+/// A comma between two quoted strings is overwhelmingly a separator, not a
+/// concatenation -- every two-key JSON object has one -- so admitting it
+/// splices a cued value onto the NEXT key's name. Measured rather than
+/// assumed: with `,` in the class, the innocent corpus in
+/// `split_literal_fp_budget` scores 4 false positives out of 24 (redacting,
+/// among others, the key name in `{"password": "hunter2", "session_id":
+/// ...}`); without it, 0. The comma form is therefore a documented residual
+/// miss -- see [`LiteralJoinView`].
+fn literal_join_seam_regex() -> &'static Regex {
+    static LITERAL_JOIN_SEAM_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        // `\.\.` must precede `[+.]` in the alternation so Lua's `..` is not
+        // read as a `.` joiner followed by a stray `.`.
+        Regex::new(r#"["'`](?:\s{0,32}(?:\.\.|[+.])\s{0,32}|\s{1,32})["'`]"#)
+            .expect("hardcoded literal join seam regex must compile")
+    });
+    &LITERAL_JOIN_SEAM_REGEX
+}
+
+/// `content` with every [`literal_join_seam_regex`] match deleted, plus the
+/// mapping that puts a range found in that view back onto the source.
+///
+/// ## What this closes, and what it does not
+///
+/// It closes the case where every piece of the secret is present in the text
+/// as an adjacent string literal, joined by one of the operators above. Both
+/// halves are then judged as the value they assemble to, and both halves are
+/// masked.
+///
+/// It does NOT close -- and cannot, without expression semantics this module
+/// does not have:
+///
+/// - **A runtime-assembled secret.** `key = prefix + suffix_var`, a value
+///   built in a loop, an f-string or `format!` interpolation, a value read
+///   from a variable or a function call. The characters of the secret are
+///   simply not all in the text.
+/// - **A comma-joined split**, including `["crsr_", "<body>"].join("")`.
+///   Excluded on measured false positives; see [`literal_join_seam_regex`].
+/// - **Any joiner not in the class**, e.g. `%` (Erlang-ish), `<<`, `++`
+///   (Haskell/Erlang), or a joiner spelled as a function call
+///   (`concat("a", "b")`, `String.join`).
+/// - **A split across more than 32 characters of whitespace**, or one whose
+///   two halves are not both quoted literals (`"crsr_" + KEY_BODY`).
+///
+/// In each of those the first literal may still be masked on its own while
+/// the rest of the secret is absent from the text or survives elsewhere.
+/// `blocked_secret_detected` is therefore still capable of being true over a
+/// partially-removed secret; it means "a secret was found", never "every
+/// byte of every secret has been removed", and no reader should take it for
+/// the latter.
+struct LiteralJoinView {
+    text: String,
+    /// `(view_offset, source_offset, len)` for each surviving run of source,
+    /// ascending. Runs are never contiguous in the source: a deleted seam
+    /// always sits between two of them.
+    segments: Vec<(usize, usize, usize)>,
+}
+
+impl LiteralJoinView {
+    /// `None` when `content` holds no seam at all, which is the ordinary
+    /// case and the reason this whole pass costs one regex scan on content
+    /// that does not need it.
+    fn build(content: &str) -> Option<Self> {
+        let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+        let mut text = String::new();
+        let mut last_end = 0usize;
+        for seam in literal_join_seam_regex().find_iter(content) {
+            let piece = &content[last_end..seam.start()];
+            segments.push((text.len(), last_end, piece.len()));
+            text.push_str(piece);
+            last_end = seam.end();
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        let tail = &content[last_end..];
+        segments.push((text.len(), last_end, tail.len()));
+        text.push_str(tail);
+        Some(Self { text, segments })
+    }
+
+    /// The source ranges covered by `range`, which is in view coordinates.
+    ///
+    /// A range spanning a deleted seam maps to one piece per literal, so
+    /// masking it rewrites both literal bodies and leaves the joining
+    /// operator and the quotes standing. Nothing is ever masked that the
+    /// source does not literally contain.
+    fn map_range(&self, range: &std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
+        let mut pieces: Vec<std::ops::Range<usize>> = Vec::new();
+        for &(view_start, source_start, len) in &self.segments {
+            let low = range.start.max(view_start);
+            let high = range.end.min(view_start + len);
+            if low >= high {
+                continue;
+            }
+            pieces.push((source_start + (low - view_start))..(source_start + (high - view_start)));
+        }
+        pieces
+    }
+}
+
+/// `ranges` sorted and merged into a disjoint ascending list.
+///
+/// Disjointness is what lets [`overlaps_merged`] binary-search: on an
+/// arbitrary range list `end` is not monotone, so a partition point over it
+/// would be meaningless.
+fn merged_ranges(ranges: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// True when `probe` overlaps any range in `merged`, which must come from
+/// [`merged_ranges`].
+fn overlaps_merged(merged: &[std::ops::Range<usize>], probe: &std::ops::Range<usize>) -> bool {
+    let from = merged.partition_point(|range| range.end <= probe.start);
+    merged
+        .get(from)
+        .is_some_and(|range| range.start < probe.end)
 }
 
 fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
@@ -3967,7 +4116,87 @@ impl DeterministicTraceRedactor {
             ranges.push(entropy_range);
         }
 
+        self.append_split_literal_ranges(input, &mut ranges, report);
+
         ranges
+    }
+
+    /// Third detection pass: re-run both detectors over a copy of `input`
+    /// with adjacent-literal joins spliced together, so a secret written as
+    /// `"crsr_" + "<body>"` is judged as the value it assembles to rather
+    /// than as two innocuous halves.
+    ///
+    /// This exists because the first two passes both rest on adjacency that
+    /// a split breaks. `cursor_api_key` matches a prefix and a body as one
+    /// token, so a quote between them defeats it outright with no cue
+    /// involved. The contextual-entropy sweep needs a cue within
+    /// [`CUE_WINDOW`] followed by a short run of separator characters, and a
+    /// concatenation operator is not one of them. In an agent trace this is
+    /// not a rare obfuscation: a model that recognises a pasted credential
+    /// often splits it rather than writing it back out whole, so the miss
+    /// concentrates in exactly the sessions most likely to hold a secret.
+    ///
+    /// Worse than a miss, it could leave a half-redaction: the cue reached
+    /// the first literal, so that half was masked and
+    /// `blocked_secret_detected` came back true, while the second half rode
+    /// out verbatim under a report saying the secret had been handled.
+    ///
+    /// Additive only. It appends ranges the first two passes did not already
+    /// cover and removes none, so nothing that was redacted before can stop
+    /// being redacted. A finding whose pieces are all already covered is
+    /// dropped rather than counted twice; a finding that adds even one piece
+    /// is counted once, under its own detector's label plus
+    /// `secret:split_literal`.
+    ///
+    /// [`LiteralJoinView`] records what still escapes after this.
+    fn append_split_literal_ranges(
+        &self,
+        input: &str,
+        ranges: &mut Vec<std::ops::Range<usize>>,
+        report: &mut RedactionReport,
+    ) {
+        let Some(view) = LiteralJoinView::build(input) else {
+            return;
+        };
+        let mut covered = merged_ranges(ranges);
+
+        let scan = self.leak_detector.scan(&view.text);
+        let named = scan.matches.iter().map(|matched| {
+            (
+                matched.location.clone(),
+                matched.pattern_name,
+                matches!(
+                    matched.severity,
+                    SecretLeakSeverity::High | SecretLeakSeverity::Critical
+                ),
+            )
+        });
+        // The entropy pass sets `blocked_secret_detected` unconditionally on
+        // the primary path, so it does here too.
+        let entropy = contextual_entropy_secret_ranges(&view.text)
+            .into_iter()
+            .map(|range| (range, "contextual_entropy", true));
+
+        for (view_range, label, blocking) in named.chain(entropy) {
+            let mut added = false;
+            for piece in view.map_range(&view_range) {
+                if overlaps_merged(&covered, &piece) {
+                    continue;
+                }
+                ranges.push(piece);
+                added = true;
+            }
+            if !added {
+                continue;
+            }
+            covered = merged_ranges(ranges);
+            report.increment("secret");
+            report.increment(format!("secret:{label}"));
+            report.increment("secret:split_literal");
+            if blocking {
+                report.blocked_secret_detected = true;
+            }
+        }
     }
 
     fn redact_text_with_state(
@@ -13421,5 +13650,221 @@ mod tests {
                 "ProseOnly must skip {event_type:?}"
             );
         }
+    }
+
+    /// #543. A secret split across two adjacent string literals used to
+    /// defeat both detectors: `cursor_api_key` matches a prefix and a body as
+    /// one token, and the contextual-entropy sweep needs a cue followed by a
+    /// short run of separator characters, which a concatenation operator is
+    /// not. The three cases below are the issue's reproduction, which
+    /// compiled and PASSED as written -- it documented the leak. Every value
+    /// here is SYNTHETIC.
+    ///
+    /// The third case is the one that mattered most: the first half was
+    /// masked, the second half rode out verbatim, and
+    /// `blocked_secret_detected` came back true, so a reader was told the
+    /// secret had been handled while half of it was still on the wire.
+    #[test]
+    fn a_split_secret_no_longer_defeats_the_cue_gate() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // 1. Prefix and body in separate literals, no cue word anywhere.
+        //    Needs no entropy reasoning: joining the literals is enough for
+        //    `cursor_api_key` to see a key.
+        let split_key = "sample = \"crsr_\" + \
+                         \"1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9\"";
+        let (out, rep) = r.redact_text(split_key);
+        assert_eq!(out, "sample = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:cursor_api_key"), Some(&1));
+        assert_eq!(rep.counts.get("secret:split_literal"), Some(&1));
+
+        // 2. The same shape with a cue word in front.
+        let cued = "CURSOR_API_KEY = \"crsr_\" + \
+                    \"1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9\"";
+        let (out, rep) = r.redact_text(cued);
+        assert_eq!(out, "CURSOR_API_KEY = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+
+        // 3. A cued value split in half, with no named pattern to lean on.
+        //    Both halves are masked now; the joining operator and the quotes
+        //    stand, because nothing is replaced that the source does not
+        //    literally contain.
+        let halved = "passphrase = \"QvR7dTnLbXk2\" + \"MwZ9pAsE4uYcH6jFgN3t\"";
+        let (out, rep) = r.redact_text(halved);
+        assert_eq!(out, "passphrase = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:split_literal"), Some(&1));
+
+        // Implicit adjacency was never affected -- quote-space-quote is
+        // entirely inside the cue regex's separator class -- and must not
+        // change. The join pass finds the same token, sees it is already
+        // covered, and adds nothing: no second `[REDACTED]`, no
+        // `split_literal` count.
+        let adjacent = "p = \"passphrase: \" \"QvR7dTnLbXk2MwZ9pAsE4uYcH6jFgN3t\"";
+        let (out, rep) = r.redact_text(adjacent);
+        assert_eq!(out, "p = \"passphrase: \" \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:split_literal"), None);
+
+        // The label this pass emits must be in `REPORT_METRIC_LABELS`, so a
+        // fail-closed re-scan of a finished envelope cannot mistake the
+        // report's own bookkeeping key for a surviving secret. See the
+        // comment on that list for why this is inert at today's entropy floor
+        // and listed regardless.
+        assert!(REPORT_METRIC_LABELS.contains(&"split_literal"));
+    }
+
+    /// The other joiners in the seam class, and the split shapes that are
+    /// still OUT of reach. Every value is SYNTHETIC.
+    ///
+    /// The misses are asserted, not merely described, so that closing one
+    /// later shows up here as a failing expectation rather than as silence.
+    #[test]
+    fn split_literal_joiners_covered_and_the_shapes_still_missed() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let body = "1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9";
+
+        // Covered joiners: Lua `..`, PHP `.`, a newline-spanning `+`, and
+        // single quotes / backticks as the literal delimiters.
+        for (label, text) in [
+            ("lua", format!("k = \"crsr_\" .. \"{body}\"")),
+            ("php", format!("$k = \"crsr_\" . \"{body}\";")),
+            ("wrapped", format!("k = \"crsr_\" +\n    \"{body}\"")),
+            ("single", format!("k = 'crsr_' + '{body}'")),
+            ("backtick", format!("k = `crsr_` + `{body}`")),
+            ("implicit", format!("k = \"crsr_\" \"{body}\"")),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(body),
+                "{label}: split key body survived: {out}"
+            );
+            assert!(rep.blocked_secret_detected, "{label}");
+        }
+
+        // Still missed: a comma joiner, excluded on measured false positives
+        // (see `split_literal_fp_budget`).
+        let comma = format!("k = [\"crsr_\", \"{body}\"].join(\"\")");
+        let (out, rep) = r.redact_text(&comma);
+        assert_eq!(out, comma, "comma joiner is a known residual miss");
+        assert!(!rep.blocked_secret_detected);
+
+        // Still missed: a joiner outside the class.
+        let unknown = format!("k = \"crsr_\" ++ \"{body}\"");
+        let (out, rep) = r.redact_text(&unknown);
+        assert_eq!(out, unknown, "`++` is a known residual miss");
+        assert!(!rep.blocked_secret_detected);
+
+        // Still missed, and the important one: a runtime-assembled secret.
+        // Only one half is a literal, so only one half is in the text at
+        // all. The report still says a secret was found -- which is what it
+        // means, and all it has ever meant.
+        let assembled = "passphrase = \"QvR7dTnLbXk2\" + suffix_var";
+        let (out, rep) = r.redact_text(assembled);
+        assert_eq!(out, "passphrase = \"[REDACTED]\" + suffix_var");
+        assert!(rep.blocked_secret_detected);
+    }
+
+    /// False-positive budget for the seam class, measured rather than
+    /// argued. Every string here is innocent content of a shape the seam
+    /// regex touches; none may be redacted.
+    ///
+    /// The comma cases are why `,` is not a joiner. With `,` in the class
+    /// this corpus scored 4 false positives -- a cued value spliced onto the
+    /// NEXT JSON key's name clears `ENTROPY_BITS_MIN`, so
+    /// `{"password": "hunter2", "session_id": ...}` had its key name
+    /// redacted. Re-run this before widening the class.
+    #[test]
+    fn split_literal_fp_budget() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        let innocent = [
+            // Two-key JSON objects whose first key is a cue word.
+            "{\"password\": \"hunter2\", \"session_id\": \"9f8e7d6c5b4a3f2e1d0c9b8a\"}",
+            "{\"token\": \"abc12345\", \"request_kind\": \"retry_after_timeout\"}",
+            "{\"api_key\": \"staging1\", \"environment_name\": \"preproduction\"}",
+            "{\"secret\": \"none1234\", \"rotation_policy\": \"quarterly_manual\"}",
+            // Arrays of ordinary strings.
+            "argv = [\"--output\", \"summary.json\"]",
+            "labels = [\"alpha\", \"beta\", \"gamma\"]",
+            // Concatenations of ordinary prose and paths.
+            "msg = \"could not open \" + \"the configuration file\"",
+            "path = \"/usr/local\" + \"/share/doc\"",
+            "sql = \"select id from users \" \"where tenant = $1\"",
+            "s = \"report-\" . \"2026-09-02\"",
+            "lua = \"total: \" .. \"1024 bytes\"",
+            // Concatenations after a cue word, where the joined value is
+            // still low-entropy or too short.
+            "password = \"letmein\" + \"please\"",
+            "api_key = \"staging\" + \"-west\"",
+            "token = \"aaaa\" + \"aaaa\"",
+            // Structural identifiers split across literals stay allowlisted.
+            "token: \"msg_01ABCD\" + \"EFghijklmnopqrstuvwx\"",
+            "id = \"550e8400-e29b-\" + \"41d4-a716-446655440000\"",
+            // Uncued opaque-ish values with no cue anywhere.
+            "commit \"0123456789abcdef\" + \"0123456789abcdef01234567\"",
+            "digest = \"a1b2c3d4e5f67890\" + \"12345678abcdef0123456789\"",
+            // Adjacent short hex after a cue: the git-sha allowlist band.
+            "api_key: \"dead\" + \"beef\"",
+            // Markdown prose with adjacent inline code.
+            "see `--verbose` `--quiet` for details",
+            // The redaction report's own metric keys, as a fail-closed
+            // re-scan of a finished envelope would see them.
+            "{\"secret:contextual_entropy\": 1, \"split_literal\": 1}",
+            "{\"secret\": 2, \"secret:split_literal\": 1}",
+            // A quoted empty string next to a joiner.
+            "joined = \"\" + \"\"",
+            "sep = separator.join(\"\") + \"tail\"",
+        ];
+
+        let mut redacted = Vec::new();
+        for text in innocent {
+            let (out, rep) = r.redact_text(text);
+            if out != text || rep.blocked_secret_detected {
+                redacted.push(format!("{text}\n  -> {out}"));
+            }
+        }
+        assert!(
+            redacted.is_empty(),
+            "split-literal false positives ({} of {}):\n{}",
+            redacted.len(),
+            innocent.len(),
+            redacted.join("\n")
+        );
+    }
+
+    /// The seam view must never mask a byte the source does not contain, and
+    /// must never move a redaction onto the joining operator. Guards
+    /// `LiteralJoinView::map_range`'s coordinate mapping directly: an
+    /// off-by-one there would either eat the operator or leave a byte of the
+    /// secret behind, and both spell correctly in a passing end-to-end test.
+    #[test]
+    fn split_literal_mapping_keeps_the_joiner_and_the_quotes() {
+        use super::*;
+
+        let source = "passphrase = \"QvR7dTnLbXk2\" + \"MwZ9pAsE4uYcH6jFgN3t\"";
+        let view = LiteralJoinView::build(source).expect("seam present");
+        assert_eq!(
+            view.text,
+            "passphrase = \"QvR7dTnLbXk2MwZ9pAsE4uYcH6jFgN3t\""
+        );
+
+        let joined_start = view.text.find("QvR7").expect("token present");
+        let joined = joined_start..view.text.len() - 1;
+        let pieces = view.map_range(&joined);
+        assert_eq!(
+            pieces.len(),
+            2,
+            "a spanning range maps to one piece per literal"
+        );
+        assert_eq!(&source[pieces[0].clone()], "QvR7dTnLbXk2");
+        assert_eq!(&source[pieces[1].clone()], "MwZ9pAsE4uYcH6jFgN3t");
+
+        // Content with no seam costs nothing and builds no view.
+        assert!(LiteralJoinView::build("password = \"QvR7dTnLbXk2\"").is_none());
     }
 }
