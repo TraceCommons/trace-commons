@@ -139,11 +139,46 @@ pub const IRONWIRE_TOGGLE: &str = "Read the local record on this machine";
 /// Nothing here waits on the app being started again.
 pub const IRONWIRE_APPLIES_AT_ONCE: &str = "Changes here apply straight away.";
 
+/// The one action offered when the machine already answered the question.
+///
+/// IronWire publishes a pointer when its daemon binds, so on a machine
+/// running it there is nothing for a contributor to look up -- the port is
+/// already known. This is the button that turns the switch on and checks,
+/// in one press, so the discovered case costs one action instead of two
+/// fields.
+pub const IRONWIRE_CONNECT: &str = "Connect and check";
+
+/// The disclosure the port and folder fields sit behind once discovery has
+/// answered.
+///
+/// They are the override, not the front door. A contributor who has to
+/// change either is on an unusual install; everybody else never opens this.
+pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set the port and folder yourself";
+
+/// Ask again, for the contributor who started IronWire after this window
+/// was open.
+///
+/// Discovery reads one small file and opens no connection, so offering to
+/// repeat it costs nothing. It is offered rather than polled: this surface
+/// does not go looking at a file on a timer.
+pub const IRONWIRE_LOOK_AGAIN: &str = "Look again";
+
 pub const IRONWIRE_PORT_TITLE: &str = "Port";
 pub const IRONWIRE_PORT_NOTE: &str =
     "Already set to the usual number. Change it only if the record is kept on a different one.";
 
 pub const IRONWIRE_FOLDER_TITLE: &str = "Folder";
+
+/// The macOS folder control's own action.
+///
+/// On that shell the folder is not really a path question. A path typed
+/// into a box is a string; what the app needs is for the person at the
+/// keyboard to have pointed at the directory themselves, through the
+/// system's own chooser, which is the only thing that survives the app
+/// being sandboxed later. The other two shells keep a text box and do not
+/// render this word.
+pub const IRONWIRE_CHOOSE_FOLDER: &str = "Choose the folder";
+
 /// The note when nothing on this machine can say where the usual place is.
 ///
 /// Kept as a constant because the payload's shape requires one, and used as
@@ -335,6 +370,39 @@ pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
     }
 }
 
+/// What discovery found, in one sentence.
+///
+/// `Some(port)` is a pointer a running IronWire published; `None` is every
+/// other case -- never installed, not running, a version that publishes
+/// nothing, a pointer this reader will not act on. They are one sentence
+/// because they are one fact to the person reading it and one next step:
+/// say the port yourself.
+///
+/// # Neither sentence is a failure
+///
+/// A machine keeping no such record is the ordinary machine, so the `None`
+/// sentence says what that looks like before it says what to do. It is the
+/// state most readers of this screen are in, and a screen that greets them
+/// with a fault is describing their machine wrongly.
+///
+/// # The found sentence promises that nothing has happened yet
+///
+/// Discovery reads a file. It opens no connection, writes no declaration
+/// and starts no reading, and the sentence says so, because "we found it"
+/// with nothing after it reads like something already began.
+#[must_use]
+pub fn ironwire_discovery_line(port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!(
+            "A local record is being kept on this machine, on port {port}. Nothing is read from \
+             it until you turn this on."
+        ),
+        None => "Nothing on this machine has left details of a local record, which is what an \
+                 ordinary machine looks like. If one is being kept, say which port below."
+            .to_string(),
+    }
+}
+
 /// The daemon's three states, in words. A state this build does not know
 /// says what the off state says: it claims nothing.
 #[must_use]
@@ -440,9 +508,13 @@ pub struct RoutingCopy {
     pub intro: &'static str,
     pub toggle: &'static str,
     pub applies_at_once: &'static str,
+    pub connect: &'static str,
+    pub override_title: &'static str,
+    pub look_again: &'static str,
     pub port_title: &'static str,
     pub port_note: &'static str,
     pub folder_title: &'static str,
+    pub choose_folder: &'static str,
     /// The only field that is not a fixed string: it names the folder this
     /// machine would read, which is a path and therefore not wording. See
     /// [`ironwire_folder_note`].
@@ -474,9 +546,13 @@ pub fn routing_copy() -> RoutingCopy {
         intro: IRONWIRE_INTRO,
         toggle: IRONWIRE_TOGGLE,
         applies_at_once: IRONWIRE_APPLIES_AT_ONCE,
+        connect: IRONWIRE_CONNECT,
+        override_title: IRONWIRE_OVERRIDE_TITLE,
+        look_again: IRONWIRE_LOOK_AGAIN,
         port_title: IRONWIRE_PORT_TITLE,
         port_note: IRONWIRE_PORT_NOTE,
         folder_title: IRONWIRE_FOLDER_TITLE,
+        choose_folder: IRONWIRE_CHOOSE_FOLDER,
         folder_note: ironwire_folder_note_here(),
         apply: IRONWIRE_APPLY,
         checking: IRONWIRE_CHECKING,
@@ -677,6 +753,76 @@ mod tests {
         assert_ne!(line, nameless);
     }
 
+    /// The one fact discovery exists to supply. A sentence that found the
+    /// port and did not say it leaves the contributor typing it anyway.
+    #[test]
+    fn the_discovered_sentence_names_the_port_that_was_found() {
+        let line = ironwire_discovery_line(Some(9143));
+        assert!(line.contains("9143"), "{line}");
+    }
+
+    /// A machine without IronWire is the ordinary machine, and neither
+    /// sentence may greet it as broken. This is the rule the whole feature
+    /// hangs on: "IronWire is not installed" is not a failure.
+    #[test]
+    fn neither_discovery_sentence_reads_as_a_fault() {
+        for line in [
+            ironwire_discovery_line(Some(8463)),
+            ironwire_discovery_line(None),
+        ] {
+            let lower = line.to_lowercase();
+            for word in [
+                "error",
+                "failed",
+                "failure",
+                "problem",
+                "wrong",
+                "not working",
+                "unable",
+                "sorry",
+            ] {
+                assert!(!lower.contains(word), "{word} in: {line}");
+            }
+        }
+    }
+
+    /// Two states, two sentences, and the empty one prints no hole.
+    #[test]
+    fn nothing_discovered_says_what_to_do_without_naming_a_port() {
+        let nothing = ironwire_discovery_line(None);
+        assert!(!nothing.contains("None"), "{nothing}");
+        assert!(!nothing.is_empty());
+        assert_ne!(nothing, ironwire_discovery_line(Some(8463)));
+    }
+
+    /// Discovery offers; it does not begin. The found sentence has to say
+    /// so, because "IronWire is running here" on its own reads as though
+    /// something already started reading it.
+    #[test]
+    fn the_discovered_sentence_says_nothing_has_been_read_yet() {
+        let line = ironwire_discovery_line(Some(8463)).to_lowercase();
+        assert!(line.contains("nothing is read"), "{line}");
+    }
+
+    /// The discovered path's action is its own word, not the manual path's.
+    /// One press instead of two fields is the whole point, and a button
+    /// that reads "Apply and check" beside a port nobody typed describes
+    /// the manual flow it replaces.
+    #[test]
+    fn the_discovered_action_is_not_the_manual_one() {
+        assert_ne!(IRONWIRE_CONNECT, IRONWIRE_APPLY);
+        assert_ne!(IRONWIRE_CONNECT, IRONWIRE_TOGGLE);
+        assert_ne!(IRONWIRE_OVERRIDE_TITLE, IRONWIRE_PORT_TITLE);
+        assert_ne!(IRONWIRE_OVERRIDE_TITLE, IRONWIRE_FOLDER_TITLE);
+        for word in [
+            IRONWIRE_CONNECT,
+            IRONWIRE_OVERRIDE_TITLE,
+            IRONWIRE_LOOK_AGAIN,
+        ] {
+            assert!(!word.is_empty());
+        }
+    }
+
     /// Three states, three sentences, and the middle one is not a fault.
     #[test]
     fn declared_but_nothing_seen_yet_does_not_read_as_a_failure() {
@@ -869,6 +1015,8 @@ mod tests {
         strings.push(ironwire_token_line(None));
         strings.push(ironwire_unreachable_line(Some(8463)));
         strings.push(ironwire_unreachable_line(None));
+        strings.push(ironwire_discovery_line(Some(8463)));
+        strings.push(ironwire_discovery_line(None));
         strings.push(last_checked_line("an hour ago"));
         for state in ["not_declared", "awaiting_rows", "rows_seen", "unknown"] {
             strings.push(ironwire_state_line(state).to_string());
@@ -988,9 +1136,13 @@ mod tests {
         assert_eq!(copy.intro, IRONWIRE_INTRO);
         assert_eq!(copy.toggle, IRONWIRE_TOGGLE);
         assert_eq!(copy.applies_at_once, IRONWIRE_APPLIES_AT_ONCE);
+        assert_eq!(copy.connect, IRONWIRE_CONNECT);
+        assert_eq!(copy.override_title, IRONWIRE_OVERRIDE_TITLE);
+        assert_eq!(copy.look_again, IRONWIRE_LOOK_AGAIN);
         assert_eq!(copy.port_title, IRONWIRE_PORT_TITLE);
         assert_eq!(copy.port_note, IRONWIRE_PORT_NOTE);
         assert_eq!(copy.folder_title, IRONWIRE_FOLDER_TITLE);
+        assert_eq!(copy.choose_folder, IRONWIRE_CHOOSE_FOLDER);
         assert_eq!(copy.folder_note, ironwire_folder_note_here());
         assert_eq!(copy.apply, IRONWIRE_APPLY);
         assert_eq!(copy.checking, IRONWIRE_CHECKING);

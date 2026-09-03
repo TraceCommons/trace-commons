@@ -1047,8 +1047,9 @@ pub fn arming_heading(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nYou can turn this off at any \
-     time.";
+     contributed without asking you. You won't review them first.\n\nA session is sent a day \
+     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
+     at any time.";
 pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
 
 // --- Quitting ----------------------------------------------------------
@@ -1911,10 +1912,11 @@ mod daily_cap_tests {
 // written to replace.
 pub use trace_commons_contributor::routing_copy::{
     IRONWIRE_APPLIES_AT_ONCE, IRONWIRE_APPLY, IRONWIRE_CHECK_UNAVAILABLE, IRONWIRE_CHECKING,
-    IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO, IRONWIRE_PORT_NOTE,
-    IRONWIRE_PORT_TITLE, IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING,
-    IRONWIRE_STATE_WAITING, IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT,
-    TOOL_GEMINI, TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring,
+    IRONWIRE_CONNECT, IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO,
+    IRONWIRE_LOOK_AGAIN, IRONWIRE_OVERRIDE_TITLE, IRONWIRE_PORT_NOTE, IRONWIRE_PORT_TITLE,
+    IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING, IRONWIRE_STATE_WAITING,
+    IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT, TOOL_GEMINI, TOOL_NOT_USED,
+    TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring, ironwire_discovery_line,
     ironwire_folder_note_here, ironwire_shows_last_checked, ironwire_state_line,
     ironwire_state_tone, ironwire_token_line, ironwire_unreachable_line, tool_tone, tool_word,
 };

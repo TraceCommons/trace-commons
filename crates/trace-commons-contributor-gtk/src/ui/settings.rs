@@ -114,6 +114,22 @@ pub struct SettingsView {
     /// rebuilding these would take the port field out from under whoever
     /// is typing into it.
     routing_switch: gtk::Switch,
+    /// What the machine already knows, before anything it is asked.
+    ///
+    /// One sentence, from the shared source, for both states: a pointer was
+    /// published, or none was. A machine without IronWire is the ordinary
+    /// machine and gets a sentence rather than an error.
+    routing_discovery: gtk::Label,
+    /// The one action offered when a pointer was found: turn it on and
+    /// check, in one press. Hidden where there is nothing to connect to,
+    /// and where something is already declared.
+    routing_connect: gtk::Button,
+    /// Ask again, for somebody who started IronWire after opening this
+    /// window. Offered rather than polled.
+    routing_look_again: gtk::Button,
+    /// The port and folder, behind a disclosure. Expanded where discovery
+    /// found nothing, because there they are the only way to answer.
+    routing_override: gtk::Expander,
     routing_port: gtk::SpinButton,
     routing_token_dir: gtk::Entry,
     routing_apply: gtk::Button,
@@ -142,6 +158,15 @@ pub struct SettingsView {
     /// into the controls, so the signals that fires are not mistaken for a
     /// contributor declaring something and echoed straight back.
     filling_routing: std::cell::Cell<bool>,
+    /// The port a running IronWire published, or `None` for a machine that
+    /// published nothing.
+    ///
+    /// Held rather than written straight into the field because the field
+    /// is repainted on every daemon event, and the rule about it is a
+    /// precedence rule: a declared port always wins, this fills in only
+    /// where there is none, and the conventional number is what is left.
+    /// See `render_routing`.
+    routing_discovered_port: std::cell::Cell<Option<u16>>,
 }
 
 impl Default for SettingsView {
@@ -224,11 +249,38 @@ impl SettingsView {
         routing_card.append(&routing_row);
         let routing_status = gtk::Box::new(gtk::Orientation::Vertical, 2);
         routing_card.append(&routing_status);
+
+        // What the machine already knows, before the two fields that ask.
+        // IronWire writes a pointer when its daemon binds, so on a machine
+        // running it there is nothing here to look up; on a machine
+        // without it this sentence says so without saying anything is
+        // wrong, because nothing is.
+        let routing_discovery = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        routing_discovery.add_css_class("tc-body");
+        routing_card.append(&routing_discovery);
+        let routing_actions = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let routing_connect = gtk::Button::with_label(copy::IRONWIRE_CONNECT);
+        routing_connect.set_visible(false);
+        routing_actions.append(&routing_connect);
+        let routing_look_again = gtk::Button::with_label(copy::IRONWIRE_LOOK_AGAIN);
+        routing_look_again.add_css_class("tc-quiet");
+        routing_actions.append(&routing_look_again);
+        routing_actions.set_halign(gtk::Align::Start);
+        routing_card.append(&routing_actions);
+
+        // The port and folder behind a disclosure. They are the override,
+        // not the front door -- but only once discovery has supplied the
+        // port. Where it has not they are the only way to answer, and
+        // `render_routing` opens this.
+        let routing_override = gtk::Expander::new(Some(copy::IRONWIRE_OVERRIDE_TITLE));
+        let routing_override_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        routing_override.set_child(Some(&routing_override_box));
+        routing_card.append(&routing_override);
         // 1 rather than 0: port 0 is the ask-the-kernel sentinel, and the
         // daemon refuses it outright, so it is not a number this control
         // may produce.
         let routing_port = knob_row(
-            &routing_card,
+            &routing_override_box,
             copy::IRONWIRE_PORT_TITLE,
             "",
             1.0,
@@ -241,13 +293,17 @@ impl SettingsView {
             .wrap(true)
             .build();
         routing_port_note.add_css_class("tc-caveat");
-        routing_card.append(&routing_port_note);
-        routing_card.append(&style::eyebrow(copy::IRONWIRE_FOLDER_TITLE));
+        routing_override_box.append(&routing_port_note);
+        routing_override_box.append(&style::eyebrow(copy::IRONWIRE_FOLDER_TITLE));
+        // Still a text box here, deliberately. The macOS folder control is
+        // a chooser because on that platform a directory is readable when
+        // the person pointed at it through the system panel, not when the
+        // app was told a string. No such rule holds on this one.
         let routing_token_dir = gtk::Entry::new();
         routing_token_dir.update_property(&[gtk::accessible::Property::Label(
             copy::IRONWIRE_FOLDER_TITLE,
         )]);
-        routing_card.append(&routing_token_dir);
+        routing_override_box.append(&routing_token_dir);
         // Assembled rather than fixed: it names the folder this machine
         // would read when the field is left empty, which is the folder every
         // failure sentence on this card sends a contributor here to name.
@@ -257,7 +313,7 @@ impl SettingsView {
             .wrap(true)
             .build();
         routing_folder_note.add_css_class("tc-caveat");
-        routing_card.append(&routing_folder_note);
+        routing_override_box.append(&routing_folder_note);
         let routing_apply = gtk::Button::with_label(copy::IRONWIRE_APPLY);
         routing_apply.add_css_class("tc-quiet");
         routing_apply.set_halign(gtk::Align::Start);
@@ -449,6 +505,10 @@ impl SettingsView {
             audit,
             routing_tools,
             routing_switch,
+            routing_discovery,
+            routing_connect,
+            routing_look_again,
+            routing_override,
             routing_port,
             routing_token_dir,
             routing_apply,
@@ -458,6 +518,7 @@ impl SettingsView {
             routing_evidence: RefCell::new(None),
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
+            routing_discovered_port: std::cell::Cell::new(None),
         }
     }
 }
@@ -538,6 +599,22 @@ pub fn wire(app: &Rc<App>) {
         }
         send_routing(&a, true);
     });
+    // The shortcut past the two fields: turn it on and check, in one
+    // press. It writes the port that is ON SCREEN -- which is the
+    // discovered one, or whatever the contributor typed over it -- so a
+    // press cannot declare a number different from the one displayed.
+    let a = Rc::clone(app);
+    app.settings.routing_connect.connect_clicked(move |_| {
+        a.settings.filling_routing.set(true);
+        a.settings.routing_switch.set_active(true);
+        a.settings.filling_routing.set(false);
+        set_routing_sensitivity(&a, true);
+        send_routing(&a, true);
+    });
+    let a = Rc::clone(app);
+    app.settings
+        .routing_look_again
+        .connect_clicked(move |_| discover_routing(&a));
 
     render_autostart(app);
     render_public(app);
@@ -1057,6 +1134,107 @@ fn render_tool_rows(app: &Rc<App>) {
     }
 }
 
+/// Which port the field shows, of the three that can claim it.
+///
+/// **The contributor's declared port always wins.** A declared port is a
+/// human instruction; the pointer is a file on disk that survives the
+/// daemon that wrote it, and IronWire removes it only on a clean stop. The
+/// failure of letting a stale pointer win is not one refused connection --
+/// it is a contributor who declared 8463, whose leftover pointer says
+/// 9000, and whose field now shows a number they never typed while the
+/// settings file still reads 8463. `ironwire_ledger_for` refuses exactly
+/// that substitution on the reading side; this is the same rule on the
+/// showing side.
+///
+/// Discovery fills only where nothing is declared, and the conventional
+/// number is the last resort rather than the first. Every one of the three
+/// is a *display*: `routing_param` still writes nothing while the switch
+/// is off.
+///
+/// Pure, and separate from the widget it fills, so the precedence can be
+/// stated as a table rather than inferred from a running window.
+#[must_use]
+fn shown_port(declared: Option<u16>, discovered: Option<u16>) -> u16 {
+    declared.or(discovered).unwrap_or(DEFAULT_IRONWIRE_PORT)
+}
+
+/// The daemon's `discover_routing` method name, spelled once.
+const DISCOVER_METHOD: &str = "discover_routing";
+
+/// What a running IronWire published about itself.
+///
+/// One boolean's worth of distinction, because there is one: a pointer was
+/// read, or it was not. Never installed, not running, a version that
+/// publishes nothing, a pointer the daemon will not act on -- all of them
+/// are the same fact to the contributor and the same next step.
+///
+/// Carries no token. `discover_routing` returns a path, never a
+/// credential, and this shell never opens it either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Discovered {
+    /// The loopback port IronWire published, or `None` for nothing found.
+    port: Option<u16>,
+}
+
+/// Read a `discover_routing` result.
+///
+/// `found` without a usable port is nothing found: the port is the fact
+/// the call exists to supply, and offering to connect to one this shell
+/// invented would be worse than asking.
+fn parse_discovery(value: &serde_json::Value) -> Discovered {
+    if value.get("found").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Discovered::default();
+    }
+    let port = value
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u16::try_from(p).ok())
+        .filter(|p| *p > 0);
+    Discovered { port }
+}
+
+/// Ask what the machine already knows, and say so.
+///
+/// **Writes nothing and reads nothing of the contributor's.** It reads one
+/// file IronWire left, learns a port from it, and puts that port in a
+/// field. Declaring is still the switch and the two buttons; a discovery
+/// that declared on its own would be this window announcing a local
+/// service nobody mentioned, which is what the declaration exists to stop.
+///
+/// A call that did not run degrades to nothing found, which is also what a
+/// machine without IronWire answers -- both mean there is nothing to offer,
+/// and neither is a fault to render as one.
+fn discover_routing(app: &Rc<App>) {
+    app.call(DISCOVER_METHOD, serde_json::json!({}), |app, result| {
+        let discovered = result.as_ref().map(parse_discovery).unwrap_or_default();
+        app.settings.routing_discovered_port.set(discovered.port);
+        render_discovery(app);
+    });
+}
+
+/// The offer: one sentence, and the actions beside it.
+///
+/// The connect button is offered only where there is something to connect
+/// to AND nothing is declared. Where something is declared the switch is
+/// already on and the button would be a second Apply.
+fn render_discovery(app: &Rc<App>) {
+    let port = app.settings.routing_discovered_port.get();
+    app.settings
+        .routing_discovery
+        .set_text(&copy::ironwire_discovery_line(port));
+    let declared = app.settings.routing_switch.is_active();
+    app.settings
+        .routing_connect
+        .set_visible(port.is_some() && !declared);
+    // Collapsed only once the machine supplied the port. Where it did not,
+    // the two fields are the only way to answer, so they stay open: this
+    // inverts the default, it does not remove the manual path. Never
+    // closed under somebody who opened it -- only ever opened.
+    if port.is_none() {
+        app.settings.routing_override.set_expanded(true);
+    }
+}
+
 fn render_routing(app: &Rc<App>, settings: &Settings) {
     let declared = settings
         .ironwire
@@ -1087,10 +1265,20 @@ fn render_routing(app: &Rc<App>, settings: &Settings) {
     // written when Apply is pressed -- so a refresh (which runs on every
     // daemon event) landing mid-edit would otherwise replace a half-typed
     // port with the declared one.
-    if let Some(port) = settings.ironwire.as_ref().and_then(|d| d.port) {
-        if !app.settings.routing_port.has_focus() {
-            app.settings.routing_port.set_value(f64::from(port));
-        }
+    //
+    // The precedence is the rule the whole feature turns on: a declared
+    // port always wins, a discovered one fills in only where there is
+    // none, and the conventional number is what is left. A pointer is a
+    // file that survives the daemon that wrote it -- IronWire removes it
+    // only on a clean stop -- so a stale one naming 9000 must not replace
+    // a declared 8463. `ironwire_ledger_for` refuses the same substitution
+    // on the reading side; this is the same rule on the showing side.
+    let shown = shown_port(
+        settings.ironwire.as_ref().and_then(|d| d.port),
+        app.settings.routing_discovered_port.get(),
+    );
+    if !app.settings.routing_port.has_focus() {
+        app.settings.routing_port.set_value(f64::from(shown));
     }
     let token_dir = settings
         .ironwire
@@ -1104,6 +1292,7 @@ fn render_routing(app: &Rc<App>, settings: &Settings) {
     }
     app.settings.filling_routing.set(false);
     set_routing_sensitivity(app, declared);
+    render_discovery(app);
 }
 
 /// The port and folder fields are the override, and they are live only
@@ -1337,6 +1526,14 @@ fn routing_port_value(app: &Rc<App>) -> u16 {
 }
 
 pub fn refresh(app: &Rc<App>) {
+    // Asked before anything is offered, and asked once rather than on
+    // every daemon event: this reads a file, and a settings screen that
+    // repolled it on every queue change would be going looking on a timer.
+    // Somebody who starts IronWire after this window opened presses the
+    // button beside the sentence, which re-asks unconditionally.
+    if app.settings.routing_discovered_port.get().is_none() {
+        discover_routing(app);
+    }
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let projects: Vec<Project> = result
             .ok()
@@ -2709,6 +2906,143 @@ mod tests {
             lines[1]
         );
         assert!(lines[3].contains("8463"), "{}", lines[3]);
+    }
+
+    // --- What the machine already knows -------------------------------
+
+    /// The method this shell calls is the one the daemon advertises.
+    ///
+    /// `discover_routing` sat in the daemon unused: its only references
+    /// outside `daemon::ipc` were two doc comments and a list of names. A
+    /// literal misspelled here would put it straight back to unused, and
+    /// the failure would look exactly like a machine without IronWire.
+    #[test]
+    fn the_discovery_method_is_one_the_daemon_answers() {
+        assert!(
+            trace_commons_contributor::daemon::ipc::METHODS.contains(&DISCOVER_METHOD),
+            "{DISCOVER_METHOD} is not a method the daemon advertises",
+        );
+    }
+
+    /// The shape a running IronWire produces, and every shape that means
+    /// there is nothing to offer.
+    ///
+    /// A machine without IronWire is the ordinary machine. Each of these
+    /// reaches the same place -- no port -- and none of them is an error.
+    #[test]
+    fn only_a_published_port_is_something_to_offer() {
+        assert_eq!(
+            parse_discovery(&serde_json::json!({
+                "found": true,
+                "port": 9143,
+                "token_path": "/home/x/.ironwire/control.token",
+            })),
+            Discovered { port: Some(9143) },
+        );
+
+        for (answer, why) in [
+            (serde_json::json!({}), "an empty answer"),
+            (
+                serde_json::json!({ "found": false }),
+                "the daemon's own no-pointer answer",
+            ),
+            (serde_json::json!({ "found": true }), "found with no port"),
+            (
+                serde_json::json!({ "found": true, "port": 0 }),
+                "port zero, the ask-the-kernel sentinel",
+            ),
+            (
+                serde_json::json!({ "found": true, "port": 70000 }),
+                "a port above 65535",
+            ),
+            (
+                serde_json::json!({ "found": true, "port": "8463" }),
+                "a port that is not a number",
+            ),
+            (
+                serde_json::json!({ "found": "true", "port": 8463 }),
+                "found as a string",
+            ),
+        ] {
+            assert_eq!(
+                parse_discovery(&answer),
+                Discovered::default(),
+                "must offer nothing: {why}",
+            );
+        }
+    }
+
+    /// The rule the whole feature turns on, as a table.
+    ///
+    /// A declared port always wins. A pointer is a file that survives the
+    /// daemon that wrote it, so a stale one naming 9000 must not replace a
+    /// declared 8463 -- the same substitution `ironwire_ledger_for`
+    /// refuses on the reading side.
+    #[test]
+    fn a_discovered_port_never_replaces_a_declared_one() {
+        assert_eq!(shown_port(Some(8463), Some(9000)), 8463);
+        assert_eq!(shown_port(Some(9000), None), 9000);
+        // And it fills in where there is nothing declared, ahead of the
+        // conventional number rather than behind it.
+        assert_eq!(shown_port(None, Some(9143)), 9143);
+        assert_eq!(shown_port(None, None), DEFAULT_IRONWIRE_PORT);
+    }
+
+    /// A shown port is still not a declaration, discovered or not.
+    ///
+    /// This is the same rule as `a_shown_default_is_not_a_declaration`,
+    /// asserted for the number discovery supplies: putting it in the field
+    /// writes nothing, and off is still spelled null.
+    #[test]
+    fn a_discovered_port_in_the_field_is_not_a_declaration() {
+        let shown = shown_port(None, Some(9143));
+        assert_eq!(shown, 9143);
+        assert_eq!(routing_param(false, shown, ""), serde_json::Value::Null);
+    }
+
+    /// Discovery offers; it does not begin.
+    ///
+    /// Read from the source, because "this function does not call that
+    /// one" is exactly the fact a later edit breaks silently and no
+    /// value-level assertion can hold. The call that would turn an offer
+    /// into a declaration is `set_settings`, and neither the ask nor the
+    /// painter may reach it.
+    #[test]
+    fn discovery_writes_nothing_and_reads_nothing() {
+        let source = include_str!("settings.rs");
+        for name in ["fn discover_routing(", "fn render_discovery("] {
+            let start = source.find(name).expect("the function exists");
+            let end = source[start..].find("\n}\n").expect("its body ends") + start;
+            let body = &source[start..end];
+            for reached in [
+                "set_settings",
+                "routing_param",
+                "send_routing",
+                "probe_routing",
+                "probe_routed_tools",
+            ] {
+                assert!(
+                    !body.contains(reached),
+                    "{name} reaches {reached}, which makes an offer into a declaration",
+                );
+            }
+        }
+    }
+
+    /// Both sentences are the shared ones, and neither reads as a fault.
+    #[test]
+    fn the_discovery_sentence_is_the_shared_one_for_both_states() {
+        let found = copy::ironwire_discovery_line(Some(9143));
+        assert!(found.contains("9143"), "{found}");
+        let nothing = copy::ironwire_discovery_line(None);
+        assert_ne!(found, nothing);
+        assert!(!nothing.contains("None"), "{nothing}");
+        for line in [&found, &nothing] {
+            let lower = line.to_lowercase();
+            for word in ["error", "failed", "problem", "wrong"] {
+                assert!(!lower.contains(word), "{word} in: {line}");
+            }
+        }
     }
 
     /// "Declared, nothing seen yet" is not a fault. A rebuilt ledger
