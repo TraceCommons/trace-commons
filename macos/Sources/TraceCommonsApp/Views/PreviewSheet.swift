@@ -236,8 +236,14 @@ struct PreviewSheet: View {
     /// counts, in the daemon's own words, largest first. The contract
     /// guarantees this map never carries matched text.
     private static func scrubbingFound(_ summary: PreviewSummary) -> String {
-        guard !summary.redactions.isEmpty else { return "nothing matched" }
-        return summary.redactions
+        // Removals only. `redactions` also carries `residual_secret_at:*`,
+        // which counts a secret that was DETECTED AND LEFT IN, and this line
+        // sits under a heading that says the opposite. See
+        // `RedactionLabels`; the survivor is stated separately, in the
+        // attention tone, rather than dropped.
+        let removals = RedactionLabels.removals(summary.redactions)
+        guard !removals.isEmpty else { return "nothing matched" }
+        return removals
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
             .joined(separator: " · ")

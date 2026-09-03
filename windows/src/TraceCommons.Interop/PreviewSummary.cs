@@ -103,7 +103,7 @@ public sealed class PreviewSummary
     /// so the same summary always renders the same line.
     /// </summary>
     public string RedactionReceipt =>
-        Redactions.Count == 0
+        RedactionLabels.RemovedTotal(Redactions) == 0
             ? "scrubbed: nothing matched"
             : "scrubbed: " + string.Join(", ", SortedCategories());
 
@@ -112,10 +112,33 @@ public sealed class PreviewSummary
     /// the number a contributor reads the transcript against.
     /// </summary>
     public string ScrubbingFound =>
-        Redactions.Count == 0 ? "nothing matched" : string.Join(" · ", SortedCategories());
+        RedactionLabels.RemovedTotal(Redactions) == 0
+            ? "nothing matched"
+            : string.Join(" · ", SortedCategories());
 
+    /// <summary>
+    /// Secrets the scan FOUND and did not remove, or an empty string when
+    /// there are none.
+    /// </summary>
+    /// <remarks>
+    /// Excluding survivors from the figures above is only half the fix:
+    /// filtering one out and then saying nothing would trade a wrong
+    /// statement for silence about a secret that is still in the payload.
+    /// See <see cref="RedactionLabels"/>.
+    /// </remarks>
+    public string SurvivingSecrets => RedactionLabels.SurvivorLine(Redactions);
+
+    /// <summary>Whether this session left a found secret in the payload.</summary>
+    public bool HasSurvivingSecrets => RedactionLabels.SurvivorTotal(Redactions) > 0;
+
+    /// <summary>
+    /// Removals only. <see cref="Redactions"/> also carries
+    /// <c>residual_secret_at:*</c>, which counts a secret that was DETECTED
+    /// AND LEFT IN, and these figures render under headings that say the
+    /// opposite. See <see cref="RedactionLabels"/>.
+    /// </summary>
     private IEnumerable<string> SortedCategories() =>
-        Redactions
+        RedactionLabels.Removals(Redactions)
             .OrderByDescending(pair => pair.Value)
             .ThenBy(pair => pair.Key, StringComparer.Ordinal)
             .Select(pair => string.Format(
