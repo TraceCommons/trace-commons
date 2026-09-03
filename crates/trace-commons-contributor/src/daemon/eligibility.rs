@@ -76,6 +76,20 @@ pub enum Eligibility {
 /// session that grows while it waits is handled by `Queue::supersede`, which
 /// costs no re-upload budget and no duplicate penalty at all. Holding turns
 /// the expensive path into the free one.
+///
+/// What this delays is a *session*, not the arming. The clock is each
+/// observation's own `modified_at`, so arming a project whose sessions have
+/// already been quiet for a day approves that backlog on the next poll --
+/// there is no cool-off on the decision itself. Only sessions still being
+/// written wait. `ProjectPolicy` does record the arming instant if a
+/// cool-off on the decision is ever wanted; nothing reads it for that today.
+///
+/// Neither input is enforceable against the contributor: `now` is the wall
+/// clock and `modified_at` is the file's own mtime, so one `touch -d` or one
+/// clock nudge skips the window. That is acceptable because this protects a
+/// contributor from sending something they have not finished, not from
+/// themselves -- but it is not a control, and nothing should be built on it
+/// as though it were.
 pub const ARMED_SETTLE_SECS: i64 = 86_400;
 
 /// Whether an armed project's session has been quiet long enough to send

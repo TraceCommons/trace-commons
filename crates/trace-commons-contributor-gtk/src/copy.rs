@@ -1022,8 +1022,9 @@ pub fn arming_heading(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nYou can turn this off at any \
-     time.";
+     contributed without asking you. You won't review them first.\n\nA session is sent a day \
+     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
+     at any time.";
 pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
 
 // --- Quitting ----------------------------------------------------------
