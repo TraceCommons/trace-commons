@@ -1219,16 +1219,31 @@ In `RunSearch`, after the redacted-body matches are counted, call
 
 - [ ] **Step 6: Make the nothing-matched chip a control**
 
-Turn the chip into a button that opens the preview on its search tab. Extend
-the scrubbing-caveat copy's zero-redaction sentence with the clause pointing
-at search, matching the other two shells word for word, and assert it in the
-copy tests:
+Turn the chip into a button that opens the preview on its search tab, and
+extend the caveat copy with the clause pointing at search, matching the
+other two shells word for word.
+
+Add a new `public const string NothingMatched` to
+`TraceCommons.Interop.ScrubDetectorCopy`, which is where this shell's shared
+caveat sentence (`ResidualRisk`) already lives and is the only side of the
+boundary `Interop.Tests` can reach:
 
 ```csharp
     [Fact]
     public void TheNothingMatchedLineOffersANextStep()
-        => Assert.Contains("search", ScrubbingCaveat.RowLine(0), System.StringComparison.OrdinalIgnoreCase);
+        => Assert.Contains(
+            "search",
+            ScrubDetectorCopy.NothingMatched,
+            System.StringComparison.OrdinalIgnoreCase);
 ```
+
+`PreviewSheetViewModel.ScrubbingCaveat` is a bare `const string` with no
+per-count variants, and it sits in `TraceCommons.App`, a WinUI project this
+suite cannot reference at all. Do not write the test against it, and do not
+hand-write a second copy of the sentence there: bind the view model's
+caveat to the `Interop` constant, the way
+`TheSettingsScreenAsksForTheRowRatherThanWritingIt` already requires of the
+settings screen.
 
 - [ ] **Step 7: Run the tests and commit**
 
@@ -1360,7 +1375,7 @@ Via `win-exec.sh`. Confirm, and report in the PR body:
 
 ```bash
 git push -u origin shell-ux-windows
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, Windows" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-windows.md.
 

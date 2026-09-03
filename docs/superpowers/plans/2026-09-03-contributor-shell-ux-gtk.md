@@ -69,7 +69,8 @@ looking for them:
 - Consumes: plan 1 Tasks 5, 6, 7.
 - Produces: `QueueEntry.project_path: String`, `QueueEntry.session_path: Option<String>`,
   `PreviewSummary.redactions_distinct: BTreeMap<String, u32>`,
-  `HistoryRecord.project_id: String`, `ProjectRow.project_path: String`.
+  `HistoryRecord.project_id: String`, `model::Project.project_path: String`
+  (this crate's `list_projects` row is `Project`; there is no `ProjectRow`).
 
 Every field on these structs already carries `#[serde(default)]`, so
 tolerating an older daemon is free -- but assert it anyway, because that is
@@ -192,8 +193,16 @@ In `PreviewSummary` after `redactions`:
     pub redactions_distinct: std::collections::BTreeMap<String, u32>,
 ```
 
-In `HistoryRecord` before `project_label`, and in `ProjectRow` beside its
-label, with the doc comments from the spec's §5 and §1.1 respectively.
+In `HistoryRecord` before `project_label`, and in `model::Project` beside
+its label, with the doc comments from the spec's §5 and §1.1 respectively.
+
+`QueueEntry`'s own doc comment currently reads "`project_key` and `path` are
+absent from the wire by design; they are absent from this struct for the
+same reason." That stops being true the moment `project_path` lands. Amend
+it in the same commit: the daemon relaxed the rule in exactly one place
+(`ipc::display_path`) for a rendered, `~`-abbreviated path, while
+`project_key` and `path` themselves stay absent for the reason they always
+were.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -711,7 +720,7 @@ pub const ALL_FOLDERS: &str = "All folders";
 /// A folder row's right-hand figures: how much is waiting, and how big.
 pub fn folder_summary(sessions: usize, bytes: u64) -> String {
     let unit = if sessions == 1 { "session" } else { "sessions" };
-    format!("{sessions} {unit}  \u{00b7}  {}", crate::format::bytes(bytes))
+    format!("{sessions} {unit}  \u{00b7}  {}", crate::model::human_bytes(bytes))
 }
 ```
 
@@ -725,9 +734,8 @@ with tests beside the other `copy.rs` tests:
     }
 ```
 
-Use whatever the crate's existing byte formatter is called rather than
-`crate::format::bytes` if that is not its name -- `manifest_for` already
-formats byte figures, so follow it.
+`model::human_bytes` is the crate's byte formatter -- there is no
+`crate::format` module. Use it rather than adding a second one.
 
 - [ ] **Step 2: Hold the location on `App`**
 
@@ -1392,19 +1400,24 @@ In `ui/queue.rs`, wrap the `copy::NOTHING_MATCHED` chip in a flat
 `gtk::Button` whose click calls
 `preview::open_with_search(app, index, None, Some("search".into()))` -- the
 tab name is the one registered at `ui/preview.rs:142`. Extend
-`copy::SCRUBBING_CAVEAT`'s zero-redaction sentence with the clause pointing
-at search, matching the macOS wording exactly, and assert the two agree in a
-`copy.rs` test:
+`copy::residual_risk_line`'s zero-redaction arm with the clause pointing at
+search, matching the macOS wording exactly, and assert it in a `copy.rs`
+test beside `the_row_caveat_varies_and_still_concedes`, which asserts over
+the same function and must keep passing:
 
 ```rust
     #[test]
     fn the_nothing_matched_line_offers_a_next_step() {
         assert!(
-            scrubbing_caveat_line(0).to_lowercase().contains("search"),
+            residual_risk_line(0).to_lowercase().contains("search"),
             "the line must point at the thing to do about it"
         );
     }
 ```
+
+There is no `copy::SCRUBBING_CAVEAT`; `residual_risk_line(total_redactions)`
+is the whole of this shell's caveat copy, and its zero case is the one that
+already carries the attention tone.
 
 - [ ] **Step 6: Run the tests and commit**
 
@@ -1607,7 +1620,7 @@ Confirm by hand, and report in the PR body:
 
 ```bash
 git push -u origin shell-ux-gtk
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, GTK" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-gtk.md.
 

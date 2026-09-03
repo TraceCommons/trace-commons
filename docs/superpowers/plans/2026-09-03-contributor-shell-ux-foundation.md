@@ -1833,7 +1833,7 @@ signature.
 
 ```bash
 git push -u origin shell-ux-feedback
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Daemon and FFI foundation for the folder-first contributor queue" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-foundation.md.
 

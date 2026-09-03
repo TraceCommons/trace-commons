@@ -785,7 +785,7 @@ group, with a heading and a back control:
                 location = .root
             } label: {
                 HStack(spacing: TC.Space.xs) {
-                    MacGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
+                    QueueGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
                     Text("All folders")
                         .font(TC.Font_.meta)
                         .foregroundStyle(TC.inkSecondary)
@@ -844,8 +844,19 @@ two copies would be two things to keep in step. Keep the
 `confirmationDialog` with whichever view still owns `Ignore` -- that is
 `QueueFolderRow` after this task.
 
-If `MacGlyph` has no `.chevronLeft` case, add one to the glyph enum
-alongside the existing cases, drawn the way its neighbours are.
+The glyph pair in play here is `QueueGlyph` / `QueueGlyphs`, at the foot of
+`QueueView.swift`. `MacGlyphs` is a second, `fileprivate` copy in
+`MainWindowView.swift` and is not reachable from this file.
+
+`QueueGlyphs` has `.chevronRight` already; it has no `.chevronLeft`, so add
+one beside the existing cases, drawn the way its neighbours are (the
+existing `chevronRight` is `m6 4 4 4-4 4`, so its mirror is `m10 4-4 4 4 4`).
+
+Both `QueueGlyph` and `QueueGlyphs` are `private` to `QueueView.swift`. The
+new `QueueFolderRow` in Step 4 therefore either lives in `QueueView.swift`
+beside them, or the pair is promoted to internal in the same commit. Prefer
+the promotion and say so in the commit body -- a third copy of the glyph
+machinery is what the comment on `QueueGlyph` already warns about.
 
 - [ ] **Step 4: Write the folder row**
 
@@ -902,7 +913,7 @@ struct QueueFolderRow: View {
                         .font(TC.Font_.ledger)
                         .monospacedDigit()
                         .foregroundStyle(TC.inkTertiary)
-                    MacGlyph(glyph: .chevronRight, size: 11, color: TC.inkTertiary)
+                    QueueGlyph(glyph: .chevronRight, size: 11, color: TC.inkTertiary)
                 }
                 .contentShape(Rectangle())
             }
@@ -1886,8 +1897,19 @@ keeping the existing glyph-and-tone treatment and picking the tone from
         }
 ```
 
-The sheet needs the entry id and a `TCDaemon` reference; pass them in from
-`QueueView`'s `.sheet(item:)`, which already holds the entry.
+`SearchTab` today holds exactly `document` and `preview`, so it needs the
+entry id and a way to call the daemon. Neither comes from `QueueView`, which
+constructs `PreviewSheet(entry:)` and nothing further. Thread them from
+`PreviewSheet` instead, which already holds `entry` and an
+`@EnvironmentObject private var model: AppModel`:
+
+- Add `searchOriginal(entryID:needle:) -> Int?` to `AppModel`, beside
+  `openPreview(entryID:)`. `AppModel.daemon` is `private` and stays that
+  way -- a view holding the handle is what `DaemonCalling` exists to avoid.
+- Give `SearchTab` an `entryID: String` and pass `entry.entryID` at the
+  `SearchTab(...)` call site in `PreviewSheet.body`, alongside the existing
+  `document` / `preview` / `initialNeedle` / `initialOffsets`. `SearchTab`
+  reads `model` from the environment like its parent does.
 
 - [ ] **Step 6: Run the tests**
 
@@ -2181,7 +2203,8 @@ git commit -m "Show queue state as a shield beside the waiting count"
 - Test: `macos/Tests/TCShellCoreTests/HistoryFoldersTests.swift` (create)
 
 **Interfaces:**
-- Consumes: `HistoryRecord.projectID` (Task 1); `ProjectRow` (existing, for
+- Consumes: `HistoryRecord.projectID` (Task 1); `ProjectRow` (existing,
+  whose id field is `projectId`, for
   the path); `QueueGrouping` (existing).
 - Produces: `public static func folders<R>(_ records: [R], projectID: (R) -> String, projectLabel: (R) -> String, path: (String) -> String?) -> [QueueGroup<R>]`
 
@@ -2318,7 +2341,8 @@ and a detail view listing that folder's `HistoryRow`s. Resolve the location
 through `QueueNavigation.resolve` on every redraw, exactly as Task 4 does.
 
 Show each folder's path by matching the group id against `model.projects`
-(`ProjectRow` carries `projectID` and now `projectPath`); a group whose id
+(`ProjectRow` carries `projectId` -- lowercase `d`, unlike this plan's new
+`HistoryRecord.projectID` -- and now `projectPath`); a group whose id
 starts with `HistoryFolders.unresolvedPrefix`, or that matches no known
 project, renders its label alone.
 
@@ -2383,7 +2407,7 @@ Record the results in the PR body. `swift test` sees none of this.
 
 ```bash
 git push -u origin shell-ux-macos
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, macOS" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-macos.md.
 
@@ -2415,11 +2439,12 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §5 history grouping | Task 11 |
 | §1.1 `project_path` consumed by the shell | Task 1 (`QueueEntry`, `ProjectRow`) |
 
-**Placeholder scan:** no TBDs. Four steps say "match the file's existing
-name for X" (Task 8 Step 4's daemon handle, Task 4 Step 3's `MacGlyph` case,
-Task 9 Step 3's `PreviewSheet` tab parameter, Task 11 Step 4's `ProjectRow`
-fields) -- each names exactly what to look for and what to do with it, and
-quoting the surrounding code would go stale.
+**Placeholder scan:** no TBDs. Three steps say "match the file's existing
+name for X" (Task 8 Step 4's daemon call, Task 9 Step 3's `PreviewSheet` tab
+parameter, Task 11 Step 4's `ProjectRow` fields) -- each names exactly what
+to look for and what to do with it, and quoting the surrounding code would
+go stale. Task 4 Step 3's `QueueGlyphs.chevronLeft` is named outright,
+because it does not exist yet in either glyph enum.
 
 **Type consistency check.** `RedactionTally.line(occurrences:distinct:)` is
 defined in Task 2 and called in Task 2 Step 4 and Task 9 Step 3
