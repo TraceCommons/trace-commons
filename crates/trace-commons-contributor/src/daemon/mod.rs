@@ -36,6 +36,7 @@ pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;
 pub mod profile;
+pub mod project_key;
 pub mod queue;
 pub mod settings;
 pub mod state;
