@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 
 /// Three groups, never one column of mixed semantics.
 ///
@@ -20,6 +21,11 @@ struct HistoryView: View {
 
     @EnvironmentObject private var model: AppModel
     @State private var quarantineExpanded = false
+    /// Which level of the history list is showing, resolved against the
+    /// live folders on every redraw exactly as the queue does it: a folder
+    /// whose records leave -- a refresh that drops them -- returns to the
+    /// list rather than rendering an empty detail view.
+    @State private var location: QueueLocation = .root
 
     var body: some View {
         ScrollView {
@@ -44,16 +50,7 @@ struct HistoryView: View {
                 }
 
                 if !model.history.isEmpty {
-                    VStack(alignment: .leading, spacing: TC.Space.m) {
-                        TCSectionHeader(
-                            title: "Everything you've contributed",
-                            trailing: "\(model.history.count)"
-                        )
-                        copyDefects
-                        ForEach(model.history) { record in
-                            HistoryRow(record: record)
-                        }
-                    }
+                    contributions
                 }
             }
             .padding(.horizontal, TC.Space.xxl)
@@ -70,6 +67,126 @@ struct HistoryView: View {
         // time a contributor opens this screen is the honest way to show
         // what the daemon actually has rather than what it had at launch.
         .onAppear { model.refreshHistory() }
+    }
+
+    /// Everything contributed, grouped by folder the way the queue is.
+    ///
+    /// Grouped on `project_id`, never on the label: two repositories can
+    /// share a basename, and one row covering both would attribute one
+    /// contributor's work to the wrong project. Records that predate the
+    /// daemon carrying an id fall back to their label under a synthetic key
+    /// -- see `HistoryFolders` for why that is the smaller loss.
+    private var folders: [QueueGroup<HistoryRecord>] {
+        HistoryFolders.folders(
+            model.history,
+            projectID: \.projectID,
+            projectLabel: \.projectLabel
+        )
+    }
+
+    @ViewBuilder
+    private var contributions: some View {
+        let folders = self.folders
+        let here = QueueNavigation.resolve(location, in: folders)
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            switch here {
+            case .root:
+                TCSectionHeader(
+                    title: "Everything you've contributed",
+                    trailing: "\(model.history.count)"
+                )
+                copyDefects
+                ForEach(folders) { group in
+                    historyFolderRow(group)
+                }
+            case .project(let id):
+                if let group = folders.first(where: { $0.id == id }) {
+                    historyFolderDetail(group)
+                }
+            }
+        }
+        .onChange(of: folders.map(\.id)) { _, _ in
+            location = QueueNavigation.resolve(location, in: folders)
+        }
+    }
+
+    /// The folder's path, when it can be resolved.
+    ///
+    /// History records carry an opaque id and no path, so the path comes
+    /// from matching that id against the live `list_projects` rows. A group
+    /// keyed by label instead of by id, and a group whose project the daemon
+    /// no longer lists, have no path to show and render their label alone --
+    /// which is the honest answer rather than a guessed directory.
+    private func folderPath(_ group: QueueGroup<HistoryRecord>) -> String? {
+        guard !group.id.hasPrefix(HistoryFolders.unresolvedPrefix) else { return nil }
+        let path = model.projects.first(where: { $0.projectId == group.id })?.projectPath
+        guard let path, !path.isEmpty else { return nil }
+        return path
+    }
+
+    private func historyFolderRow(_ group: QueueGroup<HistoryRecord>) -> some View {
+        Button {
+            location = .project(group.id)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    Text(group.label)
+                        .font(TC.Font_.cardTitle)
+                        .foregroundStyle(TC.inkPrimary)
+                    if let path = folderPath(group) {
+                        Text(path)
+                            .font(TC.Font_.meta)
+                            .foregroundStyle(TC.inkSecondary)
+                    }
+                }
+                Spacer(minLength: TC.Space.m)
+                Text("^[\(group.count) contribution](inflect: true)")
+                    .font(TC.Font_.ledger)
+                    .monospacedDigit()
+                    .foregroundStyle(TC.inkSecondary)
+                QueueGlyph(glyph: .chevronRight, size: 11, color: TC.inkTertiary)
+            }
+            .padding(TC.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .tcCard()
+        .accessibilityLabel("\(group.label), \(group.count) contributed. Open.")
+    }
+
+    private func historyFolderDetail(_ group: QueueGroup<HistoryRecord>) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.m) {
+            Button {
+                location = .root
+            } label: {
+                HStack(spacing: TC.Space.xs) {
+                    QueueGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
+                    Text("All folders")
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(group.label)
+                    .font(TC.Font_.sectionTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                if let path = folderPath(group) {
+                    Text(path)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            copyDefects
+            ForEach(group.entries) { record in
+                HistoryRow(record: record)
+            }
+        }
     }
 
     /// Three states, three tones, three glyphs, three words. The counts are
