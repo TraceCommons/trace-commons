@@ -172,22 +172,29 @@ public class RedactionLabelsTests
 
     [Fact]
     public void DistinctIsOmittedWhenEveryOccurrenceIsItsOwnValue()
-        // "3 secret (3 distinct)" says the same thing twice.
+        // "3 local path (3 distinct)" says the same thing twice.
         => Assert.Equal(
-            "3 secret",
-            RedactionLabels.Line(Map(("secret", 3)), Map(("secret", 3))));
+            "3 local path",
+            RedactionLabels.Line(Map(("local_path", 3)), Map(("local_path", 3))));
 
+    /// <summary>
+    /// The ordinary case for most labels, not an edge one. Distinct counts
+    /// come from the placeholder map, which is filled for exactly two labels
+    /// (<c>local_path</c> and <c>private_email</c>), so <c>3 secret</c> will
+    /// never carry a distinct suffix. Printing "(0 distinct)" beside a
+    /// non-zero occurrence count would read as "nothing was removed".
+    /// </summary>
     [Fact]
     public void DistinctIsOmittedWhenTheDaemonDidNotReportIt()
         => Assert.Equal("3 secret", RedactionLabels.Line(Map(("secret", 3)), Map()));
 
     [Fact]
     public void ADistinctCountAboveItsOccurrenceCountIsIgnored()
-        // Impossible from a correct daemon; "3 secret (9 distinct)" would be
-        // worse than saying nothing.
+        // Impossible from a correct daemon; "3 local path (9 distinct)" would
+        // be worse than saying nothing.
         => Assert.Equal(
-            "3 secret",
-            RedactionLabels.Line(Map(("secret", 3)), Map(("secret", 9))));
+            "3 local path",
+            RedactionLabels.Line(Map(("local_path", 3)), Map(("local_path", 9))));
 
     [Fact]
     public void TheBiggestCountLeadsAndTiesBreakOnLabel()

@@ -24,11 +24,18 @@ public readonly record struct TranscriptRun(int Start, int Length, bool IsMarker
 public static class TranscriptMarkers
 {
     /// <summary>
-    /// Both marker families the pipeline emits, including the
+    /// Every marker shape the pipeline emits, including the
     /// <c>[REDACTED:aws_secret_key]</c> form that carries a category label.
-    /// Kept identical to the macOS sheet's pattern -- three shells disagreeing
-    /// about what a redaction looks like is three different pictures of the
-    /// same bytes.
+    /// Three shells disagreeing about what a redaction looks like is three
+    /// different pictures of the same bytes.
+    ///
+    /// <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> is the third shape, and it was
+    /// missing: it does not start <c>&lt;PRIVATE_</c> and it is not
+    /// bracketed, so neither of the other two arms reaches it, and a PEM key
+    /// the redactor HAD removed drew as ordinary transcript text. That is the
+    /// one category a contributor most wants to see marked, and it was the
+    /// only one that was not. See <see cref="RedactionPlaceholders"/>, which
+    /// carries the full table of shapes and what each can say.
     ///
     /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
     /// Without that, one unclosed bracket anywhere in a body would let a
@@ -36,7 +43,8 @@ public static class TranscriptMarkers
     /// this same pattern to avoid cutting through a marker -- would then
     /// refuse to cut anywhere inside it.
     /// </summary>
-    private const string Pattern = @"<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
+    private const string Pattern =
+        @"<REDACTED_PRIVATE_KEY>|<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
 
     /// <summary>
     /// A bound on how long the scan may run.

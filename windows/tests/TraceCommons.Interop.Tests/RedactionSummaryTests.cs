@@ -52,17 +52,25 @@ public class RedactionSummaryTests
     /// A session that tripped nine different secret patterns is one row
     /// summing them, with the sub-labels on a detail line, not nine rows.
     /// </summary>
+    /// <remarks>
+    /// No distinct counts here, and that is not an omission. They come from
+    /// the placeholder map, which is filled by <c>apply_placeholder_regex</c>,
+    /// which is called for exactly two labels: <c>local_path</c> and
+    /// <c>private_email</c>. A secret will never carry a distinct figure, so a
+    /// fixture asserting one would be testing a daemon that does not exist.
+    /// </remarks>
     [Fact]
     public void SubLabelsCollapseIntoTheirFamily()
     {
         (IReadOnlyList<RedactionSummaryRow> removed, _) = RedactionSummary.Rows(
             Map(("secret:contextual_entropy", 3), ("secret:pem_private_key", 2), ("secret", 1)),
-            Map(("secret:contextual_entropy", 3), ("secret:pem_private_key", 1), ("secret", 1)));
+            Map());
 
         RedactionSummaryRow row = Assert.Single(removed);
         Assert.Equal("secret", row.Family);
         Assert.Equal(6, row.Occurrences);
-        Assert.Equal(5, row.Distinct);
+        Assert.Equal(0, row.Distinct);
+        Assert.Equal("6", row.CountText);
         Assert.Equal(new[] { "contextual entropy", "pem private key" }, row.Detail);
     }
 
@@ -143,7 +151,7 @@ public class RedactionSummaryTests
         (IReadOnlyList<RedactionSummaryRow> differing, _) =
             RedactionSummary.Rows(Map(("local_path", 185)), Map(("local_path", 12)));
         (IReadOnlyList<RedactionSummaryRow> equal, _) =
-            RedactionSummary.Rows(Map(("secret", 3)), Map(("secret", 3)));
+            RedactionSummary.Rows(Map(("local_path", 3)), Map(("local_path", 3)));
         (IReadOnlyList<RedactionSummaryRow> unreported, _) =
             RedactionSummary.Rows(Map(("secret", 3)), Map());
 
