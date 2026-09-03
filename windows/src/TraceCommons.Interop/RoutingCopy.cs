@@ -38,9 +38,24 @@ public sealed record RoutingCopy
     [JsonPropertyName("intro")] public string Intro { get; init; } = "";
     [JsonPropertyName("toggle")] public string Toggle { get; init; } = "";
     [JsonPropertyName("applies_at_once")] public string AppliesAtOnce { get; init; } = "";
+
+    /// <summary>The one action offered when discovery already found the port.</summary>
+    [JsonPropertyName("connect")] public string Connect { get; init; } = "";
+
+    /// <summary>The disclosure the port and folder sit behind once it has.</summary>
+    [JsonPropertyName("override_title")] public string OverrideTitle { get; init; } = "";
+
+    [JsonPropertyName("look_again")] public string LookAgain { get; init; } = "";
     [JsonPropertyName("port_title")] public string PortTitle { get; init; } = "";
     [JsonPropertyName("port_note")] public string PortNote { get; init; } = "";
     [JsonPropertyName("folder_title")] public string FolderTitle { get; init; } = "";
+
+    /// <summary>
+    /// The macOS folder control's action. This shell keeps a text box -- the
+    /// permission rule that makes a chooser necessary there does not hold
+    /// here -- so it arrives in the payload and is not rendered.
+    /// </summary>
+    [JsonPropertyName("choose_folder")] public string ChooseFolder { get; init; } = "";
     [JsonPropertyName("folder_note")] public string FolderNote { get; init; } = "";
     [JsonPropertyName("apply")] public string Apply { get; init; } = "";
     [JsonPropertyName("checking")] public string Checking { get; init; } = "";

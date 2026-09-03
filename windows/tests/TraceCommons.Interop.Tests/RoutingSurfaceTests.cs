@@ -711,6 +711,142 @@ public class RoutingSurfaceTests
         }
     }
 
+    // --- What the machine already knows --------------------------------
+
+    /// <summary>
+    /// The method this shell calls is the one the daemon advertises.
+    /// </summary>
+    /// <remarks>
+    /// <c>discover_routing</c> sat in the daemon unused: its only references
+    /// outside the IPC module were two doc comments and a list of names. A
+    /// literal misspelled here would put it straight back to unused, and the
+    /// failure would look exactly like a machine without IronWire.
+    /// </remarks>
+    [Fact]
+    public void TheDiscoveryMethodIsSpelledTheWayTheDaemonAdvertisesIt()
+    {
+        Assert.Equal("discover_routing", DaemonProtocol.Methods.DiscoverRouting);
+    }
+
+    /// <summary>The shape a running IronWire produces.</summary>
+    [Fact]
+    public void APublishedPointerYieldsThePortAndThePath()
+    {
+        RoutingDiscovery found = RoutingDiscovery.Parse(
+            """{"found":true,"port":9143,"token_path":"C:\\Users\\x\\.ironwire\\control.token"}""");
+
+        Assert.Equal((ushort)9143, found.Port);
+        Assert.Equal("C:\\Users\\x\\.ironwire\\control.token", found.TokenPath);
+        Assert.True(found.Found);
+    }
+
+    /// <summary>
+    /// Every shape that means there is nothing to offer, and none of them is
+    /// an error. A machine without IronWire is the ordinary machine.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json at all")]
+    [InlineData("[]")]
+    [InlineData("""{}""")]
+    [InlineData("""{"found":false}""")]
+    [InlineData("""{"found":false,"port":8463}""")]
+    [InlineData("""{"found":true}""")]
+    [InlineData("""{"found":true,"port":0}""")]
+    [InlineData("""{"found":true,"port":70000}""")]
+    [InlineData("""{"found":true,"port":"8463"}""")]
+    [InlineData("""{"found":"true","port":8463}""")]
+    public void NothingToOfferIsOneStateAndNotAnError(string? json)
+    {
+        RoutingDiscovery discovery = RoutingDiscovery.Parse(json);
+
+        Assert.Equal(RoutingDiscovery.Nothing, discovery);
+        Assert.Null(discovery.Port);
+        Assert.False(discovery.Found);
+    }
+
+    /// <summary>
+    /// A pointer that named no credential still names a port. The path is the
+    /// extra, not the thing the call is for.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"found":true,"port":9143}""")]
+    [InlineData("""{"found":true,"port":9143,"token_path":""}""")]
+    [InlineData("""{"found":true,"port":9143,"token_path":null}""")]
+    public void APointerWithoutATokenPathStillCarriesThePort(string json)
+    {
+        RoutingDiscovery discovery = RoutingDiscovery.Parse(json);
+
+        Assert.Equal((ushort)9143, discovery.Port);
+        Assert.Null(discovery.TokenPath);
+    }
+
+    /// <summary>
+    /// The rule the whole feature turns on. A declared port always wins: a
+    /// pointer is a file that survives the daemon that wrote it, so a stale
+    /// one naming 9000 must not replace a declared 8463.
+    /// </summary>
+    [Fact]
+    public void ADiscoveredPortNeverReplacesADeclaredOne()
+    {
+        Assert.Equal((ushort)8463, RoutingTools.ShownPort(8463, 9000));
+        Assert.Equal((ushort)9000, RoutingTools.ShownPort(9000, null));
+
+        // And it fills in where nothing is declared, ahead of the
+        // conventional number rather than behind it.
+        Assert.Equal((ushort)9143, RoutingTools.ShownPort(null, 9143));
+        Assert.Equal(RoutingTools.DefaultPort, RoutingTools.ShownPort(null, null));
+    }
+
+    /// <summary>
+    /// A shown port is still not a declaration, discovered or not: off is
+    /// spelled null whatever number the box carries.
+    /// </summary>
+    [Fact]
+    public void ADiscoveredPortInTheBoxIsNotADeclaration()
+    {
+        ushort shown = RoutingTools.ShownPort(null, 9143);
+
+        Assert.Equal((ushort)9143, shown);
+        using JsonDocument doc = JsonDocument.Parse(
+            RoutingTools.SerializeDeclaration(false, shown, null));
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("ironwire").ValueKind);
+    }
+
+    /// <summary>
+    /// Two states, two sentences, both from the Rust and neither a fault.
+    /// </summary>
+    [Fact]
+    public void TheDiscoverySentenceIsTheSharedOneForBothStates()
+    {
+        RoutingCopy copy = Copy();
+
+        string found = RoutingTools.DiscoveryLine(copy, new RoutingDiscovery(9143, null));
+        Assert.Contains("9143", found, StringComparison.Ordinal);
+
+        string nothing = RoutingTools.DiscoveryLine(copy, RoutingDiscovery.Nothing);
+        Assert.NotEqual(found, nothing);
+        Assert.NotEmpty(nothing);
+        Assert.DoesNotContain("0", nothing, StringComparison.Ordinal);
+        foreach (string fault in new[] { "error", "failed", "problem", "wrong" })
+        {
+            Assert.DoesNotContain(fault, nothing.ToLowerInvariant(), StringComparison.Ordinal);
+            Assert.DoesNotContain(fault, found.ToLowerInvariant(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The boxes become a disclosure only once the machine answered. Where it
+    /// did not they are the only way to answer, so they stay open.
+    /// </summary>
+    [Fact]
+    public void ThePortAndFolderCollapseOnlyOnceSomethingWasDiscovered()
+    {
+        Assert.True(RoutingTools.OverrideIsCollapsed(new RoutingDiscovery(9143, null)));
+        Assert.False(RoutingTools.OverrideIsCollapsed(RoutingDiscovery.Nothing));
+    }
+
     /// <summary>
     /// This shell no longer owns the branch table: which of the four words a
     /// tool gets is decided in <c>routing_copy.rs</c> and crosses the ABI.
@@ -1073,6 +1209,10 @@ public class RoutingSurfaceTests
         {
             // set_settings / probe_routed_tools wire keys and values.
             "ironwire", "mode", "watch", "off", "port", "token_dir",
+            // discover_routing's answer. "found" is the daemon's own key and
+            // not a word anybody reads: the sentence beside it is assembled
+            // in routing_copy.rs and crosses the ABI already finished.
+            "found",
             "outcome", "reachable", "unreachable", "token_unreadable",
             "token_path", "tools", "id", "installed", "wired",
             // The daemon's routing states, and the status block they arrive in.

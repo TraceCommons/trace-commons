@@ -271,6 +271,84 @@ public sealed class RoutingModes
     public string Gemini { get; init; } = string.Empty;
 }
 
+/// <summary>
+/// What a running IronWire published about itself, as <c>discover_routing</c>
+/// answers.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Nothing here is a failure.</b> The daemon answers <c>found: false</c>
+/// for every reason there is nothing to read -- never installed, not running,
+/// a version that publishes no pointer, a pointer it will not act on -- and
+/// they are one state here for the same reason they are one boolean there:
+/// they are one fact to the contributor and one next step. A vocabulary of
+/// outcomes would invite a caller to match on one, and this surface has
+/// already been bitten once by a word that is a prefix of another.
+/// </para>
+/// <para>
+/// <b>It carries no token.</b> <see cref="TokenPath"/> is a path the daemon
+/// reported, for display beside the port; the credential at it is opened by
+/// the daemon, at call time.
+/// </para>
+/// </remarks>
+public sealed record RoutingDiscovery(ushort? Port, string? TokenPath)
+{
+    /// <summary>The state of a machine that published nothing.</summary>
+    public static readonly RoutingDiscovery Nothing = new(null, null);
+
+    /// <summary>Whether there is anything to offer.</summary>
+    public bool Found => Port is not null;
+
+    /// <summary>
+    /// Read a <c>discover_routing</c> result.
+    /// </summary>
+    /// <remarks>
+    /// Found without a usable port is nothing found: the port is the fact the
+    /// call exists to supply, and offering to connect to one this shell
+    /// invented would be worse than asking. Every unreadable shape reaches the
+    /// same place, because an answer nothing can parse is the same fact as no
+    /// answer.
+    /// </remarks>
+    public static RoutingDiscovery Parse(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Nothing;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("found", out JsonElement found)
+                || found.ValueKind != JsonValueKind.True)
+            {
+                return Nothing;
+            }
+
+            if (!doc.RootElement.TryGetProperty("port", out JsonElement portValue)
+                || portValue.ValueKind != JsonValueKind.Number
+                || !portValue.TryGetUInt16(out ushort port)
+                || port == 0)
+            {
+                return Nothing;
+            }
+
+            string? tokenPath = doc.RootElement.TryGetProperty("token_path", out JsonElement path)
+                && path.ValueKind == JsonValueKind.String
+                    ? path.GetString()
+                    : null;
+            return new RoutingDiscovery(
+                port,
+                string.IsNullOrEmpty(tokenPath) ? null : tokenPath);
+        }
+        catch (JsonException)
+        {
+            return Nothing;
+        }
+    }
+}
+
 /// <summary>One tool's name, its one word, and how that word is painted.</summary>
 /// <remarks>
 /// The tone travels with the word because both are decided by the same
@@ -409,6 +487,58 @@ public static class RoutingTools
             name,
             ToolWord(copy, mode, wiring),
             ToolTone(mode, wiring));
+    }
+
+    /// <summary>
+    /// Which port the box shows, of the three that can claim it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The contributor's declared port always wins.</b> A declared port is
+    /// a human instruction; the pointer is a file on disk that survives the
+    /// daemon that wrote it, and IronWire removes it only on a clean stop.
+    /// The failure of letting a stale pointer win is not one refused
+    /// connection -- it is a contributor who declared 8463, whose leftover
+    /// pointer says 9000, and whose box now shows a number they never typed
+    /// while the settings file still reads 8463. <c>ironwire_ledger_for</c>
+    /// refuses that same substitution on the reading side.
+    ///
+    /// Discovery fills only where nothing is declared, and the conventional
+    /// number is the last resort. All three are a <i>display</i>:
+    /// <see cref="SerializeDeclaration"/> still writes nothing while the
+    /// switch is off.
+    /// </remarks>
+    public static ushort ShownPort(ushort? declared, ushort? discovered) =>
+        declared ?? discovered ?? DefaultPort;
+
+    /// <summary>
+    /// What discovery found, in one sentence, or the line that claims nothing
+    /// if the ABI would not assemble one.
+    /// </summary>
+    /// <remarks>
+    /// Never a half-sentence and never wording written here. A machine that
+    /// published nothing still gets a sentence, because it is the ordinary
+    /// machine and the screen has to say what to do on it.
+    /// </remarks>
+    public static string DiscoveryLine(RoutingCopy copy, RoutingDiscovery discovery)
+    {
+        ArgumentNullException.ThrowIfNull(copy);
+        ArgumentNullException.ThrowIfNull(discovery);
+        return RoutingSurface.DiscoveryLine(discovery.Port) ?? copy.CheckUnavailable;
+    }
+
+    /// <summary>
+    /// Whether the port and folder are offered as a disclosure rather than as
+    /// two boxes to fill in.
+    /// </summary>
+    /// <remarks>
+    /// Only once discovery has supplied the port. Where it has not they are
+    /// the only way to answer, so they stay open: this inverts the default,
+    /// it does not remove the manual path.
+    /// </remarks>
+    public static bool OverrideIsCollapsed(RoutingDiscovery discovery)
+    {
+        ArgumentNullException.ThrowIfNull(discovery);
+        return discovery.Found;
     }
 
     /// <summary>
