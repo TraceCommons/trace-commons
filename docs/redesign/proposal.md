@@ -256,7 +256,6 @@ struct ProjectionId(String);
 struct EvidenceId(String);
 struct PolicyId(String);
 struct BundleId(String);
-struct CertificationId(String);
 struct ContentHash(String);
 ```
 
@@ -639,53 +638,6 @@ let bundle = ClassifierBundle {
 
 The Bundle does not contain mutable index contents. Each Observation records the exact Evidence snapshot it used.
 
-### Certification
-
-A Certification states that a Bundle passed a defined offline evaluation.
-
-TODO: These feels like superficial validation but it isn't clear that a certification proves that bundle is ready for produciton
-
-```rust
-struct BundleCertification {
-    id: CertificationId,
-    bundle_id: BundleId,
-
-    evaluation_suite_id: String,
-    dataset_snapshot_hash: ContentHash,
-    evaluation_report_hash: ContentHash,
-
-    result: CertificationResult,
-    certified_by: String,
-    signature: Vec<u8>,
-}
-
-enum CertificationResult {
-    Passed,
-    Failed {
-        reason_codes: Vec<String>,
-    },
-}
-```
-
-Example:
-
-```rust
-let certification = BundleCertification {
-    id: CertificationId("certification-2026-09-01".into()),
-    bundle_id: bundle.id.clone(),
-
-    evaluation_suite_id: "classifier-suite-v4".into(),
-    dataset_snapshot_hash: sha256("test-snapshot-17"),
-    evaluation_report_hash: sha256("evaluation-report"),
-
-    result: CertificationResult::Passed,
-    certified_by: "trace-commons-model-factory".into(),
-    signature: sign("certification manifest"),
-};
-```
-
-A Bundle can have multiple Certifications. New evaluation evidence does not change the Bundle identity.
-
 ### Complete example
 
 ```rust
@@ -721,7 +673,6 @@ Fact records availability.
 Policy evaluates Facts.
 Decision specifies production effects.
 Bundle fixes the complete configuration.
-Certification approves the Bundle for deployment.
 ```
 
 
