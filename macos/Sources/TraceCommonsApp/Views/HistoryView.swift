@@ -260,6 +260,7 @@ struct WithdrawalConfirmationCapture: View {
         HistoryRecord(
             submissionID: "capture-\(status)",
             submittedAt: Date(timeIntervalSince1970: 1_770_000_000),
+            projectID: "project_capture_fixture",
             projectLabel: label,
             source: "claude-code",
             status: status,

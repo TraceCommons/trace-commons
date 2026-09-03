@@ -1295,6 +1295,7 @@ final class AppModel: ObservableObject {
             eventCount: 3,
             openingPrompt: "Add a retry to the Northwind billing sync",
             redactions: ["aws_secret_key": 1, "local_path": 3],
+            redactionsDistinct: ["aws_secret_key": 1, "local_path": 2],
             piiLabelsPresent: ["email"],
             consentScopes: ["debugging_evaluation"],
             residualRisk: "pattern-based"
@@ -1306,6 +1307,8 @@ final class AppModel: ObservableObject {
             declaredSource: nil,
             projectID: "project_screenshot_fixture",
             projectLabel: "northwind-billing",
+            projectPath: "~/code/northwind-billing",
+            sessionPath: nil,
             sizeBytes: 1615,
             discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),
             state: .pending,
