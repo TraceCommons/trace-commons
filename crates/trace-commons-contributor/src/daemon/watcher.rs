@@ -53,7 +53,7 @@ use chrono::{DateTime, Utc};
 use super::eligibility::{Eligibility, Observation, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
-use super::policy::{ProjectMode, disambiguated_label, known_keys, project_key_for};
+use super::policy::{ProjectMode, disambiguated_label, known_keys, project_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
 use super::state::CwdCacheEntry;
 use crate::source::{SessionRef, TraceSource, all_sources};
@@ -462,7 +462,7 @@ fn visit_session(
     }
 
     let cwd = resolve_cwd(shared, source, session_ref, &obs);
-    let project_key = project_key_for(cwd.as_deref());
+    let (project_key, project_path) = project_for(cwd.as_deref());
     let mode = {
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
@@ -566,9 +566,11 @@ fn visit_session(
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
+        // The unfolded spelling of the same directory, for rendering only.
+        project_path: project_path.clone(),
         // The raw recorded cwd, which `project_key_for` normalized away.
         session_cwd: cwd.clone(),
-        project_label: disambiguated_label(&project_key, &known),
+        project_label: disambiguated_label(&project_key, project_path.as_deref(), &known),
         path: obs.path.clone(),
         size_bytes: obs.size_bytes,
         discovered_at: ctx.now,
@@ -811,6 +813,7 @@ fn resolve_cwd(
 
 #[cfg(test)]
 mod tests {
+    use super::super::policy::project_key_for;
     use super::*;
     use crate::config::ConfigStore;
     use crate::daemon::policy::ProjectMode;

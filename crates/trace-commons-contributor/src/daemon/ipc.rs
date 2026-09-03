@@ -774,7 +774,7 @@ pub fn relabel_queue_entries(policy: &ProjectPolicy, queue: &mut Queue) -> bool 
         .all()
         .iter()
         .filter_map(|e| {
-            let fresh = disambiguated_label(&e.project_key, &known);
+            let fresh = disambiguated_label(&e.project_key, e.project_path.as_deref(), &known);
             (fresh != e.project_label).then_some((e.entry_id, fresh))
         })
         .collect();
@@ -832,8 +832,14 @@ fn regroup_subagent_entries(queue: &mut Queue) -> bool {
     true
 }
 
-/// A project key rendered for display: `~`-abbreviated, never modified
+/// A local path rendered for display: `~`-abbreviated, never modified
 /// otherwise.
+///
+/// Takes a PATH, not a key. Callers pass `QueueEntry::project_path` (or
+/// `ProjectEntry::display_path`) where they have one and the folded key
+/// only as a fallback, because the key is lowercased on macOS and Windows
+/// and a contributor should not be shown a spelling of their own directory
+/// that exists nowhere on their disk.
 ///
 /// This is the ONE place in this crate that deliberately puts a local
 /// filesystem path on the socket, and the bound is stated where the
@@ -860,19 +866,26 @@ pub fn display_path(project_key: &str) -> String {
     else {
         return project_key.to_string();
     };
-    // Folded on both sides, because a project key has been through
-    // `normalize_project_key` and the environment variable has not. On
-    // macOS the key is `/users/z/code/api` while `$HOME` is `/Users/z`,
-    // and on Windows the key is `c:\users\z\...` while `%USERPROFILE%`
-    // is `C:\Users\z` -- comparing the two raw meant the prefix never
-    // matched and every path rendered absolute.
+    // The COMPARISON is case-insensitive on macOS and Windows, and stays
+    // that way now that the input is unfolded. It is not a workaround for
+    // the key's folding -- it is the filesystem's own rule. `$HOME` and
+    // `%USERPROFILE%` are whatever the environment was handed; a shell
+    // exporting `HOME=/Users/Zaki` against a disk that spells it
+    // `/Users/zaki` names one directory, and on a case-insensitive volume
+    // the two are the same prefix. Comparing raw there meant the prefix
+    // never matched and every path rendered absolute.
+    //
+    // Only the comparison folds. The rendered string is cut from the
+    // ORIGINAL below, so the tail keeps its case -- which is what was
+    // missing while the input was itself a folded key: both halves were
+    // lowercase, so there was no case left to preserve.
     match crate::daemon::project_key::fold_case(project_key)
         .strip_prefix(&crate::daemon::project_key::fold_case(&home))
     {
         Some("") => "~".to_string(),
         Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
-            // Rendered from the ORIGINAL tail so a session path keeps the
-            // case the agent recorded. Folding can in principle change a
+            // Rendered from the ORIGINAL tail so the path keeps the case
+            // the filesystem holds. Folding can in principle change a
             // string's length, in which case the boundary is not a
             // character boundary and the folded tail is used instead.
             let tail = project_key
@@ -895,8 +908,11 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         "declared_source": e.declared_source,
         "project_id": project_id_for(&e.project_key),
         "project_label": e.project_label,
-        // Rendered, never logged -- see `display_path`.
-        "project_path": display_path(&e.project_key),
+        // Rendered, never logged -- see `display_path`. The unfolded half
+        // when the entry has one, and the folded key when it does not: an
+        // entry written before `project_path` existed still names the right
+        // directory, just in the case the key was folded to.
+        "project_path": display_path(e.project_path.as_deref().unwrap_or(&e.project_key)),
         // Only when the session ran somewhere other than the project root,
         // which is the fact normalization discards and the folder detail
         // view puts back. Null rather than a repeat of `project_path`, so a
@@ -905,7 +921,7 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
             .session_cwd
             .as_deref()
             .map(display_path)
-            .filter(|p| p != &display_path(&e.project_key))
+            .filter(|p| p != &display_path(e.project_path.as_deref().unwrap_or(&e.project_key)))
             .map(serde_json::Value::from)
             .unwrap_or(serde_json::Value::Null),
         "size_bytes": e.size_bytes,
@@ -985,31 +1001,32 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             let policy = shared.policy.lock().expect("policy lock");
             let queue = shared.queue.lock().expect("queue lock");
             let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-            let discovered: std::collections::BTreeSet<String> = queue
+            let discovered: std::collections::BTreeMap<String, Option<String>> = queue
                 .all()
                 .iter()
-                .map(|e| e.project_key.clone())
-                .filter(|key| !policy.projects.contains_key(key))
+                .map(|e| (e.project_key.clone(), e.project_path.clone()))
+                .filter(|(key, _)| !policy.projects.contains_key(key))
                 .collect();
             let projects: Vec<serde_json::Value> = policy
                 .projects
                 .iter()
                 .map(|(key, entry)| {
+                    let shown = entry.display_path.as_deref().unwrap_or(key);
                     serde_json::json!({
                         "project_id": project_id_for(key),
-                        "project_label": disambiguated_label(key, &known),
-                        "project_path": display_path(key),
+                        "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
+                        "project_path": display_path(shown),
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
                         "configured": true,
                         "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                     })
                 })
-                .chain(discovered.iter().map(|key| {
+                .chain(discovered.iter().map(|(key, shown)| {
                     serde_json::json!({
                         "project_id": project_id_for(key),
-                        "project_label": disambiguated_label(key, &known),
-                        "project_path": display_path(key),
+                        "project_label": disambiguated_label(key, shown.as_deref(), &known),
+                        "project_path": display_path(shown.as_deref().unwrap_or(key)),
                         "mode": policy.resolve(key),
                         "added_at": serde_json::Value::Null,
                         "configured": false,
@@ -1148,7 +1165,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                         key.to_string()
                     }
                 };
-                let label = disambiguated_label(&key, &known);
+                let shown = crate::daemon::policy::display_path_for_key(&key);
+                let label = disambiguated_label(&key, shown.as_deref(), &known);
                 (key, label)
             };
 
@@ -1414,7 +1432,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     .filter(|e| e.project_key == key && e.state == QueueState::Approved)
                     .map(|e| e.entry_id)
                     .collect();
-                let project_audit_label = disambiguated_label(&key, &known);
+                let project_audit_label = disambiguated_label(
+                    &key,
+                    crate::daemon::policy::display_path_for_key(&key).as_deref(),
+                    &known,
+                );
                 // Same ordering as `approve`'s `bulk-approved` row: written
                 // before anything is canceled, so a rollback never has to
                 // write to the disk that just refused a write. Undoing a
@@ -1874,7 +1896,14 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // Approving what is already in that bucket is an ordinary consent
         // decision about entries the contributor can see; it is *arming*
         // the bucket that `set_mode` refuses, which is a standing grant.
-        (ids, Some(disambiguated_label(&key, &known)))
+        (
+            ids,
+            Some(disambiguated_label(
+                &key,
+                crate::daemon::policy::display_path_for_key(&key).as_deref(),
+                &known,
+            )),
+        )
     } else {
         let queue = shared.queue.lock().expect("queue lock");
         (
@@ -3634,6 +3663,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/tmp/search-original".into(),
+            project_path: None,
             session_cwd: None,
             project_label: "search-original".into(),
             path,
@@ -4141,6 +4171,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: work_api.clone(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "api".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4246,6 +4277,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4296,6 +4328,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4358,6 +4391,7 @@ mod tests {
                             source: "claude-code".to_string(),
                             declared_source: None,
                             project_key: "/tmp/p".to_string(),
+                            project_path: None,
                             session_cwd: None,
                             project_label: "p".to_string(),
                             path: std::path::PathBuf::from(format!("/tmp/seed{n}.jsonl")),
@@ -4418,6 +4452,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4475,6 +4510,7 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: "/tmp/p".to_string(),
+                    project_path: None,
                     session_cwd: None,
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -4678,6 +4714,7 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: project_key.to_string(),
+                    project_path: None,
                     session_cwd: None,
                     project_label: super::super::policy::project_label_for(project_key),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -5148,6 +5185,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -5230,6 +5268,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: gone.to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "oldproj".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -5354,6 +5393,7 @@ mod tests {
             source: "claude-code".to_string(),
             declared_source: None,
             project_key: "/tmp/p".to_string(),
+            project_path: None,
             session_cwd: None,
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
@@ -5566,6 +5606,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/Users/z/code/secret-client-project".into(),
+            project_path: None,
             session_cwd: None,
             project_label: "secret-client-project".into(),
             path: "/Users/z/.claude/projects/x/s.jsonl".into(),
@@ -5622,6 +5663,7 @@ mod tests {
                 source: "claude-code".to_string(),
                 declared_source: None,
                 project_key: "/tmp/p".to_string(),
+                project_path: None,
                 session_cwd: None,
                 project_label: "p".to_string(),
                 path: std::path::PathBuf::from(path),
@@ -5710,6 +5752,7 @@ mod tests {
             source: "claude-code".to_string(),
             declared_source: None,
             project_key: "/tmp/p".to_string(),
+            project_path: None,
             session_cwd: None,
             project_label: "p".to_string(),
             path: std::path::PathBuf::from("/tmp/s.jsonl"),
@@ -5795,6 +5838,77 @@ mod tests {
         ));
         let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(display_path(&key), format!("~{sep}code{sep}api"));
+    }
+
+    /// What the contributor reads keeps its capitals; what the daemon
+    /// decides on does not.
+    ///
+    /// Both halves in one test deliberately. Unfolding the key to fix the
+    /// display would let one project mint two keys and an `Ignore` lapse
+    /// under the other spelling; re-folding the display to keep the key
+    /// tidy puts `~/code/ironwire` back in front of someone whose disk has
+    /// no such directory. Only doing both is passing.
+    ///
+    /// Every expected string is derived by running the real
+    /// `policy::project_for` over a real on-disk directory, from a
+    /// SUBDIRECTORY of it, rather than assembled here -- a test that
+    /// concatenates `$HOME` itself is how the broken `~` abbreviation went
+    /// unnoticed on this branch once already.
+    #[test]
+    fn a_mixed_case_project_keeps_its_capitals_while_its_key_stays_folded() {
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        // Inside the real home, because the `~` abbreviation is half of
+        // what is being asserted and `display_path` reads the environment.
+        let dir = tempfile::Builder::new()
+            .prefix("tc-case-")
+            .tempdir_in(&home)
+            .expect("a temporary directory under home");
+        let root = dir.path().join("IronWire");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("Crates").join("Inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let (key, shown) = crate::daemon::policy::project_for(Some(&sub.to_string_lossy()));
+        let shown = shown.expect("a directory that resolves has a display path");
+
+        let mut e = card_entry();
+        e.project_key = key.clone();
+        e.project_path = Some(shown.clone());
+        e.project_label = crate::daemon::policy::disambiguated_label(
+            &key,
+            Some(&shown),
+            std::slice::from_ref(&key),
+        );
+
+        let v = entry_value(&e);
+        let rendered = v["project_path"].as_str().expect("a rendered path");
+        assert!(
+            rendered.ends_with("IronWire"),
+            "the displayed path was lowercased: {rendered}"
+        );
+        assert!(
+            rendered.starts_with('~'),
+            "a project under home must still abbreviate: {rendered}"
+        );
+        assert_eq!(
+            v["project_label"], "IronWire",
+            "the label was lowercased: {v}"
+        );
+
+        assert_eq!(
+            key,
+            crate::daemon::project_key::fold_case(&shown),
+            "the key must remain the folded spelling of the same directory"
+        );
+        // Where folding is a no-op the two are equal by construction, so
+        // the inequality is asserted only where it is a real claim.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(
+            key, shown,
+            "on a case-insensitive filesystem the key must still be folded"
+        );
     }
 
     #[test]
@@ -6017,6 +6131,7 @@ mod tests {
                     source: "claude-code".to_string(),
                     declared_source: None,
                     project_key: "/tmp/p".to_string(),
+                    project_path: None,
                     session_cwd: None,
                     project_label: "p".to_string(),
                     path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -6366,6 +6481,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),
@@ -6414,6 +6530,7 @@ mod tests {
                         source: "claude-code".to_string(),
                         declared_source: None,
                         project_key: "/tmp/p".to_string(),
+                        project_path: None,
                         session_cwd: None,
                         project_label: "p".to_string(),
                         path: std::path::PathBuf::from("/tmp/seed.jsonl"),

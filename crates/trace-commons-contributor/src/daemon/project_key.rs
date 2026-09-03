@@ -22,19 +22,61 @@ const VCS_MARKERS: [&str; 3] = [".git", ".hg", ".jj"];
 /// a session is not a project boundary anyone intended.
 const MAX_WALK_DEPTH: usize = 24;
 
+/// A recorded working directory resolved into the two forms the daemon
+/// needs, which are deliberately not the same string.
+///
+/// `key` is case-folded on macOS and Windows ([`fold_case`]) because those
+/// filesystems are case-insensitive: without folding one project mints two
+/// keys depending on how the agent spelled the cwd, and a project set to
+/// `Ignore` under one spelling lapses under the other. Everything that
+/// decides something -- policy lookup, grouping, `project_id_for` -- keys
+/// on this.
+///
+/// `display_path` is the same directory with the case the filesystem
+/// actually holds (or, for a directory that no longer exists, the case the
+/// recording carried). Nothing decides on it. It exists because a
+/// contributor reading `~/code/ironwire` is being shown a directory that
+/// is not spelled that way anywhere on their machine.
+///
+/// No `Debug`, no `Serialize`, and no `Clone` of convenience: `display_path`
+/// is a local filesystem path, admissible only on the rendering paths that
+/// already carry one (see `ipc::display_path`), and a derived `Debug` is
+/// how such a string reaches a log line by accident.
+pub struct NormalizedProject {
+    pub key: String,
+    pub display_path: String,
+}
+
 /// Normalize a recorded working directory into a project key.
 ///
 /// `None` when the input cannot be a key at all: empty, blank, relative, or
 /// with no usable final path segment. Those go to the unknown bucket, which
 /// is `policy::project_key_for`'s job, not this one's.
+///
+/// Kept beside [`normalize_project`] rather than replaced by it. Most
+/// callers -- `policy::project_key_for`, `ProjectPolicy::rekey`'s counter
+/// and cooldown maps -- want the key and nothing else, and handing them a
+/// struct whose other half must not be logged is how that half ends up
+/// somewhere it should not be.
 pub fn normalize_project_key(cwd: &str) -> Option<String> {
-    normalize_project_key_within(cwd, home_dir().as_deref())
+    normalize_project(cwd).map(|p| p.key)
 }
 
-/// The body of [`normalize_project_key`], with the home directory injected
-/// so the "a marker in $HOME is not a project root" rule is testable
-/// without touching the real environment.
+/// [`normalize_project_key`] with the home directory injected, for tests.
 pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<String> {
+    normalize_project_within(cwd, home).map(|p| p.key)
+}
+
+/// Normalize a recorded working directory into both the folded key and the
+/// unfolded path a person should be shown.
+pub fn normalize_project(cwd: &str) -> Option<NormalizedProject> {
+    normalize_project_within(cwd, home_dir().as_deref())
+}
+
+/// The body of [`normalize_project`], with the home directory injected so
+/// the "a marker in $HOME is not a project root" rule is testable without
+/// touching the real environment.
+pub fn normalize_project_within(cwd: &str, home: Option<&Path>) -> Option<NormalizedProject> {
     let trimmed = cwd.trim();
     if trimmed.is_empty() {
         return None;
@@ -79,7 +121,17 @@ pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<St
     });
 
     let rooted = repo_root_of(&resolved, home.as_deref()).unwrap_or(resolved);
-    Some(fold_case(&path_to_key(&rooted)))
+    // One string, two spellings. `std::fs::canonicalize` returns the case
+    // the filesystem holds on both macOS and Windows, so the display half
+    // is the true spelling of the directory rather than whatever the agent
+    // happened to record; a directory that has since been deleted took the
+    // `lexically_clean` fallback above and keeps the recorded spelling,
+    // which is the most honest thing left to say about it.
+    let display_path = path_to_key(&rooted);
+    Some(NormalizedProject {
+        key: fold_case(&display_path),
+        display_path,
+    })
 }
 
 /// The nearest enclosing repository root, if one sits within
@@ -274,6 +326,47 @@ mod tests {
         assert!(
             key.ends_with("thing"),
             "expected the project itself, got {key}"
+        );
+    }
+
+    /// One directory, two spellings, and neither may drift into the other.
+    ///
+    /// Asserted as a pair on purpose. The key must stay folded -- that is
+    /// what stops `~/Code/Api` and `~/code/api` minting two keys and
+    /// letting an `Ignore` set under one spelling lapse under the other --
+    /// and the display half must keep the capitals, or a contributor reads
+    /// a path that exists nowhere on their disk. A future change that
+    /// satisfies either one by breaking the other fails here.
+    ///
+    /// Built by creating the directory and normalizing a SUBDIRECTORY of
+    /// it, so both expected strings come out of the real walk rather than
+    /// being spelled by the test.
+    #[test]
+    fn a_normalized_project_folds_only_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("IronWire");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("Crates").join("Inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let p = normalize_project(sub.to_str().unwrap()).unwrap();
+        assert!(
+            p.display_path.ends_with("IronWire"),
+            "the display half lost the capitals the disk holds: {}",
+            p.display_path
+        );
+        assert_eq!(
+            p.key,
+            fold_case(&p.display_path),
+            "the key must be the folded spelling of the same directory"
+        );
+        // Where folding is a no-op the two are equal by construction, so
+        // the inequality is asserted only where it is a real claim.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(
+            p.key, p.display_path,
+            "on a case-insensitive filesystem the key must still be folded"
         );
     }
 
