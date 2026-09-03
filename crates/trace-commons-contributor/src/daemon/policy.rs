@@ -24,7 +24,17 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{ConfigStore, DAEMON_PROJECTS_FILE};
 
-pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v1";
+/// The current policy file schema.
+///
+/// Bumped to v2 when project keys became normalized
+/// (`project_key::normalize_project_key`). A v1 file's keys are raw
+/// recorded working directories, which no longer match anything
+/// `project_key_for` produces, so `load` re-keys it. The version is what
+/// makes that happen exactly once.
+pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v2";
+
+/// The pre-normalization schema. Recognized only so `load` can migrate it.
+pub const DAEMON_PROJECTS_SCHEMA_V1: &str = "trace_commons.daemon_projects.v1";
 
 /// The bucket for sessions with no resolvable working directory. Permanently
 /// notify-only.
@@ -39,6 +49,26 @@ pub enum ProjectMode {
     NotifyOnly,
     /// Never offer sessions from this project at all.
     Ignore,
+}
+
+impl ProjectMode {
+    /// The more restrictive of two modes.
+    ///
+    /// `Ignore` beats everything, then `NotifyOnly`, then `AutoUpload`.
+    /// This is the merge rule when normalization collapses two policy
+    /// entries into one key, and the direction is not arbitrary: merging
+    /// toward the permissive mode would take a project the contributor had
+    /// silenced and start offering it again, or take one they had left
+    /// ask-first and upload from it unattended. A merge may only ever ask
+    /// more permission than before, never less.
+    pub fn more_restrictive(self, other: ProjectMode) -> ProjectMode {
+        use ProjectMode::*;
+        match (self, other) {
+            (Ignore, _) | (_, Ignore) => Ignore,
+            (NotifyOnly, _) | (_, NotifyOnly) => NotifyOnly,
+            (AutoUpload, AutoUpload) => AutoUpload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,11 +197,83 @@ impl ProjectPolicy {
             })
     }
 
+    /// Re-key every map through `normalize_project_key`, merging entries
+    /// that collapse onto one key.
+    ///
+    /// Idempotent: a key that is already normalized normalizes to itself,
+    /// so running this on a v2 file changes nothing. The unknown bucket is
+    /// not a path and is carried across untouched.
+    ///
+    /// A key that no longer normalizes at all -- a relative path from a
+    /// hand-edited file, say -- is dropped rather than kept under its old
+    /// spelling, because nothing will ever look it up again.
+    pub fn rekey(&mut self) {
+        let renamed = |key: &str| -> Option<String> {
+            if key == UNKNOWN_PROJECT_KEY {
+                return Some(UNKNOWN_PROJECT_KEY.to_string());
+            }
+            crate::daemon::project_key::normalize_project_key(key)
+        };
+
+        let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
+        for (key, entry) in std::mem::take(&mut self.projects) {
+            let Some(fresh) = renamed(&key) else { continue };
+            let label = project_label_for(&fresh);
+            projects
+                .entry(fresh)
+                .and_modify(|existing| {
+                    existing.mode = existing.mode.more_restrictive(entry.mode);
+                    // The earlier of the two: the contributor's decision
+                    // about this project is as old as its oldest half.
+                    existing.added_at = existing.added_at.min(entry.added_at);
+                    existing.label = label.clone();
+                })
+                .or_insert(ProjectEntry {
+                    mode: entry.mode,
+                    added_at: entry.added_at,
+                    label,
+                });
+        }
+        self.projects = projects;
+
+        let mut contributed: BTreeMap<String, u32> = BTreeMap::new();
+        for (key, count) in std::mem::take(&mut self.contributed) {
+            let Some(fresh) = renamed(&key) else { continue };
+            *contributed.entry(fresh).or_insert(0) += count;
+        }
+        self.contributed = contributed;
+
+        let mut declined: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+        for (key, at) in std::mem::take(&mut self.arming_declined_at) {
+            let Some(fresh) = renamed(&key) else { continue };
+            // The most recent decline wins: a merged project was declined
+            // as recently as its most recent half, which is what the
+            // cooldown should measure from.
+            declined
+                .entry(fresh)
+                .and_modify(|existing| *existing = (*existing).max(at))
+                .or_insert(at);
+        }
+        self.arming_declined_at = declined;
+
+        self.schema_version = DAEMON_PROJECTS_SCHEMA.to_string();
+    }
+
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let Some(body) = store.read_daemon_file(DAEMON_PROJECTS_FILE)? else {
             return Ok(Self::new());
         };
-        serde_json::from_slice(&body).context("parsing daemon project policy")
+        let mut policy: Self =
+            serde_json::from_slice(&body).context("parsing daemon project policy")?;
+        // Migrate in memory on every load rather than rewriting the file
+        // here: `load` has no business writing, and the next `save` -- which
+        // every mutation already performs -- persists the v2 form. A file
+        // that is never mutated again is migrated identically on every read,
+        // which costs one normalization pass and is always correct.
+        if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
+            policy.rekey();
+        }
+        Ok(policy)
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -939,5 +1041,137 @@ mod tests {
         assert_eq!(project_key_for(Some("")), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("/")), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("relative")), UNKNOWN_PROJECT_KEY);
+    }
+
+    #[test]
+    fn ignore_survives_a_rekey_that_merges_two_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("crates").join("inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // A v1 file: two entries that Task 1 collapses into one key, with
+        // the more permissive mode listed second so a naive last-write-wins
+        // would lose the Ignore.
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            root.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: "repo".to_string(),
+            },
+        );
+        p.projects.insert(
+            sub.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::AutoUpload,
+                added_at: now(),
+                label: "inner".to_string(),
+            },
+        );
+
+        p.rekey();
+
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        assert_eq!(p.projects.len(), 1);
+        assert_eq!(p.resolve(&key), ProjectMode::Ignore);
+        assert_eq!(p.schema_version, DAEMON_PROJECTS_SCHEMA);
+    }
+
+    #[test]
+    fn a_rekey_carries_contribution_counts_and_declines_across() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.contributed.insert(root.to_string_lossy().to_string(), 3);
+        p.contributed.insert(sub.to_string_lossy().to_string(), 4);
+        p.arming_declined_at
+            .insert(sub.to_string_lossy().to_string(), now());
+
+        p.rekey();
+
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        // Counts for two spellings of one project are one project's count.
+        assert_eq!(p.contributed.get(&key), Some(&7));
+        assert!(p.arming_declined_at.contains_key(&key));
+    }
+
+    #[test]
+    fn a_rekey_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.set_mode(root.to_str().unwrap(), ProjectMode::Ignore, now())
+            .unwrap();
+
+        p.rekey();
+        let once = p.clone();
+        p.rekey();
+        assert_eq!(p, once);
+    }
+
+    #[test]
+    fn loading_a_v1_file_rekeys_it() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            sub.to_string_lossy().to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: "sub".to_string(),
+            },
+        );
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        assert_eq!(loaded.resolve(&key), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn the_unknown_bucket_is_never_rekeyed() {
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        p.projects.insert(
+            UNKNOWN_PROJECT_KEY.to_string(),
+            ProjectEntry {
+                mode: ProjectMode::Ignore,
+                added_at: now(),
+                label: UNKNOWN_PROJECT_KEY.to_string(),
+            },
+        );
+        p.rekey();
+        assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::Ignore);
+    }
+
+    #[test]
+    fn ignore_is_the_most_restrictive_mode() {
+        use ProjectMode::*;
+        assert_eq!(Ignore.more_restrictive(AutoUpload), Ignore);
+        assert_eq!(AutoUpload.more_restrictive(Ignore), Ignore);
+        assert_eq!(NotifyOnly.more_restrictive(AutoUpload), NotifyOnly);
+        assert_eq!(AutoUpload.more_restrictive(AutoUpload), AutoUpload);
     }
 }
