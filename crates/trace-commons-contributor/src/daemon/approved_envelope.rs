@@ -380,6 +380,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/Users/z/code/proj".into(),
+            session_cwd: None,
             project_label: "proj".into(),
             path: std::path::PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),
             size_bytes: 100,

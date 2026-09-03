@@ -566,6 +566,8 @@ fn visit_session(
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
+        // The raw recorded cwd, which `project_key_for` normalized away.
+        session_cwd: cwd.clone(),
         project_label: disambiguated_label(&project_key, &known),
         path: obs.path.clone(),
         size_bytes: obs.size_bytes,

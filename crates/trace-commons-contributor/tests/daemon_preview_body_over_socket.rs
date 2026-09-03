@@ -118,6 +118,7 @@ impl Harness {
                     source: "claude-code".into(),
                     declared_source: None,
                     project_key: "/Users/testuser/code/myproj".into(),
+                    session_cwd: None,
                     project_label: "myproj".into(),
                     path: session_ref.path.clone(),
                     size_bytes: session_ref.size_bytes,

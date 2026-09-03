@@ -70,6 +70,22 @@ pub struct QueueEntry {
     pub declared_source: Option<String>,
     /// The full local working directory. Local-only, like `path`.
     pub project_key: String,
+    /// The working directory the session actually recorded, when it differs
+    /// from `project_key`.
+    ///
+    /// `project_key` is normalized to the enclosing repository root, which
+    /// is what makes one repo one group no matter which agent recorded the
+    /// session or which subdirectory it started in. That normalization
+    /// throws away a real fact -- *where* it ran -- and the folder detail
+    /// view puts it back. Local-only, exactly like `project_key` and
+    /// `path`: it is a filesystem path and never reaches an audit row, a
+    /// notification, a history record, or the wire.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub session_cwd: Option<String>,
     /// What consumers display.
     pub project_label: String,
     /// The session file. Present so the uploader can re-read and re-hash it.
@@ -1145,6 +1161,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/Users/z/code/proj".into(),
+            session_cwd: None,
             project_label: "proj".into(),
             path: PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),
             size_bytes: 100,
@@ -2223,5 +2240,27 @@ mod tests {
         q.entries.push(entry_in("/w/alpha", QueueState::Pending));
         assert_eq!(q.clear_project_ignored("/w/alpha"), 0);
         assert_eq!(q.all().len(), 1);
+    }
+
+    #[test]
+    fn an_entry_remembers_where_the_session_actually_ran() {
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.project_key = "/repo".to_string();
+        e.session_cwd = Some("/repo/crates/inner".to_string());
+
+        let round_tripped: QueueEntry =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(
+            round_tripped.session_cwd.as_deref(),
+            Some("/repo/crates/inner")
+        );
+    }
+
+    #[test]
+    fn an_entry_written_before_session_cwd_existed_still_loads() {
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("session_cwd");
+        let loaded: QueueEntry = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.session_cwd, None);
     }
 }
