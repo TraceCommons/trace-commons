@@ -1172,6 +1172,7 @@ mod tests {
         HistoryRecord {
             submission_id: submission_id.to_string(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: status.to_string(),
             credit_points_pending: 0.0,
@@ -1221,6 +1222,7 @@ mod tests {
         let record = HistoryRecord {
             submission_id: String::new(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: "accepted".to_string(),
             credit_points_pending: 0.0,
@@ -1239,6 +1241,7 @@ mod tests {
         let mut record = HistoryRecord {
             submission_id: String::new(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: "submitted".to_string(),
             credit_points_pending: 3.0,

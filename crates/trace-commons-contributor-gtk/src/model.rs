@@ -120,6 +120,22 @@ pub struct QueueEntry {
     pub project_id: String,
     #[serde(default)]
     pub project_label: String,
+    /// The project's folder, `~`-abbreviated, for display only.
+    ///
+    /// The daemon relaxed its path rule in exactly one place to send this
+    /// (`ipc::display_path`), because a label can keep two projects distinct
+    /// but can never make them identifiable, and the folder rows are where
+    /// that difference is decided. Never logged, never in a notification,
+    /// never in a history record.
+    #[serde(default)]
+    pub project_path: String,
+    /// Where this session actually ran, when that is not the project root.
+    ///
+    /// `None` both when the daemon predates the field and when the session
+    /// ran at the root -- the daemon sends null rather than repeating
+    /// `project_path`, so a row draws this line only when it says something.
+    #[serde(default)]
+    pub session_path: Option<String>,
     /// The size of the session file on disk. This is **not** what would be
     /// sent; `PreviewSummary::would_send_bytes` is, and it is usually
     /// larger. Never label this one "would send".
@@ -191,6 +207,15 @@ pub struct PreviewSummary {
     pub opening_prompt: String,
     #[serde(default)]
     pub redactions: std::collections::BTreeMap<String, u32>,
+    /// Distinct values removed per label, beside `redactions`' occurrence
+    /// counts.
+    ///
+    /// The redactor mints one placeholder per DISTINCT value and reuses it
+    /// wherever that value recurs, so one path referenced two hundred times
+    /// is two hundred occurrences and one value. See
+    /// [`crate::redaction_labels::line`].
+    #[serde(default)]
+    pub redactions_distinct: std::collections::BTreeMap<String, u32>,
     #[serde(default)]
     pub pii_labels_present: Vec<String>,
     #[serde(default)]
@@ -420,6 +445,13 @@ pub struct Project {
     pub project_id: String,
     #[serde(default)]
     pub project_label: String,
+    /// The project's folder, `~`-abbreviated, for display only.
+    ///
+    /// Same bound as [`QueueEntry::project_path`]: rendered, never logged,
+    /// never persisted. It is what lets a history folder row name the
+    /// repository it stands for rather than only its basename.
+    #[serde(default)]
+    pub project_path: String,
     #[serde(default)]
     pub mode: String,
     #[serde(default)]
@@ -452,6 +484,16 @@ pub struct HistoryRecord {
     pub submission_id: String,
     #[serde(default)]
     pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The opaque project id, for grouping history the same way the queue
+    /// groups: on identity rather than on a display name.
+    ///
+    /// A one-way id, never a path -- the daemon's path relaxation reaches
+    /// the socket's live views and never a persisted history record. Empty
+    /// for a record written before project keys were normalized, which is
+    /// why `history_folders` falls back to the label rather than putting
+    /// every such record in one folder.
+    #[serde(default)]
+    pub project_id: String,
     #[serde(default)]
     pub project_label: String,
     #[serde(default)]
@@ -686,6 +728,7 @@ mod tests {
             event_count: 0,
             opening_prompt: String::new(),
             redactions: Default::default(),
+            redactions_distinct: Default::default(),
             pii_labels_present: vec![],
             consent_scopes: vec![],
             residual_risk: String::new(),
@@ -708,6 +751,7 @@ mod tests {
             event_count: 1,
             opening_prompt: String::new(),
             redactions,
+            redactions_distinct: Default::default(),
             pii_labels_present: vec![],
             consent_scopes: vec![],
             residual_risk: "pattern-based".to_string(),
@@ -732,6 +776,7 @@ mod tests {
             event_count: 0,
             opening_prompt: String::new(),
             redactions,
+            redactions_distinct: Default::default(),
             pii_labels_present: vec![],
             consent_scopes: vec![],
             residual_risk: String::new(),
@@ -754,6 +799,7 @@ mod tests {
             event_count: 0,
             opening_prompt: String::new(),
             redactions,
+            redactions_distinct: Default::default(),
             pii_labels_present: vec![],
             consent_scopes: vec![],
             residual_risk: String::new(),
@@ -805,5 +851,92 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(entry.agent_label(), "trajectory");
+    }
+
+    #[test]
+    fn a_queue_entry_decodes_the_project_and_session_paths() {
+        let e: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e1",
+            "project_id": "proj_a",
+            "project_label": "repo",
+            "project_path": "~/code/repo",
+            "session_path": "~/code/repo/crates/inner",
+            "state": "pending"
+        }))
+        .unwrap();
+        assert_eq!(e.project_path, "~/code/repo");
+        assert_eq!(e.session_path.as_deref(), Some("~/code/repo/crates/inner"));
+    }
+
+    #[test]
+    fn a_queue_entry_from_an_older_daemon_has_no_paths() {
+        let e: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e1", "project_id": "proj_a",
+            "project_label": "repo", "state": "pending"
+        }))
+        .unwrap();
+        assert_eq!(e.project_path, "");
+        assert_eq!(e.session_path, None);
+    }
+
+    #[test]
+    fn a_preview_summary_decodes_distinct_redaction_counts() {
+        let p: PreviewSummary = serde_json::from_value(serde_json::json!({
+            "redactions": { "local_path": 185 },
+            "redactions_distinct": { "local_path": 12 }
+        }))
+        .unwrap();
+        assert_eq!(p.redactions.get("local_path"), Some(&185));
+        assert_eq!(p.redactions_distinct.get("local_path"), Some(&12));
+    }
+
+    #[test]
+    fn a_preview_summary_from_an_older_daemon_has_no_distinct_counts() {
+        let p: PreviewSummary = serde_json::from_value(serde_json::json!({
+            "redactions": { "local_path": 185 }
+        }))
+        .unwrap();
+        assert!(p.redactions_distinct.is_empty());
+    }
+
+    #[test]
+    fn a_history_record_decodes_its_project_id() {
+        let r: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "s1",
+            "project_id": "proj_a",
+            "project_label": "repo",
+            "status": "accepted"
+        }))
+        .unwrap();
+        assert_eq!(r.project_id, "proj_a");
+    }
+
+    #[test]
+    fn a_history_record_from_before_the_upgrade_has_no_project_id() {
+        let r: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "s1", "project_label": "repo", "status": "accepted"
+        }))
+        .unwrap();
+        assert_eq!(r.project_id, "");
+    }
+
+    #[test]
+    fn a_project_decodes_its_path() {
+        let p: Project = serde_json::from_value(serde_json::json!({
+            "project_id": "proj_a",
+            "project_label": "repo",
+            "project_path": "~/code/repo"
+        }))
+        .unwrap();
+        assert_eq!(p.project_path, "~/code/repo");
+    }
+
+    #[test]
+    fn a_project_from_an_older_daemon_has_no_path() {
+        let p: Project = serde_json::from_value(serde_json::json!({
+            "project_id": "proj_a", "project_label": "repo"
+        }))
+        .unwrap();
+        assert_eq!(p.project_path, "");
     }
 }
