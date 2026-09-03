@@ -147,4 +147,82 @@ public class RedactionLabelsTests
             "1 secret found here is still in what would be sent",
             RedactionLabels.SurvivorLine(counts));
     }
+
+    /// <summary>
+    /// The card's "removed by pattern" figure carries two different numbers --
+    /// how many times a pattern fired, and how many distinct values that was
+    /// -- and dropping either one misstates the reach of scrubbing.
+    /// </summary>
+    [Fact]
+    public void AnEmptyTallyIsNothingMatched()
+    {
+        Assert.Equal(RedactionLabels.NothingMatched, RedactionLabels.Line(Map(), Map()));
+        Assert.Equal(0, RedactionLabels.Total(Map()));
+    }
+
+    [Fact]
+    public void LabelsAreHumanReadable()
+        => Assert.Equal("3 local path", RedactionLabels.Line(Map(("local_path", 3)), Map()));
+
+    [Fact]
+    public void DistinctCountsAreShownWhenTheyDifferFromOccurrences()
+        => Assert.Equal(
+            "185 local path (12 distinct)",
+            RedactionLabels.Line(Map(("local_path", 185)), Map(("local_path", 12))));
+
+    [Fact]
+    public void DistinctIsOmittedWhenEveryOccurrenceIsItsOwnValue()
+        // "3 secret (3 distinct)" says the same thing twice.
+        => Assert.Equal(
+            "3 secret",
+            RedactionLabels.Line(Map(("secret", 3)), Map(("secret", 3))));
+
+    [Fact]
+    public void DistinctIsOmittedWhenTheDaemonDidNotReportIt()
+        => Assert.Equal("3 secret", RedactionLabels.Line(Map(("secret", 3)), Map()));
+
+    [Fact]
+    public void ADistinctCountAboveItsOccurrenceCountIsIgnored()
+        // Impossible from a correct daemon; "3 secret (9 distinct)" would be
+        // worse than saying nothing.
+        => Assert.Equal(
+            "3 secret",
+            RedactionLabels.Line(Map(("secret", 3)), Map(("secret", 9))));
+
+    [Fact]
+    public void TheBiggestCountLeadsAndTiesBreakOnLabel()
+        => Assert.Equal(
+            "185 local path  \u00b7  3 email  \u00b7  3 secret",
+            RedactionLabels.Line(
+                Map(("secret", 3), ("local_path", 185), ("email", 3)),
+                Map()));
+
+    [Fact]
+    public void TotalSumsOccurrencesNotDistinct()
+        => Assert.Equal(5, RedactionLabels.Total(Map(("a", 2), ("b", 3))));
+
+    /// <summary>
+    /// <c>residual_secret_at:*</c> counts a secret that was DETECTED AND NOT
+    /// REMOVED, and this line renders under the heading "Removed by pattern",
+    /// so including it would state the exact opposite of what happened -- on
+    /// the screen where someone is deciding whether to send the thing.
+    /// </summary>
+    [Fact]
+    public void ATallyDoesNotCountASurvivorAsRemoved()
+    {
+        var counts = Map(("local_path", 3), ("residual_secret_at:events.correction", 1));
+
+        Assert.Equal("3 local path", RedactionLabels.Line(counts, Map()));
+        Assert.Equal(3, RedactionLabels.Total(counts));
+    }
+
+    /// <summary>A session whose only count is a survivor removed nothing.</summary>
+    [Fact]
+    public void ATallyOfOnlyASurvivorMatchedNothing()
+    {
+        var counts = Map(("residual_secret_at:events.x", 1));
+
+        Assert.Equal(RedactionLabels.NothingMatched, RedactionLabels.Line(counts, Map()));
+        Assert.Equal(0, RedactionLabels.Total(counts));
+    }
 }
