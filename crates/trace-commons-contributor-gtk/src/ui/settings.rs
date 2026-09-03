@@ -673,7 +673,7 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         "A background watcher is running separately. It keeps going when this window closes."
     };
     let connected = if status.logged_in {
-        "Connected to Trace Commons."
+        concat!("Connected to ", copy::app_name!(), ".")
     } else {
         "Not connected. Sessions are still being queued; nothing can be sent yet, and nothing \
          has been lost."
