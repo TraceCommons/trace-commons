@@ -317,6 +317,24 @@ fn push_off_marker(text: &str, cut: usize, start: usize) -> usize {
     cut
 }
 
+/// The end of an angle-bracketed marker whose prefix ends at `after_prefix`,
+/// or `None` if what follows is not one.
+///
+/// The `<PRIVATE_` arm's grammar: `[A-Za-z0-9_]+` -- at least one byte --
+/// then `>`. The `<REDACTED_PRIVATE_KEY>` arm is a fixed literal and does not
+/// use this.
+fn angle_marker_end(bytes: &[u8], after_prefix: usize) -> Option<usize> {
+    let mut j = after_prefix;
+    while j < bytes.len() && is_marker_word_byte(bytes[j]) {
+        j += 1;
+    }
+    if j > after_prefix && bytes.get(j) == Some(&b'>') {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
 /// Finds the redaction markers the scrubbing pipeline leaves behind, as byte
 /// ranges into `text`, in order.
 ///
@@ -326,32 +344,45 @@ fn push_off_marker(text: &str, cut: usize, start: usize) -> usize {
 /// exactly the ones the view cares about.
 ///
 /// This is the reference implementation's regex,
-/// `<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, written out rather than
-/// compiled -- this crate carries no regex dependency and the grammar is two
-/// literal prefixes and a terminator. The `[REDACTED...]` arm excludes
-/// newlines as well as `]`: without that, one unclosed bracket anywhere in a
-/// body would let a "marker" run to the end of the file and the chunker
-/// would then refuse to cut there.
+/// `<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`,
+/// written out rather than compiled -- this crate carries no regex dependency
+/// and the grammar is three literal prefixes and a terminator. The
+/// `[REDACTED...]` arm excludes newlines as well as `]`: without that, one
+/// unclosed bracket anywhere in a body would let a "marker" run to the end of
+/// the file and the chunker would then refuse to cut there.
+///
+/// The `<REDACTED_...>` arm exists because the pipeline emits one
+/// angle-bracketed FIXED token, `<REDACTED_PRIVATE_KEY>`
+/// (`trace_contribution.rs`, `apply_pem_block_redaction`). It begins
+/// `<REDACTED_`, not `<PRIVATE_`, and is not square-bracketed, so for as long
+/// as this scanner had only two arms a PEM private key was removed from the
+/// payload and left completely unmarked in the transcript -- the highest-stakes
+/// redaction there is, and the one a contributor could not see had happened.
+/// It was also the one marker the chunker would happily cut in half, since
+/// this same scan is what protects them.
+///
+/// The arm is the LITERAL token, deliberately not a general
+/// `<REDACTED_[A-Za-z0-9_]+>`. A general arm would mark any
+/// `<REDACTED_ANYTHING>` a contributor typed themselves, telling them the
+/// pipeline removed something it never touched -- the same class of false
+/// statement as reporting a surviving secret as removed, on the same consent
+/// surface. Overstating what scrubbing did is not a safer failure than
+/// understating it.
+///
+/// The cost is that a NEW angle-bracketed fixed token would go unmarked
+/// exactly as this one did. `every_fixed_token_the_pipeline_emits_is_matched`
+/// is the guard: it enumerates them and fails if one is not matched here.
 pub fn marker_spans(text: &str) -> Vec<Range<usize>> {
     const PRIVATE: &[u8] = b"<PRIVATE_";
+    const REDACTED_ANGLE: &[u8] = b"<REDACTED_PRIVATE_KEY>";
     const REDACTED: &[u8] = b"[REDACTED";
     let bytes = text.as_bytes();
     let mut spans = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
         let end = match bytes[i] {
-            b'<' if bytes[i..].starts_with(PRIVATE) => {
-                let mut j = i + PRIVATE.len();
-                while j < bytes.len() && is_marker_word_byte(bytes[j]) {
-                    j += 1;
-                }
-                // `[A-Za-z0-9_]+` needs at least one byte, then `>`.
-                if j > i + PRIVATE.len() && bytes.get(j) == Some(&b'>') {
-                    Some(j + 1)
-                } else {
-                    None
-                }
-            }
+            b'<' if bytes[i..].starts_with(PRIVATE) => angle_marker_end(bytes, i + PRIVATE.len()),
+            b'<' if bytes[i..].starts_with(REDACTED_ANGLE) => Some(i + REDACTED_ANGLE.len()),
             b'[' if bytes[i..].starts_with(REDACTED) => {
                 let mut j = i + REDACTED.len();
                 while j < bytes.len() && bytes[j] != b']' && bytes[j] != b'\n' {
@@ -709,6 +740,11 @@ mod tests {
             "<PRIVATE_SECRET_1>",
             "[REDACTED:aws_secret_key]",
             "[REDACTED]",
+            // Until the scanner grew its `<REDACTED_` arm this one matched
+            // nothing, so it was also the one marker the chunker would cut
+            // in half -- a private key rendering as two fragments across a
+            // boundary.
+            "<REDACTED_PRIVATE_KEY>",
         ] {
             for offset in (TARGET_CHUNK_BYTES - marker.len() - 4)..(TARGET_CHUNK_BYTES + 4) {
                 // No newlines anywhere, so rule 1 cannot apply and the cut
@@ -763,6 +799,37 @@ mod tests {
         }
     }
 
+    /// Every FIXED token the redaction pipeline emits must be matched here.
+    ///
+    /// The `<REDACTED_PRIVATE_KEY>` arm is a literal rather than a general
+    /// `<REDACTED_...>`, so that a contributor's own prose is never claimed as
+    /// a redaction. The price of the literal is that a NEW fixed token would
+    /// go unmarked exactly as that one did for so long. This is the guard on
+    /// that price: when the pipeline grows a token, add it here, and this test
+    /// fails until the scanner knows about it.
+    ///
+    /// Sourced from `trace-commons-protocol`'s `trace_contribution.rs` --
+    /// `apply_redaction_ranges`, `apply_pem_block_redaction`, `redacted_marker`
+    /// -- and `redaction.rs`'s `REDACTED`.
+    #[test]
+    fn every_fixed_token_the_pipeline_emits_is_matched() {
+        for token in [
+            "[REDACTED]",
+            "[REDACTED:aws_secret_key]",
+            "[REDACTED:person_name]",
+            "[REDACTED_PATH]",
+            "<REDACTED_PRIVATE_KEY>",
+        ] {
+            let body = format!("before {token} after");
+            let found: Vec<&str> = marker_spans(&body).into_iter().map(|s| &body[s]).collect();
+            assert_eq!(
+                found,
+                vec![token],
+                "the pipeline emits {token:?} and the scanner does not know it"
+            );
+        }
+    }
+
     /// The marker grammar is the reference implementation's regex,
     /// `<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, and the three shells
     /// have to agree on it or they protect different things.
@@ -783,6 +850,29 @@ mod tests {
             ("<PRIVATE_>", &[]),
             // A space is not `[A-Za-z0-9_]`.
             ("<PRIVATE_A B>", &[]),
+            // The angle-bracketed FIXED token the PEM path emits. For a long
+            // time this matched neither arm, so a private key was removed
+            // from the payload and left unmarked in the transcript.
+            (
+                "key <REDACTED_PRIVATE_KEY> here",
+                &["<REDACTED_PRIVATE_KEY>"],
+            ),
+            // The arm is the literal token, not a general `<REDACTED_...>`.
+            // Prose a contributor typed must NOT be claimed as a redaction.
+            ("<REDACTED_ANYTHING_ELSE>", &[]),
+            ("<REDACTED_PUBLIC_KEY>", &[]),
+            ("<REDACTED_>", &[]),
+            ("<REDACTED>", &[]),
+            // All three families in one body, in document order.
+            (
+                "<PRIVATE_LOCAL_PATH_1> [REDACTED:person_name] <REDACTED_PRIVATE_KEY> [REDACTED]",
+                &[
+                    "<PRIVATE_LOCAL_PATH_1>",
+                    "[REDACTED:person_name]",
+                    "<REDACTED_PRIVATE_KEY>",
+                    "[REDACTED]",
+                ],
+            ),
             // Not a marker family we own.
             ("<html> [note] <PRIVATE", &[]),
             // The newline exclusion: an unclosed bracket must not swallow

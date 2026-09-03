@@ -16,7 +16,20 @@
 //! * **Always state the data consequence.** "Nothing was sent unscanned",
 //!   "your queue is safe", "nothing has been lost".
 
-pub const APP_NAME: &str = "Trace Commons";
+/// The app's name, re-exported from its one definition.
+///
+/// This used to be a literal here, and `routing_copy` had its own, and the
+/// Swift views had more. Pointing at `trace_commons_contributor::brand`
+/// makes this file a reader of the name rather than a second author of it.
+///
+/// Re-exporting the constant alone would not have finished the job: most of
+/// the sentences below do not merely *equal* the name, they wrap it in
+/// prose, and a `const` cannot be pasted into another `const`'s middle. So
+/// every one of them is built with [`app_name!`] inside `concat!`, which is
+/// why the macro exists. The name appears as a literal nowhere in this file
+/// except through that macro; what is left is prose in comments, which no
+/// contributor reads.
+pub use trace_commons_contributor::{app_name, brand::APP_NAME};
 
 // --- Queue -------------------------------------------------------------
 
@@ -268,6 +281,33 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 /// one that congratulates.
 pub const NOTHING_MATCHED: &str = "nothing matched";
 
+/// A secret scrubbing FOUND and did not remove.
+///
+/// `residual_secret_at:*` counts a detection that survived redaction --
+/// either a credential inside a correction the contributor wrote, which is
+/// preserved on purpose, or a field the typed traversal does not reach. It
+/// arrives in the same map as every genuine removal and used to render as
+/// one, which is the opposite of the truth on the screen where somebody
+/// decides whether to send the session.
+///
+/// The sites are schema-shaped identifiers (`events.3.correction`), never a
+/// filesystem path and never transcript text.
+///
+/// Says "found here" rather than naming a number of secrets: the count is of
+/// detection SITES, and one site can hold more than one value. Overstating
+/// the precision would be its own small lie.
+pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
+    let head = if count == 1 {
+        "1 secret found here is still in what would be sent".to_string()
+    } else {
+        format!("{count} secrets found here are still in what would be sent")
+    };
+    if sites.is_empty() {
+        return head;
+    }
+    format!("{head} ({})", sites.join(", "))
+}
+
 /// The eyebrow over the count of things that did go out this week.
 pub const CONTRIBUTED: &str = "Contributed";
 
@@ -311,14 +351,22 @@ pub const CONTRIBUTE: &str = "Contribute";
 /// Shown where the transcript would be when the shell is attached to a
 /// daemon it does not host. The contract serves the full redacted body
 /// in-process only; saying so plainly beats an empty box.
-pub const BODY_NOT_AVAILABLE_HERE: &str = "The full text can only be shown by the copy of Trace Commons that is doing the watching. \
+pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
+    "The full text can only be shown by the copy of ",
+    app_name!(),
+    " that is doing the watching. \
      A background watcher is running separately on this machine, so this window can show what \
      would be sent and what was scrubbed, but not the text itself. \
-     `trace-commons-contributor daemon preview` shows the same summary from a terminal.";
+     `trace-commons-contributor daemon preview` shows the same summary from a terminal."
+);
 
 pub const PERMISSIONS_INTRO: &str =
     "If you contribute this session, it will carry these permissions:";
-pub const PERMISSIONS_REQUESTED_NOTE: &str = "These are the permissions this device requests. Trace Commons can narrow them, never widen them.";
+pub const PERMISSIONS_REQUESTED_NOTE: &str = concat!(
+    "These are the permissions this device requests. ",
+    app_name!(),
+    " can narrow them, never widen them."
+);
 pub const UNENROLLED_PREVIEW: &str = "This is an illustration. This device isn't connected yet, so this was built without your \
      identity and nothing here can be contributed.";
 
@@ -678,10 +726,14 @@ pub fn withdraw_result_sentence(reach: Option<&str>) -> String {
 /// no way to obtain. Leads with the fact that nothing happened: a
 /// contributor must not walk away from a failed withdrawal believing their
 /// trace was taken back.
-pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it is \
-     authenticated by your Trace Commons account rather than by this device -- that is what lets \
-     you withdraw a trace after losing the machine that sent it. This build has no account \
-     sign-in yet, so it cannot make the request.";
+pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = concat!(
+    "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it \
+     is authenticated by your ",
+    app_name!(),
+    " account rather than by this device -- that is what lets you withdraw a trace after \
+     losing the machine that sent it. This build has no account sign-in yet, so it cannot \
+     make the request."
+);
 
 /// The daemon's label for "the server has no record of this submission for
 /// this account".
@@ -957,7 +1009,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
         // or a string -- and handled anyway, so a contract change surfaces
         // as a sentence rather than as the fallback below.
         "bio-required-or-null" | "bio-invalid" => "The bio wasn't sent in a form the roster takes.",
-        "not-logged-in" => "This device isn't connected to Trace Commons.",
+        "not-logged-in" => concat!("This device isn't connected to ", app_name!(), "."),
         // The underlying failure is never forwarded by the daemon -- it can
         // carry a server response body or a URL -- so there is nothing more
         // specific to say than that it did not go through.
@@ -975,7 +1027,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
 /// roster when they are still on it.
 pub fn roster_leave_failure_sentence(label: &str) -> String {
     let reason = match label {
-        "not-logged-in" => "This device isn't connected to Trace Commons.",
+        "not-logged-in" => concat!("This device isn't connected to ", app_name!(), "."),
         _ => "The request didn't go through.",
     };
     format!(
@@ -1022,8 +1074,9 @@ pub fn arming_heading(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nYou can turn this off at any \
-     time.";
+     contributed without asking you. You won't review them first.\n\nA session is sent a day \
+     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
+     at any time.";
 pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
 
 // --- Quitting ----------------------------------------------------------
@@ -1039,8 +1092,12 @@ pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running and w
 pub const QUIT_ATTACHED_CONFIRM: &str = "Quit";
 pub const QUIT_ATTACHED_ALSO_STOP: &str = "Quit and stop watching";
 
-pub const QUIT_HOSTING_BODY: &str = "Quitting stops Trace Commons watching for finished sessions. \
-     Nothing is queued or sent until you open it again. Anything already waiting stays waiting.";
+pub const QUIT_HOSTING_BODY: &str = concat!(
+    "Quitting stops ",
+    app_name!(),
+    " watching for finished sessions. Nothing is queued or sent until you open it again. \
+     Anything already waiting stays waiting."
+);
 pub const QUIT_HOSTING_CANCEL: &str = "Cancel";
 pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
 
@@ -1054,8 +1111,10 @@ pub const NOTIFY_NOTHING_SENT: &str = "Nothing is sent until you review them.";
 /// Shown to the desktop's own permission dialog, not to a widget in this
 /// window -- `org.freedesktop.portal.Background`'s `reason` option is
 /// rendered by the portal implementation itself (GNOME Shell, Plasma, ...).
-pub const PORTAL_BACKGROUND_REASON: &str =
-    "Trace Commons reviews new sessions and uploads only what you approve.";
+pub const PORTAL_BACKGROUND_REASON: &str = concat!(
+    app_name!(),
+    " reviews new sessions and uploads only what you approve."
+);
 
 // --- Autostart -----------------------------------------------------------
 
@@ -1063,10 +1122,13 @@ pub const AUTOSTART_HEADING: &str = "Starting automatically";
 /// Shown when the systemd user unit is doing the job. The service name is
 /// not a filesystem path, so naming it here does not violate the no-paths
 /// rule.
-pub const AUTOSTART_SYSTEMD_BODY: &str = "A background service you installed already starts \
-     Trace Commons at login. Manage it with systemctl --user, not from here, so this window and \
-     that service never disagree about whether it's running.";
-pub const AUTOSTART_XDG_LABEL: &str = "Start Trace Commons when you log in";
+pub const AUTOSTART_SYSTEMD_BODY: &str = concat!(
+    "A background service you installed already starts ",
+    app_name!(),
+    " at login. Manage it with systemctl --user, not from here, so this window and that \
+     service never disagree about whether it's running."
+);
+pub const AUTOSTART_XDG_LABEL: &str = concat!("Start ", app_name!(), " when you log in");
 pub const AUTOSTART_XDG_BODY: &str =
     "No background service is installed, so this switch is the other way to do it.";
 
@@ -1097,30 +1159,53 @@ pub fn portal_status_line(
     use crate::portal::BackendState::{Absent, Present, Unknown};
     match (state, systemd_unit_installed) {
         (Present, true) => {
-            "This desktop can list Trace Commons as a background app. The systemd service you \
-             installed is what actually keeps it running."
+            concat!(
+                "This desktop can list ",
+                app_name!(),
+                " as a background app. The systemd service you installed is what actually \
+                 keeps it running."
+            )
         }
         (Present, false) => {
-            "This desktop can list Trace Commons as a background app. That listing alone \
-             doesn't keep it running past login -- the switch above does."
+            concat!(
+                "This desktop can list ",
+                app_name!(),
+                " as a background app. That listing alone doesn't keep it running past login \
+                 -- the switch above does."
+            )
         }
         (Absent, true) => {
-            "This desktop has no background-app list to register with. Nothing is wrong: the \
-             systemd service you installed is what keeps Trace Commons running here, the same \
-             as it would anywhere else."
+            concat!(
+                "This desktop has no background-app list to register with. Nothing is wrong: \
+                 the systemd service you installed is what keeps ",
+                app_name!(),
+                " running here, the same as it would anywhere else."
+            )
         }
         (Absent, false) => {
-            "This desktop has no background-app list to register with, and no systemd service \
-             is installed either, so Trace Commons only runs while this window is open. Turn on \
-             the switch above, or install the service, to change that."
+            concat!(
+                "This desktop has no background-app list to register with, and no systemd \
+                 service is installed either, so ",
+                app_name!(),
+                " only runs while this window is open. Turn on the switch above, or install \
+                 the service, to change that."
+            )
         }
         (Unknown, true) => {
-            "Couldn't tell whether this desktop can list background apps. Either way, the \
-             systemd service you installed is what keeps Trace Commons running."
+            concat!(
+                "Couldn't tell whether this desktop can list background apps. Either way, the \
+                 systemd service you installed is what keeps ",
+                app_name!(),
+                " running."
+            )
         }
         (Unknown, false) => {
-            "Couldn't tell whether this desktop can list background apps. No systemd service is \
-             installed, so right now Trace Commons only runs while this window is open."
+            concat!(
+                "Couldn't tell whether this desktop can list background apps. No systemd \
+                 service is installed, so right now ",
+                app_name!(),
+                " only runs while this window is open."
+            )
         }
     }
 }
@@ -1132,8 +1217,11 @@ pub fn portal_status_line(
 /// does not exist yet (see the report), so nothing renders this today; it
 /// is pinned here so the string is ready and cannot drift from the spec
 /// when onboarding is built.
-pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = "Trace Commons needs to read your Claude \
-     Code and Codex session files. It asks for access to those folders only.";
+pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = concat!(
+    app_name!(),
+    " needs to read your Claude Code and Codex session files. It asks for access to those \
+     folders only."
+);
 
 // --- Health ------------------------------------------------------------
 
@@ -1161,7 +1249,11 @@ pub fn health_sentence(label: &str) -> &'static str {
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
         "claim-mint-failed" | "ingest-unreachable" => {
-            "Can't reach Trace Commons right now. Your queue is safe; it'll retry on its own."
+            concat!(
+                "Can't reach ",
+                app_name!(),
+                " right now. Your queue is safe; it'll retry on its own."
+            )
         }
         // The banner for this condition is built by `daily_cap_sentence`,
         // which can say how many traces are waiting and exactly when the
@@ -1173,8 +1265,11 @@ pub fn health_sentence(label: &str) -> &'static str {
              and they go out when the limit resets."
         }
         "queue-full" => {
-            "Trace Commons has stopped queuing new sessions -- 500 are already waiting. Review or \
-             clear some to start again."
+            concat!(
+                app_name!(),
+                " has stopped queuing new sessions -- 500 are already waiting. Review or clear \
+                 some to start again."
+            )
         }
         // An unrecognized label is still a real condition. Say the true
         // thing that holds for every blocking label rather than inventing a
@@ -1265,8 +1360,13 @@ pub fn reason_sentence(label: &str) -> &'static str {
 /// enough to read.
 pub fn update_offer_line(short_commit: &str) -> String {
     format!(
-        "A newer Trace Commons is available ({short_commit}). Installing it replaces this app; \
-         your queue and everything already waiting in it are untouched."
+        concat!(
+            "A newer ",
+            app_name!(),
+            " is available ({}). Installing it replaces this app; your queue and everything \
+             already waiting in it are untouched."
+        ),
+        short_commit
     )
 }
 
@@ -1275,7 +1375,7 @@ pub const UPDATE_AVAILABLE_ACTION: &str = "Install";
 
 /// Kept as a constant so the banner body and the dialog body cannot drift
 /// apart, since the dialog is the second time a person reads the same fact.
-pub const UPDATE_AVAILABLE_BODY: &str = "A newer Trace Commons is available.";
+pub const UPDATE_AVAILABLE_BODY: &str = concat!("A newer ", app_name!(), " is available.");
 
 /// The confirmation, which is where the actual decision is made.
 pub const UPDATE_CONFIRM_HEADING: &str = "Install the newer version?";
@@ -1290,8 +1390,11 @@ pub fn update_installing_line(percent: u32) -> String {
 }
 
 /// Installed but not yet running.
-pub const UPDATE_READY_BODY: &str = "The update is installed. Quit and reopen Trace Commons to start using it. Your queue stays \
-     exactly where it is.";
+pub const UPDATE_READY_BODY: &str = concat!(
+    "The update is installed. Quit and reopen ",
+    app_name!(),
+    " to start using it. Your queue stays exactly where it is."
+);
 pub const UPDATE_READY_ACTION: &str = "Quit now";
 
 /// Refused or failed. States the data consequence, names no mechanism, and
@@ -1317,9 +1420,13 @@ pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this 
 // this is transcription, not authorship. If a sentence here reads oddly,
 // change it there first.
 
-pub const ONBOARD_WELCOME_TITLE: &str = "Trace Commons";
-pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts to learn from. Almost all of that \
-     data is locked inside companies. Trace Commons is a shared pool that isn't.";
+pub const ONBOARD_WELCOME_TITLE: &str = APP_NAME;
+pub const ONBOARD_WELCOME_BODY_1: &str = concat!(
+    "Coding agents get better when there are real transcripts to learn from. Almost all of \
+     that data is locked inside companies. ",
+    app_name!(),
+    " is a shared pool that isn't."
+);
 /// The bold half of screen 1. Split from the paragraph around it because it
 /// is the promise the whole product is judged against.
 pub const ONBOARD_WELCOME_DECIDES: &str =
@@ -1403,9 +1510,12 @@ pub const ONBOARD_SCAN_OFFER: &str = "You can additionally send the message text
 /// machine to a third party) and the reassurance (an unreachable scanner
 /// holds traces rather than sending them unscanned). Cutting either half
 /// makes the screen dishonest in one direction, so they live in one string.
-pub const ONBOARD_SCAN_DISCLOSURE: &str = "This means your message text is transmitted to NEAR AI before it reaches Trace Commons. If \
-     that scanner is unreachable, nothing is sent at all — traces wait rather than going out \
-     unscanned.";
+pub const ONBOARD_SCAN_DISCLOSURE: &str = concat!(
+    "This means your message text is transmitted to NEAR AI before it reaches ",
+    app_name!(),
+    ". If that scanner is unreachable, nothing is sent at all — traces wait rather than \
+     going out unscanned."
+);
 pub const ONBOARD_SCAN_LOCAL_ONLY: &str = "Local scrubbing only";
 pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
 
@@ -1470,8 +1580,11 @@ pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
 ///
 /// It replaces the state line rather than adding a third: "you'll always be
 /// asked" already says what `Ask me first` says.
-pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = "Trace Commons can't tell which folder these ran in, so they can never be contributed \
-     automatically. You'll always be asked.";
+pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
+    app_name!(),
+    " can't tell which folder these ran in, so they can never be contributed automatically. \
+     You'll always be asked."
+);
 
 /// The per-project control on screen 5. `Ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
@@ -1491,9 +1604,12 @@ pub const ONBOARD_DONE_TITLE: &str = "You're set up. Nothing has been sent.";
 /// where the app actually lives here. Everything after that first clause is
 /// the spec's, unchanged -- the 30-minute quiet period and the at-most-one
 /// -every-4-hours promise are commitments the daemon actually keeps.
-pub const ONBOARD_DONE_BODY: &str = "Trace Commons lives in your system tray. When a session finishes and goes quiet for 30 \
-     minutes, it'll show up there. You'll get at most one notification every 4 hours, and none \
-     at all if there's nothing waiting.";
+pub const ONBOARD_DONE_BODY: &str = concat!(
+    app_name!(),
+    " lives in your system tray. When a session finishes and goes quiet for 30 minutes, it'll \
+     show up there. You'll get at most one notification every 4 hours, and none at all if \
+     there's nothing waiting."
+);
 pub const ONBOARD_DONE_BUTTON: &str = "Finish";
 
 // The roots screen. It runs BEFORE the daemon starts, so it is not one of
@@ -1501,8 +1617,11 @@ pub const ONBOARD_DONE_BUTTON: &str = "Finish";
 // exactly why the roots refusal used to be a dead end.
 
 pub const ROOTS_TITLE: &str = "Which folders may this app watch?";
-pub const ROOTS_BODY: &str = "Trace Commons reads coding-session transcripts. It will not guess where they are, and it \
-     will not watch anything until you say so.";
+pub const ROOTS_BODY: &str = concat!(
+    app_name!(),
+    " reads coding-session transcripts. It will not guess where they are, and it will not \
+     watch anything until you say so."
+);
 /// Says the consequence, per the copy rules. Without this sentence "skip it"
 /// reads as safe, and it is the opposite of safe: an unanswered source is
 /// the one that falls back to the real location.
@@ -1820,12 +1939,13 @@ mod daily_cap_tests {
 // written to replace.
 pub use trace_commons_contributor::routing_copy::{
     IRONWIRE_APPLIES_AT_ONCE, IRONWIRE_APPLY, IRONWIRE_CHECK_UNAVAILABLE, IRONWIRE_CHECKING,
-    IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO, IRONWIRE_PORT_NOTE,
-    IRONWIRE_PORT_TITLE, IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING,
-    IRONWIRE_STATE_WAITING, IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT,
-    TOOL_GEMINI, TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring,
-    ironwire_shows_last_checked, ironwire_state_line, ironwire_state_tone, ironwire_token_line,
-    ironwire_unreachable_line, tool_tone, tool_word,
+    IRONWIRE_CONNECT, IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO,
+    IRONWIRE_LOOK_AGAIN, IRONWIRE_OVERRIDE_TITLE, IRONWIRE_PORT_NOTE, IRONWIRE_PORT_TITLE,
+    IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING, IRONWIRE_STATE_WAITING,
+    IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT, TOOL_GEMINI, TOOL_NOT_USED,
+    TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring, ironwire_discovery_line,
+    ironwire_folder_note_here, ironwire_shows_last_checked, ironwire_state_line,
+    ironwire_state_tone, ironwire_token_line, ironwire_unreachable_line, tool_tone, tool_word,
 };
 
 /// When the daemon last got an answer, or nothing.
@@ -2260,12 +2380,12 @@ mod tests {
         // A backend that exists is always described as such, whether or
         // not systemd is doing the persisting.
         for line in [present_installed, present_bare] {
-            assert!(line.contains("can list Trace Commons as a background app"));
+            assert!(line.contains(concat!("can list ", app_name!(), " as a background app")));
         }
         // A desktop with no backend never says it can -- that would be a
         // false claim, not just an optimistic one.
         for line in [absent_installed, absent_bare] {
-            assert!(!line.contains("can list Trace Commons as a background app"));
+            assert!(!line.contains(concat!("can list ", app_name!(), " as a background app")));
             assert!(line.contains("no background-app list"));
         }
 
@@ -2326,7 +2446,7 @@ mod tests {
 
         for systemd_unit_installed in [true, false] {
             let line = portal_status_line(Unknown, systemd_unit_installed);
-            assert!(!line.contains("can list Trace Commons as a background app"));
+            assert!(!line.contains(concat!("can list ", app_name!(), " as a background app")));
             assert!(!line.contains("no background-app list"));
             assert!(line.to_lowercase().contains("couldn't tell"));
         }
@@ -2778,5 +2898,38 @@ mod tests {
         let lower = ARMING_OFFER_DECLINE.to_lowercase();
         assert!(!lower.contains("never"), "{ARMING_OFFER_DECLINE}");
         assert!(!lower.contains("don't ask"), "{ARMING_OFFER_DECLINE}");
+    }
+}
+
+#[cfg(test)]
+mod residual_copy_tests {
+    use super::*;
+
+    #[test]
+    fn one_survivor_reads_as_one() {
+        assert_eq!(
+            residual_secret_line(1, &[]),
+            "1 secret found here is still in what would be sent"
+        );
+    }
+
+    #[test]
+    fn several_survivors_inflect() {
+        assert!(residual_secret_line(3, &[]).starts_with("3 secrets found here are"));
+    }
+
+    /// The line must say STILL IN, never anything that reads as removal --
+    /// stating the opposite is the defect this whole change exists to fix.
+    #[test]
+    fn the_line_never_claims_the_secret_was_removed() {
+        let line = residual_secret_line(1, &["events.3.correction".to_string()]);
+        assert!(line.contains("still in what would be sent"), "{line}");
+        assert!(!line.to_lowercase().contains("removed"), "{line}");
+    }
+
+    #[test]
+    fn sites_are_listed_when_known() {
+        let line = residual_secret_line(2, &["events.1".to_string(), "events.9".to_string()]);
+        assert!(line.ends_with("(events.1, events.9)"), "{line}");
     }
 }

@@ -280,6 +280,13 @@ char*       tc_discover_sources(void);
  * check_unavailable, probe_reachable, state_off, state_waiting and
  * state_reading. Every value is a non-empty string.
  *
+ * All but one are fixed wording. folder_note names the folder this machine
+ * reads when the folder field is left empty, because every failure sentence
+ * on that surface ends by sending a contributor to that field, and a field
+ * that will not say which folder it means is an instruction with no answer.
+ * It is therefore the one value here that differs between machines, and the
+ * one that can carry a filesystem path.
+ *
  * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
  * question and returns a single list; this is a whole screen's wording and
  * must arrive as a set. Exporting the words one at a time would let a shell
@@ -429,6 +436,25 @@ char*       tc_routing_token_line(const char* token_path);
  * panic.
  */
 char*       tc_routing_unreachable_line(int32_t port);
+
+/* The routing surface's discovery sentence, assembled.
+ *
+ * port is what discover_routing reported, or 0 for a machine that published
+ * no pointer. A port outside 1..65535 is treated as 0 -- the sentence for
+ * "nothing was discovered", which names no port rather than naming one
+ * nothing published.
+ *
+ * A MACHINE WITH NO POINTER IS NOT AN ERROR, and neither branch of this
+ * sentence says otherwise. It is the ordinary state of a machine without
+ * IronWire, and there is nothing here for a caller to handle: both branches
+ * are a real sentence, and neither is a failure to render as one.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_discovery_line(int32_t port);
 
 /* The routing surface's "Last checked ..." sentence, assembled.
  *
