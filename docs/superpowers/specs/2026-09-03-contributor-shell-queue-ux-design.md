@@ -195,9 +195,17 @@ each hit as a labelled chip in the transcript.
 **Two token shapes, not one, and the difference matters.** Only
 `apply_placeholder_regex` mints the numbered `<PRIVATE_([A-Z0-9_]+)_(\d+)>`
 form, and it is called for exactly two labels: `local_path` and
-`private_email`. Everything else is replaced with a FIXED token --
-`<REDACTED_PRIVATE_KEY>` for a PEM block, `[REDACTED]` from the JSON
-key-name redactor -- carrying no label and no ordinal.
+`private_email`. Everything else is replaced with one of three FIXED
+tokens, none of them numbered:
+
+| Token | Covers |
+|---|---|
+| `[REDACTED]` | `secret`, `secret:{pattern}`, `secret:contextual_entropy`, `secret:split_literal`, `sensitive_field` |
+| `<REDACTED_PRIVATE_KEY>` | `secret:pem_private_key` -- angle-bracketed but carrying no index, so it does NOT match the numbered pattern |
+| `[REDACTED:{label}]` | `tool_sensitive_field{:action}`, and every `privacy_filter:{label}` |
+
+Only the third carries a label, so only the third can name its own category
+in a mark. The first two can say that something left and not what.
 
 That includes secrets, which is the category a contributor most wants to
 see. A shell scanning only for the numbered form would mark every path and
@@ -218,7 +226,16 @@ two labels that mint placeholders. `3 secret` will never carry a distinct
 suffix. That is correct rather than a gap -- there is no second number to
 report -- but it means no test may assert a distinct count for a secret
 fixture, and the rendering must omit the suffix rather than print
-`(0 distinct)`.
+`(0 distinct)` -- which, beside a non-zero occurrence count, reads as
+"nothing was removed".
+
+The two layers differ on the wire and a shell must not confuse them.
+`PrivacyMetadata::redaction_distinct_counts` is
+`skip_serializing_if = "BTreeMap::is_empty"`, so on a secrets-only envelope
+the key is absent from the JSON entirely. `PreviewSummary` carries no such
+attribute, so a shell reading a preview always sees the key, as `{}`. Either
+way the renderer's rule is the same: no entry means no distinct count is
+available for that label, not that the count is zero.
 
 **A caveat the UI must carry, not bury.** Placeholders appear where
 redaction *rewrote* a typed field. The detector scans every leaf; the
