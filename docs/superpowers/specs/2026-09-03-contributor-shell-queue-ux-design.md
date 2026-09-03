@@ -420,9 +420,19 @@ is why the count is safe where a context snippet would not be.
 slots -- fills with prefixes of one word.
 
 Live search stays; it is the good part. `remember` moves out of `run()` and
-onto the explicit commit paths only (`onSubmit`, the `Search` button). Same
-defect and same fix in the GTK and Windows shells, whose recents lists are
-the same in-memory design for the same documented reason.
+onto the explicit commit paths only (`onSubmit`, the `Search` button).
+
+**Windows has the same defect and takes the same fix.**
+`PreviewSheetViewModel.RunSearch` calls `Remember(Needle)` on any non-empty
+result, and `PreviewSheet.xaml.cs` calls `RunSearch` from the search box's
+text-changed handler as well as from the button. `Remember` moves onto the
+button and the recents strip only.
+
+**GTK already does this and needs no work.** `connect_search_changed` calls
+`run_search(.., false)`; `remember_search` is called only from
+`connect_activate` and the search button's click, beside the same
+`run_search(.., true)`. The separation is deliberate and carries a comment
+inside `run_search` saying so. Do not "fix" it.
 
 ### 3.4 "nothing matched" gets something to do (item 7)
 
