@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+
+/// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
+fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
+    SubmitBody::for_test(envelope)
+}
 use axum::http::HeaderValue;
 use trace_commons_protocol::llm::recording::{TraceFile, TraceResponse, TraceStep};
 use trace_commons_protocol::trace_contribution::{
@@ -547,9 +552,13 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
         envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
         envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
-        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-            .await
-            .expect("submission mirrors to DB");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(token),
+            submit_body(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
         let Json(event) = append_credit_event_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -1139,9 +1148,13 @@ async fn seed_settlement_credit(state: &Arc<AppState>, token: &str, points: f32)
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
     envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let submission_id = envelope.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-        .await
-        .expect("submission mirrors to DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(token),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
     let Json(event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -5122,6 +5135,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        witness_bypass: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -5934,7 +5948,7 @@ async fn submit_rejects_out_of_range_training_dynamics() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("out-of-range mean_confidence must be rejected");
@@ -5963,7 +5977,7 @@ async fn submit_accepts_reduced_training_dynamics() {
     let result = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await;
     if let Err((status, _)) = &result {
@@ -6172,7 +6186,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("invalid envelope reaches validation while under the rate limit");
@@ -6182,7 +6196,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
     let (status, Json(error)) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("principal over the submission rate limit is denied");
@@ -6192,7 +6206,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
     let (status, _) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("a different principal retains an independent bucket");
@@ -6213,7 +6227,7 @@ async fn submit_rate_limit_handler_honors_explicit_test_override() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("first request reaches validation under the configured test limit");
@@ -6222,7 +6236,7 @@ async fn submit_rate_limit_handler_honors_explicit_test_override() {
     let (status, Json(error)) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("second request exceeds the configured test limit");
@@ -6246,7 +6260,7 @@ async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
         let (status, Json(error)) = submit_trace_handler(
             State(state.clone()),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(envelope.clone()),
+            submit_body(envelope.clone()),
         )
         .await
         .expect_err("grantless authenticated submission is forbidden under the rate limit");
@@ -6257,7 +6271,7 @@ async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
     let (status, Json(error)) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("grantless authenticated submission over the rate limit is denied early");
@@ -6322,7 +6336,7 @@ async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(&token_a),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("principal A reaches validation while under its rate limit");
@@ -6331,15 +6345,16 @@ async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&token_a),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("principal A exhausts its own bucket");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
-    let (status, _) = submit_trace_handler(State(state), auth_headers(&token_b), Json(invalid))
-        .await
-        .expect_err("principal B retains an independent bucket");
+    let (status, _) =
+        submit_trace_handler(State(state), auth_headers(&token_b), submit_body(invalid))
+            .await
+            .expect_err("principal B retains an independent bucket");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -6400,7 +6415,7 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(&signed_token),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("signed principal reaches validation while under its rate limit");
@@ -6409,15 +6424,19 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&signed_token),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("signed principal exhausts its own bucket");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
-    let (status, _) = submit_trace_handler(State(state), auth_headers(static_token), Json(invalid))
-        .await
-        .expect_err("static principal retains an independent bucket");
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(static_token),
+        submit_body(invalid),
+    )
+    .await
+    .expect_err("static principal retains an independent bucket");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -6519,7 +6538,7 @@ async fn submit_rate_limit_caps_in_flight_requests() {
             submit_trace_handler(
                 State(state),
                 auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-                Json(envelope),
+                submit_body(envelope),
             )
             .await
         }));
@@ -6536,7 +6555,7 @@ async fn submit_rate_limit_caps_in_flight_requests() {
         submit_trace_handler(
             State(state),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid),
+            submit_body(invalid),
         ),
     )
     .await
@@ -6578,7 +6597,7 @@ async fn submit_rate_limit_releases_guard_when_request_completes() {
         submit_trace_handler(
             State(state),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid),
+            submit_body(invalid),
         )
         .await
     });
@@ -6617,7 +6636,7 @@ async fn submit_authentication_precedes_rate_limit_accounting() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         HeaderMap::new(),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("unauthenticated submission is rejected");
@@ -6630,7 +6649,7 @@ async fn submit_authentication_precedes_rate_limit_accounting() {
     let (status, _) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("authenticated request reaches validation");
@@ -6652,7 +6671,7 @@ async fn submit_under_rate_limits_succeeds_end_to_end() {
     let Json(receipt) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission under both limits succeeds");
@@ -6676,7 +6695,7 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission succeeds");
@@ -6714,7 +6733,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let Json(first_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(first.clone()),
+        submit_body(first.clone()),
     )
     .await
     .expect("first submission quarantines");
@@ -6733,7 +6752,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let Json(remediated) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(corrected.clone()),
+        submit_body(corrected.clone()),
     )
     .await
     .expect("owned quarantined remediation supersedes");
@@ -6754,7 +6773,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let blocked = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(corrected),
+        submit_body(corrected),
     )
     .await
     .expect_err("other principal cannot remediate");
@@ -6766,9 +6785,10 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     again.submission_id = first.submission_id;
     make_metadata_only_low_risk(&mut again);
     again.privacy.residual_pii_risk = ResidualPiiRisk::High;
-    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
-        .await
-        .expect("accepted remains idempotent");
+    let Json(idempotent) =
+        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(again))
+            .await
+            .expect("accepted remains idempotent");
     assert_eq!(idempotent.status, "accepted");
     let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
         .expect("record reads")
@@ -6792,7 +6812,7 @@ async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("medium-risk submission quarantines");
@@ -6850,7 +6870,7 @@ async fn submit_accepts_medium_risk_when_pilot_flag_enabled() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission succeeds");
@@ -6874,7 +6894,7 @@ async fn submit_ignores_forged_envelope_tenant_scope_at_store_boundary() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds under authenticated tenant");
@@ -6908,7 +6928,7 @@ async fn file_backed_metadata_writes_reject_tenant_storage_drift_before_write() 
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("tenant-a submission succeeds");
 
@@ -6983,7 +7003,7 @@ async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7031,7 +7051,7 @@ async fn revocation_leaves_awarded_final_credit_unchanged() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7086,7 +7106,7 @@ async fn revocation_deletes_stored_envelope_body_and_encrypted_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7158,7 +7178,7 @@ async fn revocation_fails_closed_when_artifact_store_is_unconfigured() {
     let _ = submit_trace_handler(
         State(state_with_store),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds with an artifact store configured");
@@ -7207,7 +7227,7 @@ async fn revocation_tombstone_carries_no_identity_path_or_content() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7267,7 +7287,7 @@ async fn revoking_twice_is_idempotent() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7320,7 +7340,7 @@ async fn revoke_rejects_mismatched_file_record_tenant_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7357,7 +7377,7 @@ async fn revocation_requires_db_mirror_before_file_side_effects_when_required() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds before DB mirror is required");
@@ -7399,7 +7419,7 @@ async fn review_decision_requires_db_mirror_before_file_side_effects_when_requir
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds before DB mirror is required");
@@ -7458,7 +7478,7 @@ async fn review_rejects_mismatched_file_record_tenant_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7491,7 +7511,7 @@ async fn review_rejects_mismatched_envelope_tenant_scope_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7547,7 +7567,7 @@ async fn reviewer_read_surfaces_reject_mismatched_file_record_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7593,7 +7613,7 @@ async fn contributor_credit_read_rejects_mismatched_file_ledger_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7635,7 +7655,7 @@ async fn audit_read_rejects_mismatched_file_event_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7764,7 +7784,7 @@ async fn submit_rejects_mismatched_file_revocation_tenant_before_side_effects() 
     )
     .expect("corrupt revocation writes");
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("mismatched revocation tenant fails closed");
     assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
@@ -7865,14 +7885,14 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let Json(first_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("first submission succeeds");
     let Json(retry_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("idempotent retry bypasses quota");
@@ -7885,7 +7905,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let blocked = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("new tenant submission is rate limited");
@@ -7895,7 +7915,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let _ = submit_trace_handler(
         State(state),
         auth_headers("token-b"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("quota is isolated by tenant");
@@ -7915,14 +7935,14 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("first principal submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("different contributor in same tenant is not blocked by principal quota");
@@ -7930,7 +7950,7 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
     let blocked = submit_trace_handler(
         State(state),
         auth_headers("token-a"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("same principal is rate limited");
@@ -7950,9 +7970,13 @@ async fn submit_quota_ignores_revoked_submissions() {
     );
     let first = sample_envelope().await;
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     revoke_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
@@ -7966,9 +7990,13 @@ async fn submit_quota_ignores_revoked_submissions() {
         Some("Please inspect a different quota-safe workspace".to_string());
     replacement.privacy.redaction_hash = sha256_prefixed("quota replacement trace");
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(replacement))
-        .await
-        .expect("revoked submission no longer consumes quota");
+    let _ = submit_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        submit_body(replacement),
+    )
+    .await
+    .expect("revoked submission no longer consumes quota");
 }
 
 #[test]
@@ -9499,15 +9527,16 @@ async fn submit_rejects_scope_disallowed_by_tenant_policy() {
     let error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect_err("tenant policy rejects disallowed consent scope");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers("token-b"), Json(envelope))
-        .await
-        .expect("tenant without explicit policy can submit");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers("token-b"), submit_body(envelope))
+            .await
+            .expect("tenant without explicit policy can submit");
     assert_eq!(receipt.status, "quarantined");
 }
 
@@ -9544,7 +9573,7 @@ async fn submit_rejects_allowed_use_disallowed_by_tenant_policy() {
         .allowed_uses
         .push(TraceAllowedUse::ModelTraining);
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("tenant policy rejects disallowed allowed use");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
@@ -9577,7 +9606,7 @@ async fn signed_claim_reviewer_cannot_review_decision_outside_source_scope_befor
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&contributor_token),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-scoped quarantined submission succeeds");
@@ -9627,7 +9656,7 @@ async fn tenant_policy_blocks_maintenance_purge_for_disallowed_source_before_del
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only source submission succeeds");
@@ -9686,7 +9715,7 @@ async fn tenant_policy_blocks_privileged_revocation_but_not_owner_revocation() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only source submission succeeds");
@@ -9747,7 +9776,7 @@ async fn privileged_revocation_requires_explicit_reason_after_source_abac() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -9792,15 +9821,16 @@ async fn submit_requires_explicit_tenant_policy_when_configured() {
     let error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect_err("tenant without policy cannot submit when required");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
-        .await
-        .expect("tenant with policy can submit");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+            .await
+            .expect("tenant with policy can submit");
     assert_eq!(receipt.status, "quarantined");
 }
 
@@ -12531,9 +12561,13 @@ async fn ranker_export_skips_source_without_required_allowed_use_when_no_policy(
     source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
     source.value.submission_score = 0.95;
     let submission_id = source.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(source))
-        .await
-        .expect("source can submit before export source ABAC");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(source),
+    )
+    .await
+    .expect("source can submit before export source ABAC");
 
     let Json(candidates) = ranker_training_candidates_handler(
         State(state),
@@ -12579,7 +12613,7 @@ async fn submit_writes_encrypted_artifact_receipt_when_configured() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12628,7 +12662,7 @@ async fn backfill_object_ref_preserves_record_artifact_store_across_store_cutove
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("legacy encrypted submission succeeds");
@@ -12735,7 +12769,7 @@ async fn encrypted_object_ref_reads_require_matching_configured_store_alias() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("encrypted submission succeeds");
@@ -12796,7 +12830,7 @@ async fn revocation_tombstone_redaction_hash_blocks_reingest_without_summary_has
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12829,7 +12863,7 @@ async fn revocation_tombstone_redaction_hash_blocks_reingest_without_summary_has
     let duplicate_error = submit_trace_handler(
         State(state),
         auth_headers("token-a"),
-        Json(duplicate_envelope),
+        submit_body(duplicate_envelope),
     )
     .await
     .expect_err("redaction-only tombstone blocks reingest");
@@ -12846,7 +12880,7 @@ async fn tenant_token_scopes_metadata_and_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12892,15 +12926,27 @@ async fn ingestion_writes_derived_analytics_and_duplicate_precheck() {
         }
     }
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(third))
-        .await
-        .expect("third similar submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(third),
+    )
+    .await
+    .expect("third similar submission succeeds");
 
     let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
     assert_eq!(derived.len(), 3);
@@ -13005,7 +13051,7 @@ async fn analytics_broad_release_query_fails_closed_when_privacy_budget_blocks()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -13056,7 +13102,7 @@ async fn analytics_broad_release_requires_noise_calibration_when_cells_clear() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -13105,7 +13151,7 @@ async fn analytics_broad_release_applies_configured_noise_without_leaking_key() 
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -13178,7 +13224,7 @@ async fn analytics_broad_release_fails_closed_when_epsilon_budget_exhausted() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -13265,7 +13311,7 @@ async fn analytics_read_requires_db_mirror_before_file_audit_when_required() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds before required DB mirror mode");
@@ -13316,7 +13362,7 @@ async fn analytics_release_drill_records_smoke_evidence_without_leaking_noise_ke
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -13401,7 +13447,7 @@ async fn reviewer_can_approve_quarantined_trace_and_export_dataset() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -13594,12 +13640,20 @@ async fn reviewer_batch_decision_route_applies_bounded_common_decision() {
     let second = sample_envelope().await;
     let second_id = second.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
 
     let response = app(state.clone())
         .oneshot(
@@ -13671,12 +13725,20 @@ async fn review_routing_summary_reports_queue_pressure_without_trace_bodies() {
     let first = sample_envelope().await;
     let second = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
 
     let response = app(state.clone())
         .oneshot(
@@ -13726,7 +13788,7 @@ async fn review_decision_requires_quarantined_status() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -13766,7 +13828,7 @@ async fn review_decision_blocks_unmaintained_expired_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13810,7 +13872,7 @@ async fn review_rejects_extended_retention_expiration_before_body_read() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13860,7 +13922,7 @@ async fn review_decision_blocks_purged_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13907,7 +13969,7 @@ async fn review_decision_blocks_retention_ineligible_approval() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("aggregate-only quarantined submission succeeds");
@@ -13950,7 +14012,7 @@ async fn trace_review_escalation_marks_high_risk_and_overdue_items() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("submission succeeds");
 
@@ -14001,14 +14063,14 @@ async fn quarantine_queue_prioritizes_escalated_review_items() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(fresh_envelope),
+        submit_body(fresh_envelope),
     )
     .await
     .expect("fresh submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(urgent_envelope),
+        submit_body(urgent_envelope),
     )
     .await
     .expect("urgent submission succeeds");
@@ -14066,7 +14128,7 @@ async fn process_evaluation_worker_attaches_labels_to_accepted_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -15881,7 +15943,7 @@ async fn audit_backfill_enriches_submitted_metadata_from_file_record() {
     make_metadata_only_low_risk(&mut envelope);
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("submission succeeds");
     let record = read_submission_record(temp.path(), "tenant-a", submission_id)
@@ -16287,7 +16349,7 @@ async fn process_evaluation_worker_can_emit_idempotent_ranking_label() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16411,7 +16473,7 @@ async fn process_evaluation_worker_rejects_non_system_ranking_label_source_befor
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16471,7 +16533,7 @@ async fn process_evaluation_worker_rejects_disallowed_ranking_label_before_body_
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -16542,7 +16604,7 @@ async fn process_evaluation_worker_run_uses_external_evaluator_for_hash_only_ran
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16562,7 +16624,7 @@ async fn process_evaluation_worker_run_uses_external_evaluator_for_hash_only_ran
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b accepted submission succeeds");
@@ -16760,7 +16822,7 @@ async fn process_evaluation_worker_rejects_policy_disallowed_sources_before_body
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only submission succeeds under tenant policy");
@@ -16826,7 +16888,7 @@ async fn process_evaluation_worker_allows_policy_evaluation_sources() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-allowed submission succeeds under tenant policy");
@@ -17011,7 +17073,7 @@ async fn replay_export_rejects_extended_retention_expiration_before_body_read() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -17058,7 +17120,7 @@ async fn benchmark_convert_rejects_extended_retention_expiration_before_artifact
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -17108,7 +17170,7 @@ async fn ranker_candidates_reject_extended_retention_expiration_before_export_si
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -17185,7 +17247,7 @@ async fn bulk_export_limit_cap_is_applied_by_export_callers() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -17271,7 +17333,7 @@ async fn export_access_grants_gate_replay_dataset_call_site() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -17402,7 +17464,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -17883,7 +17945,7 @@ async fn export_worker_claims_and_runs_queued_replay_job_from_safe_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission writes file and DB metadata");
@@ -18133,7 +18195,7 @@ async fn export_worker_claims_and_runs_queued_benchmark_job_from_safe_metadata()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission writes file and DB metadata");
@@ -18435,7 +18497,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking source submission writes file and DB metadata");
@@ -20793,12 +20855,20 @@ async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_art
     ];
     let kept_id = kept.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(revoked))
-        .await
-        .expect("revoked candidate submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(kept))
-        .await
-        .expect("kept submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(revoked),
+    )
+    .await
+    .expect("revoked candidate submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(kept),
+    )
+    .await
+    .expect("kept submission succeeds");
     revoke_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
@@ -20948,21 +21018,21 @@ async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original benchmark submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate benchmark submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct benchmark submission succeeds");
@@ -21064,7 +21134,7 @@ async fn benchmark_conversion_writes_provenance_and_revocation_invalidates_it() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21307,7 +21377,7 @@ async fn benchmark_conversion_artifact_tracks_registry_and_evaluator_state() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21370,7 +21440,7 @@ async fn benchmark_lifecycle_update_persists_registry_and_evaluator_state() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21466,7 +21536,7 @@ async fn benchmark_lifecycle_rejects_publish_without_passed_evaluation() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21543,7 +21613,7 @@ async fn benchmark_lifecycle_rejects_publish_without_evaluator_score() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21710,7 +21780,7 @@ async fn benchmark_evaluation_worker_run_marks_candidate_passed_without_publishi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21825,7 +21895,7 @@ async fn benchmark_evaluation_worker_run_uses_configured_external_evaluator() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21956,7 +22026,7 @@ async fn benchmark_evaluation_worker_dry_run_does_not_call_external_evaluator() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -22036,7 +22106,7 @@ async fn benchmark_registry_publication_worker_publishes_passed_evaluations_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -22144,7 +22214,7 @@ async fn benchmark_registry_publication_enqueues_external_registry_outbox() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -22362,7 +22432,7 @@ async fn operational_summary_reports_benchmark_lifecycle_readiness() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -23787,35 +23857,35 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_best),
+        submit_body(tenant_a_best),
     )
     .await
     .expect("tenant a best submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_lower),
+        submit_body(tenant_a_lower),
     )
     .await
     .expect("tenant a lower submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_quarantined),
+        submit_body(tenant_a_quarantined),
     )
     .await
     .expect("tenant a quarantined submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_revoked),
+        submit_body(tenant_a_revoked),
     )
     .await
     .expect("tenant a revoked submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -24092,21 +24162,21 @@ async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original ranker submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate ranker submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct ranker submission succeeds");
@@ -24239,21 +24309,21 @@ async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original ranker pair submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate ranker pair submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct ranker pair submission succeeds");
@@ -24358,14 +24428,14 @@ async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranker source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranker source submission succeeds");
@@ -24573,28 +24643,28 @@ async fn active_learning_queue_is_tenant_scoped_and_excludes_revoked_traces() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_quarantined),
+        submit_body(tenant_a_quarantined),
     )
     .await
     .expect("tenant a quarantined submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_accepted),
+        submit_body(tenant_a_accepted),
     )
     .await
     .expect("tenant a accepted submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_revoked),
+        submit_body(tenant_a_revoked),
     )
     .await
     .expect("tenant a revoked submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_quarantined),
+        submit_body(tenant_b_quarantined),
     )
     .await
     .expect("tenant b quarantined submission succeeds");
@@ -24706,14 +24776,14 @@ async fn maintenance_is_tenant_scoped_denies_contributors_and_prunes_revoked_exp
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a),
+        submit_body(tenant_a),
     )
     .await
     .expect("tenant a submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -24860,7 +24930,7 @@ async fn maintenance_marks_expired_traces_and_excludes_them_from_exports() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25055,7 +25125,7 @@ async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25090,7 +25160,7 @@ async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -25236,7 +25306,7 @@ async fn retention_maintenance_scheduler_tick_purges_tenant_expired_objects_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -25258,7 +25328,7 @@ async fn retention_maintenance_scheduler_tick_purges_tenant_expired_objects_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -25382,7 +25452,7 @@ async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission succeeds");
@@ -25419,7 +25489,7 @@ async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b object-primary submission succeeds");
@@ -25570,7 +25640,7 @@ async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25583,7 +25653,7 @@ async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -25769,7 +25839,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector drill source mirrors into DB");
@@ -25783,7 +25853,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b vector drill source mirrors into DB");
@@ -26008,6 +26078,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        witness_bypass: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -26058,7 +26129,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -26139,7 +26210,7 @@ async fn maintenance_rejects_tampered_retention_legal_hold_before_side_effects()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -26206,7 +26277,7 @@ async fn maintenance_rejects_extended_retention_expiration_before_side_effects()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -26381,7 +26452,7 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -27910,7 +27981,7 @@ async fn revocation_propagation_drill_records_pending_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -27929,7 +28000,7 @@ async fn revocation_propagation_drill_records_pending_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission mirrors to DB");
@@ -28098,7 +28169,7 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -28109,7 +28180,7 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission mirrors to DB");
@@ -28374,7 +28445,7 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -28799,7 +28870,7 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -29032,7 +29103,7 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission mirrors to DB");
@@ -29420,7 +29491,7 @@ async fn canary_read_drill_records_core_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -29614,7 +29685,7 @@ async fn object_primary_read_drill_records_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission succeeds");
@@ -29772,7 +29843,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary submission succeeds");
@@ -29821,7 +29892,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback submission succeeds");
@@ -29897,7 +29968,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a replay source mirrors to DB");
@@ -29943,7 +30014,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed replay source mirrors to DB");
@@ -29961,7 +30032,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored replay source succeeds");
@@ -30066,7 +30137,7 @@ async fn db_tenant_policy_reads_tenant_allowlist_keeps_fallback_tenant_policy_ba
     let tenant_a_error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect_err("tenant-a allowlisted submit obeys DB tenant policy");
@@ -30080,7 +30151,7 @@ async fn db_tenant_policy_reads_tenant_allowlist_keeps_fallback_tenant_policy_ba
     let Json(tenant_b_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b non-allowlisted submit keeps static tenant policy fallback");
@@ -30122,7 +30193,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a source mirrors to DB");
@@ -30181,7 +30252,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed source mirrors to DB");
@@ -30208,7 +30279,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored source succeeds");
@@ -30300,7 +30371,7 @@ async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backe
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary quarantined submission succeeds");
@@ -30355,7 +30426,7 @@ async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backe
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback quarantined submission succeeds");
@@ -30464,7 +30535,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary submission succeeds");
@@ -30563,7 +30634,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback submission succeeds");
@@ -31151,7 +31222,7 @@ async fn rollback_drill_records_smoke_evidence_and_preserves_db_rows() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -31465,7 +31536,7 @@ async fn audit_chain_drill_records_passed_evidence_without_raw_failures() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -31535,7 +31606,7 @@ async fn audit_chain_drill_records_failed_evidence_with_failure_hashes() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -31741,7 +31812,7 @@ async fn maintenance_reconciliation_reports_envelope_object_ref_store_mismatch()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("encrypted submission mirrors to DB");
@@ -31975,7 +32046,7 @@ async fn maintenance_reconciliation_reports_submitted_audit_metadata_drift() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -32244,7 +32315,7 @@ async fn revoke_trace_handler_mirrors_hash_only_revocation_audit_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -32651,7 +32722,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a submission mirrors to DB");
@@ -32670,7 +32741,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed submission mirrors to DB");
@@ -32680,7 +32751,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored submission succeeds");
@@ -33059,13 +33130,17 @@ async fn maintenance_backfill_reports_malformed_submission_metadata() {
     make_metadata_only_low_risk(&mut malformed);
     let malformed_id = malformed.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(valid))
-        .await
-        .expect("valid submission writes file metadata");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(malformed),
+        submit_body(valid),
+    )
+    .await
+    .expect("valid submission writes file metadata");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(malformed),
     )
     .await
     .expect("submission to corrupt writes file metadata");
@@ -33139,7 +33214,7 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .unwrap_or_else(|error| {
@@ -33156,7 +33231,7 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(expired_candidate),
+        submit_body(expired_candidate),
     )
     .await
     .expect("expired candidate source mirrors into DB before local expiration marker");
@@ -33273,7 +33348,7 @@ async fn vector_index_worker_uses_configured_external_embedder() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission mirrors into DB");
@@ -33377,9 +33452,13 @@ async fn vector_index_worker_uses_stored_vector_payloads_for_model_backed_neighb
     first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let first_submission_id = first.submission_id;
     let first_trace_id = first.trace_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(
         backend.as_ref(),
         "tenant-a",
@@ -33406,9 +33485,13 @@ async fn vector_index_worker_uses_stored_vector_payloads_for_model_backed_neighb
     second.trace_card.consent_scope = ConsentScope::RankingTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(backend.as_ref(), "tenant-a", second_submission_id, "")
         .await;
     let Json(response) = vector_index_handler(
@@ -33505,9 +33588,13 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
     first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let first_trace_id = first.trace_id;
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first vector source submission mirrors into DB");
     let _ = vector_index_handler(
         State(state.clone()),
         auth_headers("vector-worker-token-a"),
@@ -33543,9 +33630,13 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
     second.trace_card.consent_scope = ConsentScope::RankingTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(backend.as_ref(), "tenant-a", second_submission_id, "")
         .await;
     let Json(response) = vector_index_handler(
@@ -33632,7 +33723,7 @@ async fn admin_vector_index_drill_records_neighbor_policy_gap_evidence() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("vector source submission mirrors into DB");
@@ -33857,7 +33948,7 @@ async fn vector_index_worker_missing_db_fails_before_retention_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission succeeds");
@@ -33935,7 +34026,7 @@ async fn admin_vector_entries_list_returns_safe_bounded_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission mirrors into DB");
@@ -34647,7 +34738,7 @@ async fn revoked_trace_cannot_be_approved_or_receive_credit_and_listing_skips_by
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -34734,7 +34825,7 @@ async fn reviewer_tokens_are_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -34763,7 +34854,7 @@ async fn contributor_cannot_access_trace_list_or_audit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35266,7 +35357,7 @@ async fn maintenance_can_verify_file_audit_chain() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35344,16 +35435,24 @@ async fn reviewer_trace_list_filters_metadata_by_status_tool_tag_and_risk() {
     let quarantined = sample_envelope().await;
     let quarantined_id = quarantined.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(shell))
-        .await
-        .expect("shell submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(browser))
-        .await
-        .expect("browser submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(quarantined),
+        submit_body(shell),
+    )
+    .await
+    .expect("shell submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(browser),
+    )
+    .await
+    .expect("browser submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(quarantined),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -35476,14 +35575,14 @@ async fn reviewer_trace_list_filters_by_export_purpose() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(accepted),
+        submit_body(accepted),
     )
     .await
     .expect("accepted submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(quarantined),
+        submit_body(quarantined),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -35553,14 +35652,14 @@ async fn audit_events_are_tenant_scoped_for_reviewers() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a),
+        submit_body(tenant_a),
     )
     .await
     .expect("tenant a submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -35640,7 +35739,7 @@ async fn reviewer_can_append_delayed_credit_event() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35681,7 +35780,7 @@ async fn delayed_credit_requires_reason_artifact_ref_and_bounded_delta() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35746,7 +35845,7 @@ async fn manual_training_credit_rejects_source_without_model_training_use() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -35787,7 +35886,7 @@ async fn manual_benchmark_credit_rejects_source_without_benchmark_generation_use
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -35842,7 +35941,7 @@ async fn signed_claim_reviewer_cannot_append_ranking_credit_outside_claim_scope(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&contributor_token),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking-scoped source submission succeeds");
@@ -35894,7 +35993,7 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36024,7 +36123,7 @@ async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_nea
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36192,7 +36291,7 @@ async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36296,7 +36395,7 @@ async fn credit_settlement_required_near_contract_blocks_live_without_config() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36414,7 +36513,7 @@ async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36614,7 +36713,7 @@ async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36889,7 +36988,7 @@ async fn credit_settlement_can_require_central_issuer_approval_for_live_batches(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37230,7 +37329,7 @@ async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_co
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37389,7 +37488,7 @@ async fn contributor_credit_summary_nets_revocation_reversal_against_settled_bal
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -37480,7 +37579,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -37564,7 +37663,7 @@ async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_ef
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37634,7 +37733,7 @@ async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outb
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37736,7 +37835,7 @@ async fn operational_summary_blocks_credit_settlement_without_account_cap() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37855,7 +37954,7 @@ async fn operational_summary_blocks_credit_settlement_without_central_issuer_gat
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38078,7 +38177,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38247,9 +38346,13 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     let Json(first_event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -38273,7 +38376,7 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(second),
+        submit_body(second),
     )
     .await
     .expect("second submission succeeds");
@@ -38468,7 +38571,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38621,7 +38724,7 @@ async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38759,7 +38862,7 @@ async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38867,7 +38970,7 @@ async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38966,7 +39069,7 @@ async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39063,7 +39166,7 @@ async fn credit_settlement_drill_requires_central_issuer_approval_when_configure
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39283,7 +39386,7 @@ async fn credit_settlement_drill_requires_near_adapters_by_default() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39422,7 +39525,7 @@ async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39530,7 +39633,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(high_utility),
+        submit_body(high_utility),
     )
     .await
     .expect("high utility submission succeeds");
@@ -39557,7 +39660,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(held_utility),
+        submit_body(held_utility),
     )
     .await
     .expect("held utility submission succeeds");
@@ -39745,7 +39848,7 @@ async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_sc
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("training submission succeeds");
@@ -39795,7 +39898,7 @@ async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_sc
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -39951,7 +40054,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("training submission succeeds");
@@ -40076,7 +40179,7 @@ async fn credit_settlement_worker_run_respects_source_event_limit() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -40187,7 +40290,7 @@ async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batc
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -40342,7 +40445,7 @@ async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -40543,7 +40646,7 @@ async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failu
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -40631,9 +40734,13 @@ async fn admin_credit_summary_counts_tenant_wide_settled_line_items() {
         envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
         envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
-        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-            .await
-            .expect("submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(token),
+            submit_body(envelope),
+        )
+        .await
+        .expect("submission succeeds");
         let _ = append_credit_event_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -42131,7 +42238,7 @@ async fn benchmark_pipeline_scheduler_tick_evaluates_then_publishes_passed_artif
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -42242,7 +42349,7 @@ async fn benchmark_pipeline_scheduler_tick_dry_run_leaves_lifecycle_and_outbox_u
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -42347,7 +42454,7 @@ async fn process_evaluation_scheduler_tick_evaluates_and_appends_system_ranking_
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted evaluation source submission succeeds");
@@ -42435,7 +42542,7 @@ async fn process_evaluation_scheduler_tick_dry_run_skips_evaluator_and_trace_wri
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted evaluation source submission succeeds");
@@ -43734,7 +43841,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -43778,7 +43885,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -44103,7 +44210,7 @@ async fn credit_settlement_requires_promotable_calibration_for_ranking_utility()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44359,7 +44466,7 @@ async fn ranking_utility_settlement_requires_active_model() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44498,7 +44605,7 @@ async fn ranking_utility_settlement_requires_prediction_ref() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44701,7 +44808,7 @@ async fn ranking_prediction_credit_worker_appends_prediction_bound_credit_once()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45255,7 +45362,7 @@ async fn ranking_feature_worker_creates_reserved_server_provenance_features() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45349,7 +45456,7 @@ async fn ranking_feature_worker_requires_and_uses_active_vector_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission mirrors into DB");
@@ -45450,7 +45557,7 @@ async fn ranking_feature_worker_skips_sources_without_vector_metadata_when_requi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45570,7 +45677,7 @@ async fn ranking_prediction_credit_worker_run_batches_uncredited_predictions_ide
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking submission succeeds");
@@ -46158,7 +46265,7 @@ async fn ranking_prediction_credit_worker_run_records_failed_status_on_fatal_err
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -46300,7 +46407,7 @@ async fn ranking_prediction_credit_run_skips_models_with_uncleared_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(calibration_envelope),
+        submit_body(calibration_envelope),
     )
     .await
     .expect("calibration ranking submission succeeds");
@@ -46409,7 +46516,7 @@ async fn ranking_prediction_credit_run_skips_models_with_uncleared_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("post-calibration ranking submission succeeds");
@@ -46686,7 +46793,7 @@ async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_en
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(issue_envelope),
+        submit_body(issue_envelope),
     )
     .await
     .expect("unrelated model-training source submission succeeds");
@@ -47010,7 +47117,7 @@ async fn ranking_prediction_credit_worker_requires_active_positive_prediction() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -47178,7 +47285,7 @@ async fn ranking_credit_paths_reject_stale_or_underdiverse_calibration_when_gate
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -47495,7 +47602,7 @@ async fn ranking_model_promotion_activates_promotable_candidate() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -47881,7 +47988,7 @@ async fn operational_summary_reports_ranking_adjudication_issues() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("source submission succeeds");
@@ -47981,7 +48088,7 @@ async fn seed_credit_cycle_candidate_with_prediction(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking source submission succeeds");
@@ -49131,7 +49238,7 @@ async fn seed_pairwise_ranking_prediction_source(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("pairwise source submission succeeds");
@@ -49195,7 +49302,7 @@ async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -49685,7 +49792,7 @@ async fn credit_cycle_scheduler_runs_next_eligible_model() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -51237,7 +51344,7 @@ async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_cla
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("unjoined ranking label source submission succeeds");
@@ -51685,7 +51792,7 @@ async fn ranking_model_promotion_worker_run_promotes_calibrated_candidates_only(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -51898,7 +52005,7 @@ async fn ranking_calibration_worker_run_persists_calibration_and_worker_ledger()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -52156,7 +52263,7 @@ async fn ranking_model_promotion_rejects_stale_calibration_dataset_after_model_r
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -52285,7 +52392,7 @@ async fn ranking_model_promotion_rejects_current_evidence_drift_since_calibratio
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -52477,7 +52584,7 @@ async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52555,7 +52662,7 @@ async fn admin_credit_hold_release_unblocks_settlement() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52720,7 +52827,7 @@ async fn admin_credit_hold_routes_are_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52847,7 +52954,7 @@ async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configu
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -53004,7 +53111,7 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -53124,7 +53231,7 @@ async fn admin_credit_risk_summary_is_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -53151,7 +53258,7 @@ async fn admin_credit_risk_summary_is_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -53272,9 +53379,13 @@ async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     let Json(first_event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -53298,7 +53409,7 @@ async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(second),
+        submit_body(second),
     )
     .await
     .expect("second submission succeeds");
@@ -53704,7 +53815,7 @@ async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds before required mirror mode");
@@ -53768,7 +53879,7 @@ async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -53796,7 +53907,7 @@ async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(other_envelope),
+        submit_body(other_envelope),
     )
     .await
     .expect("other tenant submission mirrors to DB");
@@ -54199,7 +54310,7 @@ async fn revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -54347,7 +54458,7 @@ async fn revocation_leaves_settled_benchmark_conversion_credit_intact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission mirrors to DB");
@@ -54672,7 +54783,7 @@ async fn utility_attestation_records_hash_only_evidence_and_appends_credit_once(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -54882,7 +54993,7 @@ async fn ranking_evidence_pipeline_records_hash_only_predictions_and_labels() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -55169,14 +55280,14 @@ async fn ranking_preference_evidence_records_hash_only_pairwise_labels() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -55261,14 +55372,14 @@ async fn ranking_label_sources_require_matching_authority_role() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -55535,14 +55646,14 @@ async fn ranker_training_pairs_include_explicit_preference_labels_before_score_h
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -55620,7 +55731,7 @@ async fn ranking_pairwise_evaluation_report_scores_model_ordering_against_prefer
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking source submission succeeds");
@@ -56018,7 +56129,7 @@ async fn ranking_adjudication_report_surfaces_unresolved_label_and_pairwise_conf
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(disputed_envelope),
+        submit_body(disputed_envelope),
     )
     .await
     .expect("disputed source submission succeeds");
@@ -56032,7 +56143,7 @@ async fn ranking_adjudication_report_surfaces_unresolved_label_and_pairwise_conf
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(conflicting_envelope),
+        submit_body(conflicting_envelope),
     )
     .await
     .expect("conflicting source submission succeeds");
@@ -56195,9 +56306,13 @@ async fn ranking_labeler_reliability_report_hashes_actors_and_counts_conflicts()
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first source submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first source submission succeeds");
 
     let mut second = sample_envelope().await;
     make_metadata_only_low_risk(&mut second);
@@ -56205,9 +56320,13 @@ async fn ranking_labeler_reliability_report_hashes_actors_and_counts_conflicts()
     second.trace_card.consent_scope = ConsentScope::ModelTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second source submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second source submission succeeds");
 
     let _ = ranking_label_handler(
         State(state.clone()),
@@ -56339,7 +56458,7 @@ async fn ranking_predictions_require_registered_model_policy_and_feature_hash() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56612,7 +56731,7 @@ async fn ranking_calibration_run_persists_hash_only_model_quality_gate() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56794,7 +56913,7 @@ async fn ranking_calibration_run_applies_server_min_label_count_floor() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56905,7 +57024,7 @@ async fn ranking_calibration_run_deduplicates_repeated_labels_per_submission_sou
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57033,7 +57152,7 @@ async fn ranking_calibration_run_excludes_latest_disputed_labels_from_joined_evi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57170,7 +57289,7 @@ async fn ranking_calibration_run_applies_server_quality_thresholds() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57719,7 +57838,7 @@ async fn ranking_calibration_run_requires_label_source_diversity() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57841,7 +57960,7 @@ async fn ranking_calibration_run_requires_distinct_label_actors_for_source_diver
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57971,7 +58090,7 @@ async fn ranking_calibration_run_rejects_bad_label_source_cohort_error() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -58116,7 +58235,7 @@ async fn direct_active_ranking_model_registration_requires_target_scoped_promoti
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -58376,14 +58495,14 @@ async fn active_ranking_model_risk_report_flags_post_calibration_evidence_drift(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(calibration_envelope),
+        submit_body(calibration_envelope),
     )
     .await
     .expect("calibration submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("drift submission succeeds");
@@ -59413,7 +59532,7 @@ async fn ranking_utility_settlement_blocks_uncleared_active_model_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("post-calibration drift submission succeeds");
@@ -59579,7 +59698,7 @@ async fn ranking_model_promotion_rejects_latest_nonpromotable_calibration() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62636,7 +62755,7 @@ async fn ranking_evidence_routes_mirror_and_read_from_db_when_reviewer_reads_are
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors into DB");
@@ -62831,7 +62950,7 @@ async fn other_same_tenant_contributor_cannot_see_delayed_credit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62872,7 +62991,7 @@ async fn contributor_cannot_append_delayed_credit_event() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62910,7 +63029,7 @@ async fn central_issuer_allowlist_blocks_positive_credit_issuance() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -63105,7 +63224,7 @@ async fn central_issuer_allowlist_blocks_credit_bearing_process_evaluation_befor
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -63267,7 +63386,7 @@ async fn reviewer_can_append_negative_abuse_penalty() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -63302,9 +63421,13 @@ async fn rejects_unknown_tenant_token() {
     let state = test_state(temp.path().to_path_buf());
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("bad-token"), Json(envelope))
-        .await
-        .expect_err("unknown token is rejected");
+    let error = submit_trace_handler(
+        State(state),
+        auth_headers("bad-token"),
+        submit_body(envelope),
+    )
+    .await
+    .expect_err("unknown token is rejected");
 
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 }
@@ -63327,7 +63450,7 @@ async fn rejects_expired_tenant_token_through_submit_handler() {
     let error = submit_trace_handler(
         State(state),
         auth_headers("expired-token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("expired token is rejected");
@@ -63351,9 +63474,13 @@ async fn accepts_unexpired_tenant_token_through_submit_handler() {
     let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers("fresh-token-a"), Json(envelope))
-        .await
-        .expect("unexpired token is accepted");
+    let _ = submit_trace_handler(
+        State(state),
+        auth_headers("fresh-token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("unexpired token is accepted");
 }
 
 #[tokio::test]
@@ -63381,7 +63508,7 @@ async fn accepts_signed_tenant_token_and_attributes_to_claim_tenant() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("signed tenant token is accepted");
 
@@ -63422,7 +63549,7 @@ async fn accepts_eddsa_signed_tenant_token_and_attributes_to_claim_tenant() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("EdDSA signed tenant token is accepted");
 
@@ -63589,7 +63716,7 @@ async fn rejects_static_tenant_token_when_eddsa_required() {
     let state = test_state_with_required_eddsa_and_static_tokens(temp.path().to_path_buf());
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("static tenant token is rejected when EdDSA is required");
 
@@ -63615,7 +63742,7 @@ async fn rejects_static_tenant_token_when_managed_eddsa_required() {
     state_mut.require_managed_eddsa_signed_tokens = true;
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("static tenant token is rejected when managed EdDSA is required");
 
@@ -63663,7 +63790,7 @@ async fn rejects_hs256_signed_claim_when_eddsa_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 signed tenant claim is rejected when EdDSA is required");
 
@@ -63698,7 +63825,7 @@ async fn rejects_hs256_signed_claim_when_managed_eddsa_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 signed tenant claim is rejected when managed EdDSA is required");
 
@@ -63724,7 +63851,7 @@ async fn accepts_eddsa_signed_claim_when_eddsa_required() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("EdDSA signed tenant token is accepted when EdDSA is required");
 
@@ -63755,7 +63882,7 @@ async fn accepts_managed_eddsa_signed_claim_when_managed_eddsa_required() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("managed EdDSA signed tenant token is accepted when required");
 
@@ -63818,7 +63945,7 @@ async fn managed_eddsa_signed_claim_requires_managed_kid() {
     let missing_kid_error = submit_trace_handler(
         State(state.clone()),
         auth_headers(&missing_kid_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("managed EdDSA requires a key id");
@@ -63832,7 +63959,7 @@ async fn managed_eddsa_signed_claim_requires_managed_kid() {
     let unmanaged_kid_error = submit_trace_handler(
         State(state),
         auth_headers(&unmanaged_kid_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("managed EdDSA rejects unmanaged key ids");
@@ -63853,7 +63980,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&old_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("old managed key is initially accepted");
@@ -63892,7 +64019,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&new_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("new managed key is accepted after refresh");
@@ -63900,7 +64027,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let retired_error = submit_trace_handler(
         State(state),
         auth_headers(&old_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("retired managed key is rejected after refresh");
@@ -63984,7 +64111,7 @@ async fn accepts_keyed_eddsa_signed_tenant_token_for_rotation() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("keyed EdDSA signed tenant token is accepted");
 }
@@ -64027,7 +64154,7 @@ async fn accepts_eddsa_signed_tenant_token_from_active_managed_keyset() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("active managed EdDSA key is accepted");
 }
@@ -64070,7 +64197,7 @@ async fn rejects_eddsa_signed_tenant_token_with_inactive_managed_key() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("inactive managed EdDSA key is rejected");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
@@ -64252,7 +64379,7 @@ async fn rejects_hs256_signed_token_when_only_eddsa_key_is_configured() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 token cannot use EdDSA verifier");
 
@@ -64287,7 +64414,7 @@ async fn accepts_keyed_signed_tenant_token_for_rotation() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("keyed signed tenant token is accepted");
 }
@@ -64312,7 +64439,7 @@ async fn rejects_expired_signed_tenant_token_through_submit_handler() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("expired signed token is rejected");
 
@@ -64343,7 +64470,7 @@ async fn rejects_signed_tenant_token_missing_iat_when_max_ttl_configured() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("max-ttl signed token policy requires issued-at");
 
@@ -64376,7 +64503,7 @@ async fn rejects_signed_tenant_token_exceeding_max_ttl_policy() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("max-ttl signed token policy rejects long-lived tokens");
 
@@ -64410,9 +64537,10 @@ async fn accepts_signed_tenant_token_within_max_ttl_policy() {
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
-        .await
-        .expect("max-ttl signed token policy accepts bounded tokens");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
+            .await
+            .expect("max-ttl signed token policy accepts bounded tokens");
 
     assert_eq!(receipt.status, "accepted");
 }
@@ -64440,7 +64568,7 @@ async fn rejects_signed_tenant_token_missing_jti_when_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("signed token jti policy rejects missing jti");
 
@@ -64473,9 +64601,10 @@ async fn accepts_signed_tenant_token_with_required_jti() {
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
-        .await
-        .expect("signed token jti policy accepts jti-bearing token");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
+            .await
+            .expect("signed token jti policy accepts jti-bearing token");
 
     assert_eq!(receipt.status, "accepted");
 }
@@ -64502,7 +64631,7 @@ async fn rejects_signed_tenant_token_disallowed_submission_use() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("signed token use restriction is rejected");
 
@@ -64541,7 +64670,7 @@ async fn signed_claim_abac_controls_export_surfaces_and_source_filtering() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&benchmark_submit_token),
-        Json(benchmark_source),
+        submit_body(benchmark_source),
     )
     .await
     .expect("benchmark-scoped signed contributor can submit benchmark source");
@@ -64567,7 +64696,7 @@ async fn signed_claim_abac_controls_export_surfaces_and_source_filtering() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&ranking_submit_token),
-        Json(ranking_source),
+        submit_body(ranking_source),
     )
     .await
     .expect("ranking-scoped signed contributor can submit ranking source");
@@ -64682,7 +64811,7 @@ async fn signed_claim_abac_controls_process_eval_and_utility_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&eval_submit_token),
-        Json(eval_source),
+        submit_body(eval_source),
     )
     .await
     .expect("evaluation-scoped signed contributor can submit eval source");
@@ -64707,7 +64836,7 @@ async fn signed_claim_abac_controls_process_eval_and_utility_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&model_submit_token),
-        Json(model_source),
+        submit_body(model_source),
     )
     .await
     .expect("model-scoped signed contributor can submit model source");
@@ -64829,7 +64958,7 @@ async fn rejects_revoked_signed_tenant_token_jti() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("revoked signed token jti is rejected");
 
@@ -64858,7 +64987,7 @@ async fn rejects_unknown_signed_tenant_token_kid() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("unknown signed token kid is rejected");
 
@@ -78282,7 +78411,7 @@ async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -82175,7 +82304,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop
     );
@@ -82184,7 +82315,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            false
+            false,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -82194,7 +82327,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -82204,7 +82339,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Quarantined,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Quarantined
     );
@@ -82222,7 +82359,9 @@ fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, true, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "tool payloads are raw content and must be re-examined before the corpus"
@@ -82249,7 +82388,9 @@ fn any_content_flag_alone_is_enough_to_hold() {
             corpus_status_with_pii_backstop_hold(
                 TraceCorpusStatus::Accepted,
                 &backstop_consent(message_text, tool_payloads, correction),
-                true
+                true,
+                None,
+                None,
             ),
             expected,
             "message_text={message_text} tool_payloads={tool_payloads} \
@@ -82270,7 +82411,9 @@ fn pii_backstop_holds_a_correction_bearing_trace_with_no_other_content() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, true),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "an unredacted correction must be re-examined before the corpus"
@@ -84969,7 +85112,7 @@ async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission mirrors to DB");
@@ -88430,7 +88573,7 @@ async fn submit_records_the_basis_for_the_risk_it_stored() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -88464,7 +88607,7 @@ async fn operator_rescrub_rewrites_the_basis_beside_the_risk() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("medium-risk submission quarantines");
@@ -88554,7 +88697,7 @@ async fn the_storage_mirror_carries_the_basis_from_the_record() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -88593,7 +88736,7 @@ async fn a_record_written_before_v51_reads_as_not_recorded_not_as_empty() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -89187,4 +89330,1068 @@ fn a_configured_near_attestation_check_cannot_be_opted_out_of_by_failing() {
     );
     assert!(summary.not_applicable_checks.is_empty());
     assert_eq!(summary.evidence_status, "failed_rehearsal_evidence");
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/attestation-collateral
+// ---------------------------------------------------------------------------
+
+/// Build a collateral request against the real routing table.
+///
+/// Two routers are exercised below. `app(state)` is what says the route is
+/// actually wired into the deployed surface, outside every auth layer;
+/// `attestation_collateral_routes()` is what lets the refusal tests run
+/// without an `AppState`. A handler can be correct and unreachable, so the
+/// reachability assertion is the one that goes through `app`.
+fn collateral_request(body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/attestation-collateral")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+async fn collateral_response(
+    request: axum::http::Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(request)
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// A contributor needs collateral *before* they have decided to trust
+/// anything, so requiring a claim to obtain it would make verifying an enclave
+/// depend on already being enrolled with the operator whose enclave it is.
+#[tokio::test]
+async fn the_collateral_route_is_reachable_without_authentication() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the collateral route ended up behind an auth layer"
+    );
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the collateral route is not wired into app()"
+    );
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn a_malformed_quote_is_refused_by_name_and_echoes_nothing() {
+    // A distinctive marker, so "the refusal echoed the input" cannot pass by
+    // coincidence.
+    const MARKER: &str = "zzq-collateral-marker-zzq";
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": format!("nothex{MARKER}") }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+    assert!(
+        !body.to_string().contains(MARKER),
+        "the refusal echoed the caller's input"
+    );
+    // And no offset or length, which would tell a prober how far its guess got.
+    assert_eq!(
+        body.as_object().map(|map| map.len()),
+        Some(1),
+        "the refusal body grew a field beyond its label"
+    );
+}
+
+/// `hex::decode("")` succeeds, so an empty quote would otherwise reach the
+/// fetch with nothing to fetch collateral for.
+#[tokio::test]
+async fn an_empty_quote_is_refused_rather_than_decoding_to_nothing() {
+    let (status, body) =
+        collateral_response(collateral_request(serde_json::json!({ "quote_hex": "" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+/// Odd-length hex is not hex, and a route that truncated it would fetch
+/// collateral for bytes the caller never sent.
+#[tokio::test]
+async fn an_odd_length_quote_is_refused_rather_than_truncated() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "abc" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+#[tokio::test]
+async fn an_unknown_field_on_the_collateral_request_is_refused() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff", "tenant": "someone" }),
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a field this route does not understand was accepted and ignored"
+    );
+}
+
+/// The missing-control path. Never a 200 with an empty body: a client
+/// checking only the status could not tell that from real collateral, and a
+/// client verifying against empty collateral verifies nothing at all.
+///
+/// Compiled only without the feature, because with it this binary really can
+/// fetch collateral and the assertion would be about a network call.
+#[cfg(not(feature = "near-attestation-collateral"))]
+#[tokio::test]
+async fn a_build_without_the_collateral_client_refuses_by_missing_control() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body["error"],
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+        "the refusal must name the control an operator turns on, not a generic failure"
+    );
+}
+
+// ---------------------------------------------------------------------
+// The redaction-witness PII-backstop bypass.
+//
+// A verified certificate keeps a submission OUT OF THE HOLD and does nothing
+// else. It changes no risk tier, lifts no quarantine, and never means the
+// trace is clean.
+//
+// The whole safety argument is an ORDERING: `rescrub_trace_envelope` -- the
+// deterministic sweep over `redacted_content` and `structured_payload`, plus
+// `residual_envelope_scan` -- runs synchronously in the submit handler before
+// the hold is decided. So the only thing skipping the hold removes is the
+// async backstop's classifier stage. The first test below is the one that
+// pins that, and it is the most important test in this section.
+// ---------------------------------------------------------------------
+
+mod witness_bypass {
+    use super::*;
+    use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
+    use trace_commons_server::redaction_witness::certificate::{
+        CertificateDetails, WitnessCertificate,
+    };
+    use trace_commons_server::redaction_witness::config::{
+        WitnessBypassConfig, witness_bypass_config_from_values,
+    };
+    use trace_commons_server::redaction_witness::correspondence::check_correspondence;
+    use trace_commons_server::redaction_witness::verification::{
+        VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
+    };
+
+    /// The measurement the pin admits. Nothing here depends on its value; it
+    /// only has to be the same on both sides.
+    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+    /// A `full-pipeline` alias -- deterministic pass AND prose classifier.
+    /// The only kind an operator should ever allowlist.
+    const FULL_PIPELINE_ALIAS: &str =
+        "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
+
+    /// The bytes every certificate in this module covers, unless the test is
+    /// about a mismatch.
+    const ARTIFACT: &str = "the submitted envelope bytes";
+
+    fn signing_key() -> SigningKey {
+        let bytes = Keccak256::digest(b"witness-bypass-test-witness");
+        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
+    }
+
+    fn signing_address() -> String {
+        let key = signing_key();
+        let point = key.verifying_key().to_encoded_point(false);
+        let digest = Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    /// Sign as the witness enclave would: EIP-191 over the canonical signing
+    /// bytes, 65-byte hex with a 27/28 recovery byte.
+    fn sign(certificate: &WitnessCertificate) -> String {
+        let message = certificate.signing_bytes();
+        let mut hasher = Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(&message);
+        let (signature, recovery) = signing_key()
+            .sign_prehash_recoverable(&hasher.finalize())
+            .expect("prehash signs");
+        format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        )
+    }
+
+    /// A genuinely verified certificate over [`ARTIFACT`].
+    ///
+    /// Built the only way one can be: a correspondence proof, a real
+    /// signature, and a real `verify_witness_certificate` call against a real
+    /// pin. There is no test constructor for `VerifiedWitnessCertificate` and
+    /// there must not be -- a fake would let these tests pass over a
+    /// verification path that does not work.
+    fn verified_certificate(
+        verdict: ResidualPiiRisk,
+        policy_version: &str,
+    ) -> VerifiedWitnessCertificate {
+        let proof =
+            check_correspondence(ARTIFACT, ARTIFACT, &[]).expect("an empty span list applies");
+        let certificate = WitnessCertificate::from_proof(
+            proof,
+            CertificateDetails {
+                residual_risk_verdict: verdict,
+                redaction_policy_version: policy_version.to_string(),
+                witness_measurement: MEASUREMENT.to_string(),
+                timestamp: 1_788_000_000,
+            },
+        );
+        let signature = sign(&certificate);
+        let pin = WitnessPin::new(&signing_address(), [MEASUREMENT.to_string()])
+            .expect("the pin is well formed");
+        verify_witness_certificate(certificate, &signature, Some(&pin), ARTIFACT.as_bytes())
+            .expect("the certificate verifies against the artifact it covers")
+    }
+
+    fn low_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, FULL_PIPELINE_ALIAS)
+    }
+
+    fn medium_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Medium, FULL_PIPELINE_ALIAS)
+    }
+
+    fn certificate_with_policy(alias: &str) -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, alias)
+    }
+
+    fn bypass_config_allowing(aliases: &[&str]) -> WitnessBypassConfig {
+        witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signing_address()),
+            Some(MEASUREMENT),
+            Some(&aliases.join(",")),
+        )
+        .expect("the bypass configures")
+        .expect("the switch is on")
+    }
+
+    fn bypass_config() -> WitnessBypassConfig {
+        bypass_config_allowing(&[FULL_PIPELINE_ALIAS])
+    }
+
+    fn content_bearing_consent() -> ConsentMetadata {
+        backstop_consent(true, false, false)
+    }
+
+    /// THE test of this slice.
+    ///
+    /// The bypass is only safe because `rescrub_trace_envelope` -- the
+    /// deterministic sweep over `redacted_content` and `structured_payload`,
+    /// plus `residual_envelope_scan` -- has already run on these bytes by the
+    /// time the hold is decided. Read the handler source and assert the
+    /// order, because no runtime observation distinguishes "ran before" from
+    /// "ran at all".
+    ///
+    /// If a future change moves the hold decision above the rescrub, this
+    /// feature becomes a wholesale backstop bypass and this test must go red.
+    #[test]
+    fn the_synchronous_rescrub_runs_before_the_hold_is_decided() {
+        let source = include_str!("../trace-commons-ingest.rs");
+        let rescrub = source
+            .find("rescrub_trace_envelope(&mut envelope)")
+            .expect("submit rescrubs");
+        let hold = source
+            .find("corpus_status_with_pii_backstop_hold(")
+            .expect("submit decides the hold");
+        // `find` takes the FIRST occurrence, so this test would quietly start
+        // measuring the function's own definition if every call site were
+        // removed or moved below it -- and then it would pass while proving
+        // nothing. Require the occurrence it found to be a call.
+        let definition = source
+            .find("fn corpus_status_with_pii_backstop_hold(")
+            .expect("the decision function is defined here");
+        assert!(
+            hold < definition,
+            "the first occurrence must be a call site, not the definition; this test \
+             measures the order of the submit handler, not of the file",
+        );
+        assert!(
+            rescrub < hold,
+            "the hold decision must follow the synchronous rescrub; moving it above turns \
+             this feature into a wholesale backstop bypass",
+        );
+    }
+
+    /// Ground truth from outside the decision function: an envelope carrying a
+    /// credential of exactly the kind the prose classifier writes back into a
+    /// field it was handed. The synchronous pass must raise the risk, so
+    /// `status_for_risk` yields a non-Accepted status and the bypass never
+    /// sees an `Accepted` to skip the hold on.
+    ///
+    /// This is what makes "the certificate can never lift a quarantine" a
+    /// measured fact rather than a claim about the code's shape.
+    #[tokio::test]
+    async fn a_witness_emitted_credential_is_caught_before_the_bypass_can_act() {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, "aws key AKIAIOSFODNN7EXAMPLE in output");
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        let risk_status = status_for_risk(envelope.privacy.residual_pii_risk, false);
+        assert_ne!(
+            risk_status,
+            TraceCorpusStatus::Accepted,
+            "the synchronous pass must have raised the risk off Low, or this test \
+             proves nothing about the bypass",
+        );
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                risk_status,
+                &envelope.consent,
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            risk_status,
+            "a verified certificate must never lift a quarantine",
+        );
+    }
+
+    #[test]
+    fn a_verified_low_certificate_with_an_allowlisted_alias_skips_the_hold() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::Accepted,
+        );
+    }
+
+    /// A `Medium` verdict is the witness reporting that it found and removed
+    /// PII. That is exactly the population the server's own classifier pass
+    /// exists to re-examine, so it holds.
+    #[test]
+    fn a_medium_verdict_still_holds() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&medium_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The sharpest edge in the design: a `deterministic-only` witness never
+    /// ran a classifier, so skipping the server's would mean no classifier
+    /// ever reads this trace's prose. The allowlist is what stops it, and it
+    /// is a separate control from the measurement pin for that reason.
+    #[test]
+    fn a_deterministic_only_policy_alias_is_not_allowlisted_and_still_holds() {
+        let config = bypass_config_allowing(&[FULL_PIPELINE_ALIAS]);
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&certificate_with_policy(
+                    "ironclaw-deterministic-secret-path-v3"
+                )),
+                Some(&config),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// Ship-disabled, at the decision. With no configured bypass an arriving
+    /// certificate is ignored entirely and the trace holds exactly as today.
+    #[test]
+    fn no_configured_bypass_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                None,
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The mirror case: configured, but no certificate arrived. An ordinary
+    /// unwitnessed submission on a deployment that has the bypass on.
+    #[test]
+    fn a_configured_bypass_with_no_certificate_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                None,
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The bypass must not reach past the hold. With the backstop driver
+    /// switched off entirely there is no hold to skip, and the answer is the
+    /// risk-derived status either way -- a certificate must not turn a
+    /// non-Accepted risk into an acceptance.
+    #[test]
+    fn a_certificate_changes_nothing_when_the_backstop_is_disabled() {
+        for risk_status in [TraceCorpusStatus::Accepted, TraceCorpusStatus::Quarantined] {
+            assert_eq!(
+                corpus_status_with_pii_backstop_hold(
+                    risk_status,
+                    &content_bearing_consent(),
+                    false,
+                    Some(&low_verdict_certificate()),
+                    Some(&bypass_config()),
+                ),
+                risk_status,
+                "{risk_status:?}",
+            );
+        }
+    }
+
+    /// Group D in the spec. The credit-zeroing branch in the submit handler
+    /// keys on `!= Accepted`, so a bypassed trace takes the non-zeroing path
+    /// and keeps its pending credit. Silent failure otherwise: a contributor
+    /// whose trace was admitted on a certificate would be paid zero.
+    #[tokio::test]
+    async fn a_bypassed_trace_keeps_its_pending_credit() {
+        let mut envelope = sample_envelope().await;
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let before = envelope.value.credit_points_pending;
+        assert!(before > 0.0, "the fixture must have credit to lose");
+
+        let status = corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &content_bearing_consent(),
+            true,
+            Some(&low_verdict_certificate()),
+            Some(&bypass_config()),
+        );
+
+        assert_eq!(status, TraceCorpusStatus::Accepted);
+        assert_eq!(
+            envelope.value.credit_points_pending, before,
+            "the credit-zeroing branch keys on != Accepted, so a bypassed trace must \
+             keep the credit an ordinarily-accepted one keeps",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Reading the certificate off the request, at receipt.
+//
+// The half that is easy to build wrong. `rescrub_trace_envelope` takes
+// `&mut envelope` and rewrites `privacy.residual_pii_risk`,
+// `redaction_counts`, `pii_labels_present`, `redaction_pipeline_version`,
+// `warnings` and `redaction_hash`, so THE STORED BYTES ARE NEVER THE RECEIVED
+// BYTES. Taking the body as `Bytes` is necessary and not sufficient: a
+// handler that took `Bytes` and verified after the rescrub would fail every
+// honest witnessed submission.
+// ---------------------------------------------------------------------
+
+mod witness_receipt {
+    use super::*;
+    use axum::body::Body;
+    use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
+    use tower::ServiceExt;
+    use trace_commons_server::redaction_witness::config::witness_bypass_config_from_values;
+    use trace_commons_server::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+
+    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+    const ALIAS: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
+
+    fn signing_key() -> SigningKey {
+        let bytes = Keccak256::digest(b"witness-receipt-test-witness");
+        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
+    }
+
+    fn signing_address() -> String {
+        let point = signing_key().verifying_key().to_encoded_point(false);
+        let digest = Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    /// A certificate over `body`, encoded exactly as the witness service's
+    /// route serves it, plus its signature.
+    ///
+    /// Built from the real digest of the real bytes and signed with the real
+    /// key, so nothing here can pass by a fixture agreeing with a bug.
+    fn certificate_over(body: &[u8], verdict: &str) -> (String, String) {
+        let json = serde_json::json!({
+            "redacted_sha256": hex::encode(sha2::Sha256::digest(body)),
+            "residual_risk_verdict": verdict,
+            "redaction_policy_version": ALIAS,
+            "witness_measurement": MEASUREMENT,
+            "timestamp": 1_788_000_000i64,
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json).expect("the certificate serialises"));
+
+        // Sign the same way the enclave does: the decoder rebuilds the
+        // certificate and the signature must recover over ITS signing bytes,
+        // so this goes through the decoder rather than reconstructing them.
+        let mut headers = HeaderMap::new();
+        headers.insert(CERTIFICATE_HEADER, encoded.parse().expect("a header value"));
+        headers.insert(SIGNATURE_HEADER, "0x00".parse().expect("a header value"));
+        let (certificate, _) =
+            trace_commons_server::redaction_witness::request::witness_headers(&headers)
+                .expect("the fixture certificate decodes")
+                .expect("both headers are present");
+
+        let message = certificate.signing_bytes();
+        let mut hasher = Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(&message);
+        let (signature, recovery) = signing_key()
+            .sign_prehash_recoverable(&hasher.finalize())
+            .expect("prehash signs");
+        let signature_hex = format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        );
+        (encoded, signature_hex)
+    }
+
+    /// A state with the bypass pinned AND the backstop driver enabled, which
+    /// is the only configuration in which the bypass can be observed: with
+    /// the driver off there is no hold to skip.
+    fn witnessed_state(root: PathBuf) -> Arc<AppState> {
+        let mut state = test_state(root);
+        let state_mut = Arc::get_mut(&mut state).expect("the test state is unshared");
+        state_mut.witness_bypass = Some(
+            witness_bypass_config_from_values(
+                Some("true"),
+                Some(&signing_address()),
+                Some(MEASUREMENT),
+                Some(ALIAS),
+            )
+            .expect("the bypass configures")
+            .expect("the switch is on"),
+        );
+        // A content flag forces the residual risk to Medium, so a deployment
+        // that refuses medium risk quarantines every content-bearing trace and
+        // never reaches the hold at all. Accepting medium risk is therefore
+        // part of the only configuration in which this feature is reachable.
+        state_mut.accept_medium_risk_submissions = true;
+        state_mut.pii_backstop_driver = Some(PiiBackstopDriverConfig {
+            interval: StdDuration::from_secs(60),
+            batch_size: 1,
+            max_attempts: 3,
+            backoff_base_seconds: 1,
+            per_submission_timeout: StdDuration::from_secs(30),
+        });
+        state
+    }
+
+    /// An envelope the synchronous pass leaves `Accepted` and that declares
+    /// message text, so it is exactly the population the hold applies to.
+    async fn holdable_envelope() -> TraceContributionEnvelope {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+        envelope.consent.message_text_included = true;
+        envelope
+    }
+
+    async fn post_through_the_real_router(
+        state: Arc<AppState>,
+        body: Vec<u8>,
+        witness: Option<(&str, &str)>,
+    ) -> axum::http::Response<Body> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(AUTHORIZATION, "Bearer token-a")
+            .header(CONTENT_TYPE, "application/json");
+        if let Some((certificate, signature)) = witness {
+            request = request
+                .header(CERTIFICATE_HEADER, certificate)
+                .header(SIGNATURE_HEADER, signature);
+        }
+        app(state)
+            .oneshot(request.body(Body::from(body)).expect("request builds"))
+            .await
+            .expect("response")
+    }
+
+    fn stored_status(root: &std::path::Path, submission_id: Uuid) -> TraceCorpusStatus {
+        read_submission_record(root, "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists")
+            .status
+    }
+
+    fn stored_envelope_bytes(root: &std::path::Path, submission_id: Uuid) -> Vec<u8> {
+        let record = read_submission_record(root, "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        std::fs::read(root.join(record.object_key)).expect("stored envelope reads")
+    }
+
+    /// The control: the same envelope, the same state, no certificate. It
+    /// holds. Everything below is measured against this, so a test that
+    /// asserts `Accepted` is asserting the bypass acted rather than that the
+    /// fixture was never holdable in the first place.
+    #[tokio::test]
+    async fn an_unwitnessed_submission_holds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+
+        let response = post_through_the_real_router(state, body, None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+            "the fixture must be holdable, or every test below proves nothing",
+        );
+    }
+
+    /// The regression this test exists for. `rescrub_trace_envelope` rewrites
+    /// the envelope in place, so verifying off the stored or re-serialised
+    /// envelope fails this honest submission.
+    ///
+    /// Ground truth from outside: assert the envelope really was mutated, so
+    /// the test cannot pass by the rescrub having been a no-op on this
+    /// fixture.
+    #[tokio::test]
+    async fn an_honest_witnessed_submission_verifies_despite_the_rescrub_mutating_the_envelope() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(&body, "low");
+
+        let response =
+            post_through_the_real_router(state, body.clone(), Some((&certificate, &signature)))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            stored_envelope_bytes(temp.path(), envelope.submission_id),
+            body,
+            "the fixture must actually be rewritten by the rescrub, or this test proves nothing",
+        );
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::Accepted,
+            "a certificate over the bytes as received must verify, even though the \
+             rescrub has rewritten the envelope since",
+        );
+    }
+
+    /// A re-serialised envelope has a different digest. Feed a body whose key
+    /// order is not what `serde_json` would emit and a certificate over those
+    /// exact bytes, and require it to verify -- which it can only do if the
+    /// handler digested the received bytes rather than a round trip through
+    /// serde.
+    #[tokio::test]
+    async fn the_digest_is_taken_over_the_body_as_received() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+
+        // Re-emit the body with the top-level keys in reverse order. It is
+        // the same envelope to serde and a different byte string to SHA-256.
+        let value: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&envelope).expect("serialises"))
+                .expect("parses");
+        let object = value.as_object().expect("an envelope is an object");
+        let mut reordered = serde_json::Map::new();
+        for (key, field) in object.iter().rev() {
+            reordered.insert(key.clone(), field.clone());
+        }
+        let body = serde_json::to_vec(&serde_json::Value::Object(reordered)).expect("serialises");
+        assert_ne!(
+            body,
+            serde_json::to_vec(&envelope).expect("serialises"),
+            "the fixture must differ byte-wise from a canonical re-serialisation",
+        );
+
+        let (certificate, signature) = certificate_over(&body, "low");
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::Accepted,
+        );
+    }
+
+    /// Fail open on the submission, closed on the bypass. A witness outage
+    /// must not become a submission outage.
+    #[tokio::test]
+    async fn a_submission_with_an_unverifiable_certificate_is_still_accepted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+
+        let response =
+            post_through_the_real_router(state, body, Some(("not-a-certificate", "0xgarbage")))
+                .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a garbage certificate must refuse the bypass, never the submission",
+        );
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The same, for a well-formed certificate that covers different bytes --
+    /// the shape a replay or a client that re-encoded the body produces.
+    #[tokio::test]
+    async fn a_certificate_over_other_bytes_refuses_the_bypass_and_keeps_the_submission() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(b"some entirely other artifact", "low");
+
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// Ship-disabled, end to end. On a deployment with no bypass configured a
+    /// genuinely valid certificate changes nothing at all.
+    #[tokio::test]
+    async fn a_valid_certificate_does_nothing_when_the_bypass_is_unconfigured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = witnessed_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state)
+            .expect("the test state is unshared")
+            .witness_bypass = None;
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(&body, "low");
+
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The handler must verify at receipt, above the rescrub.
+    ///
+    /// This anchors on the CALL, not on `verify_witness_certificate`, which
+    /// appears first inside `verified_witness_for_submission`'s own body --
+    /// a definition that sits above the handler and would therefore satisfy
+    /// any ordering assertion for free. A mutation moving the call below the
+    /// rescrub left an earlier version of this test green, which is what
+    /// "documentation, not a test" looks like from the inside.
+    ///
+    /// What actually makes the honest path safe is stronger than this
+    /// ordering and is pinned by
+    /// `the_digest_is_taken_over_the_body_as_received`: `SubmitBody` captures
+    /// the bytes in the extractor, before any handler code runs, and the
+    /// rescrub mutates the parsed envelope rather than those bytes. This test
+    /// keeps the call where a reader expects to find it, so nobody later
+    /// concludes from its position that verification reads the mutated value.
+    #[test]
+    fn the_certificate_is_verified_before_the_rescrub_runs() {
+        let source = include_str!("../trace-commons-ingest.rs");
+        let verify = source
+            .find("verified_witness_for_submission(state.as_ref()")
+            .expect("submit verifies the certificate");
+        let rescrub = source
+            .find("rescrub_trace_envelope(&mut envelope)")
+            .expect("submit rescrubs");
+        assert!(
+            verify < rescrub,
+            "the certificate must be verified against the body as received, above the \
+             rescrub; the bytes survive it either way, but the call belongs where a \
+             reader will look for it",
+        );
+    }
+
+    /// The property the ordering test above is only a proxy for: the bytes
+    /// the witness digest is taken over are captured by the extractor, so
+    /// nothing the handler does to the parsed envelope can reach them.
+    ///
+    /// Stated as a test because it is the actual safety argument for this
+    /// half of the slice, and because the mutation that moved the
+    /// verification call below the rescrub did NOT break the honest path --
+    /// which is only true because of this.
+    #[tokio::test]
+    async fn the_rescrub_cannot_reach_the_bytes_the_certificate_covers() {
+        let envelope = holdable_envelope().await;
+        let raw = serde_json::to_vec(&envelope).expect("serialises");
+        let body = SubmitBody::for_test(envelope);
+        let captured = body.raw.clone();
+        let SubmitBody {
+            mut envelope,
+            raw: held,
+        } = body;
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub runs");
+
+        assert_ne!(
+            serde_json::to_vec(&envelope).expect("serialises"),
+            raw,
+            "the fixture must actually be rewritten, or this test proves nothing",
+        );
+        assert_eq!(
+            held, captured,
+            "the received bytes must be untouched by the pass that rewrites the envelope",
+        );
+    }
+
+    /// The submit handler's rejection behaviour is client-visible and must be
+    /// exactly what `Json` gave before the body became `Bytes`. Every client
+    /// depends on it, including the overwhelming majority that never send a
+    /// certificate.
+    #[tokio::test]
+    async fn the_malformed_body_rejection_is_unchanged() {
+        for (content_type, body, expected) in [
+            ("application/json", "{ not json", StatusCode::BAD_REQUEST),
+            (
+                "application/json",
+                r#"{"submission_id":1}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("text/plain", "{}", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let state = witnessed_state(temp.path().to_path_buf());
+            let response = app(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header(AUTHORIZATION, "Bearer token-a")
+                        .header(CONTENT_TYPE, content_type)
+                        .body(Body::from(body))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{content_type} {body}");
+        }
+    }
+
+    /// The content-type predicate is reimplemented rather than reached for,
+    /// so it has to be pinned against the cases `axum::Json` documents.
+    #[test]
+    fn json_content_type_matches_axum() {
+        for (value, expected) in [
+            ("application/json", true),
+            ("application/json; charset=utf-8", true),
+            ("application/json;charset=utf-8", true),
+            ("application/cloudevents+json", true),
+            ("text/json", false),
+            ("application/xml", false),
+            ("", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            if !value.is_empty() {
+                headers.insert(CONTENT_TYPE, value.parse().expect("a header value"));
+            }
+            assert_eq!(json_content_type(&headers), expected, "{value:?}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Telling the contributor which pass admitted their trace.
+//
+// #445's argument applied a second time: a trace admitted on a witness
+// certificate was admitted on a DIFFERENT BASIS from one admitted on the
+// server's own queued re-check, and every accepted trace was getting the same
+// explanation. The sentence must not claim clean, and must carry no
+// measurement and no address.
+// ---------------------------------------------------------------------
+
+mod witness_receipt_wording {
+    use super::*;
+
+    fn record_with(status: &str, reason: Option<&str>) -> TraceCommonsSubmissionRecord {
+        let mut record = submission_record_with_principal("principal-a");
+        record.status = match status {
+            "accepted" => TraceCorpusStatus::Accepted,
+            "held" => TraceCorpusStatus::AwaitingPiiBackstop,
+            "quarantined" => TraceCorpusStatus::Quarantined,
+            other => panic!("unhandled status {other}"),
+        };
+        record.last_status_reason = reason.map(str::to_string);
+        record
+    }
+
+    fn witness_admitted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", Some(WITNESS_ADMITTED_STATUS_REASON))
+    }
+
+    fn ordinary_accepted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", None)
+    }
+
+    fn held_record() -> TraceCommonsSubmissionRecord {
+        record_with("held", None)
+    }
+
+    #[test]
+    fn a_witness_admitted_receipt_says_so() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        assert!(
+            receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("attested redaction witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    #[test]
+    fn an_ordinarily_accepted_receipt_is_unchanged() {
+        let receipt =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains("witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    /// The lines an ordinary receipt already carried must all still be there,
+    /// in order. A new sentence that displaced the settlement posture would
+    /// re-open #445 while fixing its sibling.
+    #[test]
+    fn the_witness_sentence_is_added_and_displaces_nothing() {
+        let ordinary =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        let witnessed =
+            receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        assert_eq!(
+            witnessed.len(),
+            ordinary.len() + 1,
+            "exactly one line is added: {witnessed:?}",
+        );
+        for line in &ordinary {
+            assert!(witnessed.contains(line), "{line} was displaced");
+        }
+    }
+
+    /// The rule that outranks every other sentence on this surface. A witness
+    /// certificate says a known program in a pinned enclave reached a `Low`
+    /// verdict. It never says the trace is clean, and no receipt line may
+    /// imply otherwise.
+    #[test]
+    fn no_receipt_line_claims_the_trace_is_clean() {
+        for record in [
+            witness_admitted_record(),
+            ordinary_accepted_record(),
+            held_record(),
+        ] {
+            for line in receipt_from_record(&record, NearSettlementMode::Disabled).explanation {
+                let lower = line.to_ascii_lowercase();
+                for claim in [
+                    "verified clean",
+                    "no pii",
+                    "free of",
+                    "guaranteed",
+                    "contains no",
+                    "is clean",
+                ] {
+                    assert!(!lower.contains(claim), "{line}");
+                }
+            }
+        }
+    }
+
+    /// A measurement and a signing address are operator configuration. They
+    /// have no business on a contributor surface, and the repo's hash-only
+    /// rule puts them out of bounds regardless.
+    #[test]
+    fn no_receipt_line_carries_a_measurement_or_an_address() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        for line in receipt.explanation {
+            assert!(!line.contains("mrtd:"), "{line}");
+            assert!(!line.contains("0x"), "{line}");
+        }
+    }
+
+    /// The label the receipt keys on has to survive the storage allowlist,
+    /// or the submit handler writes "other" and the sentence never appears
+    /// on a real row.
+    #[test]
+    fn the_witness_status_reason_is_allowlisted_for_storage() {
+        assert_eq!(
+            safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON),
+            WITNESS_ADMITTED_STATUS_REASON,
+            "an unallowlisted label becomes \"other\" and the receipt sentence is lost",
+        );
+    }
+
+    /// The label is not a residual-risk condition and must never be read as
+    /// one. Putting it in `residual_risk_basis` would make that column's
+    /// invariant -- an empty basis means Low, and only Low -- contradict the
+    /// risk stored beside it.
+    #[test]
+    fn the_witness_status_reason_is_not_a_residual_risk_condition() {
+        assert!(
+            ResidualRiskCondition::from_label(WITNESS_ADMITTED_STATUS_REASON).is_none(),
+            "a witness admission is not a risk condition",
+        );
+    }
 }

@@ -269,6 +269,211 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  */
 char*       tc_discover_sources(void);
 
+/* Every fixed word on the routing surface, in one call.
+ *
+ * Takes no handle: it describes the build, not a running daemon.
+ *
+ * Returns an owned JSON object; free it with tc_string_free. Its keys are
+ * tools_heading, word_private, word_direct, word_unknown, word_not_used,
+ * tool_claude, tool_codex, tool_gemini, intro, toggle, applies_at_once,
+ * port_title, port_note, folder_title, folder_note, apply, checking,
+ * check_unavailable, probe_reachable, state_off, state_waiting and
+ * state_reading. Every value is a non-empty string.
+ *
+ * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
+ * question and returns a single list; this is a whole screen's wording and
+ * must arrive as a set. Exporting the words one at a time would let a shell
+ * take four of them and hand-write the fifth, and a hand-written word on this
+ * surface is a privacy claim that silently stops matching the one the other
+ * two shells print.
+ *
+ * Exactly one of these words -- word_private -- claims privacy, and no word
+ * denies one. Do not derive a "not private" label from any of the others:
+ * "Private" is a substring of "Not private", and a shell that renders both is
+ * one substring match away from showing the wrong verdict.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_routing_copy(void);
+
+/* IronWire's answer about one tool, as tc_routing_tool_word and
+ * tc_routing_tool_tone take it.
+ *
+ * Three states and not a boolean. The missing third state is the whole
+ * defect this surface was rebuilt to remove: a dead proxy and a tool
+ * IronWire has never heard of both used to render as a confident verdict.
+ *
+ * Any other value is TC_TOOL_WIRING_UNKNOWN, which claims nothing.
+ */
+#define TC_TOOL_WIRING_WIRED     0
+#define TC_TOOL_WIRING_NOT_WIRED 1
+#define TC_TOOL_WIRING_UNKNOWN   2
+
+/* How a word or a state sentence is painted. tc_routing_tool_tone and
+ * tc_routing_state_tone both answer one of these.
+ *
+ * ONE NUMBERING FOR BOTH. A tool word can never be HELD -- only a daemon
+ * state waits on something -- but two numberings would mean two 1s meaning
+ * different things on one ABI, and a shell that mapped the wrong one would
+ * mispaint a privacy claim rather than fail.
+ *
+ * None of these is a fault tone. Neither call can return one, because none of
+ * the states this surface has is a fault.
+ */
+#define TC_ROUTING_TONE_NEUTRAL 0
+#define TC_ROUTING_TONE_HELD    1
+#define TC_ROUTING_TONE_CLEAR   2
+
+/* One tool's word, from what the contributor said about that tool's sessions
+ * and what IronWire said about that tool.
+ *
+ * source_mode is get_settings's *_source_mode -- "off", "watch" or "unset".
+ * Only "off" means the tool is not used: "unset" watches the conventional
+ * location, which is a tool in use. wiring is one of TC_TOOL_WIRING_*.
+ *
+ * THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. tc_routing_copy hands a shell
+ * four words; without this call each shell also decides which of the four a
+ * tool gets, and three native copies of that decision can drift apart
+ * silently while every string stays identical. Do not reimplement this
+ * mapping natively.
+ *
+ * The declaration switch is NOT an input. It was the only input before, and
+ * that is what let a contributor read the wired word on the same card as
+ * "Nothing answered on port 8463".
+ *
+ * Pair every call with tc_routing_tool_tone rather than comparing the word
+ * this returns against the private one: "Private" is a substring of the
+ * denial that must never come back.
+ *
+ * Returns an owned string; free it with tc_string_free. Returns NULL for a
+ * NULL or non-UTF-8 source_mode, recording "null-pointer" or "invalid-utf8"
+ * for tc_last_error.
+ */
+char*       tc_routing_tool_word(const char* source_mode, int32_t wiring);
+
+/* How the word tc_routing_tool_word returned is painted: TC_TOOL_TONE_NEUTRAL
+ * or TC_TOOL_TONE_CLEAR.
+ *
+ * Takes the same two inputs as the word, so the two stay in step by
+ * construction. A shell must NOT recover this by comparing the rendered word
+ * against the private one -- that is a text comparison against a privacy
+ * claim, and "Private" is a substring of "Not private".
+ *
+ * Never fails: a NULL or non-UTF-8 source_mode, and a caught panic, all
+ * answer TC_ROUTING_TONE_NEUTRAL, the tone that claims nothing. There is no
+ * error value, because a styling call that returned one would leave a shell
+ * choosing a tone for itself. A tool word is never TC_ROUTING_TONE_HELD.
+ */
+int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
+
+/* The daemon's routing state, in words.
+ *
+ * Exported for the same reason tc_routing_tool_word is: the sentences were
+ * already shared, but the mapping from "awaiting_rows" / "rows_seen" /
+ * anything-else onto them was written out again in each shell, and three
+ * copies of a branch can disagree while three copies of a string cannot.
+ *
+ * A state this build has never heard of -- and a NULL or non-UTF-8 state --
+ * reads as the off line, which claims nothing. It never falls through to
+ * either "on" sentence.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_state_line(const char* state);
+
+/* How firmly the sentence tc_routing_state_line returned reads:
+ * TC_ROUTING_TONE_NEUTRAL, _HELD or _CLEAR.
+ *
+ * Exported for the reason the sentence is. This was the last routing branch
+ * table still written out natively in all three shells, and three copies of
+ * one decision agree today and drift apart in silence tomorrow.
+ *
+ * awaiting_rows is HELD and never a fault: a reader built a moment ago starts
+ * empty by construction, and that is the state a contributor sees immediately
+ * after touching anything on this card. Painting it as broken would accuse a
+ * working proxy at exactly that moment.
+ *
+ * Never fails. A state this build has never heard of, a NULL or non-UTF-8
+ * state, and a caught panic all answer TC_ROUTING_TONE_NEUTRAL -- the same
+ * fallback, for the same state, as tc_routing_state_line.
+ */
+int32_t     tc_routing_state_tone(const char* state);
+
+/* The routing surface's "that file could not be used" sentence, assembled.
+ *
+ * token_path may be NULL, which is the case where nothing resolved at all;
+ * the sentence for that says what to do instead of naming a file it does not
+ * have.
+ *
+ * ASSEMBLED ON THE RUST SIDE, DELIBERATELY. This ABI does not export a
+ * template with a hole in it, because a template each shell fills in is a
+ * fourth, fifth and sixth place this wording lives, each free to drop a
+ * clause around the hole, with nothing to notice when one does. Do not
+ * reassemble these sentences from parts.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_token_line(const char* token_path);
+
+/* The routing surface's "nothing answered" sentence, assembled.
+ *
+ * port outside 1..65535 -- including the 0 a caller passes for "no port was
+ * tried" -- produces the sentence that names no port, rather than one that
+ * names a port number nobody used.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_routing_unreachable_line(int32_t port);
+
+/* The routing surface's "Last checked ..." sentence, assembled.
+ *
+ * when is the shell's own humanised time -- "an hour ago", "yesterday". That
+ * is the one piece of this surface each shell renders for itself, because it
+ * is a rendering of a timestamp and not wording about routing. The words
+ * around it are still written once, on the Rust side.
+ *
+ * Returns NULL for a NULL or non-UTF-8 when, recording "null-pointer" or
+ * "invalid-utf8" for tc_last_error: unlike the two sentences above there is
+ * no meaningful shorter form of this one -- "Last checked " with nothing
+ * after it is worse than no line at all -- and a shell with no timestamp
+ * should not be calling it.
+ *
+ * Returns an owned string; free it with tc_string_free.
+ */
+char*       tc_routing_last_checked(const char* when);
+
+/* The settings screen's session-source row for one tool, assembled.
+ *
+ * tool is "claude", "codex" or "gemini". source_mode is get_settings's
+ * *_source_mode -- "watch", "off" or "unset".
+ *
+ * THREE MODES, THREE SENTENCES. *_root_configured is (mode == "watch") and is
+ * therefore false for both "off" and "unset". A shell that branches on that
+ * boolean tells a contributor who declared a tool OFF that their sessions are
+ * being read from the usual place, which is false in the fail-open direction
+ * on the one screen they would check to confirm otherwise. Call this with the
+ * mode word and render what comes back; do not add a second branch of your
+ * own, and do not build the "off" line as the "unset" line with a "not" in
+ * front -- no word on this surface may deny a claim another word makes.
+ *
+ * Assembled on the Rust side, for the reason on tc_routing_token_line.
+ *
+ * A source_mode this build does not know renders as "unset", deliberately:
+ * an older daemon sends no mode at all, and claiming nothing is read from a
+ * folder that is being scanned is the worse of the two errors. An unknown
+ * tool is refused, because there is no safe sentence for a tool with no name.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL with
+ * "unknown-source-tool", "null-pointer", "invalid-utf8" or "panic" recorded
+ * for tc_last_error.
+ */
+char*       tc_source_check_line(const char* tool, const char* source_mode);
+
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
  * contributor what is removed without transcribing the list.
  *

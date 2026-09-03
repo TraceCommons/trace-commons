@@ -18,7 +18,10 @@ use crate::trace_contribution::{
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
-pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+/// 32,000-token windows measured 5.4 s and the largest success took 9.3 s, so
+/// the previous 10 s default left a window legitimately slower than the
+/// timeout. Raised with the budget it has to serve.
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Maximum input tokens per `privacy/classify` request.
 ///
@@ -46,36 +49,49 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// reports `context_length: 512` and the cloud-api wrapper splits internally,
 /// so requests spanning several context windows are normal.
 ///
-/// **This ceiling moves, and it has moved down.** Re-measured 2026-08-31
-/// against the live endpoint, three trials per size:
+/// **This ceiling moves.** It moved DOWN on 2026-08-31 (to ~1,000) and back UP
+/// on 2026-09-03, when the token ceiling disappeared entirely. Re-measured
+/// against the live endpoint with exact o200k_base counts and trace-realistic
+/// content (3.17 chars/token):
 ///
-/// | tokens | result |
-/// |--------|--------|
-/// | 50 - 1,000 | 3/3 HTTP 200, span counts scaling 6 -> 94 |
-/// | 1,500 | 0/3, HTTP 502 |
-/// | 2,000 - 24,000 | 0/3, HTTP 502 |
+/// | true tokens | body | result |
+/// |---|---|---|
+/// | 2,000 - 64,000 | 6 KB - 203 KB | 200 OK, 1.5-7.1 s, PII span found each time |
+/// | 73,256 | 243 KiB | 200 OK, 9.3 s -- largest success |
+/// | 78,940 | 261 KiB | 413 |
+/// | 100,000 | 330 KiB | 413 |
 ///
-/// The previous budget of 2,000 was set on 2026-08-27, when failures began
-/// around 3,000. It is now ABOVE the ceiling, so every window sent to that
-/// backend fails -- which is what the "upstream unavailable" holds on
-/// 2026-08-28 were, and why this backend cannot currently serve as the
-/// fallback it is documented to be.
+/// The binding limit is now a request BODY SIZE of ~256 KiB, not a token
+/// count, and it reports an honest `413 Failed to buffer the request body`
+/// rather than the generic 502 that made an over-limit request
+/// indistinguishable from an outage.
 ///
-/// Re-measure before trusting this number. The failure is still reported as a
-/// generic 502, so an over-budget request is indistinguishable from an outage
-/// by status code alone.
-pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 1_000;
+/// The budget is set well under the proven ceiling rather than at it: this
+/// number has moved twice, so the margin is the point. Override with
+/// `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS` -- added because the previous
+/// value was hardcoded, which meant a vendor-side change could only be
+/// answered with a rebuild and a deploy.
+///
+/// Re-measure before trusting this number.
+pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 32_000;
 
-/// Token count at which classification begins failing, measured 2026-08-31:
-/// 1,000 tokens classified 3-of-3, 1,500 classified 0-of-3.
+/// Largest input proven to classify successfully, measured 2026-09-03:
+/// 73,256 tokens (243 KiB body) returned 200; 78,940 (261 KiB) returned 413.
 ///
-/// Was 3,000 as measured on 2026-08-27. The endpoint regressed.
-pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 1_500;
+/// Was 1,500 on 2026-08-31 and 3,000 on 2026-08-27. The endpoint regressed,
+/// then recovered past both. Note this is now a body-size boundary expressed
+/// in tokens: dense content hits the byte limit at a lower token count than
+/// prose does, which is why the budget below keeps real margin.
+pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 73_256;
 
 // Keep real margin under the measured failure point. The budget is not a
 // guess: exceeding it is what produced the intermittent 502s.
+// A compile-time invariant, not a test: a budget set at the measured limit is
+// one vendor change away from failing every window, and this number has moved
+// twice already (down 2026-08-31, up 2026-09-03). Require 2x margin so the
+// build breaks rather than production.
 const _: () = assert!(
-    MAX_CLASSIFY_INPUT_TOKENS * 3 <= MEASURED_CLASSIFY_TOKEN_LIMIT * 2,
+    MAX_CLASSIFY_INPUT_TOKENS * 2 <= MEASURED_CLASSIFY_TOKEN_LIMIT,
     "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
 );
 
@@ -112,6 +128,9 @@ pub struct NearAiPrivacyFilterAdapter {
     model: String,
     api_key: SecretApiKey,
     max_input_bytes: usize,
+    /// Per-request token budget. Configurable because the endpoint's ceiling
+    /// has moved twice; see [`MAX_CLASSIFY_INPUT_TOKENS`].
+    max_input_tokens: usize,
     /// Memoized classifications, keyed by SHA-256 of the window text.
     ///
     /// Agent traces re-read the same files and echo the same tool output
@@ -196,6 +215,26 @@ impl NearAiPrivacyFilterAdapter {
         timeout: Duration,
         max_input_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
+        Self::with_max_input_tokens(
+            base_url,
+            model,
+            api_key,
+            timeout,
+            max_input_bytes,
+            MAX_CLASSIFY_INPUT_TOKENS,
+        )
+    }
+
+    /// As [`Self::new`], with an explicit per-request token budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_max_input_tokens(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        timeout: Duration,
+        max_input_bytes: usize,
+        max_input_tokens: usize,
+    ) -> Result<Self, PrivacyFilterConfigError> {
         let base_url = base_url.into();
         // The classify request carries the API key as a bearer token, so the
         // configured endpoint decides who receives a credential. Require TLS
@@ -223,6 +262,7 @@ impl NearAiPrivacyFilterAdapter {
             model: model.into(),
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
+            max_input_tokens,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
         })
     }
@@ -274,12 +314,35 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
             Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
         };
 
-    let adapter = NearAiPrivacyFilterAdapter::new(
+    // Zero is rejected rather than silently meaning "unlimited": an unbounded
+    // budget sends the whole text as one request, which is exactly the
+    // over-limit case this budget exists to prevent.
+    let max_input_tokens = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS") {
+        Ok(value) => {
+            let parsed = value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+                    reason: err.to_string(),
+                }
+            })?;
+            if parsed == 0 {
+                return Err(PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+                    reason: "must be greater than zero".to_string(),
+                });
+            }
+            parsed
+        }
+        Err(_) => MAX_CLASSIFY_INPUT_TOKENS,
+    };
+
+    let adapter = NearAiPrivacyFilterAdapter::with_max_input_tokens(
         base_url,
         model,
         api_key,
         Duration::from_millis(timeout_ms),
         max_input_bytes,
+        max_input_tokens,
     )?;
     Ok(Arc::new(adapter))
 }
@@ -336,7 +399,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // are reported in that window's own codepoint coordinates; shift
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
-        let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
+        let ranges = chunk_token_ranges(text, self.max_input_tokens);
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -768,6 +831,38 @@ mod tests {
         }
     }
 
+    /// The endpoint's real limit is a request BODY SIZE (~256 KiB measured
+    /// 2026-09-03), not a token count. A token budget only respects that
+    /// indirectly, via bytes-per-token -- which varies about 2x between dense
+    /// trace content and prose. This asserts the budget cannot produce a body
+    /// over the limit for any representative content type, because exceeding
+    /// it is a 413 for the whole window, not a partial result.
+    #[test]
+    fn a_full_budget_window_stays_under_the_measured_body_limit() {
+        const MEASURED_BODY_LIMIT_BYTES: usize = 243 * 1024; // largest proven success
+
+        let prose = "Please email alice@example.com about invoice 12345. ".repeat(4000);
+        let dense = (0..4000)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(3000);
+
+        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
+            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
+            let widest = ranges
+                .iter()
+                .map(|r| text[r.clone()].len())
+                .max()
+                .expect("at least one window");
+            assert!(
+                widest <= MEASURED_BODY_LIMIT_BYTES,
+                "{label}: a {MAX_CLASSIFY_INPUT_TOKENS}-token window reached {widest} bytes, \
+                 over the {MEASURED_BODY_LIMIT_BYTES}-byte limit proven to work"
+            );
+        }
+    }
+
     /// Ranges must be contiguous and cover the whole field: a gap would drop
     /// text from classification entirely, which is a silent privacy hole
     /// rather than a performance bug.
@@ -794,19 +889,34 @@ mod tests {
     /// 502 while prose windows of identical size were fine.
     #[test]
     fn sparse_content_packs_into_fewer_windows_than_dense() {
-        let bytes = 60_000;
-        let prose: String = "Please email alice@example.com about invoice 12345. "
-            .repeat(2000)
-            .chars()
-            .take(bytes)
-            .collect();
-        let dense: String = (0..4000)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(bytes)
-            .collect();
+        // Line-delimited on purpose. The greedy packer this test is about
+        // works on line segments; an UNBROKEN run takes the bisection path
+        // instead, which halves until each piece fits and so quantises the
+        // window count to a power of two. Two inputs of very different token
+        // density then land on the same count -- prose at 149k tokens and
+        // dense at 250k both produced 8 windows -- and the comparison says
+        // nothing. The original fixtures were single lines and passed only
+        // because, at the old 1,000-token budget, they happened to fall in
+        // different bisection bands.
+        // Sized from measurement: at 16,000 lines prose is ~176k tokens (~6
+        // windows) and dense ~256k (~8), a margin of two. At 4,000 both round
+        // to 2 and tie; a margin of one is fragile to packing slack.
+        let lines = 16_000;
+        let prose = "The agent reviewed the report and summarised the findings.\n".repeat(lines);
+        let dense = (0..lines)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs\n"))
+            .collect::<String>();
+
+        let prose_tokens = classifier_token_count(&prose).expect("tokenizer");
+        let dense_tokens = classifier_token_count(&dense).expect("tokenizer");
+        assert!(
+            prose_tokens > MAX_CLASSIFY_INPUT_TOKENS && dense_tokens > MAX_CLASSIFY_INPUT_TOKENS,
+            "both fixtures must exceed the budget or neither splits"
+        );
+        assert!(
+            dense_tokens > prose_tokens,
+            "the dense fixture must actually be denser: prose {prose_tokens}, dense {dense_tokens}"
+        );
 
         let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
         let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
@@ -821,8 +931,19 @@ mod tests {
     /// base64 blob or long log line stalls its whole field.
     #[test]
     fn an_oversized_single_line_is_split() {
-        let one_line = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(1000);
+        // Size the fixture FROM the budget. A literal repeat count was sized
+        // for a 1,000-token budget and silently stopped exceeding it when the
+        // budget rose to 32,000 -- the test still passed its inner assertion
+        // while no longer testing splitting at all.
+        let unit = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7";
+        let unit_tokens = classifier_token_count(unit).expect("tokenizer");
+        let repeats = (MAX_CLASSIFY_INPUT_TOKENS / unit_tokens) * 2 + 8;
+        let one_line = unit.repeat(repeats);
         assert!(!one_line.contains('\n'));
+        assert!(
+            classifier_token_count(&one_line).expect("tokenizer") > MAX_CLASSIFY_INPUT_TOKENS,
+            "fixture must exceed the budget or this test proves nothing"
+        );
         let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
         assert!(ranges.len() > 1, "an oversized single line must be split");
         for range in &ranges {

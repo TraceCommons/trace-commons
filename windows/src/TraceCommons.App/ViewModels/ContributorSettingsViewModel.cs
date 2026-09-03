@@ -30,9 +30,50 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private bool _localNotifications;
     private string _notice = string.Empty;
 
+    /// <summary>
+    /// The routing surface's words, read once from the Rust across the C ABI.
+    ///
+    /// Null when the call failed or the payload would not parse, and the whole
+    /// surface is hidden in that case rather than rendered with blanks beside
+    /// the tool names. Nothing on this surface is written here: see
+    /// <see cref="RoutingTools"/>.
+    /// </summary>
+    private readonly RoutingCopy? _routingCopy = RoutingSurface.Copy();
+
+    private RoutingEvidence? _routingEvidence;
+    private bool _routingDeclared;
+    private double _routingPort = TraceCommons.Interop.RoutingTools.DefaultPort;
+    private string _routingTokenDir = string.Empty;
+    private string _routingProbeText = string.Empty;
+    private string _routingStateText = string.Empty;
+    private RoutingTone _routingStateTone = RoutingTone.Neutral;
+    private string? _routingLastChecked;
+    private RoutingModes _routingModes = new();
+
+    /// <summary>
+    /// Whether a daemon event may re-ask IronWire, and whether an answer
+    /// still describes the declaration this machine holds now. The rules and
+    /// their reasons live in <see cref="RoutingRefreshGate"/>, where they are
+    /// tested off Windows.
+    /// </summary>
+    private readonly RoutingRefreshGate _routingGate = new();
+
     public ContributorSettingsViewModel(DaemonHost host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+
+        // The routing card is the daemon's state, not this window's: the
+        // reader moves from awaiting-rows to rows-seen on its own, the proxy
+        // comes up, the daemon restarts and loses its per-process stamp.
+        // Without this the card showed whatever was true when it was opened
+        // until the contributor touched something. This is the same event
+        // MainViewModel refreshes on, and DaemonHost raises it for the ABI's
+        // lag and resync frames too, so a missed delta repaints this surface
+        // as well. No timer is added: the event path already exists.
+        //
+        // Never unsubscribed, matching MainViewModel. SettingsView is built
+        // once with `??=` and lives as long as the window.
+        _host.StatusChanged += OnDaemonStatusChanged;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -47,6 +88,186 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public ObservableCollection<AuditSettingViewModel> AuditEntries { get; } = new();
 
+    /// <summary>One row per tool, each carrying exactly one of the four shared words.</summary>
+    public ObservableCollection<RoutingToolRowViewModel> RoutingToolRows { get; } = new();
+
+    // --- The routing surface's fixed words ------------------------------
+    //
+    // Every one of these is the payload's, never this shell's. A string
+    // literal here would be a fourth place the wording can drift to, and one
+    // of them is a privacy claim.
+
+    /// <summary>Whether the shared words arrived at all.</summary>
+    public bool RoutingAvailable => _routingCopy is not null;
+
+    public string RoutingToolsHeading => _routingCopy?.ToolsHeading ?? string.Empty;
+
+    public string RoutingIntro => _routingCopy?.Intro ?? string.Empty;
+
+    public string RoutingToggleText => _routingCopy?.Toggle ?? string.Empty;
+
+    /// <summary>
+    /// Said out loud because the obvious worry is that it is not true.
+    /// Nothing on this surface waits on the app being started again.
+    /// </summary>
+    public string RoutingAppliesAtOnceText => _routingCopy?.AppliesAtOnce ?? string.Empty;
+
+    public string RoutingPortTitle => _routingCopy?.PortTitle ?? string.Empty;
+
+    public string RoutingPortNote => _routingCopy?.PortNote ?? string.Empty;
+
+    public string RoutingFolderTitle => _routingCopy?.FolderTitle ?? string.Empty;
+
+    public string RoutingFolderNote => _routingCopy?.FolderNote ?? string.Empty;
+
+    public string RoutingApplyText => _routingCopy?.Apply ?? string.Empty;
+
+    /// <summary>
+    /// Whether IronWire is declared on this machine.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not an input to any tool's word. Declaring IronWire here
+    /// has no causal relation to whether a tool is configured to send through
+    /// it, and reading this switch is what let a contributor see the wired
+    /// word on the same card as "Nothing answered on port 8463".
+    /// </remarks>
+    public bool RoutingDeclared
+    {
+        get => _routingDeclared;
+        private set
+        {
+            if (Set(ref _routingDeclared, value))
+            {
+                Raise(nameof(RoutingControlsEnabled));
+            }
+        }
+    }
+
+    /// <summary>The port and folder boxes are the override, live only while the switch is on.</summary>
+    public bool RoutingControlsEnabled => _routingDeclared && !_isBusy;
+
+    /// <summary>
+    /// The port, shown filled in with IronWire's conventional number so
+    /// nobody has to know it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Shown is not declared.</b> Nothing is written until the contributor
+    /// turns the switch on: a displayed default that wrote itself would have
+    /// this window announce a local service nobody mentioned.
+    /// </remarks>
+    public double RoutingPort
+    {
+        get => _routingPort;
+        set => Set(ref _routingPort, value);
+    }
+
+    public string RoutingTokenDir
+    {
+        get => _routingTokenDir;
+        set => Set(ref _routingTokenDir, value ?? string.Empty);
+    }
+
+    /// <summary>What the last check answered, or empty while nothing has been asked.</summary>
+    public string RoutingProbeText
+    {
+        get => _routingProbeText;
+        private set
+        {
+            if (Set(ref _routingProbeText, value))
+            {
+                Raise(nameof(HasRoutingProbeText));
+            }
+        }
+    }
+
+    public bool HasRoutingProbeText => _routingProbeText.Length > 0;
+
+    /// <summary>The daemon's three-state view of what it is seeing.</summary>
+    public string RoutingStateText
+    {
+        get => _routingStateText;
+        private set => Set(ref _routingStateText, value);
+    }
+
+    /// <summary>
+    /// How firmly that sentence reads, from the daemon's state.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RoutingTools.StateTone"/> already gated the "last checked"
+    /// stamp inside <see cref="RoutingTools.StatusLine"/>, but this shell
+    /// threw the tone away and painted the sentence flat. GTK has painted
+    /// this row from the same three states since it was written; this is
+    /// that parity.
+    ///
+    /// None of the three states is a fault, so this never reaches a fault
+    /// colour: <c>awaiting_rows</c> is held and not broken -- a reader built
+    /// a moment ago starts cold by construction, and that is the state a
+    /// contributor sees immediately after touching anything on this card.
+    ///
+    /// From the state, never from <see cref="RoutingStateText"/>. The word
+    /// half of this surface used to recover its tone by comparing a rendered
+    /// privacy claim, and that is the shape being removed everywhere.
+    /// </remarks>
+    public RoutingTone RoutingStateTone
+    {
+        get => _routingStateTone;
+        private set
+        {
+            if (_routingStateTone == value)
+            {
+                return;
+            }
+
+            _routingStateTone = value;
+            Raise(nameof(RoutingStateTone));
+            Raise(nameof(RoutingStateIsClear));
+            Raise(nameof(RoutingStateIsHeld));
+            Raise(nameof(RoutingStateIsNeutral));
+        }
+    }
+
+    /// <summary>
+    /// The XAML projection of <see cref="RoutingStateTone"/>, and only that.
+    ///
+    /// Three visibilities rather than one bound brush because the tone
+    /// colours live in a theme dictionary and only <c>ThemeResource</c>
+    /// resolves those correctly in both themes. All three read the enum;
+    /// none reads the sentence.
+    /// </summary>
+    public bool RoutingStateIsClear => RoutingStateTone == RoutingTone.Clear;
+
+    /// <summary>The held reading. Normal, never a fault.</summary>
+    public bool RoutingStateIsHeld => RoutingStateTone == RoutingTone.Held;
+
+    /// <summary>Says nothing either way, and is the default.</summary>
+    public bool RoutingStateIsNeutral =>
+        RoutingStateTone != RoutingTone.Clear && RoutingStateTone != RoutingTone.Held;
+
+    /// <summary>
+    /// When the daemon last got an answer.
+    /// </summary>
+    /// <remarks>
+    /// Per-process: the stamp lives in the running daemon and starts empty
+    /// again every time that process comes back up, so it is a "last checked"
+    /// and never an install date or a "connected since". Withheld entirely on
+    /// the state that has had no answer at all.
+    /// </remarks>
+    public string RoutingLastChecked => _routingLastChecked ?? string.Empty;
+
+    public bool HasRoutingLastChecked => !string.IsNullOrEmpty(_routingLastChecked);
+
+    private void SetRoutingLastChecked(string? value)
+    {
+        if (string.Equals(_routingLastChecked, value, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _routingLastChecked = value;
+        Raise(nameof(RoutingLastChecked));
+        Raise(nameof(HasRoutingLastChecked));
+    }
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -55,6 +276,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             if (Set(ref _isBusy, value))
             {
                 Raise(nameof(IsNotBusy));
+                Raise(nameof(RoutingControlsEnabled));
             }
         }
     }
@@ -170,7 +392,9 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             DaemonResponse settingsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.GetSettings)
                 .ConfigureAwait(true);
-            FillSettings(settingsResponse.ResultAs<DaemonSettingsSnapshot>());
+            DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
+            FillSettings(snapshot);
+            FillRouting(snapshot, status);
 
             DaemonResponse optionsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.ConsentOptions)
@@ -181,6 +405,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
             await LoadProjectsAsync().ConfigureAwait(true);
             await LoadAuditAsync().ConfigureAwait(true);
+            if (RoutingDeclared)
+            {
+                await CheckRoutingAsync().ConfigureAwait(true);
+            }
 
             StartupRegistrationState startup = await StartupRegistration
                 .GetStateAsync()
@@ -374,6 +602,21 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// One session-source row. The satisfied tone tracks the same mode word
+    /// the sentence does, so the tick and the words cannot disagree.
+    /// </summary>
+    private void AddSourceRow(string tool, string sourceMode)
+    {
+        string? line = SourceChecks.CheckLine(tool, sourceMode);
+        if (line is null)
+        {
+            return;
+        }
+
+        ConnectionRows.Add(new ConnectionStatusViewModel(line, sourceMode == "watch"));
+    }
+
     private void FillSettings(DaemonSettingsSnapshot? settings)
     {
         ConnectionRows.Clear();
@@ -382,16 +625,15 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             return;
         }
 
-        ConnectionRows.Add(new ConnectionStatusViewModel(
-            settings.ClaudeRootConfigured
-                ? "Claude Code sessions folder set"
-                : "Claude Code sessions read from the usual place",
-            settings.ClaudeRootConfigured));
-        ConnectionRows.Add(new ConnectionStatusViewModel(
-            settings.CodexRootConfigured
-                ? "Codex sessions folder set"
-                : "Codex sessions read from the usual place",
-            settings.CodexRootConfigured));
+        // The row's words come from the Rust, chosen by the MODE. This shell
+        // branched on ClaudeRootConfigured, which is (mode == "watch") and
+        // therefore false for "off" as well as for "unset" -- so a
+        // contributor who declared Claude Code off was told its sessions
+        // were being read from the usual place. Nothing is read from an off
+        // source. A null line means the call failed; the row is left out
+        // rather than filled with a sentence written here.
+        AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
+        AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
         ConnectionRows.Add(new ConnectionStatusViewModel(
             settings.NearAiConfigured
                 ? "Extra privacy scan configured"
@@ -485,6 +727,348 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
         Raise(nameof(HasAuditEntries));
         Raise(nameof(HasNoAuditEntries));
+    }
+
+    // --- The routing surface --------------------------------------------
+
+    /// <summary>
+    /// Turns the declaration on or off. One <c>set_settings</c> key, written
+    /// the moment the switch moves.
+    /// </summary>
+    /// <remarks>
+    /// What IronWire said about the old declaration is dropped BEFORE the
+    /// write, not after a replacement arrives: the words must stop asserting
+    /// immediately, not once something new lands.
+    /// </remarks>
+    public async Task SetRoutingEnabledAsync(bool on)
+    {
+        if (!IsLoaded || IsBusy || on == RoutingDeclared)
+        {
+            return;
+        }
+
+        await WriteRoutingAsync(on).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Rewrites the declaration from the port and folder boxes, then asks
+    /// again. The probe runs only from here and from the switch: a human
+    /// pressing something. Nothing on the submission path calls it.
+    /// </summary>
+    public async Task ApplyRoutingAsync()
+    {
+        if (!IsLoaded || IsBusy || !RoutingDeclared)
+        {
+            return;
+        }
+
+        await WriteRoutingAsync(true).ConfigureAwait(true);
+    }
+
+    private async Task WriteRoutingAsync(bool on)
+    {
+        _routingEvidence = null;
+        _routingGate.Forget();
+        RenderRoutingToolRows();
+        RoutingDeclared = on;
+        RoutingProbeText = on && _routingCopy is not null ? _routingCopy.Checking : string.Empty;
+
+        IsBusy = true;
+        try
+        {
+            string payload = TraceCommons.Interop.RoutingTools.SerializeDeclaration(
+                on,
+                RoutingPortValue(),
+                RoutingTokenDir);
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
+                .ConfigureAwait(true);
+            if (response.IsError)
+            {
+                // The error label is a fixed one by contract and is not a
+                // sentence anybody can act on. What matters is that nothing
+                // changed.
+                RoutingProbeText = string.Empty;
+                Notice = "That couldn't be changed just now. Nothing was changed.";
+            }
+
+            DaemonResponse current = await _host
+                .CallAsync(DaemonProtocol.Methods.GetSettings)
+                .ConfigureAwait(true);
+            DaemonResponse status = await _host
+                .CallAsync(DaemonProtocol.Methods.Status)
+                .ConfigureAwait(true);
+            FillRouting(
+                current.ResultAs<DaemonSettingsSnapshot>(),
+                status.ResultAs<DaemonStatus>());
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+
+        if (RoutingDeclared)
+        {
+            await CheckRoutingAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>
+    /// Asks IronWire which tools on this machine are pointed at it, and
+    /// repaints the words from the answer.
+    /// </summary>
+    /// <remarks>
+    /// A call that did not run is not a fact about any tool: the evidence is
+    /// left empty, so every word stays at the no-verdict one.
+    /// </remarks>
+    private async Task CheckRoutingAsync()
+    {
+        if (_routingCopy is null)
+        {
+            return;
+        }
+
+        long ticket = _routingGate.BeginProbe();
+        RoutingProbeText = _routingCopy.Checking;
+        IsBusy = true;
+        try
+        {
+            RoutingEvidence? evidence = await AskRoutedToolsAsync(
+                    RoutingPortValue(),
+                    RoutingTokenDir)
+                .ConfigureAwait(true);
+
+            if (evidence is null)
+            {
+                if (_routingGate.CompleteWithoutAnswer(ticket))
+                {
+                    _routingEvidence = null;
+                    RoutingProbeText = _routingCopy.CheckUnavailable;
+                }
+            }
+            else if (_routingGate.CompleteWithAnswer(ticket, DateTimeOffset.UtcNow))
+            {
+                _routingEvidence = evidence;
+                RoutingProbeText = TraceCommons.Interop.RoutingTools.ProbeLine(
+                    _routingCopy,
+                    evidence.Outcome);
+            }
+
+            RenderRoutingToolRows();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// A daemon event says something may have changed, so this card is
+    /// repainted from the daemon rather than left showing what was true when
+    /// it was opened.
+    /// </summary>
+    /// <remarks>
+    /// async void because this is an event handler, which is the one place it
+    /// is correct. Nothing it calls throws on a daemon error: an error frame
+    /// is a parsed response, and a card that could not be refreshed keeps
+    /// what it had rather than blanking.
+    /// </remarks>
+    private async void OnDaemonStatusChanged()
+    {
+        await RefreshRoutingAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Re-reads the daemon's routing state and repaints the card.
+    /// </summary>
+    /// <remarks>
+    /// Only the routing card. Everything else on this screen is a knob whose
+    /// value this window is the author of, and refetching those under a
+    /// contributor's hands would be a different change.
+    ///
+    /// Skipped while a write is in flight: that write ends by filling this
+    /// card from the daemon's own answer, and a repaint racing it would paint
+    /// the state from before it.
+    /// </remarks>
+    private async Task RefreshRoutingAsync()
+    {
+        if (!IsLoaded || IsBusy)
+        {
+            return;
+        }
+
+        DaemonResponse settingsResponse = await _host
+            .CallAsync(DaemonProtocol.Methods.GetSettings)
+            .ConfigureAwait(true);
+        DaemonResponse statusResponse = await _host
+            .CallAsync(DaemonProtocol.Methods.Status)
+            .ConfigureAwait(true);
+
+        DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
+        FillRouting(
+            snapshot,
+            statusResponse.ResultAs<DaemonStatus>(),
+            fillDeclarationFields: false);
+
+        await ReAskRoutedToolsAsync(snapshot).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Asks IronWire again on a daemon event, if the gate allows it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three differences from the human path, each deliberate. It does not
+    /// raise <see cref="IsBusy"/>: an event nobody asked for must not disable
+    /// the controls under a contributor's hands. It does not touch
+    /// <see cref="RoutingProbeText"/>: that line answers a press, and a
+    /// background call rewriting it would answer a question nobody asked.
+    /// And a call that did not run drops nothing -- the previous answer stays
+    /// on screen rather than every word blanking because one background call
+    /// failed.
+    /// </para>
+    /// <para>
+    /// The declared port and folder are used, never the boxes': an event can
+    /// land while somebody is typing into the port field, and the question
+    /// has to be about the declaration the daemon is actually holding.
+    /// </para>
+    /// </remarks>
+    private async Task ReAskRoutedToolsAsync(DaemonSettingsSnapshot? settings)
+    {
+        if (_routingCopy is null
+            || !_routingGate.TryBeginProbe(RoutingDeclared, DateTimeOffset.UtcNow, out long ticket))
+        {
+            return;
+        }
+
+        RoutingEvidence? evidence = await AskRoutedToolsAsync(
+                settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort,
+                settings?.Routing?.TokenDir ?? string.Empty)
+            .ConfigureAwait(true);
+
+        if (evidence is null)
+        {
+            _routingGate.CompleteWithoutAnswer(ticket);
+            return;
+        }
+
+        if (_routingGate.CompleteWithAnswer(ticket, DateTimeOffset.UtcNow))
+        {
+            _routingEvidence = evidence;
+            RenderRoutingToolRows();
+        }
+    }
+
+    /// <summary>
+    /// One <c>probe_routed_tools</c> call, or null when it did not run.
+    /// </summary>
+    /// <remarks>
+    /// Null and not an empty answer: a call that did not run is not a fact
+    /// about any tool, and the two callers say different things about that.
+    /// </remarks>
+    private async Task<RoutingEvidence?> AskRoutedToolsAsync(ushort port, string tokenDir)
+    {
+        string payload = TraceCommons.Interop.RoutingTools.SerializeProbeParams(port, tokenDir);
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.ProbeRoutedTools, payload)
+            .ConfigureAwait(true);
+
+        return response.IsError || response.Result is null
+            ? null
+            : RoutingEvidence.Parse(response.Result.Value.GetRawText());
+    }
+
+    /// <summary>
+    /// Fills the declaration controls and the state line from the daemon's
+    /// own answer.
+    /// </summary>
+    /// <param name="fillDeclarationFields">
+    /// Whether the port and folder boxes are refilled from the daemon's
+    /// declaration. False on a repaint driven by a daemon event: those two
+    /// are written when Apply is pressed rather than as they are typed, so an
+    /// event landing mid-edit would otherwise replace a half-typed port with
+    /// the declared one.
+    /// </param>
+    private void FillRouting(
+        DaemonSettingsSnapshot? settings,
+        DaemonStatus? status,
+        bool fillDeclarationFields = true)
+    {
+        _routingModes = new RoutingModes
+        {
+            Claude = settings?.ClaudeSourceMode ?? string.Empty,
+            Codex = settings?.CodexSourceMode ?? string.Empty,
+            Gemini = settings?.GeminiSourceMode ?? string.Empty,
+        };
+
+        bool declared = settings?.RoutingDeclared ?? false;
+        if (!declared)
+        {
+            // Nothing is declared, so nothing held about IronWire is still
+            // about this machine's current state. Dropped rather than kept,
+            // so turning the switch back on cannot paint a stale verdict
+            // before a new answer lands.
+            _routingEvidence = null;
+            _routingGate.Forget();
+            RoutingProbeText = string.Empty;
+        }
+
+        RoutingDeclared = declared;
+        if (fillDeclarationFields)
+        {
+            RoutingPort = settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort;
+            RoutingTokenDir = settings?.Routing?.TokenDir ?? string.Empty;
+        }
+
+        RenderRoutingToolRows();
+
+        if (_routingCopy is null)
+        {
+            return;
+        }
+
+        RoutingStatusLine line = TraceCommons.Interop.RoutingTools.StatusLine(
+            _routingCopy,
+            status?.RoutingState ?? string.Empty,
+            status?.Routing?.LastRefreshAt);
+        RoutingStateText = line.Text;
+        RoutingStateTone = line.Tone;
+        SetRoutingLastChecked(line.LastChecked);
+    }
+
+    /// <summary>
+    /// The single painter for the tool rows. Both things that can change a
+    /// word go through it, so neither can arrive and blank what the other
+    /// established.
+    /// </summary>
+    private void RenderRoutingToolRows()
+    {
+        RoutingToolRows.Clear();
+        if (_routingCopy is null)
+        {
+            return;
+        }
+
+        foreach (RoutingToolRow row in TraceCommons.Interop.RoutingTools.Rows(
+                     _routingCopy,
+                     _routingModes,
+                     _routingEvidence))
+        {
+            RoutingToolRows.Add(new RoutingToolRowViewModel(row));
+        }
+    }
+
+    private ushort RoutingPortValue()
+    {
+        double value = Math.Round(RoutingPort, MidpointRounding.AwayFromZero);
+        if (value < 1)
+        {
+            return TraceCommons.Interop.RoutingTools.DefaultPort;
+        }
+
+        return value > ushort.MaxValue
+            ? TraceCommons.Interop.RoutingTools.DefaultPort
+            : (ushort)value;
     }
 
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
@@ -622,4 +1206,56 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActionText)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
     }
+}
+
+/// <summary>
+/// One tool's name and its one word.
+/// </summary>
+/// <remarks>
+/// Both strings come from the shared source across the C ABI; nothing here
+/// composes wording, and no property here derives a second verdict from the
+/// word.
+///
+/// The wired row is toned, matching the GTK shell. The tone arrives on
+/// <see cref="RoutingToolRow"/>, decided by the same shared branch table that
+/// chose the word, and NOTHING here reads <see cref="Word"/> to reach it: the
+/// wired word is a substring of a denial that must never come back, and a
+/// test of the word's text to decide how to paint it is one <c>Contains</c>
+/// away from the bug that matched "unreachable" as "reachable" on this same
+/// surface.
+/// </remarks>
+public sealed class RoutingToolRowViewModel
+{
+    public RoutingToolRowViewModel(RoutingToolRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        Name = row.Name;
+        Word = row.Word;
+        Tone = row.Tone;
+        AccessibleLabel = row.AccessibleLabel;
+    }
+
+    public string Name { get; }
+
+    public string Word { get; }
+
+    /// <summary>
+    /// How the word is painted, straight from the shared table.
+    /// </summary>
+    public RoutingTone Tone { get; }
+
+    /// <summary>
+    /// The XAML projection of <see cref="Tone"/>, and only that.
+    ///
+    /// Two visibilities rather than one bound brush because the tone colours
+    /// live in a theme dictionary and only <c>ThemeResource</c> resolves them
+    /// correctly in both themes. Both read the enum; neither reads the word.
+    /// </summary>
+    public bool ShowsClearWord => Tone == RoutingTone.Clear;
+
+    /// <summary>The other half of <see cref="ShowsClearWord"/>.</summary>
+    public bool ShowsNeutralWord => Tone != RoutingTone.Clear;
+
+    /// <summary>The row read as one statement, for a screen reader.</summary>
+    public string AccessibleLabel { get; }
 }

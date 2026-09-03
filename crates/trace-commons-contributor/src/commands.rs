@@ -67,6 +67,12 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        // The unenrolled preview has no claim and therefore cannot be
+        // witnessed -- see `witness_claim_unavailable`. `None` rather than
+        // reading the environment, so an operator who exported the witness
+        // variables does not get a preview that refuses for a reason they
+        // did not ask for.
+        witness: None,
     }
 }
 
@@ -170,6 +176,10 @@ pub(crate) async fn enroll_core(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        // Enrollment never turns the witness on. It is opt-in, from config or
+        // the environment, and a server-supplied enablement is exactly the
+        // "no server-pushed enablement" rule this field exists under.
+        witness: crate::config::witness_settings_from_env(),
     };
     store
         .save_config(&cfg)
@@ -1987,6 +1997,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&existing).unwrap();
 
@@ -2129,6 +2140,7 @@ mod tests {
             display_handle: Some("quiet-otter".to_string()),
             public_bio: Some("Ships billing systems by day.".to_string()),
             public_since: Some(chrono::Utc::now()),
+            witness: None,
         }
     }
 
@@ -2200,6 +2212,7 @@ mod tests {
     fn strip_reasoning_removes_only_reasoning_events() {
         use crate::source::{SessionEvent, SessionEventKind};
         let mk = |kind: SessionEventKind| SessionEvent {
+            served_by: None,
             kind,
             timestamp: None,
             content: Some("x".to_string()),
@@ -2622,6 +2635,10 @@ async fn enroll_with_invite_core(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        // Enrollment never turns the witness on. It is opt-in, from config or
+        // the environment, and a server-supplied enablement is exactly the
+        // "no server-pushed enablement" rule this field exists under.
+        witness: crate::config::witness_settings_from_env(),
     };
     store
         .save_config(&cfg)

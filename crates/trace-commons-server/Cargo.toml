@@ -73,7 +73,13 @@ tokio = { version = "1", features = ["full"] }
 toml = "1"
 zstd = "0.13"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
-trace-commons-attestation = { path = "../trace-commons-attestation" }
+# `receipt`: this crate recovers EIP-191 signers, both for NEAR AI inference
+# receipts and for redaction-witness certificates. The feature is off by
+# default in that crate so a permissive client can take quote verification
+# without `k256` and `sha3`.
+trace-commons-attestation = { path = "../trace-commons-attestation", features = [
+    "receipt",
+] }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
@@ -164,6 +170,10 @@ path = "src/bin/trace-commons-tenant.rs"
 [[bin]]
 name = "trace-commons-smoke-envelope"
 path = "src/bin/trace-commons-smoke-envelope.rs"
+
+[[bin]]
+name = "trace-commons-witness"
+path = "src/bin/trace-commons-witness.rs"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -202,6 +202,7 @@ const REPORT_METRIC_LABELS: &[&str] = &[
     "github_token",
     "aws_access_key",
     "provider_token",
+    "cursor_api_key",
     "npm_token",
     "google_api_key",
     "pem_header_orphan",
@@ -564,6 +565,7 @@ fn diag_for(hay: &str, pattern_name: &str) -> Option<(usize, f64, String)> {
             .iter()
             .find_map(|a| first_keyish(hay, a, 8, detector_token_char))
             .map(safe_diag),
+        "cursor key" => first_keyish(hay, "crsr_", 40, |c| c.is_ascii_hexdigit()).map(safe_diag),
         "npm token" => first_keyish(hay, "npm_", 36, |c| c.is_ascii_alphanumeric()).map(safe_diag),
         "PEM private key" => find_pem_header(hay, 0).map(|r| safe_diag(&hay[r])),
         "bearer value" => first_bearer_value(hay).map(safe_diag),
@@ -726,6 +728,16 @@ fn scan(hay: &str) -> Vec<(&'static str, usize)> {
                 .map(|a| count_keyish(hay, a, 8, detector_token_char))
                 .sum(),
         ),
+        // Mirrors `(?i)\bcrsr_[0-9a-f]{40,}` (no trailing `\b` -- see the
+        // regression test on the detector side for why). Narrower than the
+        // provider-token mirror above on purpose: the production detector is
+        // anchored on a long hex body precisely so it cannot eat ordinary
+        // `crsr_` snake_case identifiers, and a harness that checked the
+        // loose tail instead would report those identifiers as leaks.
+        (
+            "cursor key",
+            count_keyish(hay, "crsr_", 40, |c| c.is_ascii_hexdigit()),
+        ),
         // Mirrors `\bnpm_[A-Za-z0-9]{36}\b`.
         (
             "npm token",
@@ -754,6 +766,7 @@ fn audit_cfg() -> ContributorConfig {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     }
 }
 
@@ -906,6 +919,10 @@ const SECRET_SHAPED_PROSE: &str = concat!(
     "ANTHROPIC key looks like sk-ant-EXAMPLEabcdef...\n",
     // Kebab-case prose following the word bearer.
     "the bearer per-a-slot-based scheme\n",
+    // An elided placeholder describing the Cursor key shape, same pattern as
+    // the ANTHROPIC line above: the trailing "..." is literal and non-hex,
+    // so the tail run stops at 8 hex chars, short of the 40-char minimum.
+    "a Cursor key looks like crsr_ followed by 40+ hex chars, e.g. crsr_9f2b7a1c...\n",
 );
 
 /// Credential-shaped strings that MUST still be counted. Synthetic, and
@@ -918,6 +935,7 @@ const REAL_SECRET_SHAPES: &str = concat!(
     "AKIAIOSFODNN7EXAMPLE\n",
     "AIzaSyD-abcdefghijklmnopqrstuvwxyz0123456789\n",
     "npm_abcdefghijklmnopqrstuvwxyz0123456789AB\n",
+    "crsr_0123456789abcdef0123456789abcdef01234567\n",
     "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0123456789abcdef\n-----END RSA PRIVATE KEY-----\n",
 );
 
@@ -951,6 +969,7 @@ fn scan_still_counts_real_credential_shapes() {
         "aws AKIA",
         "google AIza",
         "npm token",
+        "cursor key",
         "PEM private key",
     ] {
         assert!(

@@ -53,9 +53,7 @@
 //! errors here name a condition and carry no payload beyond a part count or a
 //! recovery byte.
 
-use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use sha2::{Digest as _, Sha256};
-use sha3::Keccak256;
 
 /// A receipt as the provider returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,62 +188,37 @@ pub fn verify_receipt(
     })
 }
 
-/// The EIP-191 `personal_sign` digest of `message`.
-///
-/// The length in the preamble is the **byte** length rendered as decimal
-/// ASCII, not the character count. For any message outside ASCII the two
-/// differ, and a verifier that used the character count would recover a
-/// different -- and therefore rejected -- signer.
-fn eip191_digest(message: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak256::new();
-    hasher.update(b"\x19Ethereum Signed Message:\n");
-    hasher.update(message.len().to_string().as_bytes());
-    hasher.update(message);
-    hasher.finalize().into()
-}
-
 /// Recover the 20-byte Ethereum address that produced `signature_hex` over
 /// `message` under EIP-191.
+///
+/// A thin wrapper over [`crate::eip191::recover_eip191_signer`], which is
+/// where this lives now and is **not** behind this feature -- a
+/// redaction-witness certificate is signed the same way and has nothing to do
+/// with inference receipts. Kept here, mapping into [`ReceiptError`], so that
+/// every existing caller and every existing `match` on a `ReceiptError`
+/// variant is unchanged.
 pub fn recover_eip191_signer(
     message: &[u8],
     signature_hex: &str,
 ) -> Result<[u8; 20], ReceiptError> {
-    let raw = hex::decode(strip_0x(signature_hex)).map_err(|_| ReceiptError::SignatureMalformed)?;
-    if raw.len() != 65 {
-        return Err(ReceiptError::SignatureMalformed);
+    crate::eip191::recover_eip191_signer(message, signature_hex).map_err(ReceiptError::from)
+}
+
+impl From<crate::eip191::Eip191Error> for ReceiptError {
+    fn from(error: crate::eip191::Eip191Error) -> Self {
+        // Exhaustive rather than a catch-all, so a new variant over there is
+        // a compile error here and gets a deliberate mapping instead of
+        // silently becoming "malformed".
+        match error {
+            crate::eip191::Eip191Error::SignatureMalformed => ReceiptError::SignatureMalformed,
+            crate::eip191::Eip191Error::RecoveryIdUnsupported { v } => {
+                ReceiptError::RecoveryIdUnsupported { v }
+            }
+            crate::eip191::Eip191Error::SignatureUnrecoverable => {
+                ReceiptError::SignatureUnrecoverable
+            }
+        }
     }
-    let v = raw[64];
-    let recovery_byte = match v {
-        0 | 1 => v,
-        27 | 28 => v - 27,
-        other => return Err(ReceiptError::RecoveryIdUnsupported { v: other }),
-    };
-    let recovery_id =
-        RecoveryId::from_byte(recovery_byte).ok_or(ReceiptError::RecoveryIdUnsupported { v })?;
-    let signature =
-        Signature::from_slice(&raw[..64]).map_err(|_| ReceiptError::SignatureMalformed)?;
-
-    let digest = eip191_digest(message);
-    let key = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
-        .map_err(|_| ReceiptError::SignatureUnrecoverable)?;
-
-    Ok(address_of(&key))
-}
-
-/// The Ethereum address of a secp256k1 public key: the last 20 bytes of the
-/// keccak256 of the uncompressed encoding with its `0x04` tag removed.
-fn address_of(key: &VerifyingKey) -> [u8; 20] {
-    let point = key.to_encoded_point(false);
-    let digest = Keccak256::digest(&point.as_bytes()[1..]);
-    let mut address = [0u8; 20];
-    address.copy_from_slice(&digest[12..]);
-    address
-}
-
-fn strip_0x(s: &str) -> &str {
-    s.strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s)
 }
 
 /// Decode a 32-byte hex digest, in either case. `None` if it is not one.
@@ -257,20 +230,19 @@ fn decode_sha256_hex(s: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// Decode a `0x`-prefixed 20-byte hex address, in either case.
-pub fn decode_address(s: &str) -> Option<[u8; 20]> {
-    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if body.len() != 40 {
-        return None;
-    }
-    let bytes = hex::decode(body).ok()?;
-    bytes.try_into().ok()
-}
+/// Re-exported from [`crate::address`], which is outside this feature.
+///
+/// Decoding an address is hex; recovering one is a curve. Callers that only
+/// need the former must not have to enable `receipt` to get it, so the
+/// function lives there and is re-exported here for every existing caller.
+pub use crate::address::decode_address;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eip191::{address_of, eip191_digest, strip_0x};
     use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
 
     /// Fixed test keys. Deliberately constants and never generated: a random
     /// key makes a failure unreproducible, and every input to these tests has

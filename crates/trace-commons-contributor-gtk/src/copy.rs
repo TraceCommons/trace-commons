@@ -780,10 +780,14 @@ pub const COMMUNITY_FOOTNOTE: &str = "Shown only while \"List my handle publicly
 pub const CONNECTION_HEADING: &str = "Connection";
 pub const CONNECTED: &str = "Connected";
 pub const NOT_CONNECTED: &str = "Not connected";
-pub const CHECK_CLAUDE_SET: &str = "Claude Code sessions folder set";
-pub const CHECK_CLAUDE_DEFAULT: &str = "Claude Code sessions read from the usual place";
-pub const CHECK_CODEX_SET: &str = "Codex sessions folder set";
-pub const CHECK_CODEX_DEFAULT: &str = "Codex sessions read from the usual place";
+// The two session-source rows are NOT constants here. They were, as a
+// set/default pair each, and the "default" half was printed for `off` as
+// well as for `unset` -- so a contributor who said they do not use Claude
+// Code was told its sessions were being read from the usual place. Three
+// modes need three sentences, and the other two shells print them too, so
+// the words live in `trace_commons_contributor::source_copy` and this
+// shell re-exports the one definition.
+pub use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
 pub const CHECK_SCAN_SET: &str = "Extra privacy scan configured";
 pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 
@@ -1354,6 +1358,10 @@ pub fn scrub_detector_label(slug: &str) -> String {
         // Naming them beats "provider tokens", which tells a contributor
         // nothing about whether their own provider is covered.
         "provider_token" => "Stripe, GitLab and Slack tokens".to_string(),
+        // Named separately from `provider_token` for the same reason that
+        // entry names its providers: a Cursor user reading this list has to
+        // be able to see their own key in it.
+        "cursor_api_key" => "Cursor API keys".to_string(),
         "jwt" => "JSON Web Tokens".to_string(),
         "npm_token" => "npm tokens".to_string(),
         "google_api_key" => "Google API keys".to_string(),
@@ -1793,6 +1801,45 @@ mod daily_cap_tests {
         assert!(!text.contains("tomorrow"), "{text}");
         assert!(text.contains("resets"), "{text}");
     }
+}
+
+// --- Tools -------------------------------------------------------------
+//
+// One tool, one word.
+//
+// The words themselves are NOT here. They live in
+// `trace_commons_contributor::routing_copy`, because the macOS and Windows
+// shells render this same surface and reach them across the C ABI. A word
+// kept in three places is three words that have not diverged yet, so this
+// shell re-exports the one definition rather than holding a second.
+//
+// The forbidden-word sweep moved with them. It reads that module's source
+// between its own `TOOLS-SURFACE-BEGIN` / `TOOLS-SURFACE-END` markers; a
+// sweep left behind here would have walked a region with no strings in it
+// and passed while covering nothing, which is the exact failure it was
+// written to replace.
+pub use trace_commons_contributor::routing_copy::{
+    IRONWIRE_APPLIES_AT_ONCE, IRONWIRE_APPLY, IRONWIRE_CHECK_UNAVAILABLE, IRONWIRE_CHECKING,
+    IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO, IRONWIRE_PORT_NOTE,
+    IRONWIRE_PORT_TITLE, IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING,
+    IRONWIRE_STATE_WAITING, IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT,
+    TOOL_GEMINI, TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring,
+    ironwire_shows_last_checked, ironwire_state_line, ironwire_state_tone, ironwire_token_line,
+    ironwire_unreachable_line, tool_tone, tool_word,
+};
+
+/// When the daemon last got an answer, or nothing.
+///
+/// The sentence is [`trace_commons_contributor::routing_copy::last_checked_line`];
+/// the only thing this shell adds is its own humanised time, which is a
+/// rendering of a `DateTime` and not wording about routing.
+#[must_use]
+pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    at.map(|at| {
+        trace_commons_contributor::routing_copy::last_checked_line(&crate::model::human_when(Some(
+            at,
+        )))
+    })
 }
 
 #[cfg(test)]
@@ -2559,6 +2606,63 @@ mod tests {
         }
     }
 
+    /// The words themselves, against the copy the other two shells read.
+    ///
+    /// `every_detector_has_a_human_label` above proves a label EXISTS. It
+    /// cannot see what the label says, and each shell hardcodes its own nine
+    /// strings, so all three could satisfy their coverage guards while
+    /// telling contributors three different things about the same detector.
+    /// That is not hypothetical about `provider_token` and `cursor_api_key`
+    /// in particular: the entire reason those are two detectors rather than
+    /// one is the words each is published under.
+    ///
+    /// The fixture is the single copy of those words, read by this test and
+    /// by the macOS and Windows ones named in its `checked_by`. A label
+    /// changed in one shell fails here; a label changed in the fixture fails
+    /// in the other two until they follow.
+    #[test]
+    fn scrub_detector_labels_match_the_shared_fixture() {
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/scrub-detectors/labels.json"
+        );
+
+        let raw = std::fs::read_to_string(FIXTURE)
+            .unwrap_or_else(|e| panic!("reading the shared scrub-label fixture {FIXTURE}: {e}"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("the shared scrub-label fixture must be JSON");
+        let labels = parsed["labels"]
+            .as_object()
+            .expect("the fixture must carry a `labels` object");
+
+        // The fixture describes exactly the detectors that exist. Without
+        // this, a detector added upstream is simply absent from the fixture
+        // and every shell's parity test passes over a gap.
+        let detectors = trace_commons_protocol::trace_contribution::secret_leak_pattern_names();
+        let mut fixture_slugs: Vec<&str> = labels.keys().map(String::as_str).collect();
+        let mut expected: Vec<&str> = detectors.clone();
+        fixture_slugs.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            fixture_slugs, expected,
+            "tests/fixtures/scrub-detectors/labels.json does not describe the detectors that \
+             exist. Add the new detector's words there, then to all three shells."
+        );
+
+        for slug in detectors {
+            let want = labels[slug]
+                .as_str()
+                .unwrap_or_else(|| panic!("{slug}'s label in the fixture must be a string"));
+            assert_eq!(
+                scrub_detector_label(slug),
+                want,
+                "this shell words {slug} differently from the shared fixture; the other two \
+                 shells read that file, so this is a contributor being told something \
+                 different on Linux"
+            );
+        }
+    }
+
     #[test]
     fn a_detector_nobody_named_still_renders() {
         // The safety net, asserted rather than assumed: an unrecognised slug
@@ -2612,6 +2716,22 @@ mod tests {
     #[test]
     fn the_ignore_title_names_the_project() {
         assert_eq!(ignore_project_title("api"), "Ignore api?");
+    }
+
+    /// This shell prints the shared words and not its own.
+    ///
+    /// Deliberately literal. Every other assertion on this surface compares
+    /// one re-exported constant to another and would keep passing if all
+    /// four were renamed together; this one is the tripwire that a word
+    /// changed at all, and it is the same assertion the macOS and Windows
+    /// suites make against the C ABI. Changing a word is meant to turn all
+    /// three red at once.
+    #[test]
+    fn the_shell_prints_the_shared_words() {
+        assert_eq!(TOOL_PRIVATE, "Private");
+        assert_eq!(TOOL_DIRECT, "Sends direct");
+        assert_eq!(TOOL_UNKNOWN, "Not known");
+        assert_eq!(TOOL_NOT_USED, "Not used");
     }
 
     /// The evidence is stated before the question, so a contributor who

@@ -56,6 +56,42 @@ public sealed class DaemonSettingsSnapshot
 
     [JsonPropertyName("near_ai_configured")]
     public bool NearAiConfigured { get; set; }
+
+    /// <summary>
+    /// <c>watch</c>, <c>off</c> or <c>unset</c>, for the Claude Code source.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ClaudeRootConfigured"/> cannot carry the distinction the
+    /// routing surface needs: it is false both for a source pointed at the
+    /// conventional location and for one the contributor said they do not
+    /// use, and only the second of those reads as an unused tool.
+    /// </remarks>
+    [JsonPropertyName("claude_source_mode")]
+    public string ClaudeSourceMode { get; set; } = string.Empty;
+
+    [JsonPropertyName("codex_source_mode")]
+    public string CodexSourceMode { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The Gemini CLI source. There is deliberately no
+    /// <c>gemini_root_configured</c> beside it: the <c>*_root_configured</c>
+    /// pair exists for shells written before the modes did, and none of them
+    /// knows about this source.
+    /// </summary>
+    [JsonPropertyName("gemini_source_mode")]
+    public string GeminiSourceMode { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The local proxy declaration as the daemon holds it. Absent means off:
+    /// there is no conventional fallback for a local service, so unlike a
+    /// source root there is no third state.
+    /// </summary>
+    [JsonPropertyName("ironwire")]
+    public RoutingDeclarationSnapshot? Routing { get; set; }
+
+    /// <summary>Whether IronWire is declared on this machine.</summary>
+    public bool RoutingDeclared =>
+        string.Equals(Routing?.Mode, "watch", System.StringComparison.Ordinal);
 }
 
 public enum BehaviorSetting

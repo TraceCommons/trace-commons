@@ -1717,6 +1717,377 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
     })
 }
 
+/// Every fixed word on the routing surface, in one call.
+///
+/// Needs no handle: it describes the build, not a running daemon.
+///
+/// Returns an owned JSON object whose keys are `RoutingCopy`'s fields; free
+/// it with [`tc_string_free`].
+///
+/// ONE CALL, NOT ONE PER STRING. `tc_scrub_detector_names` answers a single
+/// question and returns a single list; this is a whole screen's wording and
+/// must arrive as a set. Exporting the words one at a time would let a shell
+/// take four of them and hand-write the fifth, and a hand-written word on
+/// this surface is a privacy claim that silently stops matching the one the
+/// other two shells print.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_copy() -> *mut c_char {
+    guard(|| {
+        let copy = trace_commons_contributor::routing_copy::routing_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The C ABI's spelling of
+/// [`trace_commons_contributor::routing_copy::ToolWiring`].
+///
+/// Anything outside 0..=1 is [`ToolWiring::Unknown`], which is the value
+/// that claims nothing. That is deliberate rather than an error: a shell
+/// built against a later header, or one that passed a value this build has
+/// never heard of, must produce no verdict rather than a confident one.
+fn tool_wiring_from_abi(value: i32) -> trace_commons_contributor::routing_copy::ToolWiring {
+    use trace_commons_contributor::routing_copy::ToolWiring;
+    match value {
+        TC_TOOL_WIRING_WIRED => ToolWiring::Wired,
+        TC_TOOL_WIRING_NOT_WIRED => ToolWiring::NotWired,
+        _ => ToolWiring::Unknown,
+    }
+}
+
+/// IronWire listed this tool and said it is pointed at a local address.
+const TC_TOOL_WIRING_WIRED: i32 = 0;
+/// IronWire listed this tool and said it is not.
+const TC_TOOL_WIRING_NOT_WIRED: i32 = 1;
+
+/// The tone values [`tc_routing_tool_tone`] and [`tc_routing_state_tone`]
+/// answer in.
+///
+/// ONE NUMBERING FOR BOTH. A tool word can never be `HELD` -- only a daemon
+/// state waits on something -- but giving the two calls separate numberings
+/// would mean two `1`s meaning different things on one ABI, and a shell that
+/// mapped the wrong one would mispaint a privacy claim rather than fail.
+const TC_ROUTING_TONE_NEUTRAL: i32 = 0;
+const TC_ROUTING_TONE_HELD: i32 = 1;
+const TC_ROUTING_TONE_CLEAR: i32 = 2;
+
+/// One tool's word, from what the contributor said about that tool's
+/// sessions and what IronWire said about that tool.
+///
+/// `source_mode` is `get_settings`'s `*_source_mode` -- `off`, `watch` or
+/// `unset`. `wiring` is `TC_TOOL_WIRING_*`; anything else is the unknown
+/// state, which claims nothing.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. [`tc_routing_copy`] hands
+/// a shell four words; without this call each shell also decides which of
+/// the four a tool gets, and three native copies of that decision can drift
+/// apart silently while every string stays identical. The words could not
+/// drift; the branching could, in three places, and nothing in this repo
+/// would have noticed.
+///
+/// Pair every call with [`tc_routing_tool_tone`] rather than comparing the
+/// returned word against the private one. `Private` is a substring of the
+/// denial that must never come back.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. Returns NULL
+/// for a NULL or non-UTF-8 `source_mode`, recording `null-pointer` or
+/// `invalid-utf8`: a shell that cannot say what the contributor declared
+/// should get no word rather than one built on a guess.
+///
+/// # Safety
+/// `source_mode` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_tool_word(
+    source_mode: *const c_char,
+    wiring: i32,
+) -> *mut c_char {
+    guard_forwarding(|| {
+        let source_mode = unsafe { borrow_str(source_mode) }?;
+        Ok(to_owned_cstring(
+            trace_commons_contributor::routing_copy::tool_word(
+                source_mode,
+                tool_wiring_from_abi(wiring),
+            ),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
+/// How the word [`tc_routing_tool_word`] returned is painted:
+/// `TC_ROUTING_TONE_NEUTRAL` or `TC_ROUTING_TONE_CLEAR`.
+///
+/// Takes the same two inputs as the word, so the two stay in step by
+/// construction. **A shell must not recover this by comparing the rendered
+/// word against the private one** -- that is a text comparison against a
+/// privacy claim, and `Private` is a substring of `Not private`.
+///
+/// Answers `TC_ROUTING_TONE_NEUTRAL` -- the tone that claims nothing -- for a
+/// NULL or non-UTF-8 `source_mode` and on a caught panic. There is no
+/// failure value: a styling call that returned an error would leave a shell
+/// choosing a tone for itself, which is the thing this exists to stop.
+///
+/// # Safety
+/// `source_mode` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_tool_tone(source_mode: *const c_char, wiring: i32) -> i32 {
+    use trace_commons_contributor::routing_copy::ToolTone;
+    guard(|| {
+        let Ok(source_mode) = (unsafe { borrow_str(source_mode) }) else {
+            return Ok(TC_ROUTING_TONE_NEUTRAL);
+        };
+        Ok(
+            match trace_commons_contributor::routing_copy::tool_tone(
+                source_mode,
+                tool_wiring_from_abi(wiring),
+            ) {
+                ToolTone::Neutral => TC_ROUTING_TONE_NEUTRAL,
+                ToolTone::Clear => TC_ROUTING_TONE_CLEAR,
+            },
+        )
+    })
+    .unwrap_or(TC_ROUTING_TONE_NEUTRAL)
+}
+
+/// The daemon's routing state, in words.
+///
+/// Exported for the same reason [`tc_routing_tool_word`] is: the sentences
+/// were already shared, but the mapping from `awaiting_rows` / `rows_seen`
+/// / anything-else onto them was written out again in each shell, and three
+/// copies of a branch can disagree while three copies of a string cannot.
+///
+/// A state this build has never heard of -- and a NULL or non-UTF-8 `state`
+/// -- reads as the off line, which claims nothing. It never falls through
+/// to either "on" sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_state_line(state: *const c_char) -> *mut c_char {
+    guard(|| {
+        // An unreadable state is a state this build does not know, and the
+        // rule for those is already the safe one: say what off says.
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::routing_copy::ironwire_state_line(state),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// How firmly the sentence [`tc_routing_state_line`] returned reads:
+/// `TC_ROUTING_TONE_NEUTRAL`, `_HELD` or `_CLEAR`.
+///
+/// Exported for the reason the sentence is. This was the last routing branch
+/// table still written out natively in all three shells -- `routing_tone` in
+/// GTK, `tone(forState:)` in Swift, `StateTone` in C# -- three copies of one
+/// decision that agreed today and could drift apart in silence tomorrow.
+///
+/// None of the three states is a fault, and none of them can reach a fault
+/// tone through here: `awaiting_rows` is `HELD` and never an error, because a
+/// reader built a moment ago starts empty by construction and that is the
+/// state a contributor sees immediately after touching anything on this card.
+///
+/// Answers `TC_ROUTING_TONE_NEUTRAL` -- the tone that claims nothing -- for a
+/// state this build has never heard of, for a NULL or non-UTF-8 `state`, and
+/// on a caught panic. There is no failure value, for the reason on
+/// [`tc_routing_tool_tone`].
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::routing_copy::StateTone;
+    guard(|| {
+        // An unreadable state is a state this build does not know, and the
+        // rule for those is already the safe one -- the same rule, and the
+        // same fallback, as `tc_routing_state_line`.
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::routing_copy::ironwire_state_tone(state) {
+                StateTone::Neutral => TC_ROUTING_TONE_NEUTRAL,
+                StateTone::Held => TC_ROUTING_TONE_HELD,
+                StateTone::Clear => TC_ROUTING_TONE_CLEAR,
+            },
+        )
+    })
+    .unwrap_or(TC_ROUTING_TONE_NEUTRAL)
+}
+
+/// The routing surface's "that file could not be used" sentence, assembled.
+///
+/// `token_path` may be NULL, which is the case where nothing resolved at
+/// all; the sentence for that says what to do instead of naming a file it
+/// does not have.
+///
+/// ASSEMBLED HERE, DELIBERATELY. The alternative -- exporting a template
+/// with a `{path}` in it and letting each shell format it -- would make the
+/// shells a fourth, fifth and sixth place this wording lives, each free to
+/// drop a clause around the hole, and nothing in this repo would notice.
+/// The sweep in `routing_copy` renders these sentences and checks them; it
+/// can only do that for sentences finished on this side.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `token_path`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_token_line(token_path: *const c_char) -> *mut c_char {
+    guard(|| {
+        // A NULL path is the "nothing resolved" case and not an error. Bytes
+        // that are not UTF-8 are treated the same way: this sentence exists
+        // to tell somebody what to do next, and refusing to produce it
+        // because a path is oddly encoded would leave the screen silent.
+        let path = if token_path.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(token_path) }.ok()
+        };
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_token_line(path),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "nothing answered" sentence, assembled.
+///
+/// `port` outside 1..=65535 -- including the 0 a caller passes for "no port
+/// was tried" -- produces the sentence that names no port, rather than one
+/// that names a port number nobody used.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`].
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_unreachable_line(port: i32) -> *mut c_char {
+    guard(|| {
+        let port = u16::try_from(port).ok().filter(|p| *p != 0);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_unreachable_line(port),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "Last checked ..." sentence, assembled.
+///
+/// `when` is the shell's own humanised time -- "an hour ago", "yesterday".
+/// That is the one piece of this surface each shell renders for itself,
+/// because it is a rendering of a timestamp and not wording about routing.
+/// The words around it are still written once, here.
+///
+/// A NULL or non-UTF-8 `when` returns NULL and records an error: unlike the
+/// two sentences above there is no meaningful shorter form of this one --
+/// "Last checked " with nothing after it is worse than no line at all -- and
+/// a shell that has no timestamp should not be calling it.
+///
+/// Uses [`guard_forwarding`] rather than [`guard`], which the rule on that
+/// function permits here: the closure's only error paths are
+/// [`borrow_str`]'s two fixed labels, `null-pointer` and `invalid-utf8`.
+/// Neither embeds any caller content, so forwarding them is exactly as safe
+/// as the fixed label, and a shell can tell the two apart.
+///
+/// Returns an owned string; free it with [`tc_string_free`].
+///
+/// # Safety
+/// `when` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let when = unsafe { borrow_str(when) }?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::last_checked_line(when),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
+/// The settings screen's session-source row for one tool, assembled.
+///
+/// `tool` is `claude`, `codex` or `gemini`. `source_mode` is
+/// `get_settings`'s `*_source_mode` -- `watch`, `off` or `unset`.
+///
+/// THREE MODES, THREE SENTENCES. `*_root_configured` is `mode == "watch"`
+/// and is therefore false for both `off` and `unset`; a shell that branches
+/// on it tells a contributor who declared a tool OFF that their sessions are
+/// being read from the usual place, which is false in the fail-open
+/// direction on the one screen they would check. A shell must call this with
+/// the mode word and render what comes back, not derive a second branch from
+/// the boolean.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`]. Do not
+/// reassemble it from parts, and do not build the `off` line as the `unset`
+/// line with a "not" in front: no word on this surface may deny a privacy
+/// claim another word makes.
+///
+/// A mode this build does not know reads as `unset`, deliberately -- see
+/// `source_copy::source_check_line`. A `tool` this build does not know is an
+/// error, because there is no safe sentence for a tool with no name.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL with
+/// `unknown-source-tool`, `null-pointer`, `invalid-utf8` or `panic` on
+/// [`tc_last_error`].
+///
+/// Uses [`guard_forwarding`], which the rule on that function permits here:
+/// every error label is fixed and none embeds caller content.
+///
+/// # Safety
+/// `tool` and `source_mode` must point to valid, NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_source_check_line(
+    tool: *const c_char,
+    source_mode: *const c_char,
+) -> *mut c_char {
+    guard_forwarding(|| {
+        let tool = unsafe { borrow_str(tool) }?;
+        let source_mode = unsafe { borrow_str(source_mode) }?;
+        let tool = trace_commons_contributor::source_copy::SourceTool::from_key(tool)
+            .ok_or_else(|| anyhow::anyhow!("unknown-source-tool"))?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::source_copy::source_check_line(tool, source_mode),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
 /// The names of the secret detectors the scrubber runs, so a shell can tell
 /// a contributor what is removed without transcribing the list.
 ///

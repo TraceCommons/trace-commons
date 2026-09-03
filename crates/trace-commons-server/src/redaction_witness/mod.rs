@@ -10,12 +10,13 @@
 //! honest submission, and there is no fuzzy matcher to smuggle content past.
 //!
 //! **What this module does not establish.** Nothing here ties the raw text to
-//! a NEAR AI inference receipt. `chat_id`, `model` and the token counts on a
-//! certificate are witness self-report, checked against no receipt, because
-//! this module holds none. The certificate carries them so that the witness
-//! service -- which does hold a receipt -- can bind them there. Until it
-//! does, a verified certificate says the artifact derives from raw text the
-//! witness saw, not that anybody paid for that inference.
+//! a NEAR AI inference receipt, and the certificate no longer pretends to: the
+//! inference fields it once carried are gone, because no trace population in
+//! this repo can fill them honestly. A verified certificate says the artifact
+//! derives from raw text the witness saw, and reports the verdict a known
+//! program reached over it. It says nothing about who paid for the inference
+//! behind the trace. The reasoning, and why those fields are not coming back
+//! as optional ones, is recorded in [`certificate`].
 //!
 //! **One correspondence check must not mint N certificates.** Nothing here
 //! bounds that: an empty span list is legal, so a proof over an artifact
@@ -37,5 +38,7 @@
 //! found, so it is if anything more sensitive than the text it describes.
 
 pub mod certificate;
+pub mod config;
 pub mod correspondence;
+pub mod request;
 pub mod verification;

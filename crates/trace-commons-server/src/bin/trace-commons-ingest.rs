@@ -10,7 +10,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::Context;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::rejection::{JsonRejection, MissingJsonContentType};
+use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
@@ -20,6 +21,7 @@ use axum::{
     middleware::Next,
 };
 use base64::Engine as _;
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -50,6 +52,13 @@ use trace_commons_server::account_session::{
 };
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
+};
+use trace_commons_server::redaction_witness::config::{
+    WitnessBypassConfig, witness_bypass_config_from_env,
+};
+use trace_commons_server::redaction_witness::request::witness_headers;
+use trace_commons_server::redaction_witness::verification::{
+    VerifiedWitnessCertificate, verify_witness_certificate,
 };
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
@@ -194,7 +203,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
-    TraceWorkerKind as StorageTraceWorkerKind, safe_residual_risk_basis_labels,
+    TraceWorkerKind as StorageTraceWorkerKind, WITNESS_ADMITTED_STATUS_REASON,
+    safe_residual_risk_basis_labels, safe_status_reason_label,
 };
 use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
@@ -1608,6 +1618,14 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
+    /// posture every deployment ships in -- means an arriving certificate is
+    /// ignored entirely and every content-bearing trace holds exactly as it
+    /// does today. `Some` means an operator has pinned a witness signing
+    /// address, a measurement set and a policy allowlist, and a certificate
+    /// verifying against all three keeps a submission out of the hold. It
+    /// lifts no quarantine and never means the trace is clean.
+    witness_bypass: Option<WitnessBypassConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3791,6 +3809,13 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        // Fail closed on configuration. An enabled bypass missing its signing
+        // address, its measurement set, or its policy allowlist refuses to
+        // boot naming the control, rather than running with a control an
+        // operator believes is in place. `Ok(None)` is the switch being off,
+        // which is not an acceptance of anything.
+        let witness_bypass = witness_bypass_config_from_env()
+            .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -4070,6 +4095,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            witness_bypass,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -7946,6 +7972,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(process_evaluation_worker_run_handler),
         )
         .route("/v1/audit/events", get(audit_events_handler))
+        // Unauthenticated, like /v1/source and /v1/public/register-stats
+        // above: a contributor needs collateral before they have decided to
+        // trust anything, so it cannot sit behind enrollment.
+        .merge(attestation_collateral_routes())
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
 }
@@ -12833,11 +12863,149 @@ async fn append_tenant_access_grant_update_audit(
     .await
 }
 
+/// A submission body, kept as BOTH the parsed envelope and the exact bytes
+/// that arrived.
+///
+/// The raw bytes are the point. A witness certificate's digest is over the
+/// envelope bytes the witness produced and the contributor forwarded
+/// verbatim, and `rescrub_trace_envelope` rewrites the envelope in place --
+/// `privacy.residual_pii_risk`, `redaction_counts`, `pii_labels_present`,
+/// `redaction_pipeline_version`, `warnings` and `redaction_hash` -- so **the
+/// stored bytes are never the received bytes**, and neither is any
+/// re-serialisation of the parsed value. Verification has to run against
+/// these bytes, at receipt.
+///
+/// # Why this is an extractor rather than a `Bytes` argument
+///
+/// This is the busiest handler in the binary and its rejection behaviour is
+/// client-visible. Taking `Bytes` and hand-rolling the parse would have meant
+/// hand-rolling axum's rejection shape too -- status, body text and
+/// content-type -- and any drift there is a regression for every client,
+/// including the ones that never send a certificate. Instead this reproduces
+/// `Json`'s own `FromRequest` and returns `JsonRejection` **verbatim**, so a
+/// malformed body fails exactly as it did before.
+struct SubmitBody {
+    envelope: TraceContributionEnvelope,
+    /// The body exactly as received, for the witness digest and nothing else.
+    raw: Bytes,
+}
+
+impl SubmitBody {
+    /// Build a body from an envelope, for tests that call the handler
+    /// directly rather than through the router.
+    ///
+    /// The raw bytes are a real serialisation of the envelope, not a
+    /// placeholder: a test that hands the handler bytes which are not the
+    /// envelope would exercise a state no request can produce, and the
+    /// witness digest is taken over exactly this field.
+    ///
+    /// A direct call therefore cannot carry a certificate -- there are no
+    /// headers to put one in -- which is correct. The witnessed path is
+    /// exercised through the real router, because that is the only way to
+    /// prove the extractor and the handler agree about which bytes arrived.
+    #[cfg(test)]
+    fn for_test(envelope: TraceContributionEnvelope) -> Self {
+        let raw = Bytes::from(serde_json::to_vec(&envelope).expect("the envelope serialises"));
+        SubmitBody { envelope, raw }
+    }
+}
+
+impl<S> FromRequest<S> for SubmitBody
+where
+    S: Send + Sync,
+{
+    type Rejection = JsonRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !json_content_type(request.headers()) {
+            return Err(MissingJsonContentType::default().into());
+        }
+        let raw = Bytes::from_request(request, state).await?;
+        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)?;
+        Ok(SubmitBody { envelope, raw })
+    }
+}
+
+/// Whether a request's `Content-Type` is JSON, matching `axum::Json`.
+///
+/// Reimplemented rather than reached for, because axum's is private and the
+/// `mime` crate it uses is not a dependency of this workspace -- and adding a
+/// dependency to spell one predicate is not a trade this repo makes. The
+/// cases that matter are pinned by `json_content_type_matches_axum`: bare
+/// `application/json`, a `charset` parameter, a `+json` suffix, and
+/// `text/json` refused.
+///
+/// Where this differs from axum's it is stricter: a value `mime` would reject
+/// as malformed is rejected here too, because the essence must match
+/// `application/<token>` with no interior whitespace.
+fn json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let Some(subtype) = essence.strip_prefix("application/") else {
+        return false;
+    };
+    if subtype.is_empty()
+        || !subtype
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_'))
+    {
+        return false;
+    }
+    subtype.eq_ignore_ascii_case("json") || subtype.to_ascii_lowercase().ends_with("+json")
+}
+
+/// Verify a request-borne witness certificate against the body as received.
+///
+/// **Fail open on the submission, closed on the bypass.** Every failure path
+/// returns `None`, which means the trace is held exactly as an unwitnessed
+/// one would be. Nothing here can reject a submission that would otherwise be
+/// accepted: a witness outage, a client bug, or an attacker spraying garbage
+/// headers must not become a submission outage.
+///
+/// With no bypass configured this does not even decode the headers. That is
+/// the ship-disabled default: an arriving certificate on an unconfigured
+/// deployment is ignored, not merely unverifiable.
+///
+/// Refusals are logged at `debug` and by name only. A header value is
+/// attacker-chosen and `WitnessHeaderError` carries none of it, which is what
+/// makes logging the error safe at all.
+fn verified_witness_for_submission(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<VerifiedWitnessCertificate> {
+    let bypass = state.witness_bypass.as_ref()?;
+    let (certificate, signature) = match witness_headers(headers) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate header refused; holding as usual");
+            return None;
+        }
+    };
+    match verify_witness_certificate(certificate, &signature, Some(bypass.pin()), body) {
+        Ok(verified) => Some(verified),
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate did not verify; holding as usual");
+            None
+        }
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut envelope): Json<TraceContributionEnvelope>,
+    body: SubmitBody,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    let SubmitBody {
+        mut envelope,
+        raw: raw_body,
+    } = body;
     let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
 
     // Submission work includes the server re-scrub and gate preparation, so
@@ -12905,6 +13073,20 @@ async fn submit_trace_handler(
         state.require_tenant_submission_policy,
     )?;
 
+    // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
+    // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
+    // the envelope in place, so verifying against the parsed value -- or off
+    // the stored artifact, or off any re-serialisation -- would fail every
+    // honest witnessed submission.
+    //
+    // Placed here rather than at the top of the handler so that signature
+    // recovery sits BEHIND the submit rate limiter and the tenant-access-grant
+    // check. The bytes are captured either way, so this costs the guarantee
+    // nothing and denies an authenticated caller a free ECDSA-recovery
+    // amplifier. `the_certificate_is_verified_before_the_rescrub_runs` pins
+    // that it stays above the rescrub.
+    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
+
     // The basis is a return value of the pass, never a field on the
     // envelope: the envelope is deserialised from contributor input, so a
     // basis carried there would be client-asserted by construction.
@@ -12951,11 +13133,26 @@ async fn submit_trace_handler(
     // consumer/Accepted gates enforce the hold purely off the stored status.
     // No enrol row is written: the `awaiting_pii_backstop` status is the
     // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+    let held_without_a_witness = corpus_status_with_pii_backstop_hold(
+        corpus_status,
+        &envelope.consent,
+        state.pii_backstop_driver.is_some(),
+        None,
+        None,
+    );
     let corpus_status = corpus_status_with_pii_backstop_hold(
         corpus_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        witness.as_ref(),
+        state.witness_bypass.as_ref(),
     );
+    // The certificate changed the outcome only if the same inputs WITHOUT it
+    // would have held. Derived by comparing the two decisions rather than by
+    // re-deriving the five conditions here: a second copy of that predicate
+    // would eventually disagree with the one that decides the status, and the
+    // receipt would then describe a pass that did not happen.
+    let witness_admitted = corpus_status != held_without_a_witness;
 
     let artifact_label = if remediating_prior.is_some() {
         "remediated-envelope"
@@ -13014,7 +13211,11 @@ async fn submit_trace_handler(
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
-        last_status_reason: None,
+        // Which pass admitted this trace, when it was not the ordinary one.
+        // `safe_status_reason_label` is the allowlist choke point: a label
+        // that is not on it becomes "other" rather than reaching the column.
+        last_status_reason: witness_admitted
+            .then(|| safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON).to_string()),
         residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
@@ -19700,10 +19901,15 @@ async fn operator_rescrub_quarantined_submission(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+    // No witness on this path: the quarantine re-scrub has no request-borne
+    // certificate to verify, and a certificate over the ORIGINAL submission
+    // would say nothing about the bytes this pass has just rewritten.
     let target_status = corpus_status_with_pii_backstop_hold(
         target_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        None,
+        None,
     );
     let changed = target_status != prior_status
         || envelope.privacy.residual_pii_risk != prior_privacy_risk
@@ -56682,19 +56888,80 @@ fn status_for_risk(
 /// `reconcile_consent_declarations` (both call sites run
 /// `rescrub_trace_envelope` first, which does it), or an under-reported flag
 /// skips the hold -- the case that function's own comment exists to prevent.
+///
+/// # The witness bypass
+///
+/// `witness` and `bypass_config` are the redaction-witness bypass, and they
+/// are consulted at exactly this one call site. When an operator has pinned a
+/// witness and a certificate over the submitted bytes verified against that
+/// pin, a trace that would have been held is left `Accepted` instead.
+///
+/// **What that skips is the async backstop's CLASSIFIER stage, and only
+/// that.** It is not a wholesale bypass and it needs no exemption from the
+/// deterministic sweep, because the sweep has already run: both call sites
+/// invoke `rescrub_trace_envelope` -- the deterministic pass over
+/// `redacted_content` and `structured_payload`, plus `residual_envelope_scan`
+/// -- synchronously before reaching this function. That ordering is the
+/// entire safety argument, and
+/// `the_synchronous_rescrub_runs_before_the_hold_is_decided` pins it against
+/// the handler source. Moving this call above the rescrub turns the feature
+/// into a wholesale bypass and must turn that test red.
+///
+/// **A verified certificate never means the trace is clean.** It means a known
+/// program in a pinned enclave reached a `Low` verdict over the originating
+/// redaction pass. A credential the prose classifier itself emitted survives
+/// that verdict -- which is why the `risk_status == Accepted` precondition
+/// below is load-bearing rather than free tidiness: it is what keeps the
+/// server's own residual scan authoritative, so a certificate can never lift a
+/// quarantine the synchronous pass just imposed.
+///
+/// Five conditions, all required: the bypass is configured, a certificate
+/// verified, its verdict is `Low`, its policy alias is allowlisted, and the
+/// risk-derived status is already `Accepted`. The alias check is its own
+/// condition because a `deterministic-only` witness never ran a classifier, so
+/// admitting its alias would mean no classifier ever reads that trace's prose.
 fn corpus_status_with_pii_backstop_hold(
     risk_status: TraceCorpusStatus,
     consent: &ConsentMetadata,
     backstop_enabled: bool,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
 ) -> TraceCorpusStatus {
     let carries_raw_content = consent.message_text_included
         || consent.tool_payloads_included
         || consent.correction_included;
     if risk_status == TraceCorpusStatus::Accepted && carries_raw_content && backstop_enabled {
+        if witness_admits_trace(risk_status, witness, bypass_config) {
+            return TraceCorpusStatus::Accepted;
+        }
         TraceCorpusStatus::AwaitingPiiBackstop
     } else {
         risk_status
     }
+}
+
+/// Whether a verified witness certificate lets this trace skip the hold.
+///
+/// Split out from the decision above so the five conditions read as one list
+/// rather than as a nested `if`, and so the ingest tests can name it. It is
+/// not a public seam: the only caller is
+/// [`corpus_status_with_pii_backstop_hold`].
+///
+/// `risk_status` is re-checked here even though the caller has already
+/// established it. That is deliberate duplication: this predicate is the thing
+/// a future reader will lift to a second call site, and it must not be safe to
+/// lift only when the caller happens to have checked first.
+fn witness_admits_trace(
+    risk_status: TraceCorpusStatus,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
+) -> bool {
+    let (Some(witness), Some(config)) = (witness, bypass_config) else {
+        return false;
+    };
+    risk_status == TraceCorpusStatus::Accepted
+        && witness.residual_risk_verdict() == ResidualPiiRisk::Low
+        && config.policy_version_allowed(witness.redaction_policy_version())
 }
 
 /// The contributor-facing sentence describing what will happen to the credit
@@ -56721,16 +56988,52 @@ fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
     trace_commons_server::credit_numbers::settlement_status_sentence(mode.as_label())
 }
 
+/// Whether this row was admitted by a verified witness certificate rather
+/// than by the ordinary path.
+///
+/// Reads the allowlisted status-reason label the submit handler wrote. It is
+/// deliberately not a re-derivation of the bypass conditions: the receipt has
+/// no certificate to inspect, and a second copy of that predicate would drift
+/// from the one that decided the status.
+fn witness_admitted_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    record
+        .last_status_reason
+        .as_deref()
+        .is_some_and(|reason| reason == WITNESS_ADMITTED_STATUS_REASON)
+}
+
 fn receipt_from_record(
     record: &TraceCommonsSubmissionRecord,
     settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionReceipt {
     let explanation = match record.status {
-        TraceCorpusStatus::Accepted => vec![
-            "Accepted into the private redacted corpus.".to_string(),
-            settlement_posture_explanation(settlement_mode).to_string(),
-            format!("Attributed to tenant {}", record.tenant_storage_ref),
-        ],
+        TraceCorpusStatus::Accepted => {
+            let mut lines = vec!["Accepted into the private redacted corpus.".to_string()];
+            // #445's argument, applied to a second indistinguishable pair of
+            // outcomes: a trace admitted on a witness certificate was admitted
+            // on a DIFFERENT BASIS from one admitted on the server's own
+            // queued re-check, and a contributor is entitled to know which.
+            //
+            // The sentence deliberately claims nothing about cleanliness. It
+            // says a pinned enclave's redaction was accepted in place of the
+            // server's queued re-check, which is exactly what happened, and it
+            // carries no measurement and no address -- those are operator
+            // configuration and have no business on a contributor surface.
+            if witness_admitted_record(record) {
+                lines.push(
+                    "Admitted on an attested redaction witness certificate, in place of the \
+                     server's queued privacy re-check. The deterministic redaction sweep and \
+                     residual scan ran on this submission as they do on every submission."
+                        .to_string(),
+                );
+            }
+            lines.push(settlement_posture_explanation(settlement_mode).to_string());
+            lines.push(format!(
+                "Attributed to tenant {}",
+                record.tenant_storage_ref
+            ));
+            lines
+        }
         TraceCorpusStatus::Quarantined => vec![
             "Quarantined for privacy review; credit is pending review.".to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
@@ -75177,6 +75480,146 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         Json(self).into_response()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Intel DCAP collateral, for a contributor verifying a witness enclave.
+//
+// The client half of the redaction-witness design has to run `verify_quote`
+// before it sends a raw session anywhere, and `verify_quote` takes collateral
+// as a parameter. Nothing supplies it to a client today.
+//
+// It is served here rather than by the witness for two reasons. `dcap-qvl`'s
+// own collateral client cannot go in `trace-commons-contributor`: its `report`
+// feature pulls a second `reqwest` carrying the aws-lc-rs rustls provider
+// alongside this workspace's ring one, and rustls then panics at the first TLS
+// use unless a binary installs a default explicitly -- which `main()` here
+// does. `trace-commons-contributor` is a library inside a CLI, a GTK binary, a
+// Swift app and a Windows shell; a landmine only a `main()` can defuse does
+// not belong in it. And putting it on the witness would give the enclave an
+// outbound Intel dependency and enlarge the image, which enlarges the
+// measurement a contributor pins.
+//
+// **This does not make ingest a trust dependency.** Collateral is Intel-signed
+// and its validity window is evaluated against the clock the *client* passes,
+// so an intermediary can withhold it but cannot forge it. A client that gets
+// none refuses rather than verifying without it.
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/attestation-collateral` request body.
+///
+/// `deny_unknown_fields`: a caller sending a field this route does not
+/// understand may believe it is scoping the request somehow.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationCollateralRequest {
+    /// The quote to fetch collateral for, as bare hex. No `0x` prefix, for
+    /// the same reason `ContributorNonce::parse_hex` refuses one: one
+    /// encoding means a client and this route cannot disagree about which
+    /// bytes were asked about.
+    quote_hex: String,
+}
+
+/// The refusal for a quote that is not bare hex.
+const ATTESTATION_COLLATERAL_QUOTE_MALFORMED: &str = "attestation_collateral_quote_malformed";
+/// The refusal when the collateral could not be obtained from Intel.
+///
+/// Read only by the `near-attestation-collateral` arm below. Without the
+/// feature this binary cannot fetch collateral at all and refuses earlier,
+/// with the missing-control name instead.
+#[cfg_attr(
+    not(feature = "near-attestation-collateral"),
+    expect(
+        dead_code,
+        reason = "read only by the collateral client, which the \
+                  near-attestation-collateral feature compiles in"
+    )
+)]
+const ATTESTATION_COLLATERAL_UNAVAILABLE: &str = "attestation_collateral_unavailable";
+
+/// The collateral route.
+///
+/// Unauthenticated and outside tenant context, like `GET /v1/source`, and
+/// merged into `app` outside every auth layer on purpose. A contributor needs
+/// collateral *before* they have decided to trust anything, so requiring a
+/// claim to obtain it would make verifying an enclave depend on already being
+/// enrolled with the operator whose enclave it is. That is the wrong order,
+/// and it would make the verification worth less than it looks.
+///
+/// A separate `Router` rather than a line in `app`, so the reachability tests
+/// can drive the real routing table without constructing an `AppState`. A
+/// handler can be correct and unreachable; that exact defect has been found
+/// in this repository before.
+fn attestation_collateral_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/v1/attestation-collateral",
+        post(attestation_collateral_handler),
+    )
+}
+
+/// Fetch Intel collateral for a quote.
+///
+/// No logging at all, hash-only or otherwise. The quote itself is public, but
+/// *which* client asked about *which* enclave and when is a correlation this
+/// route must not be the source of.
+async fn attestation_collateral_handler(
+    Json(request): Json<AttestationCollateralRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Emptiness is checked separately: `hex::decode("")` succeeds and yields
+    // an empty quote, so leaving it to the parse would let a caller reach the
+    // fetch with nothing to fetch collateral for.
+    if request.quote_hex.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        ));
+    }
+    // The error carries no offset and no length. Both are derived from caller
+    // input, and an offset tells a prober exactly how far its guess got.
+    let quote = hex::decode(&request.quote_hex).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        )
+    })?;
+
+    Ok(Json(fetch_attestation_collateral(&quote).await?))
+}
+
+/// The collateral fetch, or the missing control that stands in for it.
+///
+/// Two arms behind the `near-attestation-collateral` feature, mirroring
+/// `HttpAttestationClient::fetch_collateral`. The feature-off arm refuses with
+/// the same control name that path uses, so an operator sees one name for one
+/// missing control. It never returns a 200 with an empty body, which a client
+/// checking only the status could not tell from real collateral -- and a
+/// client verifying against empty collateral verifies nothing at all.
+#[cfg(feature = "near-attestation-collateral")]
+async fn fetch_attestation_collateral(
+    quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    let unavailable = || {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ATTESTATION_COLLATERAL_UNAVAILABLE,
+        )
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let client = dcap_qvl::collateral::CollateralClient::with_default_http(&pccs_url)
+        .map_err(|_| unavailable())?;
+    let collateral = client.fetch(quote).await.map_err(|_| unavailable())?;
+    serde_json::to_value(&collateral).map_err(|_| unavailable())
+}
+
+#[cfg(not(feature = "near-attestation-collateral"))]
+async fn fetch_attestation_collateral(
+    _quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    Err(api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+    ))
 }
 
 #[cfg(test)]

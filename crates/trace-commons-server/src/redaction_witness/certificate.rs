@@ -43,50 +43,110 @@
 //! verifying a certificate is the same operation as verifying a receipt, over
 //! a different message.
 //!
+//! # Why there are no inference fields, and why they are not coming back
+//!
+//! An earlier shape of this certificate carried `chat_id`, `prompt_tokens`,
+//! `completion_tokens` and `model` -- what the upstream inference cost and
+//! which model served it. They are gone, deliberately, and this note exists
+//! so that they are not re-added by someone reading the gap as an oversight.
+//!
+//! **No trace population in this repo can fill them honestly.** A CLI
+//! transcript is a local agent session with no upstream receipt at all.
+//! IronWire's ledger records a routing decision, not an inference receipt.
+//! The witness in this design never sees the inference: it is handed a raw
+//! transcript and performs the redaction. So every one of those fields could
+//! only ever have been passed through from whatever the caller typed, signed
+//! by an enclave, and thereby made to *look* attested. A field that no honest
+//! path can fill is an invitation to fill it dishonestly.
+//!
+//! **They are not returning as optional fields here.** IronWire now records a
+//! provider response id (`nearai/ironwire#19`), so a future IronWire-sourced
+//! trace could genuinely carry a receipt, and the temptation will be to bolt
+//! four `Option`s onto [`CertificateDetails`]. That would be wrong three ways.
+//! An optional field in a length-prefixed signed encoding still has to be
+//! encoded when absent, or the encoding stops being injective -- so "optional"
+//! buys nothing on the wire and costs an absent/present discriminant that every
+//! verifier must get identically right. Two field sets under one domain string
+//! is exactly the confusion `SIGNING_DOMAIN` exists to prevent. And a
+//! certificate that sometimes attests to inference and sometimes does not is
+//! one a consumer must branch on, which is where "verified" quietly becomes
+//! "verified something".
+//!
+//! If a receipt-bearing population does arrive, the shape to build is a
+//! separate certificate profile with its own domain string -- a
+//! `redaction_witness_certificate.v2`, or a distinct receipt-binding
+//! structure -- chosen deliberately, by a witness that actually holds the
+//! receipt it binds. Not fields grafted onto this one.
+//!
 //! # Logging
 //!
-//! Nothing here logs. A certificate carries `chat_id`, which identifies an
-//! upstream conversation, so `Debug` is hand-written to withhold it; only the
-//! two digests render.
+//! Nothing here logs. With the inference fields gone, no field on this type
+//! identifies a contributor or an upstream conversation: a digest, a coarse
+//! three-valued risk verdict, a policy alias, an image measurement and a
+//! timestamp. `Debug` therefore renders all of them. It stays hand-written
+//! rather than derived so that adding an identifying field is a visible
+//! decision here rather than a silent widening of every `?cert` in a log.
+
+use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
 use super::correspondence::CorrespondenceProof;
 use crate::near_attestation::receipt::{ReceiptError, decode_address, recover_eip191_signer};
+
+/// The verdict's fixed-width tag in [`WitnessCertificate::signing_bytes`].
+///
+/// These values are assigned permanently. Changing one silently invalidates
+/// every certificate ever issued -- and, worse, would let a Medium certificate
+/// re-verify as Low if two assignments ever swapped. The match is exhaustive
+/// rather than a cast, so a new [`ResidualPiiRisk`] variant is a compile error
+/// here and gets a deliberate tag rather than inheriting a discriminant.
+fn residual_risk_tag(verdict: ResidualPiiRisk) -> u8 {
+    match verdict {
+        ResidualPiiRisk::Low => 1,
+        ResidualPiiRisk::Medium => 2,
+        ResidualPiiRisk::High => 3,
+    }
+}
 
 /// Domain separation. A signature over these bytes cannot be replayed as a
 /// signature over any other length-prefixed structure in this workspace, and
 /// a future `.v2` layout cannot be confused with this one.
 const SIGNING_DOMAIN: &[u8] = b"trace_commons.redaction_witness_certificate.v1\n";
 
-/// What the witness reports about the inference behind a trace.
+/// What the witness reports alongside the artifact digest.
 ///
-/// Every one of these is witness self-report. None of it is checked against
-/// an inference receipt here, and this module holds no receipt to check it
-/// against -- the certificate carries the fields so that the witness service,
-/// which does hold one, can bind them. Public fields are right for this type:
-/// there is nothing here a witness could not have typed, and pretending
-/// otherwise would be decoration.
+/// Every one of these is witness self-report. Public fields are right for
+/// this type: there is nothing here a witness could not have typed, and
+/// pretending otherwise would be decoration.
 ///
 /// The one field that is *not* here is `redacted_sha256`, which comes only
 /// from a [`CorrespondenceProof`]. That asymmetry is the point of the type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificateDetails {
-    /// The upstream inference conversation this trace came from.
-    pub chat_id: String,
-    /// Tokens the upstream inference billed.
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    /// The upstream model slug.
-    pub model: String,
-    /// Unix seconds at issue.
-    pub timestamp: i64,
-    /// The redaction policy the client applied. A version, not a verdict:
-    /// the witness checks mechanics, never policy.
+    /// The residual-PII verdict the witness reached over the redacted
+    /// artifact, using `residual_risk` from `trace-commons-protocol` -- the
+    /// same function ingest runs. This is the field the design turns on: it
+    /// is what lets the server trust a trace instead of re-running its own
+    /// PII backstop, and it is worth exactly as much as the measurement that
+    /// says which program computed it.
+    ///
+    /// Typed rather than a free string on purpose. A `String` here would let
+    /// a witness sign "clean", or "low ", or any spelling a server's
+    /// comparison happened not to expect; the closed set cannot.
+    pub residual_risk_verdict: ResidualPiiRisk,
+    /// The redaction policy the witness applied. **An alias, never an
+    /// authority**: `redaction_pipeline_version()` concatenates hardcoded
+    /// constants selected by backend family, so every self-hosted deployment
+    /// reports the same string regardless of which checkpoint loaded or which
+    /// detector regexes shipped. The server checks this against an allowlist
+    /// and trusts `witness_measurement`.
     pub redaction_policy_version: String,
     /// The witness enclave's measurement, as the witness reports it. The
     /// operator's pinned value is a *parameter* elsewhere, never a field
     /// here -- this is what the certificate claims, and pinning is the
     /// server's separate check against it.
     pub witness_measurement: String,
+    /// Unix seconds at issue.
+    pub timestamp: i64,
 }
 
 /// What a witness signs on a successful correspondence check.
@@ -113,26 +173,26 @@ pub struct WitnessCertificate {
     /// Lowercase hex SHA-256 of the redacted artifact, as carried by
     /// `CorrespondenceProof`.
     redacted_sha256: String,
-    chat_id: String,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    model: String,
-    timestamp: i64,
+    residual_risk_verdict: ResidualPiiRisk,
     redaction_policy_version: String,
     witness_measurement: String,
+    timestamp: i64,
 }
 
 impl std::fmt::Debug for WitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Only the two digests. `chat_id` identifies an upstream
-        // conversation, and `model` and the token counts describe one
-        // contributor's usage; a derived `Debug` would put all of them into
-        // any `tracing` call that used `?cert`.
+        // Every field, because no field on this type identifies a contributor
+        // or an upstream conversation -- see the module's Logging note. Kept
+        // hand-written rather than derived so that a field which *does*
+        // identify one cannot start rendering by accident.
         formatter
             .debug_struct("WitnessCertificate")
             .field("redacted_sha256", &self.redacted_sha256)
+            .field("residual_risk_verdict", &self.residual_risk_verdict)
+            .field("redaction_policy_version", &self.redaction_policy_version)
             .field("witness_measurement", &self.witness_measurement)
-            .finish_non_exhaustive()
+            .field("timestamp", &self.timestamp)
+            .finish()
     }
 }
 
@@ -214,13 +274,46 @@ impl WitnessCertificate {
     pub fn from_proof(proof: CorrespondenceProof, details: CertificateDetails) -> Self {
         WitnessCertificate {
             redacted_sha256: proof.redacted_sha256().to_string(),
-            chat_id: details.chat_id,
-            prompt_tokens: details.prompt_tokens,
-            completion_tokens: details.completion_tokens,
-            model: details.model,
-            timestamp: details.timestamp,
+            residual_risk_verdict: details.residual_risk_verdict,
             redaction_policy_version: details.redaction_policy_version,
             witness_measurement: details.witness_measurement,
+            timestamp: details.timestamp,
+        }
+    }
+
+    /// Rebuild a certificate that arrived over the wire, from fields a
+    /// decoder parsed one by one.
+    ///
+    /// **This is the second construction path the type doc promises, and it
+    /// is the last one.** It exists because the receiving side has no proof
+    /// and cannot have one: a server holding an artifact and a claimed digest
+    /// has, by construction, only what the sender said. Anything else it
+    /// could do here would be theatre.
+    ///
+    /// # Why a typed digest is harmless here, unlike in [`Self::from_proof`]
+    ///
+    /// Private fields exist so that nobody on the *issuing* side can mint a
+    /// certificate over a digest they typed instead of one a correspondence
+    /// check produced. That argument does not transfer to the receiving side,
+    /// where the certificate is untrusted input by definition. A certificate
+    /// built here is worth exactly nothing until
+    /// [`verify_witness_certificate`](super::verification::verify_witness_certificate)
+    /// has recovered the pinned signer from a signature over
+    /// [`Self::signing_bytes`] -- which covers every field, digest included --
+    /// pinned the measurement, and matched the digest against the bytes the
+    /// server actually holds. Typing a field here only produces a certificate
+    /// that fails all three.
+    ///
+    /// The caller is `redaction_witness::request::witness_headers`, and it
+    /// must stay the only one: a second decoder is a second wire format, and
+    /// two wire formats is how an honest certificate starts failing.
+    pub fn from_wire(redacted_sha256: String, details: CertificateDetails) -> Self {
+        WitnessCertificate {
+            redacted_sha256,
+            residual_risk_verdict: details.residual_risk_verdict,
+            redaction_policy_version: details.redaction_policy_version,
+            witness_measurement: details.witness_measurement,
+            timestamp: details.timestamp,
         }
     }
 
@@ -233,36 +326,77 @@ impl WitnessCertificate {
     pub(crate) fn from_parts(redacted_sha256: String, details: CertificateDetails) -> Self {
         WitnessCertificate {
             redacted_sha256,
-            chat_id: details.chat_id,
-            prompt_tokens: details.prompt_tokens,
-            completion_tokens: details.completion_tokens,
-            model: details.model,
-            timestamp: details.timestamp,
+            residual_risk_verdict: details.residual_risk_verdict,
             redaction_policy_version: details.redaction_policy_version,
             witness_measurement: details.witness_measurement,
+            timestamp: details.timestamp,
         }
     }
 
     /// The digest the certificate claims, for the module's own artifact
-    /// check. Not public: outside this module the digest is only reachable
-    /// through a verified certificate.
-    pub(super) fn claimed_redacted_sha256(&self) -> &str {
+    /// check and for the witness service's response encoder.
+    ///
+    /// `pub(crate)`, not public: outside this crate the digest is only
+    /// reachable through a verified certificate. The name stays "claimed"
+    /// even on the issuing side, because that is what it is to everyone who
+    /// receives it -- and a second accessor spelling the same field without
+    /// the word would be the first step in forgetting.
+    pub(crate) fn claimed_redacted_sha256(&self) -> &str {
         &self.redacted_sha256
     }
 
+    /// The verdict the certificate binds.
+    ///
+    /// `pub(crate)`, and it lands with its caller as this file's standing rule
+    /// requires: `WitnessResponse::residual_risk_verdict` reads it so the
+    /// witness service has one source for the field rather than a copy beside
+    /// the certificate. It stays crate-visible because outside this crate a
+    /// verdict is only meaningful through a `VerifiedWitnessCertificate` --
+    /// an unverified certificate's verdict is a claim by an unnamed program,
+    /// and the accessor for the verified form belongs with the PII-backstop
+    /// bypass that consumes it.
+    pub(crate) fn residual_risk_verdict(&self) -> ResidualPiiRisk {
+        self.residual_risk_verdict
+    }
+
     /// The measurement the certificate claims, for the module's own pin
-    /// check. Not public, for the same reason.
-    pub(super) fn claimed_witness_measurement(&self) -> &str {
+    /// check and for the witness service's response encoder. `pub(crate)`
+    /// for the same reason as the digest above.
+    pub(crate) fn claimed_witness_measurement(&self) -> &str {
         &self.witness_measurement
+    }
+
+    /// The policy alias the certificate carries.
+    ///
+    /// Lands with its caller, as this file's standing rule requires: the
+    /// witness service's response encoder is the only reader. **An alias,
+    /// never an authority** -- see the field's own documentation. A server
+    /// checks it against an allowlist and trusts the measurement.
+    pub(crate) fn claimed_redaction_policy_version(&self) -> &str {
+        &self.redaction_policy_version
+    }
+
+    /// The timestamp the certificate carries. Witness self-report, from the
+    /// witness's own clock; it orders nothing and proves nothing on its own.
+    pub(crate) fn claimed_timestamp(&self) -> i64 {
+        self.timestamp
     }
 
     /// The canonical bytes a witness signs and a verifier reconstructs.
     ///
     /// Each string field is `u64`-little-endian length followed by its UTF-8
-    /// bytes; each integer is fixed-width little-endian. The field order is
-    /// fixed and the field count is fixed, so the encoding is injective:
+    /// bytes; each fixed-width field follows as little-endian. The field order
+    /// is fixed and the field count is fixed, so the encoding is injective:
     /// distinct certificates cannot produce identical bytes, and no content
     /// can shift across a field boundary unnoticed.
+    ///
+    /// The three free-form strings are encoded contiguously, ahead of the
+    /// fixed-width fields, so that every adjacent length-prefixed pair is a
+    /// pair whose contents an attacker could actually choose. That is what
+    /// `signing_bytes_are_unambiguous_across_every_adjacent_string_pair`
+    /// exercises; interleaving a closed-set field between two of them would
+    /// leave the test varying a boundary it cannot move content across, which
+    /// is a collision test with no collision to find.
     ///
     /// This is the single source of truth for both sides. If the witness and
     /// the verifier ever encode differently, every honest certificate fails,
@@ -272,16 +406,13 @@ impl WitnessCertificate {
         out.extend_from_slice(SIGNING_DOMAIN);
         for field in [
             self.redacted_sha256.as_str(),
-            self.chat_id.as_str(),
-            self.model.as_str(),
             self.redaction_policy_version.as_str(),
             self.witness_measurement.as_str(),
         ] {
             out.extend_from_slice(&(field.len() as u64).to_le_bytes());
             out.extend_from_slice(field.as_bytes());
         }
-        out.extend_from_slice(&self.prompt_tokens.to_le_bytes());
-        out.extend_from_slice(&self.completion_tokens.to_le_bytes());
+        out.push(residual_risk_tag(self.residual_risk_verdict));
         out.extend_from_slice(&self.timestamp.to_le_bytes());
         out
     }
@@ -338,24 +469,23 @@ mod tests {
     fn certificate() -> WitnessCertificate {
         WitnessCertificate {
             redacted_sha256: "a".repeat(64),
-            chat_id: "chatcmpl-7f3a".to_string(),
-            prompt_tokens: 1_204,
-            completion_tokens: 337,
-            model: "qwen3.6-27b-fp8".to_string(),
-            timestamp: 1_788_000_000,
+            residual_risk_verdict: ResidualPiiRisk::Medium,
             redaction_policy_version: "policy-v3".to_string(),
             witness_measurement: "b".repeat(64),
+            timestamp: 1_788_000_000,
         }
     }
 
-    /// The five string fields, in signing order, as a mutable view. Used by
-    /// the collision test so it covers every adjacent pair rather than the
-    /// one pair someone happened to pick.
-    fn string_fields(cert: &mut WitnessCertificate) -> [&mut String; 5] {
+    /// The three free-form string fields, **in signing order and contiguous
+    /// in it**, as a mutable view. Used by the collision tests so they cover
+    /// every adjacent pair rather than the one pair someone happened to pick.
+    ///
+    /// If a field is ever added to `signing_bytes` between two of these, this
+    /// helper stops describing adjacency and the collision loops below stop
+    /// testing anything -- see the note on `signing_bytes`.
+    fn string_fields(cert: &mut WitnessCertificate) -> [&mut String; 3] {
         [
             &mut cert.redacted_sha256,
-            &mut cert.chat_id,
-            &mut cert.model,
             &mut cert.redaction_policy_version,
             &mut cert.witness_measurement,
         ]
@@ -408,13 +538,10 @@ mod tests {
         let cert = WitnessCertificate::from_proof(
             proof,
             CertificateDetails {
-                chat_id: "chatcmpl-7f3a".to_string(),
-                prompt_tokens: 1_204,
-                completion_tokens: 337,
-                model: "qwen3.6-27b-fp8".to_string(),
-                timestamp: 1_788_000_000,
+                residual_risk_verdict: ResidualPiiRisk::Medium,
                 redaction_policy_version: "policy-v3".to_string(),
                 witness_measurement: "b".repeat(64),
+                timestamp: 1_788_000_000,
             },
         );
 
@@ -427,6 +554,47 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_binds_the_residual_risk_verdict() {
+        // The field the whole design turns on. If it is not in the signing
+        // bytes, a contributor holding a genuine certificate over a High
+        // artifact can present it as Low and the server's own backstop
+        // bypass reads it. Every ordered pair of distinct verdicts, so the
+        // test cannot pass because one particular pair happened to differ.
+        for (left_verdict, right_verdict) in [
+            (ResidualPiiRisk::Low, ResidualPiiRisk::Medium),
+            (ResidualPiiRisk::Low, ResidualPiiRisk::High),
+            (ResidualPiiRisk::Medium, ResidualPiiRisk::High),
+        ] {
+            let mut left = certificate();
+            left.residual_risk_verdict = left_verdict;
+            let mut right = certificate();
+            right.residual_risk_verdict = right_verdict;
+            assert_ne!(
+                left.signing_bytes(),
+                right.signing_bytes(),
+                "{left_verdict:?} and {right_verdict:?} sign identically"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tampered_residual_risk_verdict_does_not_verify() {
+        // The binding test above proves the bytes differ. This one proves
+        // the signature notices, which is the property an operator relies
+        // on: downgrading the verdict on a signed certificate must be
+        // indistinguishable from forging one.
+        let k = key("witness");
+        let signature = sign(&k, &certificate());
+        let mut downgraded = certificate();
+        downgraded.residual_risk_verdict = ResidualPiiRisk::Low;
+        assert_ne!(downgraded, certificate(), "the mutation was a no-op");
+        assert_eq!(
+            downgraded.verify(&signature, &address_of_key(&k)),
+            Err(CertificateError::SignerMismatch)
+        );
+    }
+
+    #[test]
     fn signing_bytes_are_unambiguous_across_every_adjacent_string_pair() {
         // The classic length-prefix failure: without prefixes, moving a
         // character from the start of one field to the end of the previous
@@ -434,9 +602,11 @@ mod tests {
         // sign identically, and nothing else in this suite would notice --
         // every round-trip and every signature test passes either way.
         //
-        // Five string fields, so four adjacent pairs. Checking one pair would
-        // test that pair; checking all four tests the encoder.
-        for pair in 0..4 {
+        // Three free-form string fields, contiguous in the encoding, so two
+        // adjacent pairs: (redacted_sha256, redaction_policy_version) and
+        // (redaction_policy_version, witness_measurement). Checking one pair
+        // would test that pair; checking both tests the encoder.
+        for pair in 0..2 {
             let mut left = certificate();
             {
                 let fields = string_fields(&mut left);
@@ -473,7 +643,7 @@ mod tests {
         // content sits in the *other* field of the pair encodes identically.
         // The adjacent-shift loop above never exercises an empty field, so
         // this case is only covered here.
-        for pair in 0..4 {
+        for pair in 0..2 {
             let mut left = certificate();
             {
                 let fields = string_fields(&mut left);
@@ -532,18 +702,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tampered_token_count_does_not_verify() {
-        let k = key("witness");
-        let signature = sign(&k, &certificate());
-        let mut inflated = certificate();
-        inflated.prompt_tokens += 1;
-        assert_eq!(
-            inflated.verify(&signature, &address_of_key(&k)),
-            Err(CertificateError::SignerMismatch)
-        );
-    }
-
-    #[test]
     fn every_field_is_bound_by_the_signature() {
         // One mutation per field. A field left out of signing_bytes is free
         // for a contributor to rewrite after the fact, and the only test that
@@ -558,20 +716,10 @@ mod tests {
                 Box::new(|c: &mut WitnessCertificate| c.redacted_sha256 = "d".repeat(64)),
             ),
             (
-                "chat_id",
-                Box::new(|c: &mut WitnessCertificate| c.chat_id = "chatcmpl-other".to_string()),
-            ),
-            (
-                "prompt_tokens",
-                Box::new(|c: &mut WitnessCertificate| c.prompt_tokens = 1),
-            ),
-            (
-                "completion_tokens",
-                Box::new(|c: &mut WitnessCertificate| c.completion_tokens = 1),
-            ),
-            (
-                "model",
-                Box::new(|c: &mut WitnessCertificate| c.model = "some-other-model".to_string()),
+                "residual_risk_verdict",
+                Box::new(|c: &mut WitnessCertificate| {
+                    c.residual_risk_verdict = ResidualPiiRisk::Low
+                }),
             ),
             (
                 "timestamp",
@@ -663,21 +811,32 @@ mod tests {
     }
 
     #[test]
-    fn neither_formatter_renders_certificate_identifiers() {
-        // `?cert` and `%cert` must be equally safe: a derived Debug prints
-        // every field, and `?` is how a value ordinarily reaches a log here.
+    fn debug_renders_every_field_and_names_none_that_identifies_a_contributor() {
+        // The inference fields this type used to carry -- chat_id, model and
+        // the token counts -- were the reason Debug withheld anything. With
+        // them gone, every remaining field is safe to log, and the assertion
+        // worth making is the opposite one: that the hand-written impl still
+        // renders all of them, so `?cert` in a diagnostic is actually useful.
         let cert = certificate();
         let rendered = format!("{cert:?}");
-        for secret in [cert.chat_id.as_str(), cert.model.as_str()] {
+        for field in [
+            cert.redacted_sha256.as_str(),
+            cert.redaction_policy_version.as_str(),
+            cert.witness_measurement.as_str(),
+            "Medium",
+            "1788000000",
+        ] {
             assert!(
-                !rendered.contains(secret),
-                "Debug rendered {secret}: {rendered}"
+                rendered.contains(field),
+                "Debug omitted {field}: {rendered}"
             );
         }
-        assert!(!rendered.contains("1204"));
-        assert!(!rendered.contains("337"));
-        assert!(rendered.contains(&cert.redacted_sha256));
-        assert!(rendered.contains(&cert.witness_measurement));
+        // No `..` -- a field added to the struct and forgotten here would
+        // otherwise render as an ellipsis and read as deliberate.
+        assert!(
+            !rendered.contains(".."),
+            "Debug is non-exhaustive: {rendered}"
+        );
     }
 
     #[test]

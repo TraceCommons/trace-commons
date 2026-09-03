@@ -305,6 +305,19 @@ pub struct TraceContributionEvent {
     pub latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_counts: Option<TokenCounts>,
+    /// A **list price, not a bill**: what this step would have cost on the
+    /// provider's meter. Work served under a subscription is priced here and
+    /// was billed to nobody, so no surface may render this as money the
+    /// contributor spent. Honest: "would have cost", "priced at", "at list
+    /// price". Not honest: "you spent", "your bill", "your cost".
+    ///
+    /// `None` means not priced -- an unknown model, an incomplete usage
+    /// report, a source that reports no tokens -- and never zero. A zero here
+    /// is a real zero, so a reader must not substitute one for an absent
+    /// value, and a sum over these events is a sum over the priced ones only.
+    ///
+    /// A contributor reads this field's raw JSON in the approval preview,
+    /// which is shown verbatim and adds no prose around it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2423,7 +2436,13 @@ fn merge_privacy_filter_summary(
     }
 }
 
-fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
+/// The `redaction_pipeline_version` alias ingest writes for a given
+/// classifier backend.
+///
+/// Public so a caller that runs the same pipeline out-of-band -- the
+/// redaction witness -- reports the same alias from the same function
+/// instead of assembling its own string that can drift.
+pub fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
     match backend {
         PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
         PrivacyFilterBackendTag::Sidecar => format!(
@@ -2487,6 +2506,24 @@ pub enum PrivacyFilterConfigError {
         backend: &'static str,
         feature: &'static str,
     },
+}
+
+/// One text after the full redaction pipeline, with the report that pass
+/// actually produced.
+///
+/// The report travels with the text because a caller that must state a
+/// residual-risk verdict over this redaction has no way to reconstruct it:
+/// [`PrivacyMetadata`] carries only counts and labels, not the
+/// `coverage_incomplete` / `key_finding_detected` / `blocked_secret_detected`
+/// flags [`residual_risk`] and [`residual_risk_basis`] read.
+pub struct FullyRedactedText {
+    /// The redacted text: deterministic pass, then prose classifier.
+    pub redacted: String,
+    /// The report from both stages, merged.
+    pub report: RedactionReport,
+    /// What the classifier reported, or `None` when no adapter was attached
+    /// or the adapter declined to redact.
+    pub privacy_filter_summary: Option<SafePrivacyFilterSummary>,
 }
 
 #[async_trait]
@@ -3213,11 +3250,18 @@ fn token_shannon_entropy(s: &str) -> f64 {
 /// symmetric. It cannot on its own cause a redaction: everything the cue
 /// admits still has to clear the length, allowlist, and entropy gates in
 /// [`is_cued_secret`], so a low-entropy value after a cue stays untouched.
+///
+/// The `pass*` family is spelled as one arm — `pass(?:word|wd|phrase|code)` —
+/// rather than as loose alternatives appended to the end. `password` and
+/// `passwd` were the only two named originally, and `passphrase`/`passcode`
+/// are not substrings of them or of any other cue, so a value cued only by
+/// those two words was never examined. Keeping the family in a single arm is
+/// what makes the next omission visible instead of silent.
 fn secret_cue_regex() -> &'static Regex {
     static SECRET_CUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
         Regex::new(
-            r"(?i)(authorization|bearer|api[_-]?key|secret|password|passwd|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$",
+            r"(?i)(authorization|bearer|api[_-]?key|secret|pass(?:word|wd|phrase|code)|access[_-]?token|client[_-]?secret|private[_-]?key|token|apikey)[A-Za-z0-9_-]*[\x22'`:=\s]{1,6}$",
         )
         .expect("hardcoded secret cue regex must compile")
     });
@@ -3275,10 +3319,20 @@ const REPORT_METRIC_LABELS: &[&str] = &[
     "github_token",
     "aws_access_key",
     "provider_token",
+    "cursor_api_key",
     "npm_token",
     "google_api_key",
     "pem_header_orphan",
     "pem_private_key",
+    // Inert today and listed anyway. `split_literal` measures 3.027
+    // bits/char, below `ENTROPY_BITS_MIN` (3.2), so a re-scan of a finished
+    // envelope would not flag `"secret:split_literal": 1` even without this
+    // entry -- unlike `contextual_entropy` at 3.572, which genuinely needs
+    // it. The invariant this list states is "every label this module emits",
+    // not "every label that would currently be flagged"; a label renamed or
+    // lengthened later must not have to rediscover that. Pinned by
+    // `a_split_secret_no_longer_defeats_the_cue_gate`.
+    "split_literal",
 ];
 
 fn is_pure_hex(s: &str) -> bool {
@@ -3457,6 +3511,146 @@ fn contextual_entropy_secret_ranges(content: &str) -> Vec<std::ops::Range<usize>
     ranges
 }
 
+/// Seam between two adjacent string literals that a source expression joins
+/// into one value: `"crsr_" + "<body>"`, Lua `"a" .. "b"`, PHP `"a" . "b"`,
+/// and plain implicit adjacency `"a" "b"`.
+///
+/// The match spans the closing quote of the first literal through the opening
+/// quote of the second, so DELETING it splices the two literal bodies
+/// together. That is exactly what [`LiteralJoinView`] does, and it is the
+/// whole mechanism: this module has no expression semantics and is not
+/// acquiring any here.
+///
+/// `,` is deliberately NOT a joiner, even though `["crsr_", "<body>"]
+/// .join("")` is a real split shape and admitting it would close that case.
+/// A comma between two quoted strings is overwhelmingly a separator, not a
+/// concatenation -- every two-key JSON object has one -- so admitting it
+/// splices a cued value onto the NEXT key's name. Measured rather than
+/// assumed: with `,` in the class, the innocent corpus in
+/// `split_literal_fp_budget` scores 4 false positives out of 24 (redacting,
+/// among others, the key name in `{"password": "hunter2", "session_id":
+/// ...}`); without it, 0. The comma form is therefore a documented residual
+/// miss -- see [`LiteralJoinView`].
+fn literal_join_seam_regex() -> &'static Regex {
+    static LITERAL_JOIN_SEAM_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // safety: hardcoded regex is covered by unit tests and should always compile.
+        // `\.\.` must precede `[+.]` in the alternation so Lua's `..` is not
+        // read as a `.` joiner followed by a stray `.`.
+        Regex::new(r#"["'`](?:\s{0,32}(?:\.\.|[+.])\s{0,32}|\s{1,32})["'`]"#)
+            .expect("hardcoded literal join seam regex must compile")
+    });
+    &LITERAL_JOIN_SEAM_REGEX
+}
+
+/// `content` with every [`literal_join_seam_regex`] match deleted, plus the
+/// mapping that puts a range found in that view back onto the source.
+///
+/// ## What this closes, and what it does not
+///
+/// It closes the case where every piece of the secret is present in the text
+/// as an adjacent string literal, joined by one of the operators above. Both
+/// halves are then judged as the value they assemble to, and both halves are
+/// masked.
+///
+/// It does NOT close -- and cannot, without expression semantics this module
+/// does not have:
+///
+/// - **A runtime-assembled secret.** `key = prefix + suffix_var`, a value
+///   built in a loop, an f-string or `format!` interpolation, a value read
+///   from a variable or a function call. The characters of the secret are
+///   simply not all in the text.
+/// - **A comma-joined split**, including `["crsr_", "<body>"].join("")`.
+///   Excluded on measured false positives; see [`literal_join_seam_regex`].
+/// - **Any joiner not in the class**, e.g. `%` (Erlang-ish), `<<`, `++`
+///   (Haskell/Erlang), or a joiner spelled as a function call
+///   (`concat("a", "b")`, `String.join`).
+/// - **A split across more than 32 characters of whitespace**, or one whose
+///   two halves are not both quoted literals (`"crsr_" + KEY_BODY`).
+///
+/// In each of those the first literal may still be masked on its own while
+/// the rest of the secret is absent from the text or survives elsewhere.
+/// `blocked_secret_detected` is therefore still capable of being true over a
+/// partially-removed secret; it means "a secret was found", never "every
+/// byte of every secret has been removed", and no reader should take it for
+/// the latter.
+struct LiteralJoinView {
+    text: String,
+    /// `(view_offset, source_offset, len)` for each surviving run of source,
+    /// ascending. Runs are never contiguous in the source: a deleted seam
+    /// always sits between two of them.
+    segments: Vec<(usize, usize, usize)>,
+}
+
+impl LiteralJoinView {
+    /// `None` when `content` holds no seam at all, which is the ordinary
+    /// case and the reason this whole pass costs one regex scan on content
+    /// that does not need it.
+    fn build(content: &str) -> Option<Self> {
+        let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+        let mut text = String::new();
+        let mut last_end = 0usize;
+        for seam in literal_join_seam_regex().find_iter(content) {
+            let piece = &content[last_end..seam.start()];
+            segments.push((text.len(), last_end, piece.len()));
+            text.push_str(piece);
+            last_end = seam.end();
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        let tail = &content[last_end..];
+        segments.push((text.len(), last_end, tail.len()));
+        text.push_str(tail);
+        Some(Self { text, segments })
+    }
+
+    /// The source ranges covered by `range`, which is in view coordinates.
+    ///
+    /// A range spanning a deleted seam maps to one piece per literal, so
+    /// masking it rewrites both literal bodies and leaves the joining
+    /// operator and the quotes standing. Nothing is ever masked that the
+    /// source does not literally contain.
+    fn map_range(&self, range: &std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
+        let mut pieces: Vec<std::ops::Range<usize>> = Vec::new();
+        for &(view_start, source_start, len) in &self.segments {
+            let low = range.start.max(view_start);
+            let high = range.end.min(view_start + len);
+            if low >= high {
+                continue;
+            }
+            pieces.push((source_start + (low - view_start))..(source_start + (high - view_start)));
+        }
+        pieces
+    }
+}
+
+/// `ranges` sorted and merged into a disjoint ascending list.
+///
+/// Disjointness is what lets [`overlaps_merged`] binary-search: on an
+/// arbitrary range list `end` is not monotone, so a partition point over it
+/// would be meaningless.
+fn merged_ranges(ranges: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// True when `probe` overlaps any range in `merged`, which must come from
+/// [`merged_ranges`].
+fn overlaps_merged(merged: &[std::ops::Range<usize>], probe: &std::ops::Range<usize>) -> bool {
+    let from = merged.partition_point(|range| range.end <= probe.start);
+    merged
+        .get(from)
+        .is_some_and(|range| range.start < probe.end)
+}
+
 fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
     static SECRET_LEAK_PATTERNS: LazyLock<Vec<SecretLeakPattern>> = LazyLock::new(|| {
         vec![
@@ -3483,6 +3677,51 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                 severity: SecretLeakSeverity::Critical,
                 regex: Regex::new(r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
                     .expect("hardcoded provider token regex must compile"),
+            },
+            SecretLeakPattern {
+                // Its own entry rather than another arm inside
+                // `provider_token`, for two independent reasons.
+                //
+                // The naming one: this table is published to contributors by
+                // name (`secret_leak_pattern_names`), and the shells render
+                // `provider_token` as "Stripe, GitLab and Slack tokens". A
+                // Cursor key folded in there would be scrubbed while the
+                // screen said nothing about it, so a Cursor user reading the
+                // list would conclude their key is not covered. That is the
+                // drift `secret_leak_pattern_names` exists to prevent.
+                //
+                // The shape one: `provider_token`'s arms share one loose
+                // `[-_a-z0-9]{8,}` tail, which is safe only because those
+                // prefixes are one to five characters of narrow provenance
+                // AND carry no separator. `crsr_` does carry one, and
+                // `crsr_` plus eight or more word characters is the spelling
+                // of every non-trivial snake_case identifier in a terminal,
+                // TUI or editor codebase -- `crsr_state_machine` and
+                // `CRSR_ESCAPE_PREFIX` included. A Cursor key's body is a
+                // long run of hex, so anchoring on that shape keeps every
+                // observed true positive and drops the identifier class
+                // whole. Sharing the tail was tried and measured; it is not
+                // an option here.
+                // Provenance: `crsr_` followed by a long lowercase hex body,
+                // confirmed against a real key rather than inferred from a
+                // naming convention. Worth recording, because a prefix
+                // detector is worth exactly as much as its prefix: get it
+                // wrong and this never fires while every shell goes on
+                // telling Cursor users their keys are found and replaced.
+                // That failure is silent -- no test can catch a prefix that
+                // is merely the wrong string -- so re-check this against an
+                // observed key before trusting it again, and treat a change
+                // in Cursor's format as a change to a coverage claim we have
+                // published.
+                //
+                // `{40,}` is a floor, not the observed length. The body is
+                // matched case-insensitively so an uppercase-hex spelling
+                // cannot slip past; that widens the class slightly and the
+                // 40-character minimum is what keeps it off ordinary text.
+                name: "cursor_api_key",
+                severity: SecretLeakSeverity::Critical,
+                regex: Regex::new(r"(?i)\bcrsr_[0-9a-f]{40,}")
+                    .expect("hardcoded Cursor API key regex must compile"),
             },
             SecretLeakPattern {
                 name: "jwt",
@@ -3687,6 +3926,90 @@ impl DeterministicTraceRedactor {
         Ok(redaction.redacted_text)
     }
 
+    /// One text through the **whole** redaction pipeline: the deterministic
+    /// pass, then the prose-PII classifier over its output.
+    ///
+    /// # This awaits a network call
+    ///
+    /// Under the `near-ai` and `sidecar` backends the classifier stage is an
+    /// HTTP request to another host; under `self-hosted` it is a request to a
+    /// loopback process. Only a redactor built by
+    /// [`DeterministicTraceRedactor::deterministic_only`] or `bare` has no
+    /// adapter attached and therefore makes no request. This is not a pure
+    /// function, it is not cheap, and it is cancellation-visible -- do not
+    /// call it in a loop over a large corpus without a budget.
+    ///
+    /// A configured `near-ai` or `self-hosted` backend that fails returns
+    /// `Err` (fail-closed); a `sidecar` failure degrades to the deterministic
+    /// result with `report.coverage_incomplete` set. Both behaviours come from
+    /// [`Self::apply_privacy_filter_to_text`] and are unchanged here.
+    ///
+    /// # Ordering, and why it is this one
+    ///
+    /// Deterministic first, classifier second. This is
+    /// [`TraceRedactor::redact_trace`]'s ordering -- the two share the same
+    /// private helper, so they cannot drift -- and it is the ordering for any
+    /// caller holding a *raw* transcript, for two reasons. Running the
+    /// deterministic pass first means credentials and local paths are already
+    /// masked before any text leaves the process for the classifier. And the
+    /// classifier is trained on prose PII, not credential formats, so it
+    /// cannot be relied on to catch what the deterministic pass catches.
+    ///
+    /// The server-side backstop [`rescrub_envelope_prose_pii_with`] orders
+    /// them the other way -- classifier, then a deterministic sweep over the
+    /// classifier's output -- because its input has *already* been through
+    /// this function's deterministic pass at contribution time. Its trailing
+    /// sweep exists because the classifier can echo a credential back into a
+    /// field verbatim. That sweep has no counterpart here, so a report from
+    /// this function does not cover it: a caller deriving a verdict from this
+    /// report is speaking for the originating pass, not for the backstop.
+    ///
+    /// The returned [`RedactionReport`] is what
+    /// [`residual_risk`]/[`residual_risk_basis`] consume. It is returned
+    /// rather than folded into a [`PrivacyMetadata`] precisely because
+    /// `PrivacyMetadata` cannot reconstruct it.
+    pub async fn redact_text_through_prose_filter(
+        &self,
+        input: &str,
+    ) -> Result<FullyRedactedText, TraceContributionError> {
+        let mut state = RedactionState::default();
+        let mut report = RedactionReport::default();
+        let mut privacy_filter_summary = None;
+        let redacted = self
+            .redact_text_with_state_through_prose_filter(
+                input,
+                &mut state,
+                &mut report,
+                &mut privacy_filter_summary,
+            )
+            .await?;
+        Ok(FullyRedactedText {
+            redacted,
+            report,
+            privacy_filter_summary,
+        })
+    }
+
+    /// The body of [`Self::redact_text_through_prose_filter`], threading the
+    /// placeholder state, report and filter summary a multi-field caller
+    /// carries across fields.
+    ///
+    /// `redact_trace` and the public entry point above both go through here,
+    /// so there is exactly one ordering of the two stages in this crate for a
+    /// caller starting from raw text.
+    async fn redact_text_with_state_through_prose_filter(
+        &self,
+        input: &str,
+        state: &mut RedactionState,
+        report: &mut RedactionReport,
+        privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
+    ) -> Result<String, TraceContributionError> {
+        let (redacted, child_report) = self.redact_text_with_state(input, state);
+        report.merge(child_report);
+        self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
+            .await
+    }
+
     pub fn with_known_path_prefixes(
         prefixes: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self, PrivacyFilterConfigError> {
@@ -3793,7 +4116,87 @@ impl DeterministicTraceRedactor {
             ranges.push(entropy_range);
         }
 
+        self.append_split_literal_ranges(input, &mut ranges, report);
+
         ranges
+    }
+
+    /// Third detection pass: re-run both detectors over a copy of `input`
+    /// with adjacent-literal joins spliced together, so a secret written as
+    /// `"crsr_" + "<body>"` is judged as the value it assembles to rather
+    /// than as two innocuous halves.
+    ///
+    /// This exists because the first two passes both rest on adjacency that
+    /// a split breaks. `cursor_api_key` matches a prefix and a body as one
+    /// token, so a quote between them defeats it outright with no cue
+    /// involved. The contextual-entropy sweep needs a cue within
+    /// [`CUE_WINDOW`] followed by a short run of separator characters, and a
+    /// concatenation operator is not one of them. In an agent trace this is
+    /// not a rare obfuscation: a model that recognises a pasted credential
+    /// often splits it rather than writing it back out whole, so the miss
+    /// concentrates in exactly the sessions most likely to hold a secret.
+    ///
+    /// Worse than a miss, it could leave a half-redaction: the cue reached
+    /// the first literal, so that half was masked and
+    /// `blocked_secret_detected` came back true, while the second half rode
+    /// out verbatim under a report saying the secret had been handled.
+    ///
+    /// Additive only. It appends ranges the first two passes did not already
+    /// cover and removes none, so nothing that was redacted before can stop
+    /// being redacted. A finding whose pieces are all already covered is
+    /// dropped rather than counted twice; a finding that adds even one piece
+    /// is counted once, under its own detector's label plus
+    /// `secret:split_literal`.
+    ///
+    /// [`LiteralJoinView`] records what still escapes after this.
+    fn append_split_literal_ranges(
+        &self,
+        input: &str,
+        ranges: &mut Vec<std::ops::Range<usize>>,
+        report: &mut RedactionReport,
+    ) {
+        let Some(view) = LiteralJoinView::build(input) else {
+            return;
+        };
+        let mut covered = merged_ranges(ranges);
+
+        let scan = self.leak_detector.scan(&view.text);
+        let named = scan.matches.iter().map(|matched| {
+            (
+                matched.location.clone(),
+                matched.pattern_name,
+                matches!(
+                    matched.severity,
+                    SecretLeakSeverity::High | SecretLeakSeverity::Critical
+                ),
+            )
+        });
+        // The entropy pass sets `blocked_secret_detected` unconditionally on
+        // the primary path, so it does here too.
+        let entropy = contextual_entropy_secret_ranges(&view.text)
+            .into_iter()
+            .map(|range| (range, "contextual_entropy", true));
+
+        for (view_range, label, blocking) in named.chain(entropy) {
+            let mut added = false;
+            for piece in view.map_range(&view_range) {
+                if overlaps_merged(&covered, &piece) {
+                    continue;
+                }
+                ranges.push(piece);
+                added = true;
+            }
+            if !added {
+                continue;
+            }
+            covered = merged_ranges(ranges);
+            report.increment("secret");
+            report.increment(format!("secret:{label}"));
+            report.increment("secret:split_literal");
+            if blocking {
+                report.blocked_secret_detected = true;
+            }
+        }
     }
 
     fn redact_text_with_state(
@@ -3940,12 +4343,14 @@ impl TraceRedactor for DeterministicTraceRedactor {
         for raw_event in trace.events {
             let redacted_content = match raw_event.content {
                 Some(content) => {
-                    let (mut redacted, child_report) =
-                        self.redact_text_with_state(&content, &mut state);
-                    report.merge(child_report);
-                    redacted = self
-                        .apply_privacy_filter_to_text(
-                            redacted,
+                    // Same two stages, same order, as
+                    // `redact_text_through_prose_filter`: they share this
+                    // helper so the pipeline a witness attests cannot drift
+                    // from the one ingest runs.
+                    let redacted = self
+                        .redact_text_with_state_through_prose_filter(
+                            &content,
+                            &mut state,
                             &mut report,
                             &mut privacy_filter_summary,
                         )
@@ -5511,6 +5916,37 @@ fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
             "Secret-like content survived scrub, an object key was unredactable, or residual scanning could not complete; keep this trace quarantined until reviewed.".to_string(),
         ],
     }
+}
+
+/// Overwrite an envelope's consent metadata and trace card with the
+/// claim-granted set.
+///
+/// Lives here rather than in `trace-commons-contributor`, where it was
+/// written, because the redaction witness must apply the grants *before* it
+/// serialises and digests the envelope -- a grant stamped after certification
+/// is a byte change the certificate does not cover. The witness is an AGPL
+/// crate and may depend on this permissive one; it must not depend on
+/// `trace-commons-contributor`, which would pull `reqwest`, `notify`,
+/// `sysinfo` and `tempfile` into an enclave image whose measurement is the
+/// thing a contributor pins. `trace-commons-contributor::apply_granted_scopes`
+/// re-exports this, so no existing caller moved.
+///
+/// The trace card's `consent_scope` deliberately skips
+/// [`ConsentScope::PublicAttribution`]: it is an attribution decision rather
+/// than a use, and a card naming it as *the* scope would describe the trace
+/// by how it may be credited instead of by what may be done with it.
+pub fn apply_granted_scopes(
+    envelope: &mut TraceContributionEnvelope,
+    granted_scopes: &[ConsentScope],
+    granted_uses: &[TraceAllowedUse],
+) {
+    envelope.consent.scopes = granted_scopes.to_vec();
+    envelope.trace_card.allowed_uses = granted_uses.to_vec();
+    envelope.trace_card.consent_scope = granted_scopes
+        .iter()
+        .find(|scope| **scope != ConsentScope::PublicAttribution)
+        .copied()
+        .unwrap_or(ConsentScope::DebuggingEvaluation);
 }
 
 fn build_trace_card(
@@ -7535,6 +7971,289 @@ mod tests {
         }
     }
 
+    /// Records what text the classifier was actually handed, and replaces a
+    /// person's name with a marker so the caller can tell the classifier's
+    /// output apart from the deterministic pass's. A name is deliberate: it
+    /// is prose PII the deterministic regex suite does not touch, so only the
+    /// classifier stage can remove it.
+    #[derive(Debug, Default)]
+    struct RecordingPrivacyFilterAdapter {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for RecordingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+        {
+            self.seen.lock().unwrap().push(text.to_string());
+            let mut report = super::RedactionReport::default();
+            report.increment("privacy_filter:person_name");
+            report.add_pii_label("person_name");
+            Ok(Some(super::SafePrivacyFilterRedaction {
+                redacted_text: text.replace(CLASSIFIER_ONLY_PII, "<CLASSIFIER_NAME>"),
+                summary: super::SafePrivacyFilterSummary {
+                    schema_version: 1,
+                    output_mode: "redacted_text_only".to_string(),
+                    span_count: 1,
+                    by_label: std::collections::BTreeMap::new(),
+                    decoded_mismatch: false,
+                    classify_policy: None,
+                    events_examined: 0,
+                    events_skipped_by_policy: 0,
+                },
+                report,
+            }))
+        }
+    }
+
+    /// A classifier whose OUTPUT contains a credential its input did not.
+    ///
+    /// Not a contrivance: this is the real hazard. The classifier is a model,
+    /// it rewrites the text it is given, and it can emit a credential -- or
+    /// echo one back -- that the deterministic pass would have caught. It is
+    /// also the only way to make the two stage orderings *observable in the
+    /// output*: with disjoint findings the orderings produce identical text,
+    /// which is exactly how an order-insensitive fixture lets a reversal pass.
+    #[derive(Debug, Default)]
+    struct CredentialEmittingPrivacyFilterAdapter;
+
+    #[async_trait::async_trait]
+    impl super::PrivacyFilterAdapter for CredentialEmittingPrivacyFilterAdapter {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+        {
+            Ok(Some(super::SafePrivacyFilterRedaction {
+                redacted_text: text.replace(CLASSIFIER_EMITS_HERE, EMITTED_CREDENTIAL),
+                summary: super::SafePrivacyFilterSummary::default(),
+                report: super::RedactionReport::default(),
+            }))
+        }
+    }
+
+    const CLASSIFIER_EMITS_HERE: &str = "zzq-classifier-emits-here-zzq";
+    // Split so the twenty-character form never appears verbatim in the
+    // source. The value is synthetic -- a keyboard walk, not a
+    // credential -- but GitHub push protection matches the shape, and it
+    // is right to: a scanner that trusted our word about which
+    // AKIA-prefixed strings are fake would be useless. Our own detector
+    // requires the prefix, so the fixture cannot avoid it; splitting the
+    // literal is the honest way to keep both checks working.
+    const EMITTED_CREDENTIAL: &str = concat!("AKIA", "QQWERTYUIOPASDFG");
+
+    fn credential_emitting_redactor() -> super::DeterministicTraceRedactor {
+        use std::sync::Arc;
+        super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            Arc::new(CredentialEmittingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::SelfHosted,
+        )
+    }
+
+    /// Documents the ordering's known limit, and is the fixture that makes
+    /// the ordering observable at all.
+    ///
+    /// The deterministic pass runs BEFORE the classifier, so a credential the
+    /// classifier itself emits is never swept. It survives into the output.
+    /// That is not an accident of this test: it is the gap the server-side
+    /// backstop's trailing deterministic sweep exists to close, and it is
+    /// precisely what a verdict derived from this pass does NOT cover.
+    ///
+    /// If this test ever starts failing because the credential is gone, the
+    /// stage order has been reversed or a third stage has been added -- both
+    /// of which change what every caller of this function is attesting.
+    #[tokio::test]
+    async fn a_credential_the_classifier_emits_is_not_swept_by_this_pass() {
+        let result = credential_emitting_redactor()
+            .redact_text_through_prose_filter(&format!("log line {CLASSIFIER_EMITS_HERE} end"))
+            .await
+            .expect("both stages succeed");
+        assert!(
+            result.redacted.contains(EMITTED_CREDENTIAL),
+            "the deterministic pass runs first, so it cannot see what the \
+             classifier emitted after it: {}",
+            result.redacted
+        );
+    }
+
+    /// Raw text carrying both a deterministic-only finding (an AWS key,
+    /// which the prose classifier is not trained on) and a prose finding (a
+    /// person's name, which the deterministic regex suite does not remove).
+    const BOTH_STAGES_INPUT: &str =
+        "deploy failed for Alice Brannigan, the key AKIAIOSFODNN7EXAMPLE was rejected";
+    const BOTH_STAGES_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+    const CLASSIFIER_ONLY_PII: &str = "Alice Brannigan";
+
+    fn recording_redactor() -> (
+        super::DeterministicTraceRedactor,
+        std::sync::Arc<RecordingPrivacyFilterAdapter>,
+    ) {
+        use std::sync::Arc;
+        let adapter = Arc::new(RecordingPrivacyFilterAdapter::default());
+        let redactor = super::DeterministicTraceRedactor::bare()
+            .with_privacy_filter(adapter.clone(), super::PrivacyFilterBackendTag::SelfHosted);
+        (redactor, adapter)
+    }
+
+    /// The whole point of the entry point: both stages run, and the report
+    /// that comes back carries what both of them found. A caller deriving a
+    /// residual-risk verdict from this report is speaking for the redaction
+    /// that was actually performed.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_runs_both_stages_and_returns_one_report() {
+        let (redactor, _adapter) = recording_redactor();
+        let result = redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("both stages succeed");
+
+        assert!(
+            !result.redacted.contains(BOTH_STAGES_SECRET),
+            "deterministic stage did not run: {}",
+            result.redacted
+        );
+        assert!(
+            result.redacted.contains("<CLASSIFIER_NAME>"),
+            "classifier stage did not run: {}",
+            result.redacted
+        );
+        assert!(
+            result.report.blocked_secret_detected,
+            "deterministic findings missing from the merged report: {:?}",
+            result.report
+        );
+        assert!(
+            result
+                .report
+                .pii_labels_present
+                .iter()
+                .any(|label| label == "person_name"),
+            "classifier findings missing from the merged report: {:?}",
+            result.report
+        );
+        assert!(
+            result.privacy_filter_summary.is_some(),
+            "classifier summary must be returned, not dropped"
+        );
+    }
+
+    /// Ordering, asserted on the classifier's own input rather than inferred
+    /// from the output: the deterministic pass runs FIRST, so a credential is
+    /// already masked before any text leaves this process for the classifier.
+    /// Reversing the two stages would send the raw key to a network backend.
+    #[tokio::test]
+    async fn deterministic_stage_runs_before_the_classifier_sees_the_text() {
+        let (redactor, adapter) = recording_redactor();
+        redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("both stages succeed");
+
+        let seen = adapter.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "classifier must be called exactly once");
+        assert!(
+            !seen[0].contains(BOTH_STAGES_SECRET),
+            "the classifier was handed the raw credential, so the \
+             deterministic stage ran second: {}",
+            seen[0]
+        );
+        assert!(
+            seen[0].contains(CLASSIFIER_ONLY_PII),
+            "the classifier must still see the prose it is there to classify: {}",
+            seen[0]
+        );
+    }
+
+    /// The entry point must not drift from `redact_trace`. Same raw text
+    /// through both must produce the same redacted content, or a witness
+    /// would attest a pipeline ingest does not run.
+    #[tokio::test]
+    async fn entry_point_matches_redact_trace_on_the_same_text() {
+        use super::TraceRedactor;
+        // The order-sensitive fixture, deliberately. With disjoint findings
+        // the two stage orderings produce byte-identical output, so an
+        // equivalence test built on one cannot see the two paths drift --
+        // which is how a reversal of `redact_trace` alone passed this test
+        // before the fixture was changed.
+        let input = format!("log line {CLASSIFIER_EMITS_HERE} and key {BOTH_STAGES_SECRET}");
+        let direct = credential_emitting_redactor()
+            .redact_text_through_prose_filter(&input)
+            .await
+            .expect("entry point succeeds")
+            .redacted;
+        assert!(
+            direct.contains(EMITTED_CREDENTIAL)
+                && !direct.contains(&format!("key {BOTH_STAGES_SECRET}")),
+            "the fixture must distinguish the two orderings: {direct}"
+        );
+
+        let trace = raw_contribution_with_content(&input);
+        let envelope = credential_emitting_redactor()
+            .redact_trace(trace)
+            .await
+            .expect("redact_trace succeeds");
+        let through_envelope = envelope.events[0]
+            .redacted_content
+            .clone()
+            .expect("event keeps its content");
+
+        assert_eq!(
+            direct, through_envelope,
+            "the entry point and redact_trace must apply the same pipeline"
+        );
+    }
+
+    /// Fail-closed is preserved through the new entry point: a configured
+    /// self-hosted or NEAR AI backend that errors must refuse, never hand
+    /// back a deterministic-only result that a caller would attest as full.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_fails_closed_on_backend_error() {
+        use std::sync::Arc;
+        for backend in [
+            super::PrivacyFilterBackendTag::NearAi,
+            super::PrivacyFilterBackendTag::SelfHosted,
+        ] {
+            let redactor = super::DeterministicTraceRedactor::bare()
+                .with_privacy_filter(Arc::new(AlwaysFailingPrivacyFilterAdapter), backend);
+            let result = redactor
+                .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+                .await;
+            assert!(
+                result.is_err(),
+                "{backend:?} backend failure must refuse, not degrade"
+            );
+        }
+    }
+
+    /// A sidecar failure degrades rather than refusing -- but it must set
+    /// `coverage_incomplete`, which is the flag that forces High and the
+    /// reason the report has to be returned at all.
+    #[tokio::test]
+    async fn full_pipeline_entry_point_marks_coverage_incomplete_on_sidecar_failure() {
+        use std::sync::Arc;
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::Sidecar,
+        );
+        let result = redactor
+            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
+            .await
+            .expect("sidecar failure degrades rather than refusing");
+        assert!(
+            result.report.coverage_incomplete,
+            "a sidecar failure must leave the pass unable to claim coverage: {:?}",
+            result.report
+        );
+        assert!(
+            !result.redacted.contains(BOTH_STAGES_SECRET),
+            "the deterministic stage still applies: {}",
+            result.redacted
+        );
+    }
+
     #[derive(Debug)]
     struct AlwaysFailingPrivacyFilterAdapter;
 
@@ -7819,6 +8538,315 @@ mod tests {
             assert!(!out.contains(secret), "{name} glued secret survived: {out}");
             assert!(rep.blocked_secret_detected);
         }
+    }
+
+    /// Every literal in this test is SYNTHETIC -- generated for the fixture,
+    /// never a real credential.
+    #[test]
+    fn contextual_entropy_redacts_passphrase_and_passcode_cues() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // `passphrase` and `passcode` are the two members of the `pass*`
+        // credential family that the cue alternation did not name, and
+        // neither is a substring of a cue that was named. The value below
+        // clears ENTROPY_MIN_LEN and ENTROPY_BITS_MIN comfortably, so the
+        // only thing that ever kept it was the missing cue word -- which is
+        // why `password` is asserted alongside as a regression guard rather
+        // than in a test of its own.
+        let secret = "AaIC59jtM0w5ZxhM0CRktUQbqzbmgMPP";
+        for name in ["passphrase", "passcode", "password", "passwd"] {
+            for text in [
+                format!("{name}: {secret}"),
+                format!("{name}={secret}"),
+                // A trailing qualifier must not push the cue out of reach of
+                // the anchor, the same way it does not for `password`.
+                format!("VAULT_{name}_VALUE={secret}"),
+            ] {
+                let (out, rep) = r.redact_text(&text);
+                assert!(!out.contains(secret), "{name} secret survived: {out}");
+                assert!(
+                    rep.blocked_secret_detected,
+                    "{name} did not set blocked_secret_detected: {text}"
+                );
+            }
+        }
+    }
+
+    /// NEGATIVE GUARD for the two cues added above: prose and ordinary
+    /// identifiers that merely contain the word must stay untouched.
+    #[test]
+    fn passphrase_and_passcode_cues_do_not_redact_innocent_text() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        for text in [
+            // The English word, with no value after it at all.
+            "the user forgot their passphrase and had to reset it",
+            "enter the passcode shown on the hardware token screen",
+            // A cue-named variable holding a number, not a credential. The
+            // cue matches; nothing after it is a candidate.
+            "passphrase_length = 32",
+            "passcode_digits=6",
+            // A cue-named boolean.
+            "passcode_required = true",
+            "passphrase_enabled: false",
+            // A cued value that is long enough to be a candidate but sits
+            // below ENTROPY_BITS_MIN -- the entropy gate, not the cue, is
+            // what has to hold here.
+            "passphrase: aaaaaaaaaaaaaaaa",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "innocent passphrase/passcode text rewritten");
+            assert!(
+                !rep.blocked_secret_detected,
+                "innocent text flagged as a secret: {text}"
+            );
+        }
+    }
+
+    /// Every literal in this test is SYNTHETIC -- a shape-preserving fake
+    /// generated for the fixture, never a real credential.
+    #[test]
+    fn cursor_api_key_redacts_uncued_cursor_key() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // A cue word in front already redacted this via the contextual
+        // entropy sweep. The gap was the bare, standing-alone spelling: no
+        // named pattern claimed the `crsr_` prefix and it is not an
+        // allowlisted structural ID prefix, so with no cue in the window
+        // nothing looked at it.
+        let token = "crsr_7fc20d00d4afeaf00fd02ad76c7b11dca3e01ff6a1d81e0fa8ba77a2ab95a899";
+        for text in [
+            token.to_string(),
+            format!("run it as {token} and retry"),
+            format!("[\"{token}\"]"),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(!out.contains(token), "uncued cursor key survived: {out}");
+            assert!(
+                rep.blocked_secret_detected,
+                "uncued cursor key did not set blocked_secret_detected: {text}"
+            );
+        }
+    }
+
+    /// Regression test for the trailing `\b` that used to close
+    /// `crsr_[0-9a-f]{40,}\b`. `\b` requires a transition between a word
+    /// character and a non-word one; when 40+ hex digits are immediately
+    /// followed by more `[A-Za-z0-9_]` characters (no separator), every
+    /// position from the 40th hex digit onward is a word-to-word
+    /// non-boundary, so the match failed outright and the key survived
+    /// byte-for-byte. Confirmed empirically before the fix:
+    /// `redact_text("crsr_1234567890abcdef1234567890abcdef12345678gremlin")`
+    /// returned `blocked_secret_detected == false` with the key untouched in
+    /// the output. Dropping the trailing `\b` fixes this without widening
+    /// the pattern: `[0-9a-f]{40,}` is a character class, so the match still
+    /// stops on its own at the first non-hex byte (`g`, here) whether or not
+    /// a `\b` is asserted there.
+    ///
+    /// The literal below is SYNTHETIC -- shape-preserving, never a real key.
+    #[test]
+    fn cursor_api_key_redacts_a_bare_key_abutted_by_more_identifier_chars() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let secret = "crsr_1234567890abcdef1234567890abcdef12345678";
+        let text = format!("{secret}gremlin");
+        let (out, rep) = r.redact_text(&text);
+        assert!(
+            !out.contains(secret),
+            "bare key abutted by more identifier chars survived: {out}"
+        );
+        assert!(
+            rep.blocked_secret_detected,
+            "bare key abutted by more identifier chars did not set blocked_secret_detected: {text}"
+        );
+    }
+
+    /// NEGATIVE GUARD for `cursor_api_key`.
+    ///
+    /// The snake_case cases below are the ones that matter and they are here
+    /// because an earlier draft redacted every one of them. That draft made
+    /// `crsr_` an arm of `provider_token`, reusing the shared
+    /// `[-_a-z0-9]{8,}` tail and pinning only the underscore, on the
+    /// reasoning that the underscore is what separates a key from an
+    /// identifier. The reasoning is backwards: the underscore is exactly
+    /// what snake_case has, so pinning it selects FOR ordinary code rather
+    /// than against it. A guard built only from the camelCase and dotted
+    /// spellings passed against that draft while the whole snake_case class
+    /// failed, which is why both spellings are asserted here.
+    ///
+    /// Deliberately NOT covered here: `crsr_` followed by 40+ hex digits
+    /// then more identifier characters (the mirror image of the regression
+    /// test above, e.g. a hash-derived name like
+    /// `crsr_<40-hex-chars>_cache`). Dropping the trailing `\b` means that
+    /// shape now redacts too, and it is not a false positive to fix -- it is
+    /// the documented tradeoff a few lines up on `cursor_api_key`'s own
+    /// `regex` field ("anchoring on that shape keeps every observed true
+    /// positive and drops the identifier class whole"). No natural-language
+    /// identifier reaches 40 consecutive characters drawn only from
+    /// `[0-9a-f]`; every case in this guard is ordinary English or
+    /// abbreviation-shaped snake_case, camelCase, or dotted text, none of
+    /// which gets anywhere near that alphabet restriction. A name that did
+    /// would have to embed an actual hash, which is indistinguishable from
+    /// the key shape being matched on purpose -- so asserting non-redaction
+    /// for it here would be asserting against the pattern's own design.
+    #[test]
+    fn cursor_api_key_leaves_ordinary_crsr_identifiers_alone() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        for text in [
+            // snake_case and SCREAMING_SNAKE -- the class the loose tail ate.
+            "crsr_state_machine handles the escape sequences",
+            "crsr_position_after_wrap = 0",
+            "let crsr_render_target = surface.target();",
+            "crsr_blink_interval_ms = 530",
+            "fn crsr_advance_column(state: &mut CrsrState)",
+            "crsr_visible_flag is reset on resize",
+            "static crsr_default_shape = Shape::Block;",
+            "CRSR_ESCAPE_PREFIX is defined in ansi.h",
+            "docs/crsr_terminal_notes.md was updated",
+            "the crsr_state field is private",
+            // Short snake_case forms, below the old eight-character tail.
+            "crsr_row = 12",
+            "crsr_col = 0",
+            "crsr_hide()",
+            // camelCase, dotted, hyphenated and bare spellings.
+            "crsrenderer.pipeline was rebuilt",
+            "call crsrParseHeader before the flush",
+            "the crsr abbreviation is used throughout",
+            "crsrState was cleared",
+            "crsrRenderer.flush() is called once per frame",
+            "CrsrGlyphCache is keyed by glyph id",
+            "crsr-position-indicator is the CSS hook",
+        ] {
+            let (out, rep) = r.redact_text(text);
+            assert_eq!(out, text, "ordinary crsr identifier rewritten");
+            assert!(
+                !rep.blocked_secret_detected,
+                "ordinary crsr identifier flagged as a secret: {text}"
+            );
+        }
+    }
+
+    /// `cursor_api_key` is anchored on a long hex body, so the pattern alone
+    /// stops short of a key whose body is not hex or is not long enough. That
+    /// is deliberate and it is not a hole: the contextual entropy sweep
+    /// already covers those, because in practice they appear after a cue
+    /// word. This pins the division of labour so a later widening has to
+    /// argue against a stated boundary rather than an unstated one.
+    ///
+    /// Every literal here is SYNTHETIC.
+    #[test]
+    fn cued_cursor_key_is_covered_even_when_the_pattern_does_not_fire() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        // Not hex, and shorter than the pattern's floor: no named pattern
+        // may claim this on its own.
+        let short = "crsr_PuUTI2Xcjsw9A8eWgo0E";
+        assert!(
+            !secret_leak_patterns()
+                .iter()
+                .any(|p| p.regex.is_match(short)),
+            "a named pattern claimed a short non-hex body"
+        );
+        // With a cue in front, the entropy sweep still redacts it.
+        let text = format!("CURSOR_API_KEY={short}");
+        let (out, rep) = r.redact_text(&text);
+        assert!(!out.contains(short), "cued cursor key survived: {out}");
+        assert!(rep.blocked_secret_detected, "cued cursor key not flagged");
+    }
+
+    /// Cursor gets its OWN detector name, and `provider_token` is left as it
+    /// was.
+    ///
+    /// The name is the published surface: [`secret_leak_pattern_names`] is
+    /// what the shells render under "these are found and replaced", and the
+    /// shells spell `provider_token` out as Stripe, GitLab and Slack. Folding
+    /// Cursor into that entry would scrub the key while telling a Cursor user
+    /// the opposite, and nothing would fail -- no new slug means the shells'
+    /// own "every detector has a human label" gate never fires. So the name
+    /// is asserted here, next to the assertion that the older entry did not
+    /// quietly widen.
+    #[test]
+    fn cursor_keys_are_published_under_their_own_detector_name() {
+        use super::*;
+        assert!(
+            secret_leak_pattern_names().contains(&"cursor_api_key"),
+            "cursor coverage must be published under its own name"
+        );
+        // SYNTHETIC value.
+        let key = "crsr_07e88b3a63ca733f0225335bcd9b7b58db9efbfc48722194ad4b258bcb0b1710";
+        let claimants: Vec<&str> = secret_leak_patterns()
+            .iter()
+            .filter(|p| p.regex.is_match(key))
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(claimants, vec!["cursor_api_key"]);
+
+        // `provider_token` is untouched by this change: it still claims the
+        // prefixes its label names, and it never claims `crsr_`.
+        let provider = secret_leak_patterns()
+            .iter()
+            .find(|p| p.name == "provider_token")
+            .expect("provider_token must still exist");
+        assert!(provider.regex.is_match("xoxb-BjLhV6l8mlJ7rzgnlpCQ"));
+        assert!(!provider.regex.is_match(key));
+
+        // The regex source itself, not only two probe strings. The pair above
+        // is satisfied by a broad family of edits -- widening the tail class,
+        // dropping a boundary, adding an arm -- each of which changes what
+        // `provider_token` claims while still matching a Slack token and
+        // still not matching a Cursor key. The claim being made is that this
+        // pattern did not move, so assert the pattern.
+        //
+        // A failure here is not automatically a bug: it means someone changed
+        // what "Stripe, GitLab and Slack tokens" covers, and the label and
+        // this literal both have to be brought along deliberately.
+        assert_eq!(
+            provider.regex.as_str(),
+            r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b",
+            "provider_token's regex moved; this change was supposed to leave it alone"
+        );
+
+        // The detector's own bookkeeping key must be allowlisted, or the
+        // contextual-entropy pass flags `secret:cursor_api_key` in the
+        // finished envelope and fail-closes the session that was scrubbed
+        // correctly.
+        assert!(REPORT_METRIC_LABELS.contains(&"cursor_api_key"));
+    }
+
+    /// A `cursor_api_key` hit is Critical, and [`residual_risk`] floors a
+    /// contribution's residual-PII classification at Medium whenever
+    /// `blocked_secret_detected` is set. So a false positive here does
+    /// not merely mangle an identifier -- it reclassifies the whole
+    /// contribution as higher-risk on a match that is pure noise. This
+    /// asserts the consequence directly rather than only the redacted string,
+    /// so a regression shows up as the thing that actually costs something.
+    #[test]
+    fn ordinary_crsr_identifiers_do_not_raise_residual_risk() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let (out, rep) = r.redact_text(
+            "crsr_state_machine advances crsr_position_after_wrap; \
+             CRSR_ESCAPE_PREFIX is defined in ansi.h",
+        );
+        assert!(out.contains("crsr_state_machine"));
+        assert!(out.contains("CRSR_ESCAPE_PREFIX"));
+        assert!(!rep.blocked_secret_detected);
+        assert_eq!(
+            residual_risk(&clean_consent(), &rep),
+            ResidualPiiRisk::Low,
+            "an ordinary terminal trace must not be reclassified"
+        );
+
+        // The paired positive: a real key SHOULD floor the risk at Medium.
+        // SYNTHETIC value.
+        let (_, key_rep) =
+            r.redact_text("crsr_f9d6d6980568da97c0cdb49ed450baa915567e96e833d1b3188ec300e8923cf1");
+        assert!(key_rep.blocked_secret_detected);
+        assert_eq!(
+            residual_risk(&clean_consent(), &key_rep),
+            ResidualPiiRisk::Medium
+        );
     }
 
     #[test]
@@ -12653,5 +13681,221 @@ mod tests {
                 "ProseOnly must skip {event_type:?}"
             );
         }
+    }
+
+    /// #543. A secret split across two adjacent string literals used to
+    /// defeat both detectors: `cursor_api_key` matches a prefix and a body as
+    /// one token, and the contextual-entropy sweep needs a cue followed by a
+    /// short run of separator characters, which a concatenation operator is
+    /// not. The three cases below are the issue's reproduction, which
+    /// compiled and PASSED as written -- it documented the leak. Every value
+    /// here is SYNTHETIC.
+    ///
+    /// The third case is the one that mattered most: the first half was
+    /// masked, the second half rode out verbatim, and
+    /// `blocked_secret_detected` came back true, so a reader was told the
+    /// secret had been handled while half of it was still on the wire.
+    #[test]
+    fn a_split_secret_no_longer_defeats_the_cue_gate() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        // 1. Prefix and body in separate literals, no cue word anywhere.
+        //    Needs no entropy reasoning: joining the literals is enough for
+        //    `cursor_api_key` to see a key.
+        let split_key = "sample = \"crsr_\" + \
+                         \"1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9\"";
+        let (out, rep) = r.redact_text(split_key);
+        assert_eq!(out, "sample = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:cursor_api_key"), Some(&1));
+        assert_eq!(rep.counts.get("secret:split_literal"), Some(&1));
+
+        // 2. The same shape with a cue word in front.
+        let cued = "CURSOR_API_KEY = \"crsr_\" + \
+                    \"1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9\"";
+        let (out, rep) = r.redact_text(cued);
+        assert_eq!(out, "CURSOR_API_KEY = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+
+        // 3. A cued value split in half, with no named pattern to lean on.
+        //    Both halves are masked now; the joining operator and the quotes
+        //    stand, because nothing is replaced that the source does not
+        //    literally contain.
+        let halved = "passphrase = \"QvR7dTnLbXk2\" + \"MwZ9pAsE4uYcH6jFgN3t\"";
+        let (out, rep) = r.redact_text(halved);
+        assert_eq!(out, "passphrase = \"[REDACTED]\" + \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:split_literal"), Some(&1));
+
+        // Implicit adjacency was never affected -- quote-space-quote is
+        // entirely inside the cue regex's separator class -- and must not
+        // change. The join pass finds the same token, sees it is already
+        // covered, and adds nothing: no second `[REDACTED]`, no
+        // `split_literal` count.
+        let adjacent = "p = \"passphrase: \" \"QvR7dTnLbXk2MwZ9pAsE4uYcH6jFgN3t\"";
+        let (out, rep) = r.redact_text(adjacent);
+        assert_eq!(out, "p = \"passphrase: \" \"[REDACTED]\"");
+        assert!(rep.blocked_secret_detected);
+        assert_eq!(rep.counts.get("secret:split_literal"), None);
+
+        // The label this pass emits must be in `REPORT_METRIC_LABELS`, so a
+        // fail-closed re-scan of a finished envelope cannot mistake the
+        // report's own bookkeeping key for a surviving secret. See the
+        // comment on that list for why this is inert at today's entropy floor
+        // and listed regardless.
+        assert!(REPORT_METRIC_LABELS.contains(&"split_literal"));
+    }
+
+    /// The other joiners in the seam class, and the split shapes that are
+    /// still OUT of reach. Every value is SYNTHETIC.
+    ///
+    /// The misses are asserted, not merely described, so that closing one
+    /// later shows up here as a failing expectation rather than as silence.
+    #[test]
+    fn split_literal_joiners_covered_and_the_shapes_still_missed() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let body = "1a9c4e77b0d3f5628ac1be40d9f7302e5cb86a14df20918e7c35bb6604ea77d9";
+
+        // Covered joiners: Lua `..`, PHP `.`, a newline-spanning `+`, and
+        // single quotes / backticks as the literal delimiters.
+        for (label, text) in [
+            ("lua", format!("k = \"crsr_\" .. \"{body}\"")),
+            ("php", format!("$k = \"crsr_\" . \"{body}\";")),
+            ("wrapped", format!("k = \"crsr_\" +\n    \"{body}\"")),
+            ("single", format!("k = 'crsr_' + '{body}'")),
+            ("backtick", format!("k = `crsr_` + `{body}`")),
+            ("implicit", format!("k = \"crsr_\" \"{body}\"")),
+        ] {
+            let (out, rep) = r.redact_text(&text);
+            assert!(
+                !out.contains(body),
+                "{label}: split key body survived: {out}"
+            );
+            assert!(rep.blocked_secret_detected, "{label}");
+        }
+
+        // Still missed: a comma joiner, excluded on measured false positives
+        // (see `split_literal_fp_budget`).
+        let comma = format!("k = [\"crsr_\", \"{body}\"].join(\"\")");
+        let (out, rep) = r.redact_text(&comma);
+        assert_eq!(out, comma, "comma joiner is a known residual miss");
+        assert!(!rep.blocked_secret_detected);
+
+        // Still missed: a joiner outside the class.
+        let unknown = format!("k = \"crsr_\" ++ \"{body}\"");
+        let (out, rep) = r.redact_text(&unknown);
+        assert_eq!(out, unknown, "`++` is a known residual miss");
+        assert!(!rep.blocked_secret_detected);
+
+        // Still missed, and the important one: a runtime-assembled secret.
+        // Only one half is a literal, so only one half is in the text at
+        // all. The report still says a secret was found -- which is what it
+        // means, and all it has ever meant.
+        let assembled = "passphrase = \"QvR7dTnLbXk2\" + suffix_var";
+        let (out, rep) = r.redact_text(assembled);
+        assert_eq!(out, "passphrase = \"[REDACTED]\" + suffix_var");
+        assert!(rep.blocked_secret_detected);
+    }
+
+    /// False-positive budget for the seam class, measured rather than
+    /// argued. Every string here is innocent content of a shape the seam
+    /// regex touches; none may be redacted.
+    ///
+    /// The comma cases are why `,` is not a joiner. With `,` in the class
+    /// this corpus scored 4 false positives -- a cued value spliced onto the
+    /// NEXT JSON key's name clears `ENTROPY_BITS_MIN`, so
+    /// `{"password": "hunter2", "session_id": ...}` had its key name
+    /// redacted. Re-run this before widening the class.
+    #[test]
+    fn split_literal_fp_budget() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+
+        let innocent = [
+            // Two-key JSON objects whose first key is a cue word.
+            "{\"password\": \"hunter2\", \"session_id\": \"9f8e7d6c5b4a3f2e1d0c9b8a\"}",
+            "{\"token\": \"abc12345\", \"request_kind\": \"retry_after_timeout\"}",
+            "{\"api_key\": \"staging1\", \"environment_name\": \"preproduction\"}",
+            "{\"secret\": \"none1234\", \"rotation_policy\": \"quarterly_manual\"}",
+            // Arrays of ordinary strings.
+            "argv = [\"--output\", \"summary.json\"]",
+            "labels = [\"alpha\", \"beta\", \"gamma\"]",
+            // Concatenations of ordinary prose and paths.
+            "msg = \"could not open \" + \"the configuration file\"",
+            "path = \"/usr/local\" + \"/share/doc\"",
+            "sql = \"select id from users \" \"where tenant = $1\"",
+            "s = \"report-\" . \"2026-09-02\"",
+            "lua = \"total: \" .. \"1024 bytes\"",
+            // Concatenations after a cue word, where the joined value is
+            // still low-entropy or too short.
+            "password = \"letmein\" + \"please\"",
+            "api_key = \"staging\" + \"-west\"",
+            "token = \"aaaa\" + \"aaaa\"",
+            // Structural identifiers split across literals stay allowlisted.
+            "token: \"msg_01ABCD\" + \"EFghijklmnopqrstuvwx\"",
+            "id = \"550e8400-e29b-\" + \"41d4-a716-446655440000\"",
+            // Uncued opaque-ish values with no cue anywhere.
+            "commit \"0123456789abcdef\" + \"0123456789abcdef01234567\"",
+            "digest = \"a1b2c3d4e5f67890\" + \"12345678abcdef0123456789\"",
+            // Adjacent short hex after a cue: the git-sha allowlist band.
+            "api_key: \"dead\" + \"beef\"",
+            // Markdown prose with adjacent inline code.
+            "see `--verbose` `--quiet` for details",
+            // The redaction report's own metric keys, as a fail-closed
+            // re-scan of a finished envelope would see them.
+            "{\"secret:contextual_entropy\": 1, \"split_literal\": 1}",
+            "{\"secret\": 2, \"secret:split_literal\": 1}",
+            // A quoted empty string next to a joiner.
+            "joined = \"\" + \"\"",
+            "sep = separator.join(\"\") + \"tail\"",
+        ];
+
+        let mut redacted = Vec::new();
+        for text in innocent {
+            let (out, rep) = r.redact_text(text);
+            if out != text || rep.blocked_secret_detected {
+                redacted.push(format!("{text}\n  -> {out}"));
+            }
+        }
+        assert!(
+            redacted.is_empty(),
+            "split-literal false positives ({} of {}):\n{}",
+            redacted.len(),
+            innocent.len(),
+            redacted.join("\n")
+        );
+    }
+
+    /// The seam view must never mask a byte the source does not contain, and
+    /// must never move a redaction onto the joining operator. Guards
+    /// `LiteralJoinView::map_range`'s coordinate mapping directly: an
+    /// off-by-one there would either eat the operator or leave a byte of the
+    /// secret behind, and both spell correctly in a passing end-to-end test.
+    #[test]
+    fn split_literal_mapping_keeps_the_joiner_and_the_quotes() {
+        use super::*;
+
+        let source = "passphrase = \"QvR7dTnLbXk2\" + \"MwZ9pAsE4uYcH6jFgN3t\"";
+        let view = LiteralJoinView::build(source).expect("seam present");
+        assert_eq!(
+            view.text,
+            "passphrase = \"QvR7dTnLbXk2MwZ9pAsE4uYcH6jFgN3t\""
+        );
+
+        let joined_start = view.text.find("QvR7").expect("token present");
+        let joined = joined_start..view.text.len() - 1;
+        let pieces = view.map_range(&joined);
+        assert_eq!(
+            pieces.len(),
+            2,
+            "a spanning range maps to one piece per literal"
+        );
+        assert_eq!(&source[pieces[0].clone()], "QvR7dTnLbXk2");
+        assert_eq!(&source[pieces[1].clone()], "MwZ9pAsE4uYcH6jFgN3t");
+
+        // Content with no seam costs nothing and builds no view.
+        assert!(LiteralJoinView::build("password = \"QvR7dTnLbXk2\"").is_none());
     }
 }

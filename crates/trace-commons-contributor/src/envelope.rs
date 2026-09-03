@@ -668,19 +668,12 @@ pub fn parse_use_names(names: &[String]) -> Vec<TraceAllowedUse> {
 
 /// Overwrite the envelope's consent metadata and trace card with the
 /// claim-granted set. Called after redaction, before size check/upload.
-pub fn apply_granted_scopes(
-    envelope: &mut TraceContributionEnvelope,
-    granted_scopes: &[ConsentScope],
-    granted_uses: &[TraceAllowedUse],
-) {
-    envelope.consent.scopes = granted_scopes.to_vec();
-    envelope.trace_card.allowed_uses = granted_uses.to_vec();
-    envelope.trace_card.consent_scope = granted_scopes
-        .iter()
-        .find(|s| **s != ConsentScope::PublicAttribution)
-        .copied()
-        .unwrap_or(ConsentScope::DebuggingEvaluation);
-}
+///
+/// Moved to `trace-commons-protocol` and re-exported here so no caller moved.
+/// The redaction witness has to apply the grants before it serialises and
+/// digests the envelope -- a grant stamped afterwards is a byte change the
+/// certificate does not cover -- and it cannot reach this crate to do it.
+pub use trace_commons_protocol::trace_contribution::apply_granted_scopes;
 
 /// Stamp the contributor's verdict onto an already-redacted envelope.
 ///
@@ -960,7 +953,26 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
                 input_tokens,
                 output_tokens,
             }),
-        cost_usd: None,
+        // What the step would have cost at the provider's published list
+        // price -- not a bill, and not money the contributor was charged;
+        // most sessions run under a subscription. `None` wherever the
+        // transcript does not say enough to price it honestly, which is
+        // every source that reports no model or an incomplete usage report,
+        // and every model absent from the price table. Never a zero: a
+        // fabricated zero would silently understate. See `crate::pricing`.
+        cost_usd: match (e.token_counts, e.served_by.as_ref()) {
+            (Some((input_tokens, output_tokens)), Some(served)) => crate::pricing::list_price_usd(
+                &served.model,
+                &crate::pricing::TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens: served.cache_read_tokens,
+                    cache_write_5m_tokens: served.cache_write_5m_tokens,
+                    cache_write_1h_tokens: served.cache_write_1h_tokens,
+                },
+            ),
+            _ => None,
+        },
         success: e.success,
         failure_modes: Vec::new(),
     }
@@ -1016,7 +1028,118 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
+    }
+
+    /// The contributor's serialised envelope is not sensitive to
+    /// `serde_json::Map` ordering, so gaining `trace-commons-attestation` --
+    /// and with it `dcap-qvl`, whose mandatory `std` feature turns on
+    /// `serde_json/preserve_order` -- moves no digest.
+    ///
+    /// # Why this was checked, and why it is not a blocker
+    ///
+    /// `preserve_order` swaps `serde_json::Map` from a `BTreeMap` to an
+    /// insertion-ordered `IndexMap`, and cargo unifies features across a
+    /// build, so one dependency anywhere can silently reorder every
+    /// `Value::Object` in every crate. That is not hypothetical: adding
+    /// `dcap-qvl` on a branch enabled it and moved a golden envelope digest in
+    /// a crate the branch never touched.
+    ///
+    /// It is not a blocker here, for a reason worth recording so the next
+    /// person does not have to re-derive it. **The feature was already on in
+    /// this crate's graph before the witness work**, reached through the
+    /// existing `cfg(not(windows))` dev-dependency on `trace-commons-server`
+    /// and from there `dcap-qvl` -- `cargo tree -p trace-commons-contributor
+    /// -e features -i serde_json` shows it. So this crate's suite, including
+    /// everything downstream of `redaction_hash`, has been running under an
+    /// `IndexMap` and passing all along. The only build graph the new
+    /// dependency changes is the standalone `--no-default-features` one, which
+    /// is a `cargo check` job rather than a test job, and
+    /// `trace_commons_protocol::canonical_json` plus the
+    /// `serde_json preserve_order guard` CI job exist for exactly that case.
+    ///
+    /// What this test pins is the invariant those rest on: every path whose
+    /// bytes are hashed routes through `canonicalize`, so the ordering of the
+    /// backing map cannot be observed in a digest. Under a `BTreeMap` the
+    /// assertion is true for free; under `preserve_order` it is real work, and
+    /// it is the version that runs in this crate's graph.
+    #[tokio::test]
+    async fn an_envelope_serialises_key_sorted_whatever_map_backs_this_build() {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceContributionEvent, TraceContributionEventType,
+        };
+
+        let transcript = fixture_transcript();
+        let cfg = test_config();
+        let mut raw = build_raw_contribution(&transcript, &cfg, chrono::Utc::now());
+        // Keys deliberately out of sorted order in the source. Under an
+        // `IndexMap` an uncanonicalized payload would serialise in exactly
+        // this order.
+        raw.events.push(RawTraceContributionEvent {
+            event_id: uuid::Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: chrono::Utc::now(),
+            content: None,
+            structured_payload: serde_json::json!({
+                "zeta": 1,
+                "alpha": {"omega": 2, "beta": 3},
+                "middle": "value",
+            }),
+            tool_name: Some("Bash".to_string()),
+            tool_call_id: Some("call-1".to_string()),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+        });
+
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::new(vec![
+                "/Users/testuser".into(),
+            ])
+            .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let rendered = String::from_utf8(bytes.clone()).unwrap();
+
+        // Sorted order, not insertion order. Positions rather than a
+        // substring match, so the assertion cannot pass on a payload that
+        // happens to contain the keys somewhere.
+        let alpha = rendered.find("\"alpha\"").expect("the payload survived");
+        let middle = rendered.find("\"middle\"").expect("the payload survived");
+        let zeta = rendered.find("\"zeta\"").expect("the payload survived");
+        assert!(
+            alpha < middle && middle < zeta,
+            "an event payload reached the wire in insertion order, so a digest \
+             over it depends on which map backs the build"
+        );
+        // And nested objects too -- `canonicalize` recurses, and a shallow
+        // sort would leave a nested map ordering-dependent.
+        let beta = rendered
+            .find("\"beta\"")
+            .expect("the nested payload survived");
+        let omega = rendered
+            .find("\"omega\"")
+            .expect("the nested payload survived");
+        assert!(beta < omega, "a nested payload was not canonicalized");
+
+        // The digest the envelope carries is over those same canonical bytes,
+        // so it is stable across backing maps. Re-serialising and re-hashing
+        // must reproduce it exactly.
+        let reparsed: trace_commons_protocol::trace_contribution::TraceContributionEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&reparsed).unwrap(),
+            bytes,
+            "a round trip moved bytes, so the digest depends on the backing map"
+        );
+        assert_eq!(
+            reparsed.privacy.redaction_hash,
+            envelope.privacy.redaction_hash
+        );
     }
 
     #[tokio::test]
@@ -1155,6 +1278,7 @@ mod tests {
 
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::User,
             timestamp: None,
             content: Some("please email bob@example.com about this".into()),
@@ -1228,6 +1352,7 @@ mod tests {
     async fn oversized_envelope_is_refused() {
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
@@ -1259,6 +1384,7 @@ mod tests {
         const _: () = assert!(HACKATHON_ENVELOPE_CONTENT_BYTES < MAX_ENVELOPE_BYTES);
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(HACKATHON_ENVELOPE_CONTENT_BYTES)),
@@ -1296,6 +1422,7 @@ mod tests {
         const CONTENT_BYTES: usize = 3_000_000;
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("y".repeat(CONTENT_BYTES)),
@@ -1325,6 +1452,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
@@ -1354,6 +1482,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::User,
                 timestamp: None,
                 content: Some("what does this function do?".to_string()),
@@ -1364,6 +1493,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::Assistant,
                 timestamp: None,
                 content: Some("it parses the config".to_string()),
@@ -1396,6 +1526,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1426,6 +1557,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1448,6 +1580,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some(String::new()),
@@ -1467,6 +1600,7 @@ mod tests {
     #[test]
     fn reasoning_events_map_to_the_reasoning_event_type() {
         let event = crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Reasoning,
             timestamp: None,
             content: Some("weighing two approaches".to_string()),
@@ -1556,6 +1690,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1566,6 +1701,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -1594,6 +1730,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1604,6 +1741,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -1634,6 +1772,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1659,6 +1798,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1964,6 +2104,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1991,6 +2132,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -2076,6 +2218,115 @@ mod tests {
             ),
             "the client declaration and the server derivation must not disagree"
         );
+    }
+
+    /// A session event carries what the step would have cost at the
+    /// provider's list price, worked out here by hand from the published
+    /// rates rather than by calling the function under test.
+    ///
+    /// The fixture's first assistant record is served by `claude-fable-5`
+    /// and reports 100 input, 25 output, 1000 cache-read, and 500
+    /// cache-creation tokens split 200 (5m) / 300 (1h):
+    ///
+    /// ```text
+    ///   100 x $10        = $0.00100
+    ///    25 x $50        = $0.00125
+    ///  1000 x $1         = $0.00100
+    ///   200 x $12.50     = $0.00250
+    ///   300 x $20        = $0.00600   per million tokens
+    ///                       -------
+    ///                       $0.01175
+    /// ```
+    #[test]
+    fn a_priced_step_carries_what_it_would_have_cost() {
+        let t = fixture_transcript();
+        let events = raw_events_for(&t.events, chrono::Utc::now());
+        assert_eq!(
+            events[2].cost_usd,
+            Some(<trace_commons_protocol::trace_contribution::Decimal as std::str::FromStr>::from_str(
+                "0.01175"
+            )
+            .unwrap())
+        );
+    }
+
+    /// The step after it reports tokens but no cache report, so it cannot be
+    /// priced. The field is absent, not zero -- a zero here would read as a
+    /// step that cost nothing, and would silently understate any total built
+    /// by summing these.
+    #[test]
+    fn an_unpriceable_step_carries_no_cost_rather_than_a_zero() {
+        let t = fixture_transcript();
+        let events = raw_events_for(&t.events, chrono::Utc::now());
+        assert!(events[5].token_counts.is_some());
+        assert_eq!(events[5].cost_usd, None);
+        assert_ne!(
+            events[5].cost_usd,
+            Some(trace_commons_protocol::trace_contribution::Decimal::ZERO)
+        );
+    }
+
+    /// A step whose model is not in the price table is not priced at some
+    /// other model's rate. Nothing else about the event changes.
+    #[test]
+    fn a_step_served_by_an_unlisted_model_is_not_priced() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("hi".to_string()),
+            structured: Value::Null,
+            tool_name: None,
+            token_counts: Some((1_000_000, 1_000_000)),
+            tool_call_id: None,
+            success: None,
+            served_by: Some(crate::source::ServedBy {
+                model: "some-other-vendors-model".to_string(),
+                cache_read_tokens: 0,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+            }),
+        };
+        let listed = crate::source::SessionEvent {
+            served_by: Some(crate::source::ServedBy {
+                model: "claude-opus-5".to_string(),
+                cache_read_tokens: 0,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+            }),
+            ..event.clone()
+        };
+        let now = chrono::Utc::now();
+        // The listed model prices at $5 + $25 per million, which is what
+        // makes the `None` above a refusal rather than a dead code path.
+        assert_eq!(
+            raw_events_for(&[listed], now)[0].cost_usd,
+            Some(<trace_commons_protocol::trace_contribution::Decimal as std::str::FromStr>::from_str("30").unwrap())
+        );
+        assert_eq!(raw_events_for(&[event], now)[0].cost_usd, None);
+    }
+
+    /// Token counts alone are not enough to price a step, and a source that
+    /// reports them without a model or a cache report -- every adapter but
+    /// Claude Code today -- leaves the cost absent rather than guessing.
+    #[test]
+    fn token_counts_without_a_usage_report_are_not_priced() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("hi".to_string()),
+            structured: Value::Null,
+            tool_name: None,
+            token_counts: Some((1_000_000, 1_000_000)),
+            tool_call_id: None,
+            success: None,
+            served_by: None,
+        };
+        let mapped = raw_events_for(&[event], chrono::Utc::now());
+        assert_eq!(
+            mapped[0].token_counts.as_ref().map(|t| t.input_tokens),
+            Some(1_000_000)
+        );
+        assert_eq!(mapped[0].cost_usd, None);
     }
 
     #[test]
@@ -2203,6 +2454,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2213,6 +2465,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -2237,6 +2490,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2247,6 +2501,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -2276,6 +2531,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2286,6 +2542,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("permission denied".to_string()),
@@ -2310,6 +2567,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2320,6 +2578,7 @@ mod tests {
                 success: Some(false),
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("ok".to_string()),

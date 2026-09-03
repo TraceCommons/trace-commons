@@ -30,6 +30,7 @@ pub mod health;
 pub mod history;
 pub mod install;
 pub mod ipc;
+pub mod ironwire_pointer;
 pub mod notify;
 pub mod policy;
 pub mod preview;
@@ -1341,6 +1342,7 @@ mod tests {
                 display_handle: Some("quiet-otter".to_string()),
                 public_bio: None,
                 public_since: None,
+                witness: None,
             })
             .unwrap();
         let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());

@@ -38,6 +38,20 @@ thiserror = "2"
 
 [features]
 default = []
+# NEAR AI inference-receipt parsing. The hosted server turns it on; a
+# contributor client does not, because it makes no inference calls and holds
+# no receipts.
+#
+# This feature saves NO packages and is not meant to. `k256` and `sha3` are
+# unconditional above, because the EIP-191 signer recovery in `eip191` is what
+# verifies a redaction-witness certificate as well as a receipt, and a client
+# that ships inside a third-party agent harness does verify certificates. An
+# earlier version of this manifest gated them here on the belief that they
+# were receipt-only; they are not, and gating them would have forced the
+# witness client to either enable a receipt feature it makes no receipts with
+# or skip the signature check. Measured, they are 19 of the 65 packages this
+# crate adds to `trace-commons-contributor`.
+receipt = []
 # `dcap-qvl`'s collateral client, which the hosted server's attestation drill
 # reaches through `trace-commons-server/near-attestation-collateral`. Nothing
 # in this crate uses it; it exists only so the server can turn the feature on

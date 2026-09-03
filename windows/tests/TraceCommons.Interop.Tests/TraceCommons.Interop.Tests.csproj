@@ -22,6 +22,20 @@
   </ItemGroup>
 
   <!--
+    The shared scrub-label fixture, copied next to the test assembly.
+
+    It lives at the repository root because the GTK and macOS shells read the
+    same file; this is a build-time copy of that one source, not a second
+    copy to maintain. ScrubDetectorLabelsMatchTheSharedFixture fails loudly if
+    it is missing rather than passing over nothing.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../../tests/fixtures/scrub-detectors/labels.json"
+          Link="scrub-detector-labels.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Copy the Rust cdylib next to the test assembly so .NET's default probing
     finds it without an NATIVE_DLL_SEARCH_DIRECTORIES dance.
 
@@ -32,6 +46,47 @@
     the Windows CI runner — Condition keeps the missing ones from failing the
     build.
   -->
+  <!--
+    The routing surface's implementation source, copied next to the test
+    assembly.
+
+    NoWordingIsAuthoredInThisShell reads it and fails on any string literal
+    that is not a wire value. Asserted about the source rather than about
+    behaviour because a hand-written word that happened to match the Rust
+    would pass every behavioural test and then survive a rename in exactly
+    one of the three shells.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/RoutingTools.cs"
+          Link="RoutingTools.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    The app layer's routing surface and settings view model, copied next to
+    the test assembly.
+
+    TraceCommons.App is a WinUI project and cannot be built, let alone
+    referenced, on the macOS and Linux machines this suite runs on, so
+    without this there is nothing anywhere that checks the half of the
+    surface a contributor actually looks at. Asserted about the source for
+    the same reason NoWordingIsAuthoredInThisShell is: a view that recovered
+    a tone from a rendered string would pass every behavioural test here.
+
+    TheSettingsScreenAsksForTheRowRatherThanWritingIt reads it for the same
+    reason at the call site: a shell can call the shared copy from one place
+    and go on hand-writing the same sentence in another, which is the state
+    this row was found in.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs"
+          Link="ContributorSettingsViewModel.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/Controls/SettingsView.xaml"
+          Link="SettingsView.xaml.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
     <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/debug</TcFfiLibDir>
