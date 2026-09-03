@@ -260,6 +260,60 @@ mod tests {
         assert!(t.routing.is_empty());
         assert_eq!(t.conversation_id.as_deref(), Some("s-1"));
     }
+
+    /// A page a real IronWire (0.1.0, commit 4024619) served on 2026-09-03,
+    /// captured from `GET /_ironwire/log` with one request per facade: an
+    /// Anthropic Messages call carrying `x-claude-code-session-id` and a Chat
+    /// Completions call carrying `session-id`. Not hand-written, so the
+    /// field names and shapes are the proxy's own -- every other test in
+    /// this module builds its rows from our side of the contract.
+    const REAL_PAGE: &str = include_str!("../../tests/fixtures/ironwire/log-page-2026-09-03.json");
+
+    fn real_rows() -> Vec<RoutedExchange> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            exchanges: Vec<RoutedExchange>,
+        }
+        serde_json::from_str::<Page>(REAL_PAGE)
+            .expect("the proxy's page parses as our row type")
+            .exchanges
+    }
+
+    #[test]
+    fn a_page_a_real_proxy_served_joins_each_native_spelling_to_its_own_session() {
+        let rows = real_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, Some(1), "the cursor is present");
+        assert_eq!(rows[0].facade, "anthropic");
+        assert_eq!(rows[1].facade, "openai");
+        assert_eq!(rows[0].input_tokens, Some(7));
+        assert_eq!(rows[0].output_tokens, Some(3));
+
+        // Claude Code: the transcript stem is the UUID the client sent.
+        let claude = RoutingEnrichedSource::new(
+            Box::new(StubSource {
+                conversation_id: Some("79f2f947-522e-4780-8518-33155a18152e".into()),
+            }),
+            std::sync::Arc::new(FixedLedger::new(rows.clone())),
+        );
+        let t = claude.load(&a_ref()).expect("loads");
+        assert_eq!(t.routing.len(), 1);
+        assert_eq!(t.routing[0].id, Some(1));
+
+        // Codex: the transcript stem is the rollout file name, and the client
+        // sent only the UUID at its end.
+        let codex = RoutingEnrichedSource::new(
+            Box::new(StubSource {
+                conversation_id: Some(
+                    "rollout-2026-09-03T11-56-43-019921c3-6a5c-7d4e-9f00-aaaaaaaaaaaa".into(),
+                ),
+            }),
+            std::sync::Arc::new(FixedLedger::new(rows)),
+        );
+        let t = codex.load(&a_ref()).expect("loads");
+        assert_eq!(t.routing.len(), 1);
+        assert_eq!(t.routing[0].id, Some(2));
+    }
 }
 
 #[cfg(test)]

@@ -486,4 +486,28 @@ mod tests {
             "the page it did get is kept"
         );
     }
+
+    /// The proxy's real answer, not our idea of it: a page IronWire 0.1.0
+    /// served on 2026-09-03 (see the fixture's sibling test in `enriched.rs`).
+    /// Pins that `parse_page` reads the proxy's own field names, including
+    /// the two it added after this client was written (`id` and
+    /// `client_session_id`), and ignores the ones we do not model.
+    #[test]
+    fn the_page_a_real_proxy_serves_parses_with_its_cursor_and_session_ids() {
+        let body = include_bytes!("../../tests/fixtures/ironwire/log-page-2026-09-03.json");
+        let page = IronWireLedger::parse_page(body).expect("parses");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, Some(1));
+        assert_eq!(page[1].id, Some(2));
+        assert_eq!(
+            page[0].client_session_id.as_deref(),
+            Some("79f2f947-522e-4780-8518-33155a18152e")
+        );
+        assert_eq!(
+            page[1].client_session_id.as_deref(),
+            Some("019921c3-6a5c-7d4e-9f00-aaaaaaaaaaaa")
+        );
+        assert_eq!(page[0].backend, "fake-local");
+        assert_eq!(page[0].status, 200);
+    }
 }
