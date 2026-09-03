@@ -70,6 +70,23 @@ pub struct QueueEntry {
     pub declared_source: Option<String>,
     /// The full local working directory. Local-only, like `path`.
     pub project_key: String,
+    /// The same directory as `project_key`, spelled the way the filesystem
+    /// spells it.
+    ///
+    /// `project_key` is case-folded on macOS and Windows so one project
+    /// cannot mint two keys (see `project_key::NormalizedProject`), and
+    /// that fold is what a contributor sees when a folder row renders the
+    /// key: `~/Code/IronWire` comes back as `~/code/ironwire`. This is the
+    /// unfolded half. Nothing decides on it -- policy lookup, grouping and
+    /// `project_id_for` all key on `project_key` -- and like `project_key`
+    /// and `session_cwd` it is local-only: rendered over the socket, never
+    /// logged, audited, notified, or written to a history record.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; such an entry renders from the folded
+    /// key, which names the right directory in the wrong case.
+    #[serde(default)]
+    pub project_path: Option<String>,
     /// The working directory the session actually recorded, when it differs
     /// from `project_key`.
     ///
@@ -1161,6 +1178,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: "/Users/z/code/proj".into(),
+            project_path: None,
             session_cwd: None,
             project_label: "proj".into(),
             path: PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),

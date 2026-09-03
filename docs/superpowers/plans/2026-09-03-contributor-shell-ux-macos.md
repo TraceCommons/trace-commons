@@ -785,7 +785,7 @@ group, with a heading and a back control:
                 location = .root
             } label: {
                 HStack(spacing: TC.Space.xs) {
-                    MacGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
+                    QueueGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
                     Text("All folders")
                         .font(TC.Font_.meta)
                         .foregroundStyle(TC.inkSecondary)
@@ -844,8 +844,19 @@ two copies would be two things to keep in step. Keep the
 `confirmationDialog` with whichever view still owns `Ignore` -- that is
 `QueueFolderRow` after this task.
 
-If `MacGlyph` has no `.chevronLeft` case, add one to the glyph enum
-alongside the existing cases, drawn the way its neighbours are.
+The glyph pair in play here is `QueueGlyph` / `QueueGlyphs`, at the foot of
+`QueueView.swift`. `MacGlyphs` is a second, `fileprivate` copy in
+`MainWindowView.swift` and is not reachable from this file.
+
+`QueueGlyphs` has `.chevronRight` already; it has no `.chevronLeft`, so add
+one beside the existing cases, drawn the way its neighbours are (the
+existing `chevronRight` is `m6 4 4 4-4 4`, so its mirror is `m10 4-4 4 4 4`).
+
+Both `QueueGlyph` and `QueueGlyphs` are `private` to `QueueView.swift`. The
+new `QueueFolderRow` in Step 4 therefore either lives in `QueueView.swift`
+beside them, or the pair is promoted to internal in the same commit. Prefer
+the promotion and say so in the commit body -- a third copy of the glyph
+machinery is what the comment on `QueueGlyph` already warns about.
 
 - [ ] **Step 4: Write the folder row**
 
@@ -902,7 +913,7 @@ struct QueueFolderRow: View {
                         .font(TC.Font_.ledger)
                         .monospacedDigit()
                         .foregroundStyle(TC.inkTertiary)
-                    MacGlyph(glyph: .chevronRight, size: 11, color: TC.inkTertiary)
+                    QueueGlyph(glyph: .chevronRight, size: 11, color: TC.inkTertiary)
                 }
                 .contentShape(Rectangle())
             }
@@ -1038,84 +1049,107 @@ git commit -m "Open the preview from anywhere on the card"
 
 ---
 
-### Task 6: `RedactionPlaceholders` -- show removals in place
+### Task 6: Name the chips the shell already draws
 
-The redactor substitutes `<PRIVATE_LOCAL_PATH_1>` for each distinct value,
-and those tokens are already in the body the ABI returns. The app renders
-them as ordinary text. This finds them so the transcript can mark them.
+The spec's 3.1 is a correction: **all three shells already mark the
+redactor's tokens**, and this one has done it since
+`TranscriptMarkerScan`/`TranscriptMarkers.chipped` landed. That scan is
+deliberately shared with the chunker so a marker is never cut in half, and
+the chip styling is a considered choice recorded in its own doc comment. A
+shell must not add a second marker pass, restyle the existing chips, or
+bypass the chunk-boundary contract.
+
+What is missing is the *naming*: every chip today draws as the same
+anonymous token. This task adds one pure function that turns a matched token
+into words, and calls it from the one place chips are already built.
 
 **Files:**
-- Create: `macos/Sources/TCShellCore/RedactionPlaceholders.swift`
-- Modify: `macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift` (transcript rendering)
-- Test: `macos/Tests/TCShellCoreTests/RedactionPlaceholdersTests.swift` (create)
+- Create: `macos/Sources/TCShellCore/RedactionMarkerNames.swift`
+- Modify: `macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift` (`TranscriptMarkers.chipped`, and the `caption` sentence)
+- Test: `macos/Tests/TCShellCoreTests/RedactionMarkerNamesTests.swift` (create)
 
 **Interfaces:**
-- Consumes: the preview body string.
+- Consumes: `TCShellCore.TranscriptMarkerScan.spans(in:)` -- the existing
+  scan, unchanged. No new scan, no new pattern, no new constant.
 - Produces:
-  - `public struct RedactionPlaceholder: Equatable { public let range: Range<String.Index>; public let label: String; public let ordinal: Int; public var display: String }`
-  - `public static func scan(_ body: String) -> [RedactionPlaceholder]`
+  - `public struct RedactionMarkerName: Equatable { public let text: String; public let ordinal: Int? }`
+  - `public static func RedactionMarkerNames.of(_ token: String) -> RedactionMarkerName`
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `macos/Tests/TCShellCoreTests/RedactionPlaceholdersTests.swift`:
+Create `macos/Tests/TCShellCoreTests/RedactionMarkerNamesTests.swift`:
 
 ```swift
 import XCTest
 
 @testable import TCShellCore
 
-/// The redactor leaves a typed placeholder where it removed a value, and
-/// those tokens are already in the body the ABI hands us -- rendered, until
-/// now, as ordinary transcript text. Finding them is what lets the preview
-/// say WHERE something was cut, which is more than a category count can.
-final class RedactionPlaceholdersTests: XCTestCase {
-    func testABodyWithNoPlaceholdersScansToNothing() {
-        XCTAssertTrue(RedactionPlaceholders.scan("just some ordinary text").isEmpty)
-        XCTAssertTrue(RedactionPlaceholders.scan("").isEmpty)
+/// The scan already finds every marker. What it does not do is say what one
+/// was. These are the tokens `TranscriptMarkerScan.pattern` matches, and
+/// every one of them has to come back with words a contributor can read.
+final class RedactionMarkerNamesTests: XCTestCase {
+    func testTheNumberedFormCarriesALabelAndAnOrdinal() {
+        let name = RedactionMarkerNames.of("<PRIVATE_LOCAL_PATH_3>")
+        XCTAssertEqual(name.text, "local path")
+        XCTAssertEqual(name.ordinal, 3)
     }
 
-    func testASinglePlaceholderIsFound() {
-        let body = "ran the build in <PRIVATE_LOCAL_PATH_1> and stopped"
-        let found = RedactionPlaceholders.scan(body)
-        XCTAssertEqual(found.count, 1)
-        XCTAssertEqual(found[0].label, "LOCAL_PATH")
-        XCTAssertEqual(found[0].ordinal, 1)
-        XCTAssertEqual(String(body[found[0].range]), "<PRIVATE_LOCAL_PATH_1>")
+    func testTheOtherNumberedLabelIsNamedToo() {
+        // `apply_placeholder_regex` mints the numbered form for exactly two
+        // labels: `local_path` and `private_email`.
+        XCTAssertEqual(RedactionMarkerNames.of("<PRIVATE_PRIVATE_EMAIL_1>").text, "private email")
     }
 
-    func testTheDisplayNameIsHumanReadable() {
-        let found = RedactionPlaceholders.scan("<PRIVATE_CONTEXTUAL_ENTROPY_2>")
-        XCTAssertEqual(found[0].display, "contextual entropy")
-    }
-
-    func testMultiplePlaceholdersAreFoundInOrder() {
-        let body = "<PRIVATE_SECRET_1> then <PRIVATE_LOCAL_PATH_3> then <PRIVATE_SECRET_1>"
-        let found = RedactionPlaceholders.scan(body)
-        XCTAssertEqual(found.map(\.label), ["SECRET", "LOCAL_PATH", "SECRET"])
-        XCTAssertEqual(found.map(\.ordinal), [1, 3, 1])
-    }
-
+    /// The ordinal is the LAST underscore-delimited run of digits, so a
+    /// label that itself ends in a number must not steal it.
     func testALabelContainingDigitsIsParsedCorrectly() {
-        // The ordinal is the LAST underscore-delimited run of digits, so a
-        // label that itself ends in a number must not steal it.
-        let found = RedactionPlaceholders.scan("<PRIVATE_SHA256_KEY_7>")
-        XCTAssertEqual(found[0].label, "SHA256_KEY")
-        XCTAssertEqual(found[0].ordinal, 7)
+        let name = RedactionMarkerNames.of("<PRIVATE_SHA256_KEY_7>")
+        XCTAssertEqual(name.text, "sha256 key")
+        XCTAssertEqual(name.ordinal, 7)
     }
 
-    func testTextThatMerelyLooksLikeAPlaceholderIsIgnored() {
-        XCTAssertTrue(RedactionPlaceholders.scan("<PRIVATE>").isEmpty)
-        XCTAssertTrue(RedactionPlaceholders.scan("<PRIVATE_LOCAL_PATH_>").isEmpty)
-        XCTAssertTrue(RedactionPlaceholders.scan("<private_local_path_1>").isEmpty)
-        XCTAssertTrue(RedactionPlaceholders.scan("PRIVATE_LOCAL_PATH_1").isEmpty)
+    /// The five fixed tokens the pipeline emits, taken from the same sources
+    /// as the GTK scanner's `every_fixed_token_the_pipeline_emits_is_matched`
+    /// guard: `apply_redaction_ranges`, `apply_pem_block_redaction`,
+    /// `redacted_marker`, and `redaction.rs`'s `REDACTED`. None of them
+    /// carries an ordinal -- there is no second number to report, and
+    /// inventing one would claim a distinctness the token does not have.
+    func testEveryFixedTokenIsNamedAndCarriesNoOrdinal() {
+        let cases = [
+            ("[REDACTED]", "something removed"),
+            ("[REDACTED:aws_secret_key]", "aws secret key"),
+            ("[REDACTED:person_name]", "person name"),
+            ("[REDACTED_PATH]", "URL path"),
+            ("<REDACTED_PRIVATE_KEY>", "private key"),
+        ]
+        for (token, expected) in cases {
+            let name = RedactionMarkerNames.of(token)
+            XCTAssertEqual(name.text, expected, "\(token)")
+            XCTAssertNil(name.ordinal, "\(token) carries no ordinal")
+        }
     }
 
-    func testScanningCarriesNoMatchedContent() {
-        // The placeholder IS the content here -- the original value is gone
-        // by construction. This asserts the type exposes nothing else.
-        let found = RedactionPlaceholders.scan("<PRIVATE_SECRET_1>")
-        XCTAssertEqual(found[0].display, "secret")
-        XCTAssertEqual(found[0].ordinal, 1)
+    /// Labels are an open, namespaced vocabulary. A token this build has no
+    /// words for must still say that something left, never nothing.
+    func testAnUnrecognizedTokenStillSaysSomethingLeft() {
+        let name = RedactionMarkerNames.of("[REDACTED:some_future_detector]")
+        XCTAssertEqual(name.text, "some future detector")
+        XCTAssertNil(name.ordinal)
+    }
+
+    /// Every token the shared scan matches must name to something. This is
+    /// the guard on that: it drives the naming from the scan rather than
+    /// from a second list that could drift away from it.
+    func testEveryTokenTheScanFindsIsNamed() {
+        let body = """
+            <PRIVATE_LOCAL_PATH_1> [REDACTED] [REDACTED:aws_secret_key] \
+            [REDACTED_PATH] <REDACTED_PRIVATE_KEY>
+            """
+        let spans = TranscriptMarkerScan.spans(in: body)
+        XCTAssertEqual(spans.count, 5)
+        for span in spans {
+            XCTAssertFalse(RedactionMarkerNames.of(String(body[span])).text.isEmpty)
+        }
     }
 }
 ```
@@ -1123,113 +1157,72 @@ final class RedactionPlaceholdersTests: XCTestCase {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-cd macos && swift test --filter RedactionPlaceholdersTests
+cd macos && swift test --filter RedactionMarkerNamesTests
 ```
 
-Expected: `cannot find 'RedactionPlaceholders' in scope`.
+Expected: `cannot find 'RedactionMarkerNames' in scope`.
+
+If `testEveryTokenTheScanFindsIsNamed` reports fewer than 5 spans, this
+checkout predates the widened pattern -- `<REDACTED_PRIVATE_KEY>` was
+unmatched until it was added to `TranscriptMarkerScan.pattern`. Rebase
+rather than working around it here; the pattern is the chunker's too.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `macos/Sources/TCShellCore/RedactionPlaceholders.swift`:
+Create `macos/Sources/TCShellCore/RedactionMarkerNames.swift`. It takes the
+matched token text -- nothing else -- and returns words:
 
-```swift
-import Foundation
+- `<PRIVATE_<LABEL>_<n>>`: the label lowercased with `_` as a space, and `n`
+  as the ordinal. The redactor mints one token per distinct value and reuses
+  it, so two chips with the same ordinal are the same original string, which
+  is the fact worth surfacing.
+- `<REDACTED_PRIVATE_KEY>`: `"private key"`, no ordinal.
+- `[REDACTED:<label>]`: the label lowercased with `_` as a space, no ordinal.
+- `[REDACTED_PATH]`: `"URL path"` -- it replaces a URL's path component, not
+  a local one.
+- `[REDACTED]` and anything else the scan matched: `"something removed"`.
+  Never empty, and never a guess at a category.
 
-/// One place the redactor removed a value, as it appears in the preview
-/// body.
-public struct RedactionPlaceholder: Equatable {
-    /// Where the token sits in the body it was scanned from.
-    public let range: Range<String.Index>
-    /// The raw label, as the redactor spelled it: `LOCAL_PATH`, `SECRET`.
-    public let label: String
-    /// Which distinct value of that label this is. The redactor mints one
-    /// placeholder per value and reuses it, so the same ordinal appearing
-    /// twice means the same original string appeared twice.
-    public let ordinal: Int
-
-    /// The label as a person reads it: "local path", "contextual entropy".
-    public var display: String {
-        label.lowercased().replacingOccurrences(of: "_", with: " ")
-    }
-}
-
-/// Finding the redactor's placeholders in a preview body.
-///
-/// `DeterministicTraceRedactor` does not delete a matched value -- it
-/// substitutes `<PRIVATE_<LABEL>_<n>>`, one token per distinct value, reused
-/// wherever that value recurs. Those tokens have always been in the bytes
-/// the ABI returns; the app just rendered them as ordinary text and the
-/// contributor scrolled past them.
-///
-/// Marking them is the whole of "show me what got removed", and it is
-/// better than a list because it also answers *where*. It needs no new
-/// protocol field and no new content across any boundary: the token is
-/// already what is on screen.
-///
-/// What it must not be allowed to imply: a region with no placeholder is
-/// not a region with nothing sensitive in it. The detector scans every leaf
-/// and the rewriter reaches only typed fields, so highlighting makes the app
-/// look more thorough than it is. `ScrubbingCaveat`'s sentence is what says
-/// so, and it belongs beside these marks rather than at the foot of the
-/// screen.
-public enum RedactionPlaceholders {
-    /// Every placeholder in `body`, left to right.
-    ///
-    /// Deliberately strict about the shape: an uppercase label of letters,
-    /// digits and underscores, then an underscore, then the ordinal, then
-    /// `>`. A transcript can contain anything, including prose that looks
-    /// approximately like a token, and marking a contributor's own sentence
-    /// as a redaction would be a lie about what the scrubber did.
-    public static func scan(_ body: String) -> [RedactionPlaceholder] {
-        guard !body.isEmpty else { return [] }
-        let pattern = /<PRIVATE_([A-Z0-9_]*[A-Z0-9])_([0-9]+)>/
-        return body.matches(of: pattern).map { match in
-            RedactionPlaceholder(
-                range: match.range,
-                label: String(match.output.1),
-                ordinal: Int(match.output.2) ?? 0
-            )
-        }
-    }
-}
-```
+The doc comment records the two things the type must not be read as saying:
+a region with no chip is not a region with nothing sensitive in it -- the
+detector scans every leaf while the rewriter reaches only typed fields --
+and a name is not a distinct count. Only `local_path` and `private_email`
+mint placeholders, so only those can report "the same value twice".
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-cd macos && swift test --filter RedactionPlaceholdersTests
+cd macos && swift test --filter RedactionMarkerNamesTests
 ```
 
-Expected: 7 tests pass. If `testALabelContainingDigitsIsParsedCorrectly`
-fails, the regex is being greedy across the final underscore -- the
-`[A-Z0-9_]*[A-Z0-9]` shape is what forces the label to end on a
-non-underscore so the last `_<digits>` is the ordinal.
+- [ ] **Step 5: Put the name on the chip**
 
-- [ ] **Step 5: Mark them in the transcript**
-
-In `PreviewSheet.swift`, wherever the transcript body is rendered as `Text`,
-build an `AttributedString` that styles each scanned range instead:
+In `PreviewSheet.swift`'s existing `TranscriptMarkers.chipped` -- the same
+loop over `TranscriptMarkerScan.spans(in:)`, with the same
+`TC.redactionChipBackground` / `TC.redactionChipForeground` and the same
+bold weight. Only the chip's *string* changes:
 
 ```swift
-    /// The transcript, with each redaction marked where it happened.
-    ///
-    /// The marks are a tone and a label, never a value -- there is no value
-    /// left to show. See `RedactionPlaceholders` for why this needs no new
-    /// data from the daemon.
-    private func marked(_ body: String) -> AttributedString {
-        var out = AttributedString(body)
-        for placeholder in RedactionPlaceholders.scan(body) {
-            guard let lower = AttributedString.Index(placeholder.range.lowerBound, within: out),
-                  let upper = AttributedString.Index(placeholder.range.upperBound, within: out)
-            else { continue }
-            out[lower..<upper].foregroundColor = TC.goldText
-            out[lower..<upper].backgroundColor = TC.gold.opacity(TC.Border.chipAlpha)
-        }
-        return out
-    }
+            let name = RedactionMarkerNames.of(String(text[range]))
+            let label = name.ordinal.map { "\(name.text) #\($0)" } ?? name.text
+            var chip = AttributedString(label)
 ```
 
-Keep `ScrubbingCaveat`'s sentence visible on the same tab as the marks.
+Do not touch the scan, the pattern, the tone, or the chunk loop.
+
+Two consequences to carry rather than discover:
+
+1. The transcript's on-screen text is no longer byte-identical to the body,
+   because a chip now reads `local path #1` where the token stood. The
+   caption above it says "These are the exact bytes an approval covers", so
+   amend that sentence to say the marks are named rather than literal. The
+   `copyAll` path is unaffected -- it copies `document.wholeText()`, the
+   body itself, not the chipped `AttributedString`.
+2. The chip's width changes, so `TranscriptRowIndex`'s row estimate is
+   slightly further off for a chunk full of markers. It is an estimate by
+   construction and the error is already bounded per chunk; no change.
+
+Keep `ScrubbingCaveatNote()` visible on the same tab as the marks.
 
 - [ ] **Step 6: Build and run the suite**
 
@@ -1243,10 +1236,10 @@ Expected: all pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add macos/Sources/TCShellCore/RedactionPlaceholders.swift \
-        macos/Tests/TCShellCoreTests/RedactionPlaceholdersTests.swift \
+git add macos/Sources/TCShellCore/RedactionMarkerNames.swift \
+        macos/Tests/TCShellCoreTests/RedactionMarkerNamesTests.swift \
         macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift
-git commit -m "Mark each redaction where it happened in the transcript"
+git commit -m "Say what each redaction chip stood for"
 ```
 
 ---
@@ -1904,8 +1897,19 @@ keeping the existing glyph-and-tone treatment and picking the tone from
         }
 ```
 
-The sheet needs the entry id and a `TCDaemon` reference; pass them in from
-`QueueView`'s `.sheet(item:)`, which already holds the entry.
+`SearchTab` today holds exactly `document` and `preview`, so it needs the
+entry id and a way to call the daemon. Neither comes from `QueueView`, which
+constructs `PreviewSheet(entry:)` and nothing further. Thread them from
+`PreviewSheet` instead, which already holds `entry` and an
+`@EnvironmentObject private var model: AppModel`:
+
+- Add `searchOriginal(entryID:needle:) -> Int?` to `AppModel`, beside
+  `openPreview(entryID:)`. `AppModel.daemon` is `private` and stays that
+  way -- a view holding the handle is what `DaemonCalling` exists to avoid.
+- Give `SearchTab` an `entryID: String` and pass `entry.entryID` at the
+  `SearchTab(...)` call site in `PreviewSheet.body`, alongside the existing
+  `document` / `preview` / `initialNeedle` / `initialOffsets`. `SearchTab`
+  reads `model` from the environment like its parent does.
 
 - [ ] **Step 6: Run the tests**
 
@@ -2199,7 +2203,8 @@ git commit -m "Show queue state as a shield beside the waiting count"
 - Test: `macos/Tests/TCShellCoreTests/HistoryFoldersTests.swift` (create)
 
 **Interfaces:**
-- Consumes: `HistoryRecord.projectID` (Task 1); `ProjectRow` (existing, for
+- Consumes: `HistoryRecord.projectID` (Task 1); `ProjectRow` (existing,
+  whose id field is `projectId`, for
   the path); `QueueGrouping` (existing).
 - Produces: `public static func folders<R>(_ records: [R], projectID: (R) -> String, projectLabel: (R) -> String, path: (String) -> String?) -> [QueueGroup<R>]`
 
@@ -2336,7 +2341,8 @@ and a detail view listing that folder's `HistoryRow`s. Resolve the location
 through `QueueNavigation.resolve` on every redraw, exactly as Task 4 does.
 
 Show each folder's path by matching the group id against `model.projects`
-(`ProjectRow` carries `projectID` and now `projectPath`); a group whose id
+(`ProjectRow` carries `projectId` -- lowercase `d`, unlike this plan's new
+`HistoryRecord.projectID` -- and now `projectPath`); a group whose id
 starts with `HistoryFolders.unresolvedPrefix`, or that matches no known
 project, renders its label alone.
 
@@ -2401,7 +2407,7 @@ Record the results in the PR body. `swift test` sees none of this.
 
 ```bash
 git push -u origin shell-ux-macos
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, macOS" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-macos.md.
 
@@ -2422,7 +2428,7 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.2 folder detail, `session_path` | Task 4 |
 | §2.3 `Submit all` at n = 1 | Task 4 (`QueueFolderRow`) |
 | §2.4 card click | Task 5 |
-| §3.1 placeholders marked in place | Task 6 |
+| §3.1 chips named (already marked) | Task 6 |
 | §3.1b removed-summary panel | Task 6b |
 | §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts on the card | Task 2 |
@@ -2433,17 +2439,19 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §5 history grouping | Task 11 |
 | §1.1 `project_path` consumed by the shell | Task 1 (`QueueEntry`, `ProjectRow`) |
 
-**Placeholder scan:** no TBDs. Four steps say "match the file's existing
-name for X" (Task 8 Step 4's daemon handle, Task 4 Step 3's `MacGlyph` case,
-Task 9 Step 3's `PreviewSheet` tab parameter, Task 11 Step 4's `ProjectRow`
-fields) -- each names exactly what to look for and what to do with it, and
-quoting the surrounding code would go stale.
+**Placeholder scan:** no TBDs. Three steps say "match the file's existing
+name for X" (Task 8 Step 4's daemon call, Task 9 Step 3's `PreviewSheet` tab
+parameter, Task 11 Step 4's `ProjectRow` fields) -- each names exactly what
+to look for and what to do with it, and quoting the surrounding code would
+go stale. Task 4 Step 3's `QueueGlyphs.chevronLeft` is named outright,
+because it does not exist yet in either glyph enum.
 
 **Type consistency check.** `RedactionTally.line(occurrences:distinct:)` is
 defined in Task 2 and called in Task 2 Step 4 and Task 9 Step 3
 (`RedactionTally.nothingMatched`). `QueueLocation` / `QueueNavigation.resolve`
-are defined in Task 3 and used in Tasks 4 and 11. `RedactionPlaceholders.scan`
-is defined and used in Task 6 only. `RecentSearches.remember` keeps its
+are defined in Task 3 and used in Tasks 4 and 11. `RedactionMarkerNames.of`
+is defined and used in Task 6 only; the scan it names is the existing
+`TranscriptMarkerScan.spans(in:)`. `RecentSearches.remember` keeps its
 existing signature (Task 7). `OriginalSearchOutcome.classify(remaining:original:)`
 is defined in Task 8 Step 3 and called in Task 8 Step 5.
 `QueueShieldState.state(waiting:nothingMatched:trimmed:)` is defined and
