@@ -1,10 +1,10 @@
 # Folder-first queue, and what the scrubber will admit to
 
 An alpha contributor ran the 0.7.0 contributor app against a real machine --
-149 sessions waiting -- and reported eleven things. This design answers all
-eleven across the three shells (macOS, GTK, Windows).
+149 sessions waiting -- and reported ten things. This design answers all
+ten across the three shells (macOS, GTK, Windows).
 
-The report is worth reading as one complaint rather than eleven, because
+The report is worth reading as one complaint rather than ten, because
 that is what it is: **at 149 sessions the queue stops being a list and
 becomes a haystack, and the app still renders it as a list.** Every
 navigation item below follows from that. The scrubber items are a second,
@@ -18,7 +18,7 @@ invariant this design relaxes in exactly one place and nowhere else.
 
 ## What is not changing
 
-Stating these first, because three of the eleven items look like they ask
+Stating these first, because three of the ten items look like they ask
 for one of them and do not:
 
 - **A local filesystem path still never reaches `daemon-audit.jsonl`, OS
@@ -68,7 +68,7 @@ for the new field's absence, mirroring the existing path test rather than
 replacing it.
 
 **Why this is necessary and not merely nice.** The reporter did not ask for
-paths out of curiosity. Three of their eleven items -- "it doesn't unify the
+paths out of curiosity. Three of their ten items -- "it doesn't unify the
 same folder", "I have the same path 2-3 times", "folder name should be more
 prominent" -- are the same observation: `disambiguated_label` renders two
 different projects as `api` and `api (3f9c)`, and a contributor holding
