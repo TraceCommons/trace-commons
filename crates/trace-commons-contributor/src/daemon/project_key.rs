@@ -45,6 +45,16 @@ pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<St
         return None;
     }
 
+    // Judged on the RECORDED form, before any cleaning. `/Users/z/code/..`
+    // lexically cleans to `/Users/z`, which would be a perfectly usable key
+    // -- but a cwd an agent recorded that way is one it could not name, and
+    // `policy`'s `a_cwd_with_no_usable_basename_goes_to_the_unknown_bucket`
+    // keeps every such cwd in the unknown bucket rather than minting a key
+    // from a directory the session was never really in.
+    if path.file_name().is_none_or(|n| n.is_empty()) {
+        return None;
+    }
+
     // Strip trailing separators and any `.`/`..` the recording carried, and
     // resolve symlinks where the directory still exists. A directory that
     // has since been deleted keeps the textual form -- the watcher can

@@ -375,23 +375,22 @@ fn has_usable_basename(cwd: &str) -> bool {
         .is_some_and(|n| !n.is_empty())
 }
 
-/// The policy key for a session: its true working directory, or the locked
-/// unknown bucket. Never falls back to a basename heuristic.
+/// The policy key for a session: its normalized working directory, or the
+/// locked unknown bucket. Never falls back to a basename heuristic.
 ///
-/// A cwd with no usable final path segment goes to the unknown bucket
-/// rather than becoming a key of its own. Such a key has no label but
-/// itself, and `project_label` crosses the socket, lands in
+/// Normalization (`project_key::normalize_project_key`) is what makes one
+/// directory one project regardless of how the recording spelled it. A cwd
+/// with no usable final path segment -- `/`, anything ending in `..`, the
+/// empty string, a relative path -- yields no key and goes to the unknown
+/// bucket rather than becoming a key of its own. Such a key has no label
+/// but itself, and `project_label` crosses the socket, lands in
 /// `daemon-audit.jsonl`, in OS notification text, and in `HistoryRecord` --
 /// so the fallback turned a full local path into every one of those, in
 /// direct violation of the invariant `audit`'s own
-/// `an_audit_entry_never_carries_a_path` test asserts. It can also never be
-/// armed, which is the right answer for a directory the daemon cannot even
-/// name.
+/// `an_audit_entry_never_carries_a_path` test asserts.
 pub fn project_key_for(cwd: Option<&str>) -> String {
-    match cwd {
-        Some(cwd) if !cwd.trim().is_empty() && has_usable_basename(cwd) => cwd.to_string(),
-        _ => UNKNOWN_PROJECT_KEY.to_string(),
-    }
+    cwd.and_then(crate::daemon::project_key::normalize_project_key)
+        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string())
 }
 
 /// A display label for a project key: the final path segment, or the bucket
@@ -513,6 +512,14 @@ mod tests {
     fn sessions_without_a_cwd_land_in_the_unknown_bucket() {
         assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("   ")), UNKNOWN_PROJECT_KEY);
+        // Lowercase on the case-folding platforms, which is what
+        // `project_key::normalize_project_key` produces there.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            project_key_for(Some("/Users/z/code/proj")),
+            "/users/z/code/proj"
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             project_key_for(Some("/Users/z/code/proj")),
             "/Users/z/code/proj"
@@ -907,5 +914,30 @@ mod tests {
         assert!(p.contributed.is_empty());
         assert!(p.arming_declined_at.is_empty());
         assert!(p.arming_suggestion(t("2026-08-31T12:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn two_recordings_of_one_directory_share_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("crates").join("inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // What Claude Code records, and what Codex records, for one repo.
+        let from_root = project_key_for(Some(root.to_str().unwrap()));
+        let from_sub = project_key_for(Some(sub.to_str().unwrap()));
+
+        assert_eq!(from_root, from_sub);
+        assert_eq!(project_id_for(&from_root), project_id_for(&from_sub));
+    }
+
+    #[test]
+    fn an_unusable_cwd_still_lands_in_the_unknown_bucket() {
+        assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("")), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("/")), UNKNOWN_PROJECT_KEY);
+        assert_eq!(project_key_for(Some("relative")), UNKNOWN_PROJECT_KEY);
     }
 }

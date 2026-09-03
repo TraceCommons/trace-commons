@@ -957,28 +957,30 @@ mod tests {
             self.shared.settings.lock().unwrap().max_queue_entries = max;
         }
 
+        /// Set a mode for the project a `write_session` fixture records.
+        ///
+        /// Goes through `project_key_for` rather than using the recorded
+        /// cwd verbatim, because that is what the watcher does: the key is
+        /// the NORMALIZED directory, and a helper that set policy under the
+        /// raw spelling would be setting it for a project nothing ever
+        /// resolves to.
         fn set_mode(&self, project: &str, mode: ProjectMode) {
-            self.shared
-                .policy
-                .lock()
-                .unwrap()
-                .set_mode(
-                    &format!("/Users/testuser/code/{project}"),
-                    mode,
-                    at("2026-08-08T12:00:00Z"),
-                )
-                .unwrap();
+            self.set_mode_for_key(&format!("/Users/testuser/code/{project}"), mode);
         }
 
-        /// Like `set_mode`, but for an explicit project key rather than one
-        /// derived from `/Users/testuser/code/{project}` -- needed for
+        /// Like `set_mode`, but for an explicit recorded cwd rather than
+        /// one derived from `/Users/testuser/code/{project}` -- needed for
         /// projects written via `write_session_with_cwd`.
         fn set_mode_for_key(&self, key: &str, mode: ProjectMode) {
             self.shared
                 .policy
                 .lock()
                 .unwrap()
-                .set_mode(key, mode, at("2026-08-08T12:00:00Z"))
+                .set_mode(
+                    &project_key_for(Some(key)),
+                    mode,
+                    at("2026-08-08T12:00:00Z"),
+                )
                 .unwrap();
         }
 
@@ -992,7 +994,7 @@ mod tests {
                 id: 1,
                 method: "set_project_mode".to_string(),
                 params: serde_json::json!({
-                    "project_key": format!("/Users/testuser/code/{project}"),
+                    "project_key": project_key_for(Some(&format!("/Users/testuser/code/{project}"))),
                     "mode": mode,
                 }),
             };
@@ -1368,12 +1370,12 @@ mod tests {
         let first = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/work/api")))
             .unwrap();
         let second = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/client/api")
+            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/client/api")))
             .unwrap();
         assert!(
             first.project_label.starts_with("api ("),
@@ -1437,7 +1439,7 @@ mod tests {
         let queue_entry = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/work/api")))
             .unwrap();
         assert_eq!(
             list_label, queue_entry.project_label,
