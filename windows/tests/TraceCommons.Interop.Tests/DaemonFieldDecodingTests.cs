@@ -1,3 +1,4 @@
+using System;
 using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
@@ -95,6 +96,38 @@ public class DaemonFieldDecodingTests
 
         Assert.NotNull(summary);
         Assert.Empty(summary!.RedactionsDistinct);
+    }
+
+    /// <summary>
+    /// A secrets-only session, which is the ordinary case and not an edge one.
+    /// </summary>
+    /// <remarks>
+    /// Distinct counts come from the placeholder map, and only
+    /// <c>local_path</c> and <c>private_email</c> mint a placeholder. So a
+    /// session whose removals are all secrets carries occurrences and an EMPTY
+    /// distinct map, and no <c>(N distinct)</c> suffix may appear anywhere.
+    /// Printing <c>(0 distinct)</c> beside a non-zero occurrence count would
+    /// read as "nothing was removed", which is the one direction this figure
+    /// must not fail in.
+    ///
+    /// <c>PreviewSummary</c> always carries the key, as <c>{}</c>;
+    /// <c>PrivacyMetadata</c> skips it when empty. Either way the rule is the
+    /// same: no entry means no distinct count is AVAILABLE, never that it is
+    /// zero.
+    /// </remarks>
+    [Fact]
+    public void ASecretsOnlySummaryRendersNoDistinctSuffix()
+    {
+        PreviewSummary? summary = PreviewSummary.Parse("""
+        {"redactions":{"secret":1,"secret:openai_api_key":1},
+         "redactions_distinct":{}}
+        """);
+
+        Assert.NotNull(summary);
+        Assert.Empty(summary!.RedactionsDistinct);
+        Assert.DoesNotContain("distinct", summary.ScrubbingFound, StringComparison.Ordinal);
+        Assert.DoesNotContain("distinct", summary.RedactionReceipt, StringComparison.Ordinal);
+        Assert.Equal("1 secret  \u00b7  1 secret:openai api key", summary.ScrubbingFound);
     }
 
     [Fact]

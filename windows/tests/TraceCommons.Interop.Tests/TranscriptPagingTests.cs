@@ -275,6 +275,29 @@ public sealed class TranscriptPagingTests
         AssertMarkerSurvivesEveryOffset("[REDACTED:aws_secret_key]");
     }
 
+    /// <summary>The same for the bare <c>[REDACTED]</c> secrets token.</summary>
+    [Fact]
+    public void BareRedactedMarkerStraddlingABoundaryIsNotSplit()
+    {
+        AssertMarkerSurvivesEveryOffset("[REDACTED]");
+    }
+
+    /// <summary>
+    /// And for <c>&lt;REDACTED_PRIVATE_KEY&gt;</c>, which the pattern did not
+    /// recognise at all until it gained an arm of its own.
+    /// </summary>
+    /// <remarks>
+    /// Two things went wrong while it was unrecognised, and this covers the
+    /// second. It drew as ordinary body text, and the chunker had no reason to
+    /// keep it whole, so a boundary landing inside it left
+    /// <c>&lt;REDACTED_PRIV</c> and <c>ATE_KEY&gt;</c> in different chunks.
+    /// </remarks>
+    [Fact]
+    public void PrivateKeyMarkerStraddlingABoundaryIsNotSplit()
+    {
+        AssertMarkerSurvivesEveryOffset("<REDACTED_PRIVATE_KEY>");
+    }
+
     private static void AssertMarkerSurvivesEveryOffset(string marker)
     {
         int target = TranscriptPaging.TargetChunkBytes;

@@ -29,13 +29,18 @@ public static class TranscriptMarkers
     /// Three shells disagreeing about what a redaction looks like is three
     /// different pictures of the same bytes.
     ///
-    /// <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> is the third shape, and it was
-    /// missing: it does not start <c>&lt;PRIVATE_</c> and it is not
-    /// bracketed, so neither of the other two arms reaches it, and a PEM key
-    /// the redactor HAD removed drew as ordinary transcript text. That is the
-    /// one category a contributor most wants to see marked, and it was the
-    /// only one that was not. See <see cref="RedactionPlaceholders"/>, which
-    /// carries the full table of shapes and what each can say.
+    /// The redactor emits four shapes, and this arm exists because one of
+    /// them reached neither of the others. <c>apply_placeholder_regex</c>
+    /// mints the numbered <c>&lt;PRIVATE_LABEL_n&gt;</c> form for exactly two
+    /// labels, <c>local_path</c> and <c>private_email</c>. Everything else
+    /// gets a fixed token: <c>[REDACTED]</c> for secrets and sensitive
+    /// fields, <c>[REDACTED:{label}]</c> for tool arguments and
+    /// privacy-filter findings, and <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> for a
+    /// PEM key. That last one starts neither <c>&lt;PRIVATE_</c> nor a
+    /// bracket, so both other arms missed it and a private key the redactor
+    /// HAD removed drew as ordinary transcript text. Secrets are the category
+    /// a contributor most wants to see marked, and this was the shape that
+    /// was not.
     ///
     /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
     /// Without that, one unclosed bracket anywhere in a body would let a

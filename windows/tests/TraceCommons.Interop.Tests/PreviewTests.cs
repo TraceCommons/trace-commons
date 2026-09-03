@@ -237,6 +237,78 @@ public sealed class TranscriptMarkerTests
         Assert.True(runs[0].IsMarker);
     }
 
+    /// <summary>
+    /// The redactor emits FOUR token shapes and every one has to be marked.
+    /// </summary>
+    /// <remarks>
+    /// <c>apply_placeholder_regex</c> mints the numbered
+    /// <c>&lt;PRIVATE_LABEL_n&gt;</c> form for exactly two labels,
+    /// <c>local_path</c> and <c>private_email</c>. Everything else gets a
+    /// fixed token, and a shell that marked only the numbered form would mark
+    /// every path and NO SECRET while the scrubbing panel beside it reported
+    /// those secrets as removed.
+    /// </remarks>
+    [Fact]
+    public void EveryTokenShapeTheRedactorEmitsIsMarked()
+    {
+        const string text =
+            "a <PRIVATE_LOCAL_PATH_1> b [REDACTED] c <REDACTED_PRIVATE_KEY> d "
+            + "[REDACTED:person_name] e";
+
+        IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(text);
+
+        Assert.Equal(4, System.Linq.Enumerable.Count(runs, run => run.IsMarker));
+        Assert.Equal(
+            new[]
+            {
+                "<PRIVATE_LOCAL_PATH_1>",
+                "[REDACTED]",
+                "<REDACTED_PRIVATE_KEY>",
+                "[REDACTED:person_name]",
+            },
+            System.Linq.Enumerable.ToArray(
+                System.Linq.Enumerable.Select(
+                    System.Linq.Enumerable.Where(runs, run => run.IsMarker),
+                    run => text.Substring(run.Start, run.Length))));
+        Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>
+    /// The regression this case exists for.
+    /// </summary>
+    /// <remarks>
+    /// <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> starts neither <c>&lt;PRIVATE_</c>
+    /// nor a bracket, so the pattern's other two arms both missed it, and a
+    /// PEM private key the redactor HAD removed drew as ordinary transcript
+    /// text. Asserted on its own, without a neighbouring marker, so it cannot
+    /// pass by being swallowed into an adjacent one.
+    /// </remarks>
+    [Fact]
+    public void APrivateKeyTokenIsAMarkerAndNotOrdinaryText()
+    {
+        const string text = "key was <REDACTED_PRIVATE_KEY> and is gone";
+
+        IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(text);
+
+        Assert.Equal(3, runs.Count);
+        Assert.Equal(new[] { false, true, false }, Selected(runs));
+        Assert.Equal(
+            "<REDACTED_PRIVATE_KEY>",
+            text.Substring(runs[1].Start, runs[1].Length));
+        Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>
+    /// A token that merely looks like one of the four is not a marker.
+    /// Marking ordinary text as removed is its own lie.
+    /// </summary>
+    [Fact]
+    public void TextThatMerelyResemblesATokenIsNotMarked()
+    {
+        Assert.False(TranscriptMarkers.Split("<REDACTED_PUBLIC_KEY>")[0].IsMarker);
+        Assert.False(TranscriptMarkers.Split("REDACTED_PRIVATE_KEY")[0].IsMarker);
+    }
+
     [Fact]
     public void PlainTextIsOneRun()
     {
