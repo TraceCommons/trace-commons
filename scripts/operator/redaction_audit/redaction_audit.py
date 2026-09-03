@@ -25,7 +25,7 @@ class Detection(TypedDict):
     surface: str
     source_hash: str
     locator_hash: str
-    evidence_hash: str
+    evidence_shape: str
 
 
 class AuditFailure(TypedDict):
@@ -281,6 +281,69 @@ def _short_hash(value: str | bytes) -> str:
     return hashlib.sha256(value).hexdigest()[:20]
 
 
+# Kept in step with `shape_signature` in
+# crates/trace-commons-contributor/tests/local_redaction_audit.rs, which is
+# where this repo settled the question of how an audit describes something it
+# must not quote.
+_SHAPE_MAX_RUNS = 24
+
+
+def _shape_signature(value: str, max_runs: int = _SHAPE_MAX_RUNS) -> str:
+    """Structural signature with every information-bearing character erased.
+
+    Lowercase becomes ``a``, uppercase ``A``, digits ``9``, whitespace ``_``;
+    punctuation is kept verbatim, and runs collapse to ``class{n}``.
+
+    This replaced a plain SHA-256 of the matched text. A hash is the right
+    shape of answer for a credential, whose value is high-entropy, and the
+    wrong one for most of what this auditor exists to find: an unsalted
+    digest of ``Jane Doe``, a date of birth, or a postal address is recovered
+    with a wordlist in seconds, so a findings report -- the artefact an
+    operator forwards, pastes into an issue, or archives -- carried the very
+    third-party PII the scan was run to locate.
+
+    A shape leaks strictly less and says strictly more. It cannot be reversed
+    to the name, and unlike an opaque digest it tells a triager whether a
+    credential hit is a live secret or a placeholder, which is what the Rust
+    auditor's version of this exists to do.
+
+    Not zero-knowledge: a shape still reveals length and character classes.
+    That is the repo's standing trade for an audit surface, and it is why the
+    output carries no raw text at all.
+    """
+
+    def class_of(character: str) -> str:
+        if character.islower() and character.isascii():
+            return "a"
+        if character.isupper() and character.isascii():
+            return "A"
+        if character.isdigit() and character.isascii():
+            return "9"
+        if character.isspace():
+            return "_"
+        return character
+
+    out: list[str] = []
+    classes = [class_of(character) for character in value]
+    index = 0
+    runs = 0
+    while index < len(classes):
+        if runs >= max_runs:
+            out.append("...")
+            break
+        current = classes[index]
+        length = 1
+        while index + length < len(classes) and classes[index + length] == current:
+            length += 1
+        if current in {"a", "A", "9", "_"} and length > 1:
+            out.append(f"{current}{{{length}}}")
+        else:
+            out.append(current * length)
+        index += length
+        runs += 1
+    return "".join(out)
+
+
 def _is_placeholder(value: str) -> bool:
     return bool(_PLACEHOLDER_RE.fullmatch(value.strip()))
 
@@ -435,7 +498,7 @@ def _emit(
             "surface": surface,
             "source_hash": source_id,
             "locator_hash": locator_hash,
-            "evidence_hash": _short_hash(evidence),
+            "evidence_shape": _shape_signature(evidence),
         }
     )
 
@@ -693,6 +756,17 @@ def _check_regression_fixtures() -> list[tuple[str, bool, bool]]:
     return results
 
 
+# The distinctive substrings of the self-test's own positive samples. A
+# detection that contains any of these is quoting its input back.
+_SELF_TEST_SENSITIVE_STRINGS: tuple[str, ...] = (
+    "Zyxoria",
+    "Mockvale",
+    "2098-03-05",
+    "fuzz-orbit-canvas-84",
+    "Fuzzworks",
+)
+
+
 def _self_test() -> int:
     import tempfile
 
@@ -770,6 +844,26 @@ def _self_test() -> int:
         )
         negative_report = audit(negative_file)
 
+    # The property the whole output format rests on: a detection describes
+    # what was found without carrying it. Checked against the positive corpus
+    # above, whose scalars are exactly the sensitive shapes this tool exists
+    # to locate -- a name, a date of birth, an address, a credential.
+    #
+    # This is here because the field it guards used to be a plain SHA-256 of
+    # the matched text, which is a fine answer for a high-entropy credential
+    # and a poor one for a name: an unsalted digest of `Jane Doe` falls to a
+    # wordlist, so a findings report carried the third-party PII the scan was
+    # run to find.
+    echoed: list[str] = []
+    for detection in positive_report["detections"] + key_report["detections"] + path_report["detections"]:
+        for field, value in detection.items():
+            if not isinstance(value, str):
+                continue
+            for sensitive in _SELF_TEST_SENSITIVE_STRINGS:
+                if sensitive and sensitive in value:
+                    echoed.append(f"{detection['detector']}.{field}")
+    quotes_nothing = not echoed
+
     regression_results = _check_regression_fixtures()
     regression_passed = all(positive_ok and negative_ok for _, positive_ok, negative_ok in regression_results)
 
@@ -782,12 +876,16 @@ def _self_test() -> int:
         and path_hit
         and not negative_report["detections"]
         and regression_passed
+        and quotes_nothing
     )
     print(f"self_test={'PASS' if passed else 'FAIL'}")
     print(f"positive_classes={len(expected - set(missing))}/{len(expected)}")
     print(f"key_surface={'PASS' if key_hit else 'FAIL'}")
     print(f"path_surface={'PASS' if path_hit else 'FAIL'}")
     print(f"negative_detections={len(negative_report['detections'])}")
+    print(f"quotes_nothing={'PASS' if quotes_nothing else 'FAIL'}")
+    for field in sorted(set(echoed)):
+        print(f"  FAIL {field} echoes its input back into the report")
     regression_ok_count = sum(1 for _, positive_ok, negative_ok in regression_results if positive_ok and negative_ok)
     print(f"regression_fixtures={regression_ok_count}/{len(regression_results)}")
     for label, positive_ok, negative_ok in regression_results:

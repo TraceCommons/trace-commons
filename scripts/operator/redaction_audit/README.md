@@ -52,3 +52,27 @@ adjusted until its own detector passes measures nothing.
 
 `_NAMED_PATH_RE` carries the same latent defect that was fixed in `name_near_role`:
 `re.IGNORECASE` defeats its embedded proper-noun shape. No current case trips it.
+
+## What a finding contains
+
+A detection names the class, the detector, the surface, a hash of the source
+and locator, and an `evidence_shape` -- the matched text with every
+information-bearing character erased (`Jane Doe` becomes `Aa{3}_Aa{2}`,
+`[REDACTED]` becomes `[A{8}]`). It never carries the text itself.
+
+This field was a plain SHA-256 of the match. That is the right answer for a
+credential, whose value is high-entropy, and the wrong one for most of what
+this tool exists to find: an unsalted digest of a name, a date of birth, or a
+postal address falls to a wordlist in seconds, so a findings report -- the
+artefact an operator forwards, pastes into an issue, or archives -- carried
+the third-party PII the scan was run to locate.
+
+A shape leaks strictly less and says strictly more: unlike an opaque digest it
+tells a triager whether a credential hit is a live secret or a placeholder,
+which is what the same signature does for
+`crates/trace-commons-contributor/tests/local_redaction_audit.rs`. It is not
+zero-knowledge -- a shape still reveals length and character classes -- and
+that is the standing trade for an audit surface here.
+
+`--self-test` asserts it: `quotes_nothing` fails if any string field of any
+detection contains a distinctive substring of the sample that produced it.
