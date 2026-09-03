@@ -815,7 +815,25 @@ fn manifest_block(
         (CardPreview::Ready(_), Some(0)) => {
             let chip = style::tag(copy::NOTHING_MATCHED, Tone::Attention);
             chip.set_valign(gtk::Align::Start);
-            pairs.append(&chip);
+            // The chip is the one thing on the card that names a doubt, and
+            // it used to be the one thing that could not be acted on. It now
+            // opens the sheet on the search tab, which is where the doubt is
+            // answerable: type the string you are worried about and be told
+            // whether it is in there.
+            let button = gtk::Button::builder().child(&chip).build();
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Start);
+            button.set_tooltip_text(Some(copy::NOTHING_MATCHED_TOOLTIP));
+            let app_for_chip = Rc::clone(app);
+            button.connect_clicked(move |_| {
+                super::preview::open_with_search(
+                    &app_for_chip,
+                    index,
+                    None,
+                    Some("search".to_string()),
+                );
+            });
+            pairs.append(&button);
         }
         (CardPreview::Ready(p), _) => pairs.append(&style::manifest_field(
             copy::REMOVED_BY_PATTERN,

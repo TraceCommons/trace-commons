@@ -532,6 +532,23 @@ impl App {
         );
     }
 
+    /// How many times `needle` was in the entry's pre-redaction session
+    /// text. `None` for any failure -- see `worker::Outcome::SearchOriginal`.
+    pub fn search_original<F>(self: &Rc<Self>, entry_id: &str, needle: &str, callback: F)
+    where
+        F: FnOnce(&Rc<App>, Option<u32>) + 'static,
+    {
+        let id = self.worker.search_original(entry_id, needle);
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::SearchOriginal(matches) = outcome {
+                    callback(app, matches)
+                }
+            }),
+        );
+    }
+
     pub fn preview<F>(self: &Rc<Self>, entry_id: &str, callback: F)
     where
         F: FnOnce(&Rc<App>, Result<(PreviewSummary, Option<String>), String>) + 'static,

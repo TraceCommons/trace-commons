@@ -22,6 +22,7 @@ pub mod backend;
 pub mod copy;
 pub mod model;
 pub mod notify;
+pub mod original_search;
 pub mod placeholders;
 pub mod portal;
 pub mod queue_folders;

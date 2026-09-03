@@ -1053,6 +1053,11 @@ impl Sheet {
         }
 
         let hits = search_hits(body, needle);
+        // What the redacted body says, on its own, before the daemon
+        // answers about the original. It is replaced in place by
+        // `apply_original_count` when that answer lands, and it is what
+        // stands if the answer never does.
+        self.request_original_count(needle, hits.len() as u32);
         // "0 matches" is the answer a contributor under an NDA came here
         // for, so it is the one that gets the good-standing tone. A hit is
         // not a failure -- it is something to weigh -- so it gets gold, not
@@ -1112,6 +1117,55 @@ impl Sheet {
             more.add_css_class("tc-meta");
             self.search_results.append(&more);
         }
+    }
+
+    /// Ask the daemon how many times this needle was in the PRE-redaction
+    /// session, and say which of the four cases this is once it answers.
+    ///
+    /// Asynchronous, because the daemon reads the raw session file to
+    /// answer. Until it does, the summary says what the redacted body says
+    /// on its own -- an honest partial answer rather than a blank.
+    ///
+    /// The reply is dropped unless the search box still holds the needle it
+    /// was asked about. Typing produces one call per keystroke and the
+    /// replies can land out of order, and a stale count printed against a
+    /// newer needle would be a wrong answer on the screen whose whole job is
+    /// to be right about this.
+    fn request_original_count(self: &Rc<Self>, needle: &str, remaining: u32) {
+        let Some(entry) = self.current() else {
+            return;
+        };
+        let entry_id = entry.entry_id.clone();
+        let sheet = Rc::clone(self);
+        let asked = needle.to_string();
+        let needle_sent = asked.clone();
+        self.app
+            .search_original(&entry_id, &needle_sent, move |_, original| {
+                if sheet.search_entry.text().trim() != asked {
+                    return;
+                }
+                sheet.apply_original_count(remaining, original);
+            });
+    }
+
+    /// Replace the summary with the sentence that tells "never here" apart
+    /// from "removed". See `crate::original_search`.
+    fn apply_original_count(&self, remaining: u32, original: Option<u32>) {
+        let outcome = crate::original_search::classify(remaining, original);
+        self.set_summary_tone(if crate::original_search::is_alarming(&outcome) {
+            Tone::Attention
+        } else {
+            Tone::Clear
+        });
+        let glyph = if crate::original_search::is_alarming(&outcome) {
+            Tone::Attention.glyph()
+        } else {
+            Tone::Clear.glyph()
+        };
+        self.search_summary.set_text(&format!(
+            "{glyph}  {}",
+            crate::original_search::sentence(&outcome)
+        ));
     }
 
     fn remember_search(self: &Rc<Self>, needle: &str) {

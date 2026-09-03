@@ -48,7 +48,8 @@ pub const RESIDUAL_RISK: &str =
 pub fn residual_risk_line(total_redactions: u32) -> String {
     match total_redactions {
         0 => "Scrubbing matched nothing here. That is not the same as there being nothing to \
-              find -- it only recognises patterns it has seen before."
+              find -- it only recognises patterns it has seen before. Search this session for \
+              anything you are worried about."
             .to_string(),
         1 => "Scrubbing removed 1 thing it recognised. It works from patterns, so it misses \
               what it hasn't seen before."
@@ -211,6 +212,32 @@ pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
     }
 }
 
+/// The four things a search can find, in the words the sheet says them.
+///
+/// The search scans the REDACTED body, so a value that was removed returns
+/// zero matches -- indistinguishable, on that count alone, from a value that
+/// was never in the session. The daemon's `search_original` counts the same
+/// needle in the pre-redaction text, and these four sentences are what tell
+/// the two apart. See [`crate::original_search`].
+pub fn search_absent() -> String {
+    "0 matches \u{2014} not in this session".to_string()
+}
+
+pub fn search_all_removed(total: u32) -> String {
+    format!("{total} matches \u{2014} all {total} were removed")
+}
+
+pub fn search_some_remain(remaining: u32, total: u32) -> String {
+    format!("{total} matches \u{2014} {remaining} would still be sent")
+}
+
+/// The arm where the app does not know, and must not round that off to a
+/// clean answer. Saying "not in this session" because a call failed would be
+/// the most dangerous wrong sentence this tab can print.
+pub fn search_unknown() -> String {
+    "0 matches in what would be sent \u{2014} couldn't check the original".to_string()
+}
+
 /// What each redaction family IS, in words -- the panel's actual value to a
 /// reader who has never seen these labels.
 ///
@@ -328,6 +355,9 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 /// reassurance, which is why they share a wording that concedes rather than
 /// one that congratulates.
 pub const NOTHING_MATCHED: &str = "nothing matched";
+
+/// What the chip does now that it is a control.
+pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this session for a value you are worried about";
 
 /// A secret scrubbing FOUND and did not remove.
 ///
@@ -1932,6 +1962,17 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    /// The zero case names a doubt. It has to name the thing to do about it
+    /// too, and that thing is the search tab -- which the card's chip now
+    /// opens.
+    #[test]
+    fn the_nothing_matched_line_offers_a_next_step() {
+        assert!(
+            residual_risk_line(0).to_lowercase().contains("search"),
+            "the line must point at the thing to do about it"
+        );
+    }
 
     #[test]
     fn a_panel_row_omits_a_distinct_count_that_repeats_the_occurrence_count() {
