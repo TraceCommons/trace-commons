@@ -44,9 +44,11 @@ for one of them and do not:
 ### 1.1 A project's path, on the socket only
 
 Queue entries and `list_projects` rows gain `project_path: String`,
-`~`-abbreviated for display. `project_label` is unchanged: still the bare
-basename from `project_label_for`, still the only project string that
-crosses into any audit, notification, or history sink.
+`~`-abbreviated for display. Both it and `project_label` are rendered from
+the normalized project key, which 1.2 case-folds on macOS and Windows -- see
+the note there for what that costs. `project_label` is otherwise unchanged:
+still the bare basename from `project_label_for`, still the only project
+string that crosses into any audit, notification, or history sink.
 
 This is a deliberate widening of the rule stated in `policy.rs`'s
 `project_id_for` doc comment -- "the privacy rule is that a project key, a
@@ -103,6 +105,30 @@ repo and still say individually where they ran.
 Steps 1-3 are unconditional. Step 4 is worth stating as reversible: it is a
 single function, and if the merge turns out to be wrong for real users it
 comes out without touching anything else.
+
+**The key is the folded string, and every project string a shell draws is
+derived from it.** `normalize_project_key` returns
+`fold_case(path_to_key(rooted))`, so on macOS and Windows the key is
+lowercased. `project_label_for` and `display_path` both take that key, so on
+those two platforms the folder label and the folder path render folded: a
+session in `~/Code/IronWire` is keyed, labelled, and displayed as
+`~/code/ironwire` and `ironwire`.
+
+That is step 3's price and it belongs in this document rather than in a bug
+report. It does not defeat 1.1 -- a lowercased path still tells two projects
+called `api` apart, which is the job the hash suffix could not do -- but the
+app does spell a contributor's folder differently from the way they do, and
+1.1's "identifiable" is weaker for it. Recovering the recorded case means
+carrying the canonicalized, unfolded path beside the key, on every queue
+entry and in the policy file, and that second field is deliberately not in
+this design.
+
+`session_path` is unaffected. It renders `QueueEntry.session_cwd`, which is
+the raw cwd the watcher recorded and is never folded. `display_path` folds
+both sides only to *compare* against `$HOME`, and renders the tail from the
+string it was handed -- so a session path keeps its recorded case while a
+project path, having been folded before it ever reached the function,
+does not.
 
 Normalization changes `project_id_for`'s input, and ids are derived rather
 than stored, so **every existing project id changes on upgrade.** What that

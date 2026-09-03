@@ -301,7 +301,7 @@ fn path_to_key(path: &Path) -> String {
 /// directories. The folded string is still a usable path on macOS and
 /// Windows, which is what keeps `project_key_is_admissible` working against
 /// it.
-fn fold_case(key: &str) -> String {
+pub(crate) fn fold_case(key: &str) -> String {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         key.to_lowercase()
@@ -928,10 +928,20 @@ Add to `ipc.rs`'s test module:
         assert_eq!(v["session_path"], "/tmp/somewhere/repo/crates/inner");
     }
 
+    /// Fed a REAL normalizer output rather than a hand-written path.
+    ///
+    /// A literal `{home}/code/api` is unfolded, and on macOS and Windows a
+    /// key never is -- so a test written that way passes against a string
+    /// the daemon does not produce, and would go on passing if
+    /// `display_path` compared the two spellings raw. The abbreviation is
+    /// exactly what breaks in that case, so this is the test that has to
+    /// use the real thing.
     #[test]
     fn a_home_relative_project_path_is_abbreviated() {
         let home = std::env::var("HOME").expect("HOME is set in the test environment");
-        assert_eq!(display_path(&format!("{home}/code/api")), "~/code/api");
+        let key = crate::daemon::project_key::normalize_project_key(&format!("{home}/code/api"))
+            .expect("an absolute path with a basename normalizes");
+        assert_eq!(display_path(&key), "~/code/api");
         assert_eq!(display_path("/opt/elsewhere"), "/opt/elsewhere");
     }
 
@@ -988,13 +998,43 @@ pub fn display_path(project_key: &str) -> String {
     else {
         return project_key.to_string();
     };
-    match project_key.strip_prefix(&home) {
-        Some(rest) if rest.is_empty() => "~".to_string(),
-        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!("~{rest}"),
+    // Folded on both sides, because a project key has been through
+    // `normalize_project_key` and the environment variable has not. On
+    // macOS the key is `/users/z/code/api` while `$HOME` is `/Users/z`,
+    // and on Windows the key is `c:\users\z\...` while `%USERPROFILE%`
+    // is `C:\Users\z` -- comparing the two raw meant the prefix never
+    // matched and every path rendered absolute.
+    match crate::daemon::project_key::fold_case(project_key)
+        .strip_prefix(&crate::daemon::project_key::fold_case(&home))
+    {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
+            // Rendered from the ORIGINAL tail so a session path keeps the
+            // case the agent recorded. Folding can in principle change a
+            // string's length, in which case the boundary is not a
+            // character boundary and the folded tail is used instead.
+            let tail = project_key
+                .get(project_key.len().saturating_sub(rest.len())..)
+                .unwrap_or(rest);
+            format!("~{tail}")
+        }
         _ => project_key.to_string(),
     }
 }
 ```
+
+**What this function does and does not restore.** `project_key` reaching
+here has already been folded by `normalize_project_key`, so on macOS and
+Windows `project_path` renders lowercased -- `~/Code/IronWire` draws as
+`~/code/ironwire`, and `project_label_for` labels it `ironwire`. The tail is
+taken from the original string so that `session_path`, which is handed
+`QueueEntry.session_cwd` and has never been folded, keeps the case the agent
+recorded. Folding both sides of the comparison is what makes the `~`
+abbreviation work at all; it does not unfold the key. See the spec's 1.2 for
+why the unfolded path is not carried.
+
+`fold_case` must be `pub(crate)` for this call site, not private to
+`project_key.rs`.
 
 In `entry_value`, immediately after the `"project_label"` line:
 
