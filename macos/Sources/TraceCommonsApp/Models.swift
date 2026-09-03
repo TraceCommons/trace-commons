@@ -277,8 +277,12 @@ struct PreviewSummary: Decodable, Equatable, Sendable {
     /// "12 secrets, 4 tokens, 31 paths" -- category labels and counts only;
     /// the contract guarantees neither map ever carries matched text.
     var redactionReceipt: String {
-        if redactions.isEmpty { return "scrubbed: nothing matched" }
-        let parts = redactions
+        // Removals only -- `redactions` also carries `residual_secret_at:*`,
+        // which counts a secret that was FOUND AND LEFT IN. See
+        // `RedactionLabels`.
+        let removals = RedactionLabels.removals(redactions)
+        if removals.isEmpty { return "scrubbed: nothing matched" }
+        let parts = removals
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
         return "scrubbed: " + parts.joined(separator: ", ")

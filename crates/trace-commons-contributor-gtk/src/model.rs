@@ -218,7 +218,15 @@ impl PreviewSummary {
     /// that obviously touched a `.env` is a signal the contributor can act
     /// on.
     pub fn scrubbed_line(&self) -> String {
-        let total: u32 = self.redactions.values().sum();
+        // Removals only. `redactions` also carries `residual_secret_at:*`,
+        // which counts a secret that was DETECTED AND LEFT IN, and this line
+        // renders under a heading that says the opposite. That mislabelling
+        // was worse here than in the other shells:
+        // `humanize_redaction_kind` maps any label containing `secret` onto
+        // the word "secrets", so a survivor was summed into the removed
+        // count and became indistinguishable from a secret that had really
+        // been taken out. See `crate::redaction_labels`.
+        let total = crate::redaction_labels::removed_total(&self.redactions);
         if total == 0 {
             return "scrubbed: nothing".to_string();
         }
@@ -227,7 +235,11 @@ impl PreviewSummary {
         // Their counts are summed rather than listed twice: "1 secrets, 1
         // secrets" reads as a bug, and it is one.
         let mut totals: std::collections::BTreeMap<String, u32> = Default::default();
-        for (kind, n) in self.redactions.iter().filter(|(_, n)| **n > 0) {
+        for (kind, n) in self
+            .redactions
+            .iter()
+            .filter(|(kind, n)| **n > 0 && crate::redaction_labels::is_removal(kind))
+        {
             *totals.entry(humanize_redaction_kind(kind)).or_default() += n;
         }
         // Ordered as the shared spec writes the line -- "12 secrets, 4

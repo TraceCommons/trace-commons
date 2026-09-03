@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use super::eligibility::{Eligibility, Observation, evaluate};
+use super::eligibility::{Eligibility, Observation, armed_settle_elapsed, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
 use super::policy::{ProjectMode, disambiguated_label, known_keys, project_for};
@@ -65,6 +65,11 @@ pub struct TickReport {
     /// Entries handed straight to the uploader because their project is
     /// opted in.
     pub auto_ready: usize,
+    /// Entries whose project is opted in but whose session has not been
+    /// quiet for `ARMED_SETTLE_SECS` yet, so they stay `Pending` for now.
+    /// Counted apart from `auto_ready` because it is a wait, not a refusal:
+    /// the same entry becomes `auto_ready` on a later poll.
+    pub armed_not_settled: usize,
     pub ignored: usize,
     /// Sessions skipped because the contributor dismissed them. Distinct
     /// from `ignored`, which is a standing decision about a whole project.
@@ -424,6 +429,18 @@ fn visit_session(
             out.report.ignored += 1;
             return;
         }
+        // Armed, but not yet settled: leave it `Pending` and look again next
+        // poll. The entry stays in the queue meanwhile, so a contributor who
+        // opens the app can still approve it by hand -- arming is a standing
+        // yes to sending finished work unattended, not a refusal to let them
+        // act sooner. See `eligibility::ARMED_SETTLE_SECS`.
+        if mode == ProjectMode::AutoUpload
+            && state == QueueState::Pending
+            && !armed_settle_elapsed(obs.modified_at, ctx.now)
+        {
+            out.report.armed_not_settled += 1;
+            return;
+        }
         // The one thing the discarded dedup path did do: re-apply a
         // project's standing opt-in to an entry that has since been
         // put back to `Pending` (by a supersede, or by the
@@ -544,6 +561,12 @@ fn visit_session(
         known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
     };
 
+    // Two independent restrictions on arming, and a fresh entry has to clear
+    // both. They arrived from different directions -- the settle window from
+    // #515, the staging exclusion from the trajectory-import work -- and each
+    // one dropped is a session sent unattended that should not have been, so
+    // they are ANDed rather than either replacing the other.
+
     // A staged trajectory is never armed, whatever the project mode says.
     //
     // The daemon's only trajectory scope is the staging directory (see
@@ -558,7 +581,15 @@ fn visit_session(
     // contributor dropped in by hand, not only for the ones that name
     // themselves.
     let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
-    let armed = mode == ProjectMode::AutoUpload && !from_staging;
+
+    // A fresh entry from an armed project is queued `Pending` until it has
+    // settled, not `Approved` on sight. The next poll promotes it once the
+    // window has elapsed (site above), and a session that grows in the
+    // meantime supersedes this entry -- free, where the same growth after an
+    // upload would cost one of three re-uploads and a duplicate penalty.
+    let armed = mode == ProjectMode::AutoUpload
+        && !from_staging
+        && armed_settle_elapsed(obs.modified_at, ctx.now);
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
@@ -1222,6 +1253,58 @@ mod tests {
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.queued, 0);
         assert_eq!(f.states(), vec![QueueState::Approved]);
+    }
+
+    /// Arming is a standing yes to sending *finished* work unattended, not
+    /// to sending whatever has been quiet for half an hour. The fixture's
+    /// mtime is genuinely now, so an hour later is past quiescence and well
+    /// inside the settle window -- exactly a session paused over lunch.
+    #[tokio::test]
+    async fn an_opted_in_session_is_not_approved_before_it_settles() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        assert_eq!(report.auto_ready, 0, "{report:?}");
+        assert_eq!(
+            f.states(),
+            vec![QueueState::Pending],
+            "an unsettled armed session waits in the queue rather than being sent"
+        );
+    }
+
+    /// ...and it is a wait, not a refusal: the same entry is promoted once
+    /// the window elapses, with no new discovery and no second decision.
+    #[tokio::test]
+    async fn an_opted_in_session_is_approved_once_it_settles() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+
+        let report = tick(&f.shared, Utc::now() + chrono::Duration::hours(25))
+            .await
+            .unwrap();
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(f.states(), vec![QueueState::Approved]);
+        assert_eq!(f.queue_len(), 1, "promotion must not mint a second entry");
+    }
+
+    /// The wait is counted, and counted apart from `auto_ready`, so an
+    /// operator reading a tick report can tell "holding" from "nothing
+    /// armed here".
+    #[tokio::test]
+    async fn an_unsettled_armed_session_is_reported_as_waiting() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        let report = tick(&f.shared, Utc::now() + chrono::Duration::hours(2))
+            .await
+            .unwrap();
+        assert_eq!(report.armed_not_settled, 1, "{report:?}");
+        assert_eq!(report.auto_ready, 0, "{report:?}");
     }
 
     #[tokio::test]

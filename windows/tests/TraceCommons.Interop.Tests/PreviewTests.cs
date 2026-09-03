@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -224,6 +225,103 @@ public sealed class TranscriptMarkerTests
         Assert.Equal(5, runs.Count);
         Assert.Equal(new[] { false, true, false, true, false }, Selected(runs));
         Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>
+    /// The angle-bracketed FIXED token the PEM path emits.
+    /// </summary>
+    /// <remarks>
+    /// Not a variation on the others. It begins <c>&lt;REDACTED_</c>, not
+    /// <c>&lt;PRIVATE_</c>, and is not square-bracketed, so for a long time it
+    /// matched neither arm of the shared pattern: a private key was removed
+    /// from the payload and left completely unmarked in the transcript. The
+    /// same pattern is what stops the chunker cutting through a marker, so it
+    /// was also the one marker that could be split across a boundary.
+    /// </remarks>
+    [Fact]
+    public void APrivateKeyMarkerIsSplitOutLikeAnyOther()
+    {
+        const string text = "before <REDACTED_PRIVATE_KEY> after";
+
+        IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(text);
+
+        Assert.Equal(3, runs.Count);
+        Assert.Equal(new[] { false, true, false }, Selected(runs));
+        Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>All three marker families in one body, in document order.</summary>
+    [Fact]
+    public void AllThreeMarkerFamiliesAreFound()
+    {
+        const string text =
+            "<PRIVATE_LOCAL_PATH_1> [REDACTED:person_name] <REDACTED_PRIVATE_KEY> [REDACTED]";
+
+        string[] markers = TranscriptMarkers.Split(text)
+            .Where(run => run.IsMarker)
+            .Select(run => text.Substring(run.Start, run.Length))
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                "<PRIVATE_LOCAL_PATH_1>",
+                "[REDACTED:person_name]",
+                "<REDACTED_PRIVATE_KEY>",
+                "[REDACTED]",
+            },
+            markers);
+    }
+
+    /// <summary>
+    /// The <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> arm is the LITERAL token, not a
+    /// general one. Prose a contributor typed must never be claimed as a
+    /// redaction: telling someone the pipeline removed something it never
+    /// touched is the same class of false statement as reporting a surviving
+    /// secret as removed.
+    /// </summary>
+    [Fact]
+    public void ProseResemblingTheTokenIsNotClaimedAsARedaction()
+    {
+        Assert.Equal(0, MarkerCount("<REDACTED_ANYTHING_ELSE>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_PUBLIC_KEY>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_>"));
+        Assert.Equal(0, MarkerCount("<REDACTED>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_UNCLOSED"));
+    }
+
+    /// <summary>
+    /// Every FIXED token the pipeline emits must be matched. The literal arm's
+    /// price is that a NEW token would go unmarked exactly as this one did;
+    /// this is the guard on that price.
+    /// </summary>
+    [Fact]
+    public void EveryFixedTokenThePipelineEmitsIsMatched()
+    {
+        foreach (string token in new[]
+        {
+            "[REDACTED]",
+            "[REDACTED:aws_secret_key]",
+            "[REDACTED:person_name]",
+            "[REDACTED_PATH]",
+            "<REDACTED_PRIVATE_KEY>",
+        })
+        {
+            Assert.Equal(1, MarkerCount("before " + token + " after"));
+        }
+    }
+
+    private static int MarkerCount(string text)
+    {
+        int count = 0;
+        foreach (TranscriptRun run in TranscriptMarkers.Split(text))
+        {
+            if (run.IsMarker)
+            {
+                count++;
+            }
+        }
+        return count;
     }
 
     [Fact]

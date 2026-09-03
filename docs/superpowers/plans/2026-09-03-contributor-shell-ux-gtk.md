@@ -69,7 +69,8 @@ looking for them:
 - Consumes: plan 1 Tasks 5, 6, 7.
 - Produces: `QueueEntry.project_path: String`, `QueueEntry.session_path: Option<String>`,
   `PreviewSummary.redactions_distinct: BTreeMap<String, u32>`,
-  `HistoryRecord.project_id: String`, `ProjectRow.project_path: String`.
+  `HistoryRecord.project_id: String`, `model::Project.project_path: String`
+  (this crate's `list_projects` row is `Project`; there is no `ProjectRow`).
 
 Every field on these structs already carries `#[serde(default)]`, so
 tolerating an older daemon is free -- but assert it anyway, because that is
@@ -192,8 +193,16 @@ In `PreviewSummary` after `redactions`:
     pub redactions_distinct: std::collections::BTreeMap<String, u32>,
 ```
 
-In `HistoryRecord` before `project_label`, and in `ProjectRow` beside its
-label, with the doc comments from the spec's §5 and §1.1 respectively.
+In `HistoryRecord` before `project_label`, and in `model::Project` beside
+its label, with the doc comments from the spec's §5 and §1.1 respectively.
+
+`QueueEntry`'s own doc comment currently reads "`project_key` and `path` are
+absent from the wire by design; they are absent from this struct for the
+same reason." That stops being true the moment `project_path` lands. Amend
+it in the same commit: the daemon relaxed the rule in exactly one place
+(`ipc::display_path`) for a rendered, `~`-abbreviated path, while
+`project_key` and `path` themselves stay absent for the reason they always
+were.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -711,7 +720,7 @@ pub const ALL_FOLDERS: &str = "All folders";
 /// A folder row's right-hand figures: how much is waiting, and how big.
 pub fn folder_summary(sessions: usize, bytes: u64) -> String {
     let unit = if sessions == 1 { "session" } else { "sessions" };
-    format!("{sessions} {unit}  \u{00b7}  {}", crate::format::bytes(bytes))
+    format!("{sessions} {unit}  \u{00b7}  {}", crate::model::human_bytes(bytes))
 }
 ```
 
@@ -725,9 +734,8 @@ with tests beside the other `copy.rs` tests:
     }
 ```
 
-Use whatever the crate's existing byte formatter is called rather than
-`crate::format::bytes` if that is not its name -- `manifest_for` already
-formats byte figures, so follow it.
+`model::human_bytes` is the crate's byte formatter -- there is no
+`crate::format` module. Use it rather than adding a second one.
 
 - [ ] **Step 2: Hold the location on `App`**
 
@@ -889,20 +897,32 @@ git commit -m "Open the preview from anywhere on the card"
 
 ---
 
-### Task 6: Mark redactions in the transcript
+### Task 6: Name the chips this shell already draws
+
+The spec's 3.1 is a correction: **all three shells already mark the
+redactor's tokens**. This one does it in `transcript_paging::marker_spans`,
+which `ui/preview.rs` walks to apply a gold text tag per marker. That scan is
+deliberately shared with the chunker so a marker is never cut in half, and
+`every_fixed_token_the_pipeline_emits_is_matched` is the guard that keeps it
+covering all five fixed tokens. A shell must not add a second marker pass,
+restyle the existing chips, or bypass the chunk-boundary contract.
+
+What is missing is the *naming*: every chip today draws as the same
+anonymous token. This task adds one pure function that turns a matched token
+into words, and calls it from the one place the tag is already applied.
 
 **Files:**
-- Create: `crates/trace-commons-contributor-gtk/src/placeholders.rs`
-- Modify: crate root (`mod placeholders;`)
-- Modify: `crates/trace-commons-contributor-gtk/src/ui/preview.rs` (transcript markup)
-- Test: `placeholders.rs`, inline
+- Create: `crates/trace-commons-contributor-gtk/src/marker_names.rs`
+- Modify: `crates/trace-commons-contributor-gtk/src/lib.rs` (`pub mod marker_names;`)
+- Modify: `crates/trace-commons-contributor-gtk/src/ui/preview.rs:1287-1298` (the existing `marker_spans` loop)
+- Test: `marker_names.rs`, inline
 
 **Interfaces:**
-- Consumes: the preview body string.
+- Consumes: `transcript_paging::marker_spans` -- the existing scan,
+  unchanged. No new scan, no new pattern, no new constant.
 - Produces:
-  - `pub struct Placeholder { pub start: usize, pub end: usize, pub label: String, pub ordinal: u32 }`
-  - `pub fn scan(body: &str) -> Vec<Placeholder>`
-  - `pub fn display(label: &str) -> String`
+  - `pub struct MarkerName { pub text: String, pub ordinal: Option<u32> }`
+  - `pub fn name_of(token: &str) -> MarkerName`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -912,61 +932,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_body_with_no_placeholders_scans_to_nothing() {
-        assert!(scan("just some ordinary text").is_empty());
-        assert!(scan("").is_empty());
+    fn the_numbered_form_carries_a_label_and_an_ordinal() {
+        let n = name_of("<PRIVATE_LOCAL_PATH_3>");
+        assert_eq!(n.text, "local path");
+        assert_eq!(n.ordinal, Some(3));
     }
 
+    /// `apply_placeholder_regex` mints the numbered form for exactly two
+    /// labels: `local_path` and `private_email`.
     #[test]
-    fn a_single_placeholder_is_found() {
-        let body = "ran the build in <PRIVATE_LOCAL_PATH_1> and stopped";
-        let found = scan(body);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].label, "LOCAL_PATH");
-        assert_eq!(found[0].ordinal, 1);
-        assert_eq!(&body[found[0].start..found[0].end], "<PRIVATE_LOCAL_PATH_1>");
-    }
-
-    #[test]
-    fn the_display_name_is_human_readable() {
-        assert_eq!(display("CONTEXTUAL_ENTROPY"), "contextual entropy");
-    }
-
-    #[test]
-    fn multiple_placeholders_are_found_in_order() {
-        let found = scan("<PRIVATE_SECRET_1> then <PRIVATE_LOCAL_PATH_3> then <PRIVATE_SECRET_1>");
-        assert_eq!(
-            found.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(),
-            ["SECRET", "LOCAL_PATH", "SECRET"]
-        );
-        assert_eq!(found.iter().map(|p| p.ordinal).collect::<Vec<_>>(), [1, 3, 1]);
+    fn the_other_numbered_label_is_named_too() {
+        assert_eq!(name_of("<PRIVATE_PRIVATE_EMAIL_1>").text, "private email");
     }
 
     /// The ordinal is the last underscore-delimited run of digits, so a
     /// label that itself ends in a number must not steal it.
     #[test]
     fn a_label_containing_digits_is_parsed_correctly() {
-        let found = scan("<PRIVATE_SHA256_KEY_7>");
-        assert_eq!(found[0].label, "SHA256_KEY");
-        assert_eq!(found[0].ordinal, 7);
+        let n = name_of("<PRIVATE_SHA256_KEY_7>");
+        assert_eq!(n.text, "sha256 key");
+        assert_eq!(n.ordinal, Some(7));
     }
 
+    /// The five fixed tokens, from the same sources as
+    /// `every_fixed_token_the_pipeline_emits_is_matched`. None carries an
+    /// ordinal -- there is no second number to report, and inventing one
+    /// would claim a distinctness the token does not have.
     #[test]
-    fn text_that_merely_looks_like_a_placeholder_is_ignored() {
-        assert!(scan("<PRIVATE>").is_empty());
-        assert!(scan("<PRIVATE_LOCAL_PATH_>").is_empty());
-        assert!(scan("<private_local_path_1>").is_empty());
-        assert!(scan("PRIVATE_LOCAL_PATH_1").is_empty());
+    fn every_fixed_token_is_named_and_carries_no_ordinal() {
+        for (token, expected) in [
+            ("[REDACTED]", "something removed"),
+            ("[REDACTED:aws_secret_key]", "aws secret key"),
+            ("[REDACTED:person_name]", "person name"),
+            ("[REDACTED_PATH]", "URL path"),
+            ("<REDACTED_PRIVATE_KEY>", "private key"),
+        ] {
+            let n = name_of(token);
+            assert_eq!(n.text, expected, "{token}");
+            assert_eq!(n.ordinal, None, "{token} carries no ordinal");
+        }
     }
 
-    /// Offsets are BYTE offsets into the body, and a transcript is full of
-    /// multi-byte text. Slicing at a char index would panic or cut a
-    /// codepoint in half.
+    /// Labels are an open, namespaced vocabulary. A token this build has no
+    /// words for must still say that something left, never nothing.
     #[test]
-    fn offsets_are_byte_offsets_and_survive_multibyte_text() {
-        let body = "héllo <PRIVATE_SECRET_1> wörld";
-        let found = scan(body);
-        assert_eq!(&body[found[0].start..found[0].end], "<PRIVATE_SECRET_1>");
+    fn an_unrecognized_token_still_says_something_left() {
+        let n = name_of("[REDACTED:some_future_detector]");
+        assert_eq!(n.text, "some future detector");
+        assert_eq!(n.ordinal, None);
+    }
+
+    /// Drives the naming from the shared scan rather than from a second
+    /// list that could drift away from it.
+    #[test]
+    fn every_token_the_scan_finds_is_named() {
+        let body = "<PRIVATE_LOCAL_PATH_1> [REDACTED] [REDACTED:aws_secret_key] \
+                    [REDACTED_PATH] <REDACTED_PRIVATE_KEY>";
+        let spans = crate::transcript_paging::marker_spans(body);
+        assert_eq!(spans.len(), 5);
+        for span in spans {
+            assert!(!name_of(&body[span]).text.is_empty());
+        }
     }
 }
 ```
@@ -974,106 +1000,62 @@ mod tests {
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml placeholders
+cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml marker_names
 ```
 
-Expected: `cannot find function scan in this scope`.
+Expected: `cannot find function name_of in this scope`.
+
+If `every_token_the_scan_finds_is_named` reports fewer than 5 spans, this
+checkout predates the widened pattern -- `<REDACTED_PRIVATE_KEY>` was
+unmatched until it was added. Rebase rather than working around it here; the
+pattern is the chunker's too.
 
 - [ ] **Step 3: Write the implementation**
 
-```rust
-//! Finding the redactor's placeholders in a preview body.
-//!
-//! `DeterministicTraceRedactor` does not delete a matched value -- it
-//! substitutes `<PRIVATE_<LABEL>_<n>>`, one token per distinct value, reused
-//! wherever that value recurs. Those tokens have always been in the bytes
-//! the daemon returns; this shell just rendered them as ordinary transcript
-//! text and the contributor scrolled past them.
-//!
-//! Marking them is the whole of "show me what got removed", and it beats a
-//! list because it also answers *where*. No new protocol field, no new
-//! content across any boundary: the token is already what is on screen.
-//!
-//! What it must not be allowed to imply: a region with no placeholder is not
-//! a region with nothing sensitive in it. The detector scans every leaf and
-//! the rewriter reaches only typed fields, so highlighting makes the app look
-//! more thorough than it is. `copy::SCRUBBING_CAVEAT` is what says so, and it
-//! belongs beside these marks.
+`marker_names.rs` takes the matched token text -- nothing else -- and
+returns words. No regex: this crate has none and the shapes are all
+prefix/suffix work.
 
-/// One place the redactor removed a value.
-pub struct Placeholder {
-    /// BYTE offsets into the body this was scanned from. A transcript is
-    /// full of multi-byte text and a char index would slice it wrongly.
-    pub start: usize,
-    pub end: usize,
-    /// The raw label as the redactor spelled it: `LOCAL_PATH`, `SECRET`.
-    pub label: String,
-    /// Which distinct value of that label this is. The redactor mints one
-    /// placeholder per value, so the same ordinal twice is the same original
-    /// string twice.
-    pub ordinal: u32,
-}
+- `<PRIVATE_<LABEL>_<n>>`: the label lowercased with `_` as a space, and `n`
+  as the ordinal. The redactor mints one token per distinct value and reuses
+  it, so two chips with the same ordinal are the same original string, which
+  is the fact worth surfacing.
+- `<REDACTED_PRIVATE_KEY>`: `"private key"`, no ordinal.
+- `[REDACTED:<label>]`: the label lowercased with `_` as a space, no ordinal.
+- `[REDACTED_PATH]`: `"URL path"` -- it replaces a URL's path component, not
+  a local one.
+- `[REDACTED]` and anything else the scan matched: `"something removed"`.
+  Never empty, and never a guess at a category.
 
-/// The label as a person reads it.
-pub fn display(label: &str) -> String {
-    label.to_lowercase().replace('_', " ")
-}
+The module doc records the two things it must not be read as saying: a
+region with no chip is not a region with nothing sensitive in it -- the
+detector scans every leaf while the rewriter reaches only typed fields, and
+`copy::residual_risk_line` is the sentence that says so -- and a name is not
+a distinct count. Only `local_path` and `private_email` mint placeholders,
+so only those can report "the same value twice".
 
-/// Every placeholder in `body`, left to right.
-///
-/// Written as a hand-rolled scan rather than a regex because this crate has
-/// no regex dependency and adding one for eight lines is not a trade worth
-/// making. Deliberately strict about the shape: an uppercase label of
-/// letters, digits and underscores ending on a non-underscore, then the
-/// ordinal. A transcript can contain prose that looks approximately like a
-/// token, and marking a contributor's own sentence as a redaction would be a
-/// lie about what the scrubber did.
-pub fn scan(body: &str) -> Vec<Placeholder> {
-    const OPEN: &str = "<PRIVATE_";
-    let mut out = Vec::new();
-    let mut from = 0usize;
-    while let Some(rel) = body[from..].find(OPEN) {
-        let start = from + rel;
-        let after = start + OPEN.len();
-        let Some(close_rel) = body[after..].find('>') else { break };
-        let close = after + close_rel;
-        let inner = &body[after..close];
-        from = close + 1;
+- [ ] **Step 4: Put the name on the chip**
 
-        let Some(split) = inner.rfind('_') else { continue };
-        let (label, ordinal) = (&inner[..split], &inner[split + 1..]);
-        if label.is_empty() || ordinal.is_empty() {
-            continue;
-        }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        {
-            continue;
-        }
-        if label.ends_with('_') {
-            continue;
-        }
-        let Ok(ordinal) = ordinal.parse::<u32>() else { continue };
-        out.push(Placeholder {
-            start,
-            end: close + 1,
-            label: label.to_string(),
-            ordinal,
-        });
-    }
-    out
-}
-```
+In `ui/preview.rs`, the same forward pass over `marker_spans` that already
+applies the gold `tag`, with the same tag and the same character-offset
+carry. Only the chip's *text* changes: before applying the tag, replace the
+span's text in the buffer with `name_of(&text[span]).text`, suffixed with
+` #<ordinal>` when there is one, and tag the replacement's range instead.
 
-- [ ] **Step 4: Mark them in the sheet**
+Replace the text through the buffer's own delete/insert so the running
+`chars` offset is corrected by the length difference -- the pass is
+one-directional and a substitution that changed the length without
+adjusting the counter would drag every later tag off its marker.
 
-The transcript is rendered with Pango markup (`label.set_markup`). Wrap each
-scanned range in a span using the gold tone the CSS contract already defines,
-building the markup by walking the scan results and escaping everything
-between them with `glib::markup_escape_text`. Escaping is not optional: the
-body is trace content and an unescaped `&` or `<` in it would either break
-the markup or let transcript text inject spans.
+Two consequences to carry rather than discover:
+
+1. The transcript's on-screen text is no longer byte-identical to the body.
+   The copy-all path is unaffected: it copies the body string, not the
+   buffer. Check `copy_all`'s handler before relying on that.
+2. Chunk residency and the row estimate are computed from the body's bytes,
+   not from what the buffer holds, so this changes neither.
+
+Keep the residual-risk sentence visible on the same tab as the marks.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1087,10 +1069,10 @@ Expected: all pass.
 
 ```bash
 cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
-git add crates/trace-commons-contributor-gtk/src/placeholders.rs \
-        crates/trace-commons-contributor-gtk/src/ui/preview.rs \
-        crates/trace-commons-contributor-gtk/src/main.rs
-git commit -m "Mark each redaction where it happened in the transcript"
+git add crates/trace-commons-contributor-gtk/src/marker_names.rs \
+        crates/trace-commons-contributor-gtk/src/lib.rs \
+        crates/trace-commons-contributor-gtk/src/ui/preview.rs
+git commit -m "Say what each redaction chip stood for"
 ```
 
 ---
@@ -1418,19 +1400,24 @@ In `ui/queue.rs`, wrap the `copy::NOTHING_MATCHED` chip in a flat
 `gtk::Button` whose click calls
 `preview::open_with_search(app, index, None, Some("search".into()))` -- the
 tab name is the one registered at `ui/preview.rs:142`. Extend
-`copy::SCRUBBING_CAVEAT`'s zero-redaction sentence with the clause pointing
-at search, matching the macOS wording exactly, and assert the two agree in a
-`copy.rs` test:
+`copy::residual_risk_line`'s zero-redaction arm with the clause pointing at
+search, matching the macOS wording exactly, and assert it in a `copy.rs`
+test beside `the_row_caveat_varies_and_still_concedes`, which asserts over
+the same function and must keep passing:
 
 ```rust
     #[test]
     fn the_nothing_matched_line_offers_a_next_step() {
         assert!(
-            scrubbing_caveat_line(0).to_lowercase().contains("search"),
+            residual_risk_line(0).to_lowercase().contains("search"),
             "the line must point at the thing to do about it"
         );
     }
 ```
+
+There is no `copy::SCRUBBING_CAVEAT`; `residual_risk_line(total_redactions)`
+is the whole of this shell's caveat copy, and its zero case is the one that
+already carries the attention tone.
 
 - [ ] **Step 6: Run the tests and commit**
 
@@ -1633,7 +1620,7 @@ Confirm by hand, and report in the PR body:
 
 ```bash
 git push -u origin shell-ux-gtk
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, GTK" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-gtk.md.
 
@@ -1655,7 +1642,7 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.2 folder detail, `session_path` | Task 4 |
 | §2.3 `Submit all` at n = 1 | Task 4 Step 4 |
 | §2.4 card click | Task 5 |
-| §3.1 placeholders marked | Task 6 |
+| §3.1 chips named (already marked) | Task 6 |
 | §3.1b removed-summary panel | Task 6b |
 | §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts | Task 2 |
@@ -1672,8 +1659,9 @@ what to look for.
 
 **Type consistency check.** `redaction_tally::{line, total}` defined in Task
 2, called in Task 2 Step 4. `queue_folders::{Folder, Location, group,
-resolve}` defined in Task 3, used in Tasks 4 and 8. `placeholders::{scan,
-display, Placeholder}` defined and used in Task 6. `original_search::{Outcome,
+resolve}` defined in Task 3, used in Tasks 4 and 8. `marker_names::{name_of,
+MarkerName}` defined and used in Task 6; the scan it names is the existing
+`transcript_paging::marker_spans`. `original_search::{Outcome,
 classify, sentence, is_alarming}` defined in Task 7 Steps 1-2 and used in
 Step 4; `Backend::search_original` defined in Step 3 and called in Step 4
 with `(&str, &str) -> Option<u32>` in both. `shield::{Shield, state}` defined

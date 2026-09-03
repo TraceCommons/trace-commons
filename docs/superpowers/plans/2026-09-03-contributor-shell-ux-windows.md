@@ -701,20 +701,40 @@ git commit -m "Open the preview from anywhere on the card"
 
 ---
 
-### Task 6: Mark redactions in the transcript
+### Task 6: Name the chips this shell already draws
+
+The spec's 3.1 is a correction: **all three shells already mark the
+redactor's tokens**. This one does it in
+`TraceCommons.Interop.TranscriptMarkers.Split`, which returns the transcript
+as plain runs and marker runs for the sheet to draw. That pattern is
+deliberately shared with the chunker so a marker is never cut in half. A
+shell must not add a second marker pass, restyle the existing chips, or
+bypass the chunk-boundary contract.
+
+What is missing is the *naming*: every chip today draws as the same
+anonymous token. This task adds one pure function that turns a matched token
+into words, and calls it where the marker runs are already drawn.
 
 **Files:**
-- Create: `windows/src/TraceCommons.Interop/RedactionPlaceholders.cs`
+- Create: `windows/src/TraceCommons.Interop/RedactionMarkerNames.cs`
 - Modify: `windows/src/TraceCommons.App/ViewModels/PreviewSheetViewModel.cs`, `Controls/PreviewSheet.xaml`
-- Test: `windows/tests/TraceCommons.Interop.Tests/RedactionPlaceholdersTests.cs` (create)
+- Test: `windows/tests/TraceCommons.Interop.Tests/RedactionMarkerNamesTests.cs` (create)
 
 **Interfaces:**
-- Consumes: the preview transcript string.
+- Consumes: `TranscriptMarkers.Split` -- the existing scan, unchanged. No
+  new scan, no new pattern, no new constant.
 - Produces:
-  - `public sealed record RedactionPlaceholder(int Start, int Length, string Label, int Ordinal) { public string Display { get; } }`
-  - `public static IReadOnlyList<RedactionPlaceholder> Scan(string body)`
+  - `public readonly record struct RedactionMarkerName(string Text, int? Ordinal)`
+  - `public static RedactionMarkerName RedactionMarkerNames.Of(string token)`
+
+It goes in `TraceCommons.Interop` rather than `TraceCommons.App` because
+`Interop.Tests` references only that project -- the WinUI app cannot be
+built, let alone referenced, on the macOS and Linux machines this suite runs
+on.
 
 - [ ] **Step 1: Write the failing tests**
+
+Create `windows/tests/TraceCommons.Interop.Tests/RedactionMarkerNamesTests.cs`:
 
 ```csharp
 using TraceCommons.Interop;
@@ -723,83 +743,88 @@ using Xunit;
 namespace TraceCommons.Interop.Tests;
 
 /// <summary>
-/// The redactor leaves a typed placeholder where it removed a value, and
-/// those tokens are already in the transcript the ABI hands us -- rendered,
-/// until now, as ordinary text. Finding them is what lets the preview say
-/// WHERE something was cut, which is more than a category count can.
+/// The scan already finds every marker. What it does not do is say what one
+/// was. These are the tokens <c>TranscriptMarkers</c>' pattern matches, and
+/// every one of them has to come back with words a contributor can read.
 /// </summary>
-public class RedactionPlaceholdersTests
+public class RedactionMarkerNamesTests
 {
     [Fact]
-    public void ABodyWithNoPlaceholdersScansToNothing()
+    public void TheNumberedFormCarriesALabelAndAnOrdinal()
     {
-        Assert.Empty(RedactionPlaceholders.Scan("just some ordinary text"));
-        Assert.Empty(RedactionPlaceholders.Scan(""));
-    }
-
-    [Fact]
-    public void ASinglePlaceholderIsFound()
-    {
-        const string body = "ran the build in <PRIVATE_LOCAL_PATH_1> and stopped";
-        var found = RedactionPlaceholders.Scan(body);
-        Assert.Single(found);
-        Assert.Equal("LOCAL_PATH", found[0].Label);
-        Assert.Equal(1, found[0].Ordinal);
-        Assert.Equal("<PRIVATE_LOCAL_PATH_1>", body.Substring(found[0].Start, found[0].Length));
-    }
-
-    [Fact]
-    public void TheDisplayNameIsHumanReadable()
-        => Assert.Equal(
-            "contextual entropy",
-            RedactionPlaceholders.Scan("<PRIVATE_CONTEXTUAL_ENTROPY_2>")[0].Display);
-
-    [Fact]
-    public void MultiplePlaceholdersAreFoundInOrder()
-    {
-        var found = RedactionPlaceholders.Scan(
-            "<PRIVATE_SECRET_1> then <PRIVATE_LOCAL_PATH_3> then <PRIVATE_SECRET_1>");
-        Assert.Equal(new[] { "SECRET", "LOCAL_PATH", "SECRET" },
-            System.Linq.Enumerable.ToArray(
-                System.Linq.Enumerable.Select(found, p => p.Label)));
-        Assert.Equal(new[] { 1, 3, 1 },
-            System.Linq.Enumerable.ToArray(
-                System.Linq.Enumerable.Select(found, p => p.Ordinal)));
+        var name = RedactionMarkerNames.Of("<PRIVATE_LOCAL_PATH_3>");
+        Assert.Equal("local path", name.Text);
+        Assert.Equal(3, name.Ordinal);
     }
 
     /// <summary>
-    /// The ordinal is the last underscore-delimited run of digits, so a label
-    /// that itself ends in a number must not steal it.
+    /// <c>apply_placeholder_regex</c> mints the numbered form for exactly
+    /// two labels: <c>local_path</c> and <c>private_email</c>.
+    /// </summary>
+    [Fact]
+    public void TheOtherNumberedLabelIsNamedToo()
+        => Assert.Equal("private email", RedactionMarkerNames.Of("<PRIVATE_PRIVATE_EMAIL_1>").Text);
+
+    /// <summary>
+    /// The ordinal is the last underscore-delimited run of digits, so a
+    /// label that itself ends in a number must not steal it.
     /// </summary>
     [Fact]
     public void ALabelContainingDigitsIsParsedCorrectly()
     {
-        var found = RedactionPlaceholders.Scan("<PRIVATE_SHA256_KEY_7>");
-        Assert.Equal("SHA256_KEY", found[0].Label);
-        Assert.Equal(7, found[0].Ordinal);
-    }
-
-    [Fact]
-    public void TextThatMerelyLooksLikeAPlaceholderIsIgnored()
-    {
-        Assert.Empty(RedactionPlaceholders.Scan("<PRIVATE>"));
-        Assert.Empty(RedactionPlaceholders.Scan("<PRIVATE_LOCAL_PATH_>"));
-        Assert.Empty(RedactionPlaceholders.Scan("<private_local_path_1>"));
-        Assert.Empty(RedactionPlaceholders.Scan("PRIVATE_LOCAL_PATH_1"));
+        var name = RedactionMarkerNames.Of("<PRIVATE_SHA256_KEY_7>");
+        Assert.Equal("sha256 key", name.Text);
+        Assert.Equal(7, name.Ordinal);
     }
 
     /// <summary>
-    /// Offsets index a C# string, which is UTF-16. The ABI reports UTF-8 byte
-    /// offsets elsewhere and <c>TcPreview.Search</c> converts them; this scan
-    /// runs on the already-converted string, so its offsets are UTF-16 and
-    /// must survive text outside the BMP.
+    /// The five fixed tokens, from the same sources as the GTK scanner's
+    /// <c>every_fixed_token_the_pipeline_emits_is_matched</c> guard. None
+    /// carries an ordinal -- there is no second number to report, and
+    /// inventing one would claim a distinctness the token does not have.
+    /// </summary>
+    [Theory]
+    [InlineData("[REDACTED]", "something removed")]
+    [InlineData("[REDACTED:aws_secret_key]", "aws secret key")]
+    [InlineData("[REDACTED:person_name]", "person name")]
+    [InlineData("[REDACTED_PATH]", "URL path")]
+    [InlineData("<REDACTED_PRIVATE_KEY>", "private key")]
+    public void EveryFixedTokenIsNamedAndCarriesNoOrdinal(string token, string expected)
+    {
+        var name = RedactionMarkerNames.Of(token);
+        Assert.Equal(expected, name.Text);
+        Assert.Null(name.Ordinal);
+    }
+
+    /// <summary>
+    /// Labels are an open, namespaced vocabulary. A token this build has no
+    /// words for must still say that something left, never nothing.
     /// </summary>
     [Fact]
-    public void OffsetsIndexTheManagedStringIncludingAstralText()
+    public void AnUnrecognizedTokenStillSaysSomethingLeft()
     {
-        const string body = "h\U0001F600llo <PRIVATE_SECRET_1> world";
-        var found = RedactionPlaceholders.Scan(body);
-        Assert.Equal("<PRIVATE_SECRET_1>", body.Substring(found[0].Start, found[0].Length));
+        var name = RedactionMarkerNames.Of("[REDACTED:some_future_detector]");
+        Assert.Equal("some future detector", name.Text);
+        Assert.Null(name.Ordinal);
+    }
+
+    /// <summary>
+    /// Drives the naming from the shared scan rather than from a second list
+    /// that could drift away from it.
+    /// </summary>
+    [Fact]
+    public void EveryTokenTheScanFindsIsNamed()
+    {
+        const string body =
+            "<PRIVATE_LOCAL_PATH_1> [REDACTED] [REDACTED:aws_secret_key] "
+            + "[REDACTED_PATH] <REDACTED_PRIVATE_KEY>";
+        var markers = System.Linq.Enumerable.ToList(
+            System.Linq.Enumerable.Where(TranscriptMarkers.Split(body), r => r.IsMarker));
+        Assert.Equal(5, markers.Count);
+        foreach (var run in markers)
+        {
+            Assert.NotEmpty(RedactionMarkerNames.Of(body.Substring(run.Start, run.Length)).Text);
+        }
     }
 }
 ```
@@ -807,35 +832,52 @@ public class RedactionPlaceholdersTests
 - [ ] **Step 2: Run to verify it fails, then implement**
 
 ```bash
-cd windows && dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --filter RedactionPlaceholdersTests
+cd windows && dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --filter RedactionMarkerNamesTests
 ```
 
-Write `RedactionPlaceholders.cs` with the class comment recording that the
-redactor substitutes rather than deletes, that the tokens were always in the
-transcript, and the caveat that a region with no placeholder is not a region
-with nothing sensitive in it -- the detector scans every leaf while the
-rewriter reaches only typed fields, so marking makes the app look more
-thorough than it is, and the scrubbing caveat belongs beside the marks.
+If `EveryTokenTheScanFindsIsNamed` reports fewer than 5 markers, this
+checkout predates the widened pattern -- `<REDACTED_PRIVATE_KEY>` was
+unmatched until it was added. Rebase rather than working around it here; the
+pattern is the chunker's too.
 
-Use a compiled `Regex` with the pattern `<PRIVATE_([A-Z0-9_]*[A-Z0-9])_([0-9]+)>`.
-The `[A-Z0-9_]*[A-Z0-9]` shape is what forces the label to end on a
-non-underscore so the final `_<digits>` is the ordinal.
+Write `RedactionMarkerNames.cs`. It takes the matched token text -- nothing
+else -- and returns words:
 
-- [ ] **Step 3: Mark them in the sheet**
+- `<PRIVATE_<LABEL>_<n>>`: the label lowercased with `_` as a space, and `n`
+  as the ordinal. The redactor mints one token per distinct value and reuses
+  it, so two chips with the same ordinal are the same original string.
+- `<REDACTED_PRIVATE_KEY>`: `"private key"`, no ordinal.
+- `[REDACTED:<label>]`: the label lowercased with `_` as a space, no ordinal.
+- `[REDACTED_PATH]`: `"URL path"` -- it replaces a URL's path component, not
+  a local one.
+- `[REDACTED]` and anything else the scan matched: `"something removed"`.
+  Never empty, and never a guess at a category.
 
-The transcript is displayed as text. Replace it with a `RichTextBlock` (or
-inlines on the existing `TextBlock`) built by walking the scan results: plain
-runs between placeholders, and a gold-toned run for each placeholder. Keep
-the scrubbing caveat visible on the same tab.
+The class comment records the two things it must not be read as saying: a
+region with no chip is not a region with nothing sensitive in it -- the
+detector scans every leaf while the rewriter reaches only typed fields --
+and a name is not a distinct count. Only `local_path` and `private_email`
+mint placeholders, so only those can report "the same value twice".
+
+- [ ] **Step 3: Put the name on the chip**
+
+Wherever the view model turns `TranscriptMarkers.Split` runs into inlines,
+a marker run's text becomes `Of(token).Text`, suffixed with ` #<ordinal>`
+when there is one. Same tone, same weight, same runs: only the string
+changes. Plain runs are untouched.
+
+The transcript's on-screen text is no longer byte-identical to the body. Any
+copy-to-clipboard path must keep copying `Transcript`, the body itself,
+rather than the inlines. Keep the scrubbing caveat visible on the same tab.
 
 - [ ] **Step 4: Run the tests and commit**
 
 ```bash
 cd windows && dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj
-git add windows/src/TraceCommons.Interop/RedactionPlaceholders.cs \
-        windows/tests/TraceCommons.Interop.Tests/RedactionPlaceholdersTests.cs \
+git add windows/src/TraceCommons.Interop/RedactionMarkerNames.cs \
+        windows/tests/TraceCommons.Interop.Tests/RedactionMarkerNamesTests.cs \
         windows/src/TraceCommons.App/
-git commit -m "Mark each redaction where it happened in the transcript"
+git commit -m "Say what each redaction chip stood for"
 ```
 
 ---
@@ -1177,16 +1219,31 @@ In `RunSearch`, after the redacted-body matches are counted, call
 
 - [ ] **Step 6: Make the nothing-matched chip a control**
 
-Turn the chip into a button that opens the preview on its search tab. Extend
-the scrubbing-caveat copy's zero-redaction sentence with the clause pointing
-at search, matching the other two shells word for word, and assert it in the
-copy tests:
+Turn the chip into a button that opens the preview on its search tab, and
+extend the caveat copy with the clause pointing at search, matching the
+other two shells word for word.
+
+Add a new `public const string NothingMatched` to
+`TraceCommons.Interop.ScrubDetectorCopy`, which is where this shell's shared
+caveat sentence (`ResidualRisk`) already lives and is the only side of the
+boundary `Interop.Tests` can reach:
 
 ```csharp
     [Fact]
     public void TheNothingMatchedLineOffersANextStep()
-        => Assert.Contains("search", ScrubbingCaveat.RowLine(0), System.StringComparison.OrdinalIgnoreCase);
+        => Assert.Contains(
+            "search",
+            ScrubDetectorCopy.NothingMatched,
+            System.StringComparison.OrdinalIgnoreCase);
 ```
+
+`PreviewSheetViewModel.ScrubbingCaveat` is a bare `const string` with no
+per-count variants, and it sits in `TraceCommons.App`, a WinUI project this
+suite cannot reference at all. Do not write the test against it, and do not
+hand-write a second copy of the sentence there: bind the view model's
+caveat to the `Interop` constant, the way
+`TheSettingsScreenAsksForTheRowRatherThanWritingIt` already requires of the
+settings screen.
 
 - [ ] **Step 7: Run the tests and commit**
 
@@ -1318,7 +1375,7 @@ Via `win-exec.sh`. Confirm, and report in the PR body:
 
 ```bash
 git push -u origin shell-ux-windows
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Folder-first queue and scrubber transparency, Windows" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-windows.md.
 
@@ -1340,7 +1397,7 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.2 folder detail, `session_path` | Task 4 |
 | §2.3 `Submit all` at n = 1 | Task 3 (`ShowSubmitAll`) |
 | §2.4 card click | Task 5 |
-| §3.1 placeholders marked | Task 6 |
+| §3.1 chips named (already marked) | Task 6 |
 | §3.1b removed-summary panel | Task 6b |
 | §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts | Task 2 |
@@ -1360,8 +1417,9 @@ verified would be worse than pointing precisely at where to look.
 **Type consistency check.** `RedactionTally.{Line, Total, NothingMatched}`
 defined in Task 2, used in Task 2 Step 4. `ProjectQueueGroup.{ProjectPath,
 SizeBytes, ShowSubmitAll}` and `QueueLocation` / `QueueNavigation.Resolve`
-defined in Task 3, used in Tasks 4 and 9. `RedactionPlaceholders.Scan`
-defined and used in Task 6. `RecentSearches.{Remember, Current, Reset}`
+defined in Task 3, used in Tasks 4 and 9. `RedactionMarkerNames.Of`
+defined and used in Task 6; the scan it names is the existing
+`TranscriptMarkers.Split`. `RecentSearches.{Remember, Current, Reset}`
 defined in Task 7 Step 3, used in Steps 1 and 3.
 `OriginalSearchOutcome.Classify(int, int?)` defined in Task 8 Step 2, called
 in Step 5; `tc_search_original` declared in Step 3 and called through
