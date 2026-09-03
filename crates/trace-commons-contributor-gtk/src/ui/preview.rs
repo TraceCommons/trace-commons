@@ -1764,26 +1764,47 @@ fn chunk_view(text: &str) -> gtk::TextView {
 /// Name each redaction mark, on hover.
 ///
 /// `highlight_redactions` makes a mark legible; this says WHAT was taken out
-/// there. The two are separate because they mark different sets: the wash
-/// covers `[REDACTED...]` too, while only a `<PRIVATE_LABEL_n>` token
-/// carries a label to report -- see `crate::placeholders`.
+/// there, which is the half a `GtkTextTag` cannot carry. Both walk the same
+/// spans -- `transcript_paging::marker_spans`, which the chunker also uses
+/// -- so there is no second marker pass, and no set of marks one of them
+/// knows about and the other does not.
 ///
-/// The ranges are scanned once and converted to CHARACTER offsets here,
-/// because that is the unit a `GtkTextIter` counts in while
-/// `placeholders::scan` reports bytes. Doing it per motion event would
-/// re-walk the chunk on every pixel of a hover.
+/// Three forms, three amounts of information, and none of them padded out
+/// with a guess: a numbered placeholder names its category and, on a repeat
+/// of the same ordinal, says it is the same original value; a labelled
+/// `[REDACTED:...]` names its category only; a bare `[REDACTED]` says just
+/// that something was removed. See `crate::placeholders`.
+///
+/// The ranges are converted to CHARACTER offsets here, because that is the
+/// unit a `GtkTextIter` counts in while the spans are bytes. Done once per
+/// chunk rather than per motion event, which would re-walk the chunk on
+/// every pixel of a hover.
 fn label_placeholders(view: &gtk::TextView, text: &str) {
     let mut marks: Vec<(i32, i32, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
     let mut byte = 0usize;
     let mut chars = 0i32;
     for found in crate::placeholders::scan(text) {
         chars += text[byte..found.start].chars().count() as i32;
         let width = text[found.start..found.end].chars().count() as i32;
-        marks.push((
-            chars,
-            chars + width,
-            copy::redaction_mark_tooltip(&crate::placeholders::display(&found.label)),
-        ));
+        let name = match (&found.label, found.ordinal) {
+            (Some(label), Some(ordinal)) => {
+                let kind = crate::placeholders::display(label);
+                // Only a numbered placeholder supports this claim: the
+                // redactor mints one token per DISTINCT value and reuses it
+                // wherever that value recurs.
+                if seen.insert((label.clone(), ordinal)) {
+                    copy::redaction_mark_tooltip(&kind)
+                } else {
+                    copy::redaction_mark_repeat(&kind)
+                }
+            }
+            (Some(label), None) => {
+                copy::redaction_mark_tooltip(&crate::placeholders::display(label))
+            }
+            (None, _) => copy::REDACTION_MARK_UNNAMED.to_string(),
+        };
+        marks.push((chars, chars + width, name));
         chars += width;
         byte = found.end;
     }

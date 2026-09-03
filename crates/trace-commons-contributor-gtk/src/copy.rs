@@ -268,13 +268,32 @@ pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
 
 /// What a redaction mark in the transcript is, named on hover.
 ///
-/// The spec asks for a LABELLED chip. A `GtkTextTag` colours a run and can
-/// carry no label of its own, so the name arrives as the tooltip over the
-/// mark -- which is the same fact in the mechanism this shell has, rather
-/// than a chip drawn as a widget and a transcript that stops being text.
+/// The marks themselves are not new -- the transcript has washed them in
+/// gold since the pane was written. What is new is the NAME, which a
+/// `GtkTextTag` cannot carry: a tag colours a run and has no label of its
+/// own, so the name arrives as the tooltip over the mark.
+///
+/// Three sentences because the scrubber leaves three marker forms carrying
+/// three different amounts of information, and none of them may be padded
+/// out with a guess. See `crate::placeholders`.
 pub fn redaction_mark_tooltip(kind: &str) -> String {
     format!("Removed: {kind}")
 }
+
+/// A repeat of a value already marked earlier in this transcript.
+///
+/// Only a numbered placeholder supports this claim: the redactor mints one
+/// token per DISTINCT value and reuses it, so the same label and ordinal
+/// twice is the same original string twice. Never said of a mark whose
+/// marker carries no ordinal.
+pub fn redaction_mark_repeat(kind: &str) -> String {
+    format!("Removed: {kind} -- the same value as an earlier mark")
+}
+
+/// A mark whose marker names no category -- a bare `[REDACTED]`, which is
+/// the form plain secrets land in. It says what it can and stops. Guessing
+/// a category here would put a word on screen the scrubber never said.
+pub const REDACTION_MARK_UNNAMED: &str = "Removed";
 
 /// The back control at the head of a folder's sessions.
 pub const ALL_FOLDERS: &str = "All folders";
@@ -468,8 +487,19 @@ pub const NOTHING_MATCHED_BODY: &str = "A search only finds what is written the 
 /// string copy rather than a layout, so it is bounded work at any size.
 pub const TRANSCRIPT_COPY_ALL: &str = "Copy everything";
 
+/// The example is a `local_path` placeholder for a reason: `local_path` and
+/// `private_email` are the only two labels that mint a numbered
+/// `<PRIVATE_..._n>` token. `<PRIVATE_SECRET_1>`, which this line used to
+/// show, is a shape the scrubber never produces -- a secret is replaced with
+/// a bare `[REDACTED]`. Naming an impossible token taught the wrong thing on
+/// the one screen that must be right about this.
+///
+/// The second sentence is not decoration. A mark shows where the rewriter
+/// reached a typed field; the detector scans every leaf and the rewriter
+/// does not reach all of them, so an unmarked stretch is not a clean one.
 pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval covers. Marks like \
-     <PRIVATE_SECRET_1> show where scrubbing fired -- legible as chips, not holes.";
+     <PRIVATE_LOCAL_PATH_1> and [REDACTED] show where scrubbing fired. A stretch with no mark \
+     is not a stretch with nothing in it -- scrubbing only rewrites the fields it reaches.";
 
 /// What the sheet says about redaction at the moment of consent.
 ///
@@ -1964,6 +1994,49 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 #[cfg(test)]
 mod tests {
 
+    /// The caption names a token shape as an example, so that shape has to
+    /// be one the scrubber can actually produce. Only `local_path` and
+    /// `private_email` mint a numbered placeholder; a secret never does.
+    #[test]
+    fn the_transcript_caption_names_only_a_token_shape_that_can_exist() {
+        assert!(TRANSCRIPT_CAPTION.contains("<PRIVATE_LOCAL_PATH_1>"));
+        assert!(
+            !TRANSCRIPT_CAPTION.contains("<PRIVATE_SECRET"),
+            "secrets mint no numbered placeholder"
+        );
+    }
+
+    /// Marking makes the app look more thorough than it is, so the caption
+    /// beside the marks has to concede what a mark does not cover.
+    #[test]
+    fn the_transcript_caption_concedes_what_a_mark_does_not_mean() {
+        assert!(
+            TRANSCRIPT_CAPTION.contains("no mark is not"),
+            "{TRANSCRIPT_CAPTION}"
+        );
+    }
+
+    #[test]
+    fn a_redaction_mark_names_what_left() {
+        assert_eq!(redaction_mark_tooltip("local path"), "Removed: local path");
+    }
+
+    /// The repeat wording may only ever be said of a numbered placeholder,
+    /// so it has to be distinguishable from the plain one.
+    #[test]
+    fn a_repeated_mark_says_it_is_the_same_value() {
+        let repeat = redaction_mark_repeat("local path");
+        assert_ne!(repeat, redaction_mark_tooltip("local path"));
+        assert!(repeat.contains("the same value"), "{repeat}");
+    }
+
+    /// An unnamed mark must not acquire a category it never had.
+    #[test]
+    fn an_unnamed_mark_names_no_category() {
+        assert_eq!(REDACTION_MARK_UNNAMED, "Removed");
+        assert!(!REDACTION_MARK_UNNAMED.contains(':'));
+    }
+
     #[test]
     fn a_history_folder_summary_inflects_its_count() {
         assert_eq!(history_folder_summary(1), "1 submission");
@@ -1998,11 +2071,6 @@ mod tests {
                 .to_lowercase()
                 .contains("removed")
         );
-    }
-
-    #[test]
-    fn a_redaction_mark_names_what_left() {
-        assert_eq!(redaction_mark_tooltip("local path"), "Removed: local path");
     }
 
     #[test]

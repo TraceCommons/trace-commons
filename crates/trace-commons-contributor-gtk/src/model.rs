@@ -218,6 +218,13 @@ pub struct PreviewSummary {
     /// wherever that value recurs, so one path referenced two hundred times
     /// is two hundred occurrences and one value. See
     /// [`crate::redaction_labels::line`].
+    ///
+    /// **Only two labels can ever appear here.** Distinct counts come from
+    /// the placeholder map, and `apply_placeholder_regex` mints a numbered
+    /// placeholder for `local_path` and `private_email` and nothing else --
+    /// secrets are replaced with a bare `[REDACTED]`. So a secrets-only
+    /// session reports occurrences and an EMPTY map here, and a missing or
+    /// zero entry means "not measured", never "no distinct values".
     #[serde(default)]
     pub redactions_distinct: std::collections::BTreeMap<String, u32>,
     #[serde(default)]

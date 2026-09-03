@@ -141,6 +141,12 @@ mod tests {
     }
 
     /// Nine secret patterns are one `secret` row, not nine rows.
+    ///
+    /// The distinct map is EMPTY here, and that is the real shape: distinct
+    /// counts come from the placeholder map, and only `local_path` and
+    /// `private_email` mint a placeholder (`apply_placeholder_regex` in
+    /// `trace-commons-protocol`). A fixture feeding `distinct: {"secret": 3}`
+    /// would assert correct behaviour on input that cannot occur.
     #[test]
     fn sub_labels_collapse_into_their_family() {
         let (removed, _) = rows(
@@ -149,16 +155,48 @@ mod tests {
                 ("secret:pem_private_key", 1),
                 ("secret", 2),
             ]),
-            &map(&[
-                ("secret:contextual_entropy", 2),
-                ("secret:pem_private_key", 1),
-                ("secret", 2),
-            ]),
+            &map(&[]),
         );
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].occurrences, 6);
-        assert_eq!(removed[0].distinct, 5);
+        assert_eq!(removed[0].distinct, 0, "secrets mint no placeholder");
         assert_eq!(removed[0].detail, ["contextual entropy", "pem private key"]);
+    }
+
+    /// The shape a secrets-only session actually has: occurrences for two
+    /// secret labels, and `redactions_distinct` as `{}` -- the key is always
+    /// present on the wire (no `skip_serializing_if`) and always empty here.
+    /// Nothing in the panel may render a distinct figure for it.
+    #[test]
+    fn a_secrets_only_session_carries_no_distinct_figure() {
+        let (removed, _) = rows(
+            &map(&[("secret", 1), ("secret:openai_api_key", 1)]),
+            &map(&[]),
+        );
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].distinct, 0);
+        assert_eq!(
+            crate::copy::redaction_row_counts(removed[0].occurrences, removed[0].distinct),
+            "2",
+            "a zero distinct count is an absence, never `(0 distinct)`"
+        );
+    }
+
+    /// Distinct counts summed across a family, using the only two labels
+    /// that can carry one.
+    #[test]
+    fn distinct_counts_sum_across_the_labels_that_mint_placeholders() {
+        let (removed, _) = rows(
+            &map(&[("local_path", 185), ("private_email", 4)]),
+            &map(&[("local_path", 12), ("private_email", 2)]),
+        );
+        assert_eq!(
+            removed
+                .iter()
+                .map(|r| (r.family.as_str(), r.occurrences, r.distinct))
+                .collect::<Vec<_>>(),
+            [("local_path", 185, 12), ("private_email", 4, 2)]
+        );
     }
 
     /// A secret DETECTED AND NOT REMOVED. Putting it in `removed` would

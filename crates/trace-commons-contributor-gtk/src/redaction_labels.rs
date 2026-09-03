@@ -246,28 +246,56 @@ mod tests {
         );
     }
 
+    /// `local_path` and `private_email` are the ONLY two labels that mint a
+    /// numbered placeholder (`apply_placeholder_regex` in
+    /// `trace-commons-protocol`), so they are the only two a distinct count
+    /// can ever be reported for. Every fixture with a non-empty distinct map
+    /// uses one of them.
     #[test]
     fn distinct_is_omitted_when_every_occurrence_is_its_own_value() {
-        // "3 secret (3 distinct)" says the same thing twice.
+        // "3 private email (3 distinct)" says the same thing twice.
         assert_eq!(
-            line(&map(&[("secret", 3)]), &map(&[("secret", 3)])),
-            "3 secret"
+            line(&map(&[("private_email", 3)]), &map(&[("private_email", 3)])),
+            "3 private email"
         );
     }
 
     #[test]
     fn distinct_is_omitted_when_the_daemon_did_not_report_it() {
-        assert_eq!(line(&map(&[("secret", 3)]), &map(&[])), "3 secret");
+        assert_eq!(line(&map(&[("local_path", 3)]), &map(&[])), "3 local path");
+    }
+
+    /// A zero is not a count, it is an absence. Beside a non-zero occurrence
+    /// count, "185 local path (0 distinct)" reads as "nothing was removed",
+    /// which is the one direction this line must not fail in.
+    #[test]
+    fn a_zero_distinct_count_is_an_absence_and_is_never_rendered() {
+        assert_eq!(
+            line(&map(&[("local_path", 185)]), &map(&[("local_path", 0)])),
+            "185 local path"
+        );
     }
 
     #[test]
     fn a_distinct_count_above_its_occurrence_count_is_ignored() {
-        // Impossible from a correct daemon; "3 secret (9 distinct)" would be
-        // worse than saying nothing.
+        // Impossible from a correct daemon; "3 local path (9 distinct)"
+        // would be worse than saying nothing.
         assert_eq!(
-            line(&map(&[("secret", 3)]), &map(&[("secret", 9)])),
-            "3 secret"
+            line(&map(&[("local_path", 3)]), &map(&[("local_path", 9)])),
+            "3 local path"
         );
+    }
+
+    /// The shape a secrets-only session actually has. `redactions_distinct`
+    /// carries no `skip_serializing_if`, so a shell always sees the key --
+    /// as `{}`, because secrets mint no placeholder. No `(N distinct)`
+    /// suffix may appear anywhere in the result.
+    #[test]
+    fn a_secrets_only_session_reports_no_distinct_counts_at_all() {
+        let occurrences = map(&[("secret", 1), ("secret:openai_api_key", 1)]);
+        let rendered = line(&occurrences, &map(&[]));
+        assert_eq!(rendered, "1 secret \u{00b7} 1 secret:openai api key");
+        assert!(!rendered.contains("distinct"), "{rendered}");
     }
 
     #[test]
