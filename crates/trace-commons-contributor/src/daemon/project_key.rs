@@ -160,7 +160,7 @@ fn path_to_key(path: &Path) -> String {
 /// directories. The folded string is still a usable path on macOS and
 /// Windows, which is what keeps `project_key_is_admissible` working against
 /// it.
-fn fold_case(key: &str) -> String {
+pub(crate) fn fold_case(key: &str) -> String {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         key.to_lowercase()
@@ -171,7 +171,7 @@ fn fold_case(key: &str) -> String {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -181,6 +181,7 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::test_paths::{abs, abs_key};
 
     #[test]
     fn a_trailing_separator_is_stripped() {
@@ -287,10 +288,15 @@ mod tests {
     fn a_path_that_does_not_exist_still_normalizes_textually() {
         // The watcher can see a cwd for a directory that has since been
         // deleted. That must still key consistently rather than vanishing.
-        let key = normalize_project_key("/No/Such/Directory/Here/").unwrap();
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        assert_eq!(key, "/no/such/directory/here");
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_eq!(key, "/No/Such/Directory/Here");
+        // Spelled for the host: a leading-slash path is not absolute on
+        // Windows, so this would have tested the relative-path rejection
+        // rather than the textual fallback it is named for.
+        let recorded = format!(
+            "{}{}",
+            abs("No/Such/Directory/Here"),
+            std::path::MAIN_SEPARATOR
+        );
+        let key = normalize_project_key(&recorded).unwrap();
+        assert_eq!(key, abs_key("No/Such/Directory/Here"));
     }
 }

@@ -860,9 +860,26 @@ pub fn display_path(project_key: &str) -> String {
     else {
         return project_key.to_string();
     };
-    match project_key.strip_prefix(&home) {
+    // Folded on both sides, because a project key has been through
+    // `normalize_project_key` and the environment variable has not. On
+    // macOS the key is `/users/z/code/api` while `$HOME` is `/Users/z`,
+    // and on Windows the key is `c:\users\z\...` while `%USERPROFILE%`
+    // is `C:\Users\z` -- comparing the two raw meant the prefix never
+    // matched and every path rendered absolute.
+    match crate::daemon::project_key::fold_case(project_key)
+        .strip_prefix(&crate::daemon::project_key::fold_case(&home))
+    {
         Some("") => "~".to_string(),
-        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!("~{rest}"),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
+            // Rendered from the ORIGINAL tail so a session path keeps the
+            // case the agent recorded. Folding can in principle change a
+            // string's length, in which case the boundary is not a
+            // character boundary and the folded tail is used instead.
+            let tail = project_key
+                .get(project_key.len().saturating_sub(rest.len())..)
+                .unwrap_or(rest);
+            format!("~{tail}")
+        }
         _ => project_key.to_string(),
     }
 }
@@ -5748,9 +5765,36 @@ mod tests {
 
     #[test]
     fn a_home_relative_project_path_is_abbreviated() {
-        let home = std::env::var("HOME").expect("HOME is set in the test environment");
-        assert_eq!(display_path(&format!("{home}/code/api")), "~/code/api");
-        assert_eq!(display_path("/opt/elsewhere"), "/opt/elsewhere");
+        // `home_dir` rather than `$HOME`: Windows sets `%USERPROFILE%` and
+        // no `HOME`, which is exactly the fallback `display_path` itself
+        // uses. Reading only `HOME` here made this test unrunnable there.
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            display_path(&format!("{}{sep}code{sep}api", home.display())),
+            format!("~{sep}code{sep}api")
+        );
+        let elsewhere = crate::daemon::test_paths::abs("opt/elsewhere");
+        assert_eq!(display_path(&elsewhere), elsewhere);
+    }
+
+    /// The bug the `HOME`-only test above could not see.
+    ///
+    /// A real project key has been through `normalize_project_key`, which
+    /// case-folds on macOS and Windows. `$HOME` and `%USERPROFILE%` have
+    /// not: they are `/Users/z` and `C:\Users\z`, capital letter and all.
+    /// Comparing the folded key against the unfolded home meant the prefix
+    /// never matched and every path rendered absolute.
+    #[test]
+    fn a_normalized_key_under_home_is_still_abbreviated() {
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        let key = crate::daemon::policy::project_key_for(Some(
+            &home.join("code").join("api").to_string_lossy(),
+        ));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(display_path(&key), format!("~{sep}code{sep}api"));
     }
 
     #[test]
