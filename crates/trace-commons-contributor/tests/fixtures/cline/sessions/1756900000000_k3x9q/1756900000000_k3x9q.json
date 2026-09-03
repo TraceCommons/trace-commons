@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "session_id": "1756900000000_k3x9q",
+  "source": "vscode",
+  "pid": 4242,
+  "started_at": "2026-09-03T11:20:00.000Z",
+  "ended_at": "2026-09-03T11:20:05.000Z",
+  "status": "completed",
+  "interactive": true,
+  "provider": "anthropic",
+  "model": "claude-sonnet-5",
+  "cwd": "/home/contributor/code/alpha",
+  "workspace_root": "/home/contributor/code/alpha",
+  "enable_tools": true,
+  "enable_spawn": false,
+  "enable_teams": false
+}

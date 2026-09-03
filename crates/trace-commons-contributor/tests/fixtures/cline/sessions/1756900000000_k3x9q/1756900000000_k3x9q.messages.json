@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-03T11:20:05.000Z",
+  "agent": "lead",
+  "sessionId": "1756900000000_k3x9q",
+  "origin": { "source": "vscode", "mode": "act", "sessionId": "1756900000000_k3x9q" },
+  "messages": [
+    {
+      "role": "user",
+      "ts": 1756900000000,
+      "content": [ { "type": "text", "text": "List the files in src" } ]
+    },
+    {
+      "role": "assistant",
+      "ts": 1756900001500,
+      "modelInfo": { "id": "claude-sonnet-5", "provider": "anthropic" },
+      "metrics": { "inputTokens": 1200, "outputTokens": 85, "cacheReadTokens": 0, "cacheWriteTokens": 0, "cost": 0.0041 },
+      "content": [
+        { "type": "thinking", "thinking": "The user wants a directory listing." },
+        { "type": "text", "text": "I'll list the directory." },
+        { "type": "tool_use", "id": "toolu_01", "name": "list_files", "input": { "path": "src", "recursive": false } }
+      ]
+    },
+    {
+      "role": "user",
+      "ts": 1756900001600,
+      "content": [
+        { "type": "tool_result", "tool_use_id": "toolu_01", "name": "list_files", "content": "index.ts\nutil.ts" }
+      ]
+    },
+    {
+      "role": "assistant",
+      "ts": 1756900003000,
+      "modelInfo": { "id": "claude-sonnet-5", "provider": "anthropic" },
+      "metrics": { "inputTokens": 1300, "outputTokens": 20, "cacheReadTokens": 1100, "cacheWriteTokens": 0, "cost": 0.0012 },
+      "content": [ { "type": "text", "text": "Two files: index.ts and util.ts." } ]
+    }
+  ]
+}

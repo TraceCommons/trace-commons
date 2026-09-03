@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-03T11:22:00.000Z",
+  "agent": "lead",
+  "sessionId": "1756900100000_p2m7z",
+  "origin": { "source": "vscode", "mode": "act", "sessionId": "1756900100000_p2m7z" },
+  "messages": [
+    { "role": "user", "ts": 1756900100000, "content": "Run the tests" },
+    {
+      "role": "assistant",
+      "ts": 1756900101000,
+      "modelInfo": { "id": "gpt-5.5", "provider": "openai" },
+      "content": [
+        { "type": "tool_use", "id": "call_9", "name": "execute_command", "input": { "command": "cargo test" } }
+      ]
+    },
+    {
+      "role": "user",
+      "ts": 1756900102000,
+      "content": [
+        { "type": "tool_result", "tool_use_id": "call_9", "name": "execute_command", "is_error": true,
+          "content": [ { "type": "text", "text": "error: no such command" }, { "type": "image", "data": "AAAA", "mediaType": "image/png" } ] },
+        { "type": "image", "data": "BBBB", "mediaType": "image/png" },
+        { "type": "future_block", "payload": 1 }
+      ]
+    }
+  ]
+}
