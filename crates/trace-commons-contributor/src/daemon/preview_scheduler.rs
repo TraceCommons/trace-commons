@@ -624,10 +624,11 @@ impl PreviewJobRunner for DaemonPreviewRunner {
             // Nothing here pins: an approval that finds no pin builds and
             // pins one synchronously (`handle_approve`), so a contributor
             // still cannot send bytes they were never shown.
-            let (near_ai, source_roots) = {
+            let near_ai = {
                 let s = shared.settings.lock().expect("settings lock");
-                (s.near_ai.clone(), s.source_roots())
+                s.near_ai.clone()
             };
+            let source_roots = shared.source_roots_with_routing();
             let sources = crate::source::all_sources(&source_roots);
             let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
                 return PreviewOutcome::Failed {

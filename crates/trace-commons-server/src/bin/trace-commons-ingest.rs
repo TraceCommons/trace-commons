@@ -10,7 +10,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::Context;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::rejection::{JsonRejection, MissingJsonContentType};
+use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
@@ -20,6 +21,7 @@ use axum::{
     middleware::Next,
 };
 use base64::Engine as _;
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -51,6 +53,13 @@ use trace_commons_server::account_session::{
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
+use trace_commons_server::redaction_witness::config::{
+    WitnessBypassConfig, witness_bypass_config_from_env,
+};
+use trace_commons_server::redaction_witness::request::witness_headers;
+use trace_commons_server::redaction_witness::verification::{
+    VerifiedWitnessCertificate, verify_witness_certificate,
+};
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -68,6 +77,19 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::near_attestation::client::{
+    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
+    AttestationClient as NearAttestationClient,
+    BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
+    MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
+};
+use trace_commons_server::near_attestation::drill::{
+    NearAttestationDrillOutcome, generate_drill_nonce,
+    run_near_attestation_drill as run_near_attestation_drill_steps,
+};
+use trace_commons_server::near_attestation::measurements::{
+    EXPECTED_MEASUREMENTS_ENV, expected_measurements_from_env,
+};
 use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
@@ -181,7 +203,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
     TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
-    TraceWorkerKind as StorageTraceWorkerKind, safe_residual_risk_basis_labels,
+    TraceWorkerKind as StorageTraceWorkerKind, WITNESS_ADMITTED_STATUS_REASON,
+    safe_residual_risk_basis_labels, safe_status_reason_label,
 };
 use trace_commons_server::trace_gate_service::{
     DstackGateService, EnclaveGateService, GateDecision, GateServiceStatus, InMemoryGateService,
@@ -444,6 +467,10 @@ const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
 const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// Intel PCS / caching-PCCS base URL for the attestation drill's collateral
+// fetch. Defaults to Intel's own service: the collateral is what a quote is
+// verified against, so the shorter the trust path to Intel the better.
+const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
 #[allow(dead_code)]
 const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 #[allow(dead_code)]
@@ -1129,6 +1156,11 @@ SUBCOMMANDS:
     --generate-attestation-keypair    Print a fresh Ed25519 keypair and kid for
                                       score attestations, as env-var
                                       assignments. Requires no configuration.
+    --tls-selfcheck                   Confirm a rustls crypto provider is
+                                      installed, so TLS cannot panic at the
+                                      first handshake. Requires no
+                                      configuration. Run it against a build
+                                      before deploying.
     -V, --version                     Print the version, the commit this binary
                                       was built from, and the build time. The
                                       same identity is on GET /health.
@@ -1137,12 +1169,61 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Choose the rustls crypto provider before anything can open a TLS
+    // connection.
+    //
+    // With `near-attestation-collateral` two providers are compiled in: ours
+    // through `reqwest`'s `rustls-tls-native-roots` (ring), and
+    // `dcap-qvl/report`'s through `reqwest`'s `rustls` (aws-lc-rs). Cargo
+    // unifies features additively, so neither can be dropped by de-selecting a
+    // feature. rustls will not guess between them -- it panics at the first TLS
+    // use with "Could not automatically determine the process-level
+    // CryptoProvider".
+    //
+    // That panic is not a compile error, so `cargo check` on the feature passes
+    // and the binary dies at startup. It took a production deploy to find.
+    // `ring` is chosen because it is already a direct dependency of this crate.
+    // An error here means a provider was already installed, which is not a
+    // failure worth aborting a boot for.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Argument handling precedes any env/config load so the keypair generator
     // works on an unconfigured host.
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         None => {}
         Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
+        // Assert that a rustls crypto provider is installed.
+        //
+        // On 2026-09-01 the pilot crash-looped on
+        // "Could not automatically determine the process-level CryptoProvider":
+        // with `near-attestation-collateral`, both `ring` (via reqwest's
+        // rustls-tls-native-roots) and `aws-lc-rs` (via dcap-qvl/report's
+        // reqwest) are linked, Cargo unifies features additively, and rustls
+        // refuses to choose. It is a RUNTIME panic, so every `cargo check` job
+        // in this repo passed and the binary died on boot.
+        //
+        // This asserts the property that prevents it -- a default provider is
+        // installed, so rustls never reaches the auto-selection that panics.
+        //
+        // Two weaker checks were tried first and BOTH passed with the fix
+        // removed, which is why this one asserts the invariant instead of
+        // trying to reproduce the failure:
+        //   - `Client::builder().build()` alone: the provider is resolved
+        //     lazily, not at builder time.
+        //   - a request to a closed loopback port: fails at TCP connect,
+        //     before any handshake.
+        Some("--tls-selfcheck") => {
+            if rustls::crypto::CryptoProvider::get_default().is_none() {
+                anyhow::bail!(
+                    "no rustls CryptoProvider installed; rustls will panic at the \
+                     first TLS handshake. main() must install one before any \
+                     TLS use -- see the install_default call at the top."
+                );
+            }
+            println!("tls-selfcheck: ok");
+            return Ok(());
+        }
         Some("-h") | Some("--help") => {
             print!("{INGEST_HELP_TEXT}");
             return Ok(());
@@ -1471,6 +1552,24 @@ struct AppState {
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
     artifact_store: Option<ConfiguredTraceArtifactStore>,
     require_object_store_versioning: bool,
+    /// The NEAR AI inference endpoint the attestation drill probes, or
+    /// `None` when the base URL / model / API key are not all configured.
+    /// A drill run against `None` refuses with a named missing control; it
+    /// never reports a pass it did not earn.
+    near_attestation_client: Option<Arc<dyn NearAttestationClient>>,
+    /// Frozen clock for the attestation drill's collateral-validity check.
+    ///
+    /// `None` means wall-clock time, which is the only correct production
+    /// value, and [`AppState::from_env`] sets it to `None` unconditionally --
+    /// it is deliberately not readable from the environment, so it can never
+    /// become a lever for making an expired-collateral failure go away.
+    ///
+    /// It exists because the handler is the one place in this slice where the
+    /// verification clock would otherwise be implicit: a test driving the
+    /// handler against a captured collateral fixture would start failing on
+    /// the fixture's `nextUpdate` date rather than on a code change, and a
+    /// test that fails on a calendar date is worse than no test.
+    near_attestation_verification_clock: Option<DateTime<Utc>>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,
@@ -1519,6 +1618,14 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
+    /// posture every deployment ships in -- means an arriving certificate is
+    /// ignored entirely and every content-bearing trace holds exactly as it
+    /// does today. `Some` means an operator has pinned a witness signing
+    /// address, a measurement set and a policy allowlist, and a certificate
+    /// verifying against all three keeps a submission out of the hold. It
+    /// lifts no quarantine and never means the trace is clean.
+    witness_bypass: Option<WitnessBypassConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3148,6 +3255,7 @@ enum TokenRole {
     ProcessEvalWorker,
     RevocationWorker,
     CompetitionReadWorker,
+    RegisterStatsWorker,
 }
 
 impl TokenRole {
@@ -3169,6 +3277,7 @@ impl TokenRole {
             "competition_read_worker" | "competition-read-worker" => {
                 Ok(Self::CompetitionReadWorker)
             }
+            "register_stats_worker" | "register-stats-worker" => Ok(Self::RegisterStatsWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -3202,11 +3311,21 @@ impl TokenRole {
             Self::ProcessEvalWorker => "process_eval_worker",
             Self::RevocationWorker => "revocation_worker",
             Self::CompetitionReadWorker => "competition_read_worker",
+            Self::RegisterStatsWorker => "register_stats_worker",
         }
     }
 }
 
 impl AppState {
+    /// The configured settlement mode's label (`"disabled"` / `"dry_run"` /
+    /// `"http"`), for surfaces that render posture text through
+    /// `trace_commons_server::credit_numbers`. Reads the value `AppState`
+    /// resolved once at startup (`NearSettlementMode::from_env`) rather than
+    /// re-reading the environment on every request.
+    fn near_settlement_mode_label(&self) -> &'static str {
+        self.near_settlement_mode.as_label()
+    }
+
     fn db_contributor_reads_for_tenant(&self, tenant_id: &str) -> bool {
         self.tenant_rollout_gates.enabled_for(
             TraceTenantRolloutFeature::DbContributorReads,
@@ -3690,6 +3809,13 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        // Fail closed on configuration. An enabled bypass missing its signing
+        // address, its measurement set, or its policy allowlist refuses to
+        // boot naming the control, rather than running with a control an
+        // operator believes is in place. `Ok(None)` is the switch being off,
+        // which is not an acceptance of anything.
+        let witness_bypass = witness_bypass_config_from_env()
+            .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
         let benchmark_registry_scheduler =
             parse_trace_benchmark_registry_scheduler_config_from_env()?;
         let benchmark_pipeline_scheduler =
@@ -3868,8 +3994,12 @@ impl AppState {
             None => None,
         };
 
+        let near_attestation_client = build_near_attestation_client_from_env()?;
+
         Ok(Self {
             root,
+            near_attestation_client,
+            near_attestation_verification_clock: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
             signed_token_verifier,
@@ -3965,6 +4095,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            witness_bypass,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -5907,8 +6038,9 @@ fn parse_required_u64_env(var: &'static str) -> anyhow::Result<u64> {
 
 /// Stable canonical-bytes hash of every dimension that influences the gate
 /// decision: policy version, floors, top-k, both model identifiers + token
-/// caps, the vector index dim, the chunking knobs, and the chunk-SELECTION
-/// algorithm. Operators rotating any of these MUST see the audit trail break
+/// caps, the vector index dim, the chunking knobs, the chunk-SELECTION
+/// algorithm, and the canonical event RENDERER. Operators rotating any of
+/// these MUST see the audit trail break
 /// — the previous fixed `"sha256:enclave_mock_v1"` value stamped every
 /// decision regardless of configuration.
 ///
@@ -5947,8 +6079,15 @@ fn compute_gate_version_hash(
          embedder={embedder_model_id}:{embedder_max_tokens}:{embedder_matryoshka_dim:?}\n\
          vector_dim={vector_index_dim}\n\
          chunking={chunk_target_tokens},{chunk_max_tokens},{chunk_cap},{chunk_min_tokens},{embed_insert_novelty_micros}\n\
-         chunk_selection={chunk_selection}",
+         chunk_selection={chunk_selection}\n\
+         render={render}",
         chunk_selection = trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
+        // Which chunks survive the cap and what the text inside them says are
+        // separate dimensions: two decisions can select identical chunks and
+        // still be incomparable because the renderer changed underneath them.
+        // Without this line the stamp claims a decision is reproducible when
+        // re-rendering the same envelope would move every signal.
+        render = trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
     );
     let mut h = Sha256::new();
     h.update(canonical.as_bytes());
@@ -7174,6 +7313,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
+            "/v1/account/credit-summary",
+            get(account_credit_summary_handler),
+        )
+        .route(
             "/v1/account/traces/{submission_id}",
             get(account_trace_detail_handler),
         )
@@ -7280,6 +7423,9 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/source", get(source_offer_handler))
+        // Unauthenticated, like /v1/source above and for the same structural
+        // reason: it is registered here, outside every auth layer, on purpose.
+        .route("/v1/public/register-stats", get(register_stats_handler))
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -7628,6 +7774,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(credit_settlement_drill_handler),
         )
         .route(
+            "/v1/admin/near-attestation-drill",
+            post(near_attestation_drill_handler),
+        )
+        .route(
             "/v1/workers/credit-settlements/run",
             post(credit_settlement_worker_run_handler),
         )
@@ -7746,6 +7896,10 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/workers/revocation-propagation",
             post(revocation_propagation_worker_handler),
         )
+        .route(
+            "/v1/workers/register-stats/refresh",
+            post(register_stats_refresh_handler),
+        )
         .route("/v1/workers/vector-index", post(vector_index_handler))
         .route(
             "/v1/workers/gate/evaluate",
@@ -7818,6 +7972,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(process_evaluation_worker_run_handler),
         )
         .route("/v1/audit/events", get(audit_events_handler))
+        // Unauthenticated, like /v1/source and /v1/public/register-stats
+        // above: a contributor needs collateral before they have decided to
+        // trust anything, so it cannot sit behind enrollment.
+        .merge(attestation_collateral_routes())
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
 }
@@ -12705,11 +12863,149 @@ async fn append_tenant_access_grant_update_audit(
     .await
 }
 
+/// A submission body, kept as BOTH the parsed envelope and the exact bytes
+/// that arrived.
+///
+/// The raw bytes are the point. A witness certificate's digest is over the
+/// envelope bytes the witness produced and the contributor forwarded
+/// verbatim, and `rescrub_trace_envelope` rewrites the envelope in place --
+/// `privacy.residual_pii_risk`, `redaction_counts`, `pii_labels_present`,
+/// `redaction_pipeline_version`, `warnings` and `redaction_hash` -- so **the
+/// stored bytes are never the received bytes**, and neither is any
+/// re-serialisation of the parsed value. Verification has to run against
+/// these bytes, at receipt.
+///
+/// # Why this is an extractor rather than a `Bytes` argument
+///
+/// This is the busiest handler in the binary and its rejection behaviour is
+/// client-visible. Taking `Bytes` and hand-rolling the parse would have meant
+/// hand-rolling axum's rejection shape too -- status, body text and
+/// content-type -- and any drift there is a regression for every client,
+/// including the ones that never send a certificate. Instead this reproduces
+/// `Json`'s own `FromRequest` and returns `JsonRejection` **verbatim**, so a
+/// malformed body fails exactly as it did before.
+struct SubmitBody {
+    envelope: TraceContributionEnvelope,
+    /// The body exactly as received, for the witness digest and nothing else.
+    raw: Bytes,
+}
+
+impl SubmitBody {
+    /// Build a body from an envelope, for tests that call the handler
+    /// directly rather than through the router.
+    ///
+    /// The raw bytes are a real serialisation of the envelope, not a
+    /// placeholder: a test that hands the handler bytes which are not the
+    /// envelope would exercise a state no request can produce, and the
+    /// witness digest is taken over exactly this field.
+    ///
+    /// A direct call therefore cannot carry a certificate -- there are no
+    /// headers to put one in -- which is correct. The witnessed path is
+    /// exercised through the real router, because that is the only way to
+    /// prove the extractor and the handler agree about which bytes arrived.
+    #[cfg(test)]
+    fn for_test(envelope: TraceContributionEnvelope) -> Self {
+        let raw = Bytes::from(serde_json::to_vec(&envelope).expect("the envelope serialises"));
+        SubmitBody { envelope, raw }
+    }
+}
+
+impl<S> FromRequest<S> for SubmitBody
+where
+    S: Send + Sync,
+{
+    type Rejection = JsonRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !json_content_type(request.headers()) {
+            return Err(MissingJsonContentType::default().into());
+        }
+        let raw = Bytes::from_request(request, state).await?;
+        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)?;
+        Ok(SubmitBody { envelope, raw })
+    }
+}
+
+/// Whether a request's `Content-Type` is JSON, matching `axum::Json`.
+///
+/// Reimplemented rather than reached for, because axum's is private and the
+/// `mime` crate it uses is not a dependency of this workspace -- and adding a
+/// dependency to spell one predicate is not a trade this repo makes. The
+/// cases that matter are pinned by `json_content_type_matches_axum`: bare
+/// `application/json`, a `charset` parameter, a `+json` suffix, and
+/// `text/json` refused.
+///
+/// Where this differs from axum's it is stricter: a value `mime` would reject
+/// as malformed is rejected here too, because the essence must match
+/// `application/<token>` with no interior whitespace.
+fn json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let Some(subtype) = essence.strip_prefix("application/") else {
+        return false;
+    };
+    if subtype.is_empty()
+        || !subtype
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_'))
+    {
+        return false;
+    }
+    subtype.eq_ignore_ascii_case("json") || subtype.to_ascii_lowercase().ends_with("+json")
+}
+
+/// Verify a request-borne witness certificate against the body as received.
+///
+/// **Fail open on the submission, closed on the bypass.** Every failure path
+/// returns `None`, which means the trace is held exactly as an unwitnessed
+/// one would be. Nothing here can reject a submission that would otherwise be
+/// accepted: a witness outage, a client bug, or an attacker spraying garbage
+/// headers must not become a submission outage.
+///
+/// With no bypass configured this does not even decode the headers. That is
+/// the ship-disabled default: an arriving certificate on an unconfigured
+/// deployment is ignored, not merely unverifiable.
+///
+/// Refusals are logged at `debug` and by name only. A header value is
+/// attacker-chosen and `WitnessHeaderError` carries none of it, which is what
+/// makes logging the error safe at all.
+fn verified_witness_for_submission(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<VerifiedWitnessCertificate> {
+    let bypass = state.witness_bypass.as_ref()?;
+    let (certificate, signature) = match witness_headers(headers) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate header refused; holding as usual");
+            return None;
+        }
+    };
+    match verify_witness_certificate(certificate, &signature, Some(bypass.pin()), body) {
+        Ok(verified) => Some(verified),
+        Err(err) => {
+            tracing::debug!(?err, "witness certificate did not verify; holding as usual");
+            None
+        }
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut envelope): Json<TraceContributionEnvelope>,
+    body: SubmitBody,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    let SubmitBody {
+        mut envelope,
+        raw: raw_body,
+    } = body;
     let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
 
     // Submission work includes the server re-scrub and gate preparation, so
@@ -12777,6 +13073,20 @@ async fn submit_trace_handler(
         state.require_tenant_submission_policy,
     )?;
 
+    // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
+    // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
+    // the envelope in place, so verifying against the parsed value -- or off
+    // the stored artifact, or off any re-serialisation -- would fail every
+    // honest witnessed submission.
+    //
+    // Placed here rather than at the top of the handler so that signature
+    // recovery sits BEHIND the submit rate limiter and the tenant-access-grant
+    // check. The bytes are captured either way, so this costs the guarantee
+    // nothing and denies an authenticated caller a free ECDSA-recovery
+    // amplifier. `the_certificate_is_verified_before_the_rescrub_runs` pins
+    // that it stays above the rescrub.
+    let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
+
     // The basis is a return value of the pass, never a field on the
     // envelope: the envelope is deserialised from contributor input, so a
     // basis carried there would be client-asserted by construction.
@@ -12823,11 +13133,26 @@ async fn submit_trace_handler(
     // consumer/Accepted gates enforce the hold purely off the stored status.
     // No enrol row is written: the `awaiting_pii_backstop` status is the
     // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+    let held_without_a_witness = corpus_status_with_pii_backstop_hold(
+        corpus_status,
+        &envelope.consent,
+        state.pii_backstop_driver.is_some(),
+        None,
+        None,
+    );
     let corpus_status = corpus_status_with_pii_backstop_hold(
         corpus_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        witness.as_ref(),
+        state.witness_bypass.as_ref(),
     );
+    // The certificate changed the outcome only if the same inputs WITHOUT it
+    // would have held. Derived by comparing the two decisions rather than by
+    // re-deriving the five conditions here: a second copy of that predicate
+    // would eventually disagree with the one that decides the status, and the
+    // receipt would then describe a pass that did not happen.
+    let witness_admitted = corpus_status != held_without_a_witness;
 
     let artifact_label = if remediating_prior.is_some() {
         "remediated-envelope"
@@ -12886,7 +13211,11 @@ async fn submit_trace_handler(
         retention_policy_id: retention_policy.name,
         expires_at,
         purged_at: None,
-        last_status_reason: None,
+        // Which pass admitted this trace, when it was not the ordinary one.
+        // `safe_status_reason_label` is the allowlist choke point: a label
+        // that is not on it becomes "other" rather than reaching the column.
+        last_status_reason: witness_admitted
+            .then(|| safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON).to_string()),
         residual_risk_basis: Some(safe_residual_risk_basis_labels(&residual_risk_basis)),
         object_key: stored_envelope.object_key,
         artifact_receipt: stored_envelope.artifact_receipt,
@@ -15004,6 +15333,40 @@ struct AccountTracesPage {
     next_cursor: Option<String>,
 }
 
+/// One contributor's own credit figures.
+///
+/// Deliberately small. It carries what this account earned and nothing that
+/// could address another account: no principal refs, no hashes, no ids.
+///
+/// It also carries NO spend figure. The server sees submissions, not anyone's
+/// inference bill, so a client that wants "credit covered N% of my spend"
+/// composes it from its own local ledger. An API that reported your spend back
+/// to you would have to be told it first.
+#[derive(Debug, Serialize)]
+struct AccountCreditSummary {
+    points: AccountCreditPoints,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    currency: Option<trace_commons_server::credit_numbers::CurrencyBlock>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+    period: AccountCreditPeriod,
+    /// Submissions held and not yet counted, so a contributor whose figure
+    /// looks low has somewhere to look rather than a mystery.
+    pending_review: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPoints {
+    earned_this_period: i64,
+    lifetime_earned: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountCreditPeriod {
+    /// Stated explicitly rather than implied by "this period".
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 /// Build a synthetic, low-privilege `TenantAuth` for the hash-only read audit.
 /// The audit path consumes only `tenant_id`, `principal_ref`, and `role`; this
 /// records the resolved actor (`account-actor:{id}` for the cookie path, the
@@ -15135,6 +15498,201 @@ async fn account_traces_list_handler(
     .map_err(internal_error)?;
 
     Ok(Json(AccountTracesPage { items, next_cursor }))
+}
+
+/// A contributor's own credit figures.
+///
+/// Scoped to `ctx.principal_set` — the account's active principals — because a
+/// contributor with several credentials is one contributor. Reuses the same
+/// SQL-scoped submission read `/v1/account/traces` already applies rather than
+/// a second notion of who an account is.
+async fn account_credit_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<Json<AccountCreditSummary>> {
+    // Per-account rate limit, keyed on the auth-derived account id (a uuid,
+    // not a secret), BEFORE the read. This handler is unpaginated and
+    // `account_credit_totals` reaches `list_trace_credit_events`, which
+    // returns the whole tenant's credit events and filters them in Rust -- on
+    // a shared tenant that is the entire tenant ledger per request. Reshaping
+    // that query is pre-existing work with six other callers; bounding how
+    // often this new route can trigger it is not. Collapses to a generic 429,
+    // like every other account surface: no enumeration, no size signal.
+    let account_key = ctx.account_id.as_uuid().to_string();
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("credit-summary-account:{account_key}"),
+        CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
+    let period_end = Utc::now();
+    let period_start = period_end - Duration::days(30);
+
+    let (earned_this_period, lifetime_earned, pending_review) = account_credit_totals(
+        state.as_ref(),
+        &ctx.tenant_id,
+        &ctx.principal_set,
+        period_start,
+        period_end,
+    )
+    .await?;
+
+    append_control_plane_read_audit(
+        state.as_ref(),
+        &account_audit_tenant(&ctx),
+        "account_credit_summary",
+        1,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let rate = trace_commons_server::credit_numbers::rate_from_env();
+    let settlement_mode = state.near_settlement_mode_label();
+
+    Ok(Json(AccountCreditSummary {
+        points: AccountCreditPoints {
+            earned_this_period,
+            lifetime_earned,
+        },
+        currency: trace_commons_server::credit_numbers::currency_for(
+            earned_this_period,
+            rate.as_ref(),
+        ),
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+        period: AccountCreditPeriod {
+            start: period_start,
+            end: period_end,
+        },
+        pending_review,
+    }))
+}
+
+/// Earned in the period, earned lifetime, and submissions still held, for one
+/// account's principal set.
+///
+/// Follows `account_traces_list_handler`'s own SQL-scoped read
+/// (`list_account_trace_submissions_keyset`, walked across every page) to get
+/// this account's owned submissions — one answer to "which rows belong to this
+/// account," matching the account trace routes exactly rather than a raw query
+/// that goes around them. The credit ledger itself has no per-principal SQL
+/// filter (`list_trace_credit_events` returns every event for the tenant), so
+/// ledger rows are narrowed to this account in two steps: first to the events
+/// whose `submission_id` was just proven owned (the `owner_by_submission` map
+/// built from the SQL-scoped read). That ownership gate is what actually
+/// bounds this to the account: `trace_commons_credit_event_from_storage`
+/// stamps the owning submission's principal ref onto every event it builds,
+/// so anything that survives the first step already carries this account's
+/// principal by construction. The second pass through
+/// `visible_credit_events_for_account` — the pure `&AccountPrincipalSet`
+/// predicate beside `visible_submission_records_for_account` — is this
+/// codebase's established belt-and-braces idiom, not an independent defence
+/// on this path.
+///
+/// Points are summed as `f32` (matching how `TraceCommonsTenantCreditResponse`
+/// accumulates `credit_points_delta`) and rounded to whole points only once,
+/// at this boundary — the same `(x).round() as i64` idiom `credit_delta_micros`
+/// uses to cross from a float points figure to an integer.
+async fn account_credit_totals(
+    state: &AppState,
+    tenant_id: &str,
+    principals: &AccountPrincipalSet,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> ApiResult<(i64, i64, usize)> {
+    if principals.is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    let db = account_db(state)?;
+    let principal_refs = principals.to_vec();
+
+    // Walk every page of this account's owned submissions via the same
+    // keyset-paginated, SQL-scoped query `/v1/account/traces` uses.
+    let mut records = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = db
+            .list_account_trace_submissions_keyset(
+                tenant_id,
+                &principal_refs,
+                cursor,
+                ACCOUNT_TRACES_MAX_LIMIT as i64,
+            )
+            .await
+            .map_err(internal_error)?;
+        let page_len = page.len();
+        let next_cursor = page.last().map(|record| TraceSubmissionKeysetCursor {
+            received_at: record.received_at,
+            submission_id: record.submission_id,
+        });
+        records.extend(
+            page.into_iter()
+                .filter_map(trace_commons_record_from_storage_submission)
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(internal_error)?,
+        );
+        if page_len < ACCOUNT_TRACES_MAX_LIMIT {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    let pending_review = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.status,
+                TraceCorpusStatus::Quarantined | TraceCorpusStatus::AwaitingPiiBackstop
+            )
+        })
+        .count();
+
+    if records.is_empty() {
+        return Ok((0, 0, pending_review));
+    }
+
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events(tenant_id)
+        .await
+        .map_err(internal_error)?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())
+                .map_err(internal_error)?
+        {
+            credit_events.push(event);
+        }
+    }
+    let credit_events = visible_credit_events_for_account(principals, credit_events);
+
+    let lifetime_earned: f32 = credit_events
+        .iter()
+        .map(|event| event.credit_points_delta)
+        .sum();
+    let earned_this_period: f32 = credit_events
+        .iter()
+        .filter(|event| event.created_at >= period_start && event.created_at <= period_end)
+        .map(|event| event.credit_points_delta)
+        .sum();
+
+    Ok((
+        earned_this_period.round() as i64,
+        lifetime_earned.round() as i64,
+        pending_review,
+    ))
 }
 
 /// `GET /v1/account/traces/{submission_id}` — dual-auth, account-scoped single
@@ -16236,6 +16794,13 @@ const NEAR_LOGIN_PER_KEY_LIMIT: u32 = 5;
 const NEAR_LOGIN_PUBKEY_MAX_LEN: usize = 120;
 /// Per-account cap on `GET /v1/account/traces/{id}/content` reads per window.
 const CONTENT_PER_ACCOUNT_LIMIT: u32 = 60;
+
+/// Per-account cap on `GET /v1/account/credit-summary` per window.
+///
+/// Lower than most account surfaces because each call currently reads the
+/// whole tenant's credit ledger (see the handler). A contributor checking
+/// their figures needs a handful a minute; nothing legitimate needs thirty.
+const CREDIT_SUMMARY_PER_ACCOUNT_LIMIT: u32 = 30;
 /// Concurrency cap on in-flight content reads per account (defense against a
 /// single account fanning out many simultaneous expensive decrypts).
 const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
@@ -19336,10 +19901,15 @@ async fn operator_rescrub_quarantined_submission(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+    // No witness on this path: the quarantine re-scrub has no request-borne
+    // certificate to verify, and a certificate over the ORIGINAL submission
+    // would say nothing about the bytes this pass has just rewritten.
     let target_status = corpus_status_with_pii_backstop_hold(
         target_status,
         &envelope.consent,
         state.pii_backstop_driver.is_some(),
+        None,
+        None,
     );
     let changed = target_status != prior_status
         || envelope.privacy.residual_pii_risk != prior_privacy_risk
@@ -24226,7 +24796,7 @@ fn credit_settlement_drill_evidence_hash(
             ),
         );
     }
-    sha256_prefixed(&evidence.to_string())
+    json_evidence_hash(&evidence)
 }
 
 async fn run_credit_settlement(
@@ -44968,22 +45538,19 @@ fn rollback_drill_evidence_hash(
     db_tombstone_count: usize,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_rollback_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "active_rollout_flags": active_rollout_flags,
-            "file_submission_count": file_submission_count,
-            "db_submission_count": db_submission_count,
-            "file_audit_event_count": file_audit_event_count,
-            "db_audit_event_count": db_audit_event_count,
-            "file_tombstone_count": file_tombstone_count,
-            "db_tombstone_count": db_tombstone_count,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_rollback_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "active_rollout_flags": active_rollout_flags,
+        "file_submission_count": file_submission_count,
+        "db_submission_count": db_submission_count,
+        "file_audit_event_count": file_audit_event_count,
+        "db_audit_event_count": db_audit_event_count,
+        "file_tombstone_count": file_tombstone_count,
+        "db_tombstone_count": db_tombstone_count,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45004,28 +45571,25 @@ fn audit_chain_drill_evidence_hash(
     blocking_gaps: &[String],
     failure_hashes: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_audit_chain_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "file_verified": file_verified,
-            "file_event_count": file_event_count,
-            "file_legacy_event_count": file_legacy_event_count,
-            "file_mismatch_count": file_mismatch_count,
-            "file_last_event_hash": file_last_event_hash,
-            "db_verified": db_verified,
-            "db_event_count": db_event_count,
-            "db_legacy_event_count": db_legacy_event_count,
-            "db_payload_verified_event_count": db_payload_verified_event_count,
-            "db_payload_unverified_event_count": db_payload_unverified_event_count,
-            "db_mismatch_count": db_mismatch_count,
-            "db_last_event_hash": db_last_event_hash,
-            "blocking_gaps": blocking_gaps,
-            "failure_hashes": failure_hashes,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_audit_chain_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "file_verified": file_verified,
+        "file_event_count": file_event_count,
+        "file_legacy_event_count": file_legacy_event_count,
+        "file_mismatch_count": file_mismatch_count,
+        "file_last_event_hash": file_last_event_hash,
+        "db_verified": db_verified,
+        "db_event_count": db_event_count,
+        "db_legacy_event_count": db_legacy_event_count,
+        "db_payload_verified_event_count": db_payload_verified_event_count,
+        "db_payload_unverified_event_count": db_payload_unverified_event_count,
+        "db_mismatch_count": db_mismatch_count,
+        "db_last_event_hash": db_last_event_hash,
+        "blocking_gaps": blocking_gaps,
+        "failure_hashes": failure_hashes,
+    }))
 }
 
 fn db_reconciliation_drill_evidence_hash(
@@ -45258,34 +45822,31 @@ fn postgres_rls_drill_evidence_hash(
 ) -> String {
     let expected_runtime_role_hash_matched = expected_runtime_role_hash
         .map(|expected_hash| diagnostics.runtime_role_matches_expected_hash(Some(expected_hash)));
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_postgres_rls_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "rls_ready": diagnostics.rls_ready(),
-            "force_rls_ready": diagnostics.force_rls_ready(),
-            "production_ready": diagnostics.production_ready(),
-            "production_ready_with_expected_runtime_role": diagnostics
-                .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
-            "expected_table_count": diagnostics.expected_table_count,
-            "policy_installed_count": diagnostics.policy_installed_count,
-            "rls_enabled_count": diagnostics.rls_enabled_count,
-            "force_rls_enabled_count": diagnostics.force_rls_enabled_count,
-            "missing_policy_table_count": diagnostics.missing_policy_tables.len(),
-            "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
-            "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
-            "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
-            "current_role_hash": &diagnostics.current_role_hash,
-            "expected_runtime_role_hash_configured": expected_runtime_role_hash.is_some(),
-            "expected_runtime_role_hash_matched": expected_runtime_role_hash_matched,
-            "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
-            "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
-            "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_postgres_rls_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "rls_ready": diagnostics.rls_ready(),
+        "force_rls_ready": diagnostics.force_rls_ready(),
+        "production_ready": diagnostics.production_ready(),
+        "production_ready_with_expected_runtime_role": diagnostics
+            .production_ready_with_expected_runtime_role(expected_runtime_role_hash),
+        "expected_table_count": diagnostics.expected_table_count,
+        "policy_installed_count": diagnostics.policy_installed_count,
+        "rls_enabled_count": diagnostics.rls_enabled_count,
+        "force_rls_enabled_count": diagnostics.force_rls_enabled_count,
+        "missing_policy_table_count": diagnostics.missing_policy_tables.len(),
+        "rls_disabled_table_count": diagnostics.rls_disabled_tables.len(),
+        "force_rls_disabled_table_count": diagnostics.force_rls_disabled_tables.len(),
+        "policy_expression_mismatch_table_count": diagnostics.policy_expression_mismatch_tables.len(),
+        "current_role_hash": &diagnostics.current_role_hash,
+        "expected_runtime_role_hash_configured": expected_runtime_role_hash.is_some(),
+        "expected_runtime_role_hash_matched": expected_runtime_role_hash_matched,
+        "current_role_bypasses_rls": diagnostics.current_role_bypasses_rls,
+        "current_role_owns_trace_tables": diagnostics.current_role_owns_trace_tables,
+        "tenant_context_transaction_local": diagnostics.tenant_context_transaction_local,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn retention_dry_run_drill_evidence_hash(
@@ -45293,31 +45854,28 @@ fn retention_dry_run_drill_evidence_hash(
     response: &TraceMaintenanceResponse,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_retention_dry_run_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "revoked_submission_count": response.revoked_submission_count,
-            "expired_submission_count": response.expired_submission_count,
-            "records_marked_revoked": response.records_marked_revoked,
-            "records_marked_expired": response.records_marked_expired,
-            "records_marked_purged": response.records_marked_purged,
-            "derived_marked_revoked": response.derived_marked_revoked,
-            "derived_marked_expired": response.derived_marked_expired,
-            "export_cache_files_pruned": response.export_cache_files_pruned,
-            "export_provenance_invalidated": response.export_provenance_invalidated,
-            "benchmark_artifacts_invalidated": response.benchmark_artifacts_invalidated,
-            "trace_object_files_deleted": response.trace_object_files_deleted,
-            "encrypted_artifacts_deleted": response.encrypted_artifacts_deleted,
-            "db_mirror_backfilled": response.db_mirror_backfilled,
-            "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
-            "vector_entries_indexed": response.vector_entries_indexed,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_retention_dry_run_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "revoked_submission_count": response.revoked_submission_count,
+        "expired_submission_count": response.expired_submission_count,
+        "records_marked_revoked": response.records_marked_revoked,
+        "records_marked_expired": response.records_marked_expired,
+        "records_marked_purged": response.records_marked_purged,
+        "derived_marked_revoked": response.derived_marked_revoked,
+        "derived_marked_expired": response.derived_marked_expired,
+        "export_cache_files_pruned": response.export_cache_files_pruned,
+        "export_provenance_invalidated": response.export_provenance_invalidated,
+        "benchmark_artifacts_invalidated": response.benchmark_artifacts_invalidated,
+        "trace_object_files_deleted": response.trace_object_files_deleted,
+        "encrypted_artifacts_deleted": response.encrypted_artifacts_deleted,
+        "db_mirror_backfilled": response.db_mirror_backfilled,
+        "db_mirror_backfill_failed": response.db_mirror_backfill_failed,
+        "vector_entries_indexed": response.vector_entries_indexed,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn vector_index_drill_evidence_hash(
@@ -45325,29 +45883,26 @@ fn vector_index_drill_evidence_hash(
     response: &TraceVectorIndexDrillResponse,
     state: &AppState,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_vector_index_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "limit": response.limit,
-            "require_candidates": response.require_candidates,
-            "private_embedder_configured": state.vector_embedder.is_some(),
-            "private_embedder_required": state.require_external_vector_embedder,
-            "private_searcher_configured": state.vector_searcher.is_some(),
-            "private_searcher_required": state.require_external_vector_searcher,
-            "scheduler_enabled": state.vector_index_scheduler.is_some(),
-            "checked_count": response.checked_count,
-            "vector_entries_indexed": response.vector_entries_indexed,
-            "skipped_existing_count": response.skipped_existing_count,
-            "pending_after_count": response.pending_after_count,
-            "candidate_count": response.candidate_count,
-            "nearest_neighbor_policy_gap_count": response.nearest_neighbor_policy_gap_count,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_vector_index_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "limit": response.limit,
+        "require_candidates": response.require_candidates,
+        "private_embedder_configured": state.vector_embedder.is_some(),
+        "private_embedder_required": state.require_external_vector_embedder,
+        "private_searcher_configured": state.vector_searcher.is_some(),
+        "private_searcher_required": state.require_external_vector_searcher,
+        "scheduler_enabled": state.vector_index_scheduler.is_some(),
+        "checked_count": response.checked_count,
+        "vector_entries_indexed": response.vector_entries_indexed,
+        "skipped_existing_count": response.skipped_existing_count,
+        "pending_after_count": response.pending_after_count,
+        "candidate_count": response.candidate_count,
+        "nearest_neighbor_policy_gap_count": response.nearest_neighbor_policy_gap_count,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn analytics_release_drill_evidence_hash(
@@ -45357,113 +45912,104 @@ fn analytics_release_drill_evidence_hash(
     min_cell_count: Option<usize>,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_analytics_release_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "min_cell_count": state.analytics_min_cell_count,
-            "min_cell_count_configured": min_cell_count.is_some(),
-            "broad_release_noise_configured": state.analytics_broad_release_noise.is_some(),
-            "broad_release_noise_max_delta": state
-                .analytics_broad_release_noise
-                .as_ref()
-                .map(|config| config.max_delta),
-            "privacy_accounting_configured": state
-                .analytics_broad_release_privacy_accounting
-                .is_some(),
-            "epsilon_micros_per_release": budget.epsilon_micros_per_release,
-            "max_epsilon_micros": budget.max_epsilon_micros,
-            "epsilon_spent_micros": budget.epsilon_spent_micros,
-            "epsilon_remaining_micros": budget.epsilon_remaining_micros,
-            "released_cell_count": budget.released_cell_count,
-            "suppressed_cell_count": budget.suppressed_cell_count,
-            "suppression_applied": budget.suppression_applied,
-            "noise_applied": budget.noise_applied,
-            "noise_max_delta": budget.noise_max_delta,
-            "noisy_cell_count": budget.noisy_cell_count,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_analytics_release_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "min_cell_count": state.analytics_min_cell_count,
+        "min_cell_count_configured": min_cell_count.is_some(),
+        "broad_release_noise_configured": state.analytics_broad_release_noise.is_some(),
+        "broad_release_noise_max_delta": state
+            .analytics_broad_release_noise
+            .as_ref()
+            .map(|config| config.max_delta),
+        "privacy_accounting_configured": state
+            .analytics_broad_release_privacy_accounting
+            .is_some(),
+        "epsilon_micros_per_release": budget.epsilon_micros_per_release,
+        "max_epsilon_micros": budget.max_epsilon_micros,
+        "epsilon_spent_micros": budget.epsilon_spent_micros,
+        "epsilon_remaining_micros": budget.epsilon_remaining_micros,
+        "released_cell_count": budget.released_cell_count,
+        "suppressed_cell_count": budget.suppressed_cell_count,
+        "suppression_applied": budget.suppression_applied,
+        "noise_applied": budget.noise_applied,
+        "noise_max_delta": budget.noise_max_delta,
+        "noisy_cell_count": budget.noisy_cell_count,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn benchmark_readiness_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceBenchmarkReadinessDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_benchmark_readiness_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "require_artifacts": response.require_artifacts,
-            "require_external_evaluator": response.require_external_evaluator,
-            "require_registry_submitter": response.require_registry_submitter,
-            "require_registry_confirmer": response.require_registry_confirmer,
-            "total_artifact_count": response.total_artifact_count,
-            "candidate_not_evaluated_count": response.candidate_not_evaluated_count,
-            "evaluated_passed_unpublished_count": response.evaluated_passed_unpublished_count,
-            "publishable_count": response.publishable_count,
-            "published_count": response.published_count,
-            "revoked_count": response.revoked_count,
-            "registry_submitter_configured": response.registry_submitter_configured,
-            "registry_submitter_auth_configured": response.registry_submitter_auth_configured,
-            "registry_confirmer_configured": response.registry_confirmer_configured,
-            "registry_confirmer_auth_configured": response.registry_confirmer_auth_configured,
-            "registry_require_adapter_auth": response.registry_require_adapter_auth,
-            "external_evaluator_configured": response.external_evaluator_configured,
-            "registry_outbox_pending_count": response.registry_outbox_pending_count,
-            "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
-            "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
-            "registry_outbox_failed_count": response.registry_outbox_failed_count,
-            "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
-            "registry_outbox_pending_without_submitter_auth_count": response.registry_outbox_pending_without_submitter_auth_count,
-            "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
-            "registry_outbox_submitted_without_confirmer_auth_count": response.registry_outbox_submitted_without_confirmer_auth_count,
-            "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
-            "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
-            "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
-            "blocker_reasons": response.blocker_reasons,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_benchmark_readiness_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "require_artifacts": response.require_artifacts,
+        "require_external_evaluator": response.require_external_evaluator,
+        "require_registry_submitter": response.require_registry_submitter,
+        "require_registry_confirmer": response.require_registry_confirmer,
+        "total_artifact_count": response.total_artifact_count,
+        "candidate_not_evaluated_count": response.candidate_not_evaluated_count,
+        "evaluated_passed_unpublished_count": response.evaluated_passed_unpublished_count,
+        "publishable_count": response.publishable_count,
+        "published_count": response.published_count,
+        "revoked_count": response.revoked_count,
+        "registry_submitter_configured": response.registry_submitter_configured,
+        "registry_submitter_auth_configured": response.registry_submitter_auth_configured,
+        "registry_confirmer_configured": response.registry_confirmer_configured,
+        "registry_confirmer_auth_configured": response.registry_confirmer_auth_configured,
+        "registry_require_adapter_auth": response.registry_require_adapter_auth,
+        "external_evaluator_configured": response.external_evaluator_configured,
+        "registry_outbox_pending_count": response.registry_outbox_pending_count,
+        "registry_outbox_submitted_count": response.registry_outbox_submitted_count,
+        "registry_outbox_confirmed_count": response.registry_outbox_confirmed_count,
+        "registry_outbox_failed_count": response.registry_outbox_failed_count,
+        "registry_outbox_pending_without_submitter_count": response.registry_outbox_pending_without_submitter_count,
+        "registry_outbox_pending_without_submitter_auth_count": response.registry_outbox_pending_without_submitter_auth_count,
+        "registry_outbox_submitted_without_confirmer_count": response.registry_outbox_submitted_without_confirmer_count,
+        "registry_outbox_submitted_without_confirmer_auth_count": response.registry_outbox_submitted_without_confirmer_auth_count,
+        "publishable_without_external_evaluator_count": response.publishable_without_external_evaluator_count,
+        "external_registry_adapter_gap_count": response.external_registry_adapter_gap_count,
+        "external_registry_invalidation_gap_count": response.external_registry_invalidation_gap_count,
+        "blocker_reasons": response.blocker_reasons,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn ranking_model_readiness_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceRankingModelReadinessDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_ranking_model_readiness_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "require_active_model": response.require_active_model,
-            "require_ready_credit": response.require_ready_credit,
-            "require_clean_adjudication": response.require_clean_adjudication,
-            "require_process_evaluator": response.require_process_evaluator,
-            "process_evaluator_configured": response.process_evaluator_configured,
-            "active_model_count": response.active_model_count,
-            "monitored_model_count": response.monitored_model_count,
-            "at_risk_model_count": response.at_risk_model_count,
-            "risk_code_counts": response.risk_code_counts,
-            "calibration_dataset_count": response.calibration_dataset_count,
-            "calibration_dataset_manifest_conflict_count": response.calibration_dataset_manifest_conflict_count,
-            "ready_model_target_count": response.ready_model_target_count,
-            "blocked_model_target_count": response.blocked_model_target_count,
-            "dataset_reason_code_counts": response.dataset_reason_code_counts,
-            "adjudication_issue_group_count": response.adjudication_issue_group_count,
-            "adjudication_reason_counts": response.adjudication_reason_counts,
-            "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
-            "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
-            "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
-            "credit_blocked_reason_counts": response.credit_blocked_reason_counts,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_ranking_model_readiness_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "require_active_model": response.require_active_model,
+        "require_ready_credit": response.require_ready_credit,
+        "require_clean_adjudication": response.require_clean_adjudication,
+        "require_process_evaluator": response.require_process_evaluator,
+        "process_evaluator_configured": response.process_evaluator_configured,
+        "active_model_count": response.active_model_count,
+        "monitored_model_count": response.monitored_model_count,
+        "at_risk_model_count": response.at_risk_model_count,
+        "risk_code_counts": response.risk_code_counts,
+        "calibration_dataset_count": response.calibration_dataset_count,
+        "calibration_dataset_manifest_conflict_count": response.calibration_dataset_manifest_conflict_count,
+        "ready_model_target_count": response.ready_model_target_count,
+        "blocked_model_target_count": response.blocked_model_target_count,
+        "dataset_reason_code_counts": response.dataset_reason_code_counts,
+        "adjudication_issue_group_count": response.adjudication_issue_group_count,
+        "adjudication_reason_counts": response.adjudication_reason_counts,
+        "pending_ranking_credit_event_count": response.pending_ranking_credit_event_count,
+        "ready_ranking_credit_event_count": response.ready_ranking_credit_event_count,
+        "blocked_ranking_credit_event_count": response.blocked_ranking_credit_event_count,
+        "credit_blocked_reason_counts": response.credit_blocked_reason_counts,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn revocation_propagation_drill_evidence_hash(
@@ -45471,52 +46017,46 @@ fn revocation_propagation_drill_evidence_hash(
     response: &TraceRevocationPropagationWorkerResponse,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_propagation_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "dry_run": response.dry_run,
-            "checked": response.checked,
-            "completed": response.completed,
-            "failed": response.failed,
-            "skipped": response.skipped,
-            "pending": response.pending,
-            "next_attempt_scheduled": response.next_attempt_scheduled,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_propagation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "dry_run": response.dry_run,
+        "checked": response.checked,
+        "completed": response.completed,
+        "failed": response.failed,
+        "skipped": response.skipped,
+        "pending": response.pending,
+        "next_attempt_scheduled": response.next_attempt_scheduled,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 fn revocation_effects_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceRevocationEffectsDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_effects_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "canary_revocation_found": response.canary_revocation_found,
-            "credit_reversal_item_count": response.credit_reversal_item_count,
-            "credit_reversal_done_count": response.credit_reversal_done_count,
-            "reversed_credit_event_count": response.reversed_credit_event_count,
-            "near_reversal_outbox_count": response.near_reversal_outbox_count,
-            "delayed_credit_reversal_ready": response.delayed_credit_reversal_ready,
-            "object_delete_item_count": response.object_delete_item_count,
-            "object_delete_done_count": response.object_delete_done_count,
-            "deleted_object_ref_count": response.deleted_object_ref_count,
-            "physical_delete_receipt_count": response.physical_delete_receipt_count,
-            "object_deletion_refs_ready": response.object_deletion_refs_ready,
-            "worker_queue_invalidation_item_count": response.worker_queue_invalidation_item_count,
-            "worker_queue_invalidation_done_count": response.worker_queue_invalidation_done_count,
-            "worker_queue_invalidation_ready": response.worker_queue_invalidation_ready,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_effects_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "canary_revocation_found": response.canary_revocation_found,
+        "credit_reversal_item_count": response.credit_reversal_item_count,
+        "credit_reversal_done_count": response.credit_reversal_done_count,
+        "reversed_credit_event_count": response.reversed_credit_event_count,
+        "near_reversal_outbox_count": response.near_reversal_outbox_count,
+        "delayed_credit_reversal_ready": response.delayed_credit_reversal_ready,
+        "object_delete_item_count": response.object_delete_item_count,
+        "object_delete_done_count": response.object_delete_done_count,
+        "deleted_object_ref_count": response.deleted_object_ref_count,
+        "physical_delete_receipt_count": response.physical_delete_receipt_count,
+        "object_deletion_refs_ready": response.object_deletion_refs_ready,
+        "worker_queue_invalidation_item_count": response.worker_queue_invalidation_item_count,
+        "worker_queue_invalidation_done_count": response.worker_queue_invalidation_done_count,
+        "worker_queue_invalidation_ready": response.worker_queue_invalidation_ready,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn revocation_effects_drill_check_evidence_hash(
@@ -45525,148 +46065,130 @@ fn revocation_effects_drill_check_evidence_hash(
     check_name: &str,
     passed: bool,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_revocation_effects_drill_check.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "aggregate_evidence_hash": aggregate_evidence_hash,
-            "check_name": check_name,
-            "passed": passed,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_revocation_effects_drill_check.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "aggregate_evidence_hash": aggregate_evidence_hash,
+        "check_name": check_name,
+        "passed": passed,
+    }))
 }
 
 fn canary_read_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceCanaryReadDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_canary_read_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "isolation_tenant_storage_ref": response.isolation_tenant_storage_ref,
-            "canary_submission_found": response.canary_submission_found,
-            "submit_status_visible": response.submit_status_visible,
-            "tenant_canary_isolated": response.tenant_canary_isolated,
-            "contributor_credit_visible": response.contributor_credit_visible,
-            "reviewer_metadata_visible": response.reviewer_metadata_visible,
-            "replay_export_selection_visible": response.replay_export_selection_visible,
-            "audit_read_count": response.audit_read_count,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_canary_read_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "isolation_tenant_storage_ref": response.isolation_tenant_storage_ref,
+        "canary_submission_found": response.canary_submission_found,
+        "submit_status_visible": response.submit_status_visible,
+        "tenant_canary_isolated": response.tenant_canary_isolated,
+        "contributor_credit_visible": response.contributor_credit_visible,
+        "reviewer_metadata_visible": response.reviewer_metadata_visible,
+        "replay_export_selection_visible": response.replay_export_selection_visible,
+        "audit_read_count": response.audit_read_count,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_primary_read_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceObjectPrimaryReadDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_primary_read_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "submission_ref_hash": response.submission_ref_hash,
-            "fallback_tenant_storage_ref": response.fallback_tenant_storage_ref,
-            "canary_submission_found": response.canary_submission_found,
-            "object_store_eligible": response.object_store_eligible,
-            "object_primary_submit_review_enabled": response.object_primary_submit_review_enabled,
-            "object_primary_replay_export_enabled": response.object_primary_replay_export_enabled,
-            "submitted_object_ref_present": response.submitted_object_ref_present,
-            "submitted_object_ref_service_owned": response.submitted_object_ref_service_owned,
-            "submitted_object_ref_readable": response.submitted_object_ref_readable,
-            "review_body_object_ref_readable": response.review_body_object_ref_readable,
-            "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
-            "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
-            "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_primary_read_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "submission_ref_hash": response.submission_ref_hash,
+        "fallback_tenant_storage_ref": response.fallback_tenant_storage_ref,
+        "canary_submission_found": response.canary_submission_found,
+        "object_store_eligible": response.object_store_eligible,
+        "object_primary_submit_review_enabled": response.object_primary_submit_review_enabled,
+        "object_primary_replay_export_enabled": response.object_primary_replay_export_enabled,
+        "submitted_object_ref_present": response.submitted_object_ref_present,
+        "submitted_object_ref_service_owned": response.submitted_object_ref_service_owned,
+        "submitted_object_ref_readable": response.submitted_object_ref_readable,
+        "review_body_object_ref_readable": response.review_body_object_ref_readable,
+        "replay_body_object_ref_readable": response.replay_body_object_ref_readable,
+        "plaintext_submitted_body_absent": response.plaintext_submitted_body_absent,
+        "fallback_tenant_object_primary_disabled": response.fallback_tenant_object_primary_disabled,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_store_migration_probe_ref_hash(
     object_store_name: &str,
     receipt: &EncryptedTraceArtifactReceipt,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "object_store_name": object_store_name,
-            "tenant_storage_ref": receipt.tenant_storage_ref,
-            "artifact_kind": receipt.artifact_kind,
-            "object_key": receipt.object_key,
-            "ciphertext_sha256": receipt.ciphertext_sha256,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "object_store_name": object_store_name,
+        "tenant_storage_ref": receipt.tenant_storage_ref,
+        "artifact_kind": receipt.artifact_kind,
+        "object_key": receipt.object_key,
+        "ciphertext_sha256": receipt.ciphertext_sha256,
+    }))
 }
 
 fn object_store_migration_manifest_hash(
     tenant: &TenantAuth,
     response: &TraceObjectStoreMigrationDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_store_migration_manifest.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "generated_at": response.generated_at,
-            "purpose_hash": sha256_prefixed(&response.purpose),
-            "object_store_configured": response.object_store_configured,
-            "object_store_name": response.object_store_name,
-            "object_store_eligible": response.object_store_eligible,
-            "object_io_enabled": response.object_io_enabled,
-            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
-            "require_delete": response.require_delete,
-            "require_versioning": response.require_versioning,
-            "object_versioning_supported": response.object_versioning_supported,
-            "restore_after_delete_supported": response.restore_after_delete_supported,
-            "write_succeeded": response.write_succeeded,
-            "read_succeeded": response.read_succeeded,
-            "delete_succeeded": response.delete_succeeded,
-            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
-            "probe_object_ref_hash": response.probe_object_ref_hash,
-            "io_error_hashes": response.io_error_hashes,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_store_migration_manifest.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "generated_at": response.generated_at,
+        "purpose_hash": sha256_prefixed(&response.purpose),
+        "object_store_configured": response.object_store_configured,
+        "object_store_name": response.object_store_name,
+        "object_store_eligible": response.object_store_eligible,
+        "object_io_enabled": response.object_io_enabled,
+        "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+        "require_delete": response.require_delete,
+        "require_versioning": response.require_versioning,
+        "object_versioning_supported": response.object_versioning_supported,
+        "restore_after_delete_supported": response.restore_after_delete_supported,
+        "write_succeeded": response.write_succeeded,
+        "read_succeeded": response.read_succeeded,
+        "delete_succeeded": response.delete_succeeded,
+        "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
+        "probe_object_ref_hash": response.probe_object_ref_hash,
+        "io_error_hashes": response.io_error_hashes,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn object_store_migration_drill_evidence_hash(
     tenant: &TenantAuth,
     response: &TraceObjectStoreMigrationDrillResponse,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_object_store_migration_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "migration_manifest_hash": response.migration_manifest_hash,
-            "object_store_configured": response.object_store_configured,
-            "object_store_name": response.object_store_name,
-            "object_store_eligible": response.object_store_eligible,
-            "object_io_enabled": response.object_io_enabled,
-            "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
-            "require_delete": response.require_delete,
-            "require_versioning": response.require_versioning,
-            "object_versioning_supported": response.object_versioning_supported,
-            "restore_after_delete_supported": response.restore_after_delete_supported,
-            "write_succeeded": response.write_succeeded,
-            "read_succeeded": response.read_succeeded,
-            "delete_succeeded": response.delete_succeeded,
-            "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
-            "probe_object_ref_hash": response.probe_object_ref_hash,
-            "io_error_hashes": response.io_error_hashes,
-            "blocking_gaps": response.blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_object_store_migration_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "migration_manifest_hash": response.migration_manifest_hash,
+        "object_store_configured": response.object_store_configured,
+        "object_store_name": response.object_store_name,
+        "object_store_eligible": response.object_store_eligible,
+        "object_io_enabled": response.object_io_enabled,
+        "plaintext_compatibility_allowed": response.plaintext_compatibility_allowed,
+        "require_delete": response.require_delete,
+        "require_versioning": response.require_versioning,
+        "object_versioning_supported": response.object_versioning_supported,
+        "restore_after_delete_supported": response.restore_after_delete_supported,
+        "write_succeeded": response.write_succeeded,
+        "read_succeeded": response.read_succeeded,
+        "delete_succeeded": response.delete_succeeded,
+        "restore_after_delete_succeeded": response.restore_after_delete_succeeded,
+        "probe_object_ref_hash": response.probe_object_ref_hash,
+        "io_error_hashes": response.io_error_hashes,
+        "blocking_gaps": response.blocking_gaps,
+    }))
 }
 
 fn canary_read_drill_check_evidence_hash(
@@ -45675,17 +46197,14 @@ fn canary_read_drill_check_evidence_hash(
     check_name: &str,
     passed: bool,
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_canary_read_drill_check.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "aggregate_evidence_hash": aggregate_evidence_hash,
-            "check_name": check_name,
-            "passed": passed,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_canary_read_drill_check.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "aggregate_evidence_hash": aggregate_evidence_hash,
+        "check_name": check_name,
+        "passed": passed,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45707,30 +46226,27 @@ fn key_rotation_drill_evidence_hash(
     signed_token_require_jti: bool,
     blocking_gaps: &[String],
 ) -> String {
-    sha256_prefixed(
-        &serde_json::json!({
-            "schema": "trace_commons_key_rotation_drill.v1",
-            "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
-            "actor_principal_ref": tenant.principal_ref,
-            "signed_token_auth_enabled": signed_token_auth_enabled,
-            "require_eddsa_signed_tokens": state.require_eddsa_signed_tokens,
-            "require_managed_eddsa_signed_tokens": state.require_managed_eddsa_signed_tokens,
-            "signed_token_managed_eddsa_key_count": signed_token_managed_eddsa_key_count,
-            "signed_token_managed_eddsa_active_key_count": signed_token_managed_eddsa_active_key_count,
-            "signed_token_managed_eddsa_inactive_key_count": signed_token_managed_eddsa_inactive_key_count,
-            "signed_token_eddsa_keyset_url_refresh_enabled": signed_token_eddsa_keyset_url_refresh_enabled,
-            "signed_token_eddsa_keyset_url_max_stale_seconds": signed_token_eddsa_keyset_url_max_stale_seconds,
-            "signed_token_eddsa_keyset_url_last_refresh_success_at": signed_token_eddsa_keyset_url_last_refresh_success_at,
-            "signed_token_eddsa_keyset_url_last_refresh_failure_at": signed_token_eddsa_keyset_url_last_refresh_failure_at,
-            "signed_token_eddsa_keyset_url_stale": signed_token_eddsa_keyset_url_stale,
-            "signed_token_issuer_configured": signed_token_issuer_configured,
-            "signed_token_audience_configured": signed_token_audience_configured,
-            "signed_token_max_ttl_seconds": signed_token_max_ttl_seconds,
-            "signed_token_require_jti": signed_token_require_jti,
-            "blocking_gaps": blocking_gaps,
-        })
-        .to_string(),
-    )
+    json_evidence_hash(&serde_json::json!({
+        "schema": "trace_commons_key_rotation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "signed_token_auth_enabled": signed_token_auth_enabled,
+        "require_eddsa_signed_tokens": state.require_eddsa_signed_tokens,
+        "require_managed_eddsa_signed_tokens": state.require_managed_eddsa_signed_tokens,
+        "signed_token_managed_eddsa_key_count": signed_token_managed_eddsa_key_count,
+        "signed_token_managed_eddsa_active_key_count": signed_token_managed_eddsa_active_key_count,
+        "signed_token_managed_eddsa_inactive_key_count": signed_token_managed_eddsa_inactive_key_count,
+        "signed_token_eddsa_keyset_url_refresh_enabled": signed_token_eddsa_keyset_url_refresh_enabled,
+        "signed_token_eddsa_keyset_url_max_stale_seconds": signed_token_eddsa_keyset_url_max_stale_seconds,
+        "signed_token_eddsa_keyset_url_last_refresh_success_at": signed_token_eddsa_keyset_url_last_refresh_success_at,
+        "signed_token_eddsa_keyset_url_last_refresh_failure_at": signed_token_eddsa_keyset_url_last_refresh_failure_at,
+        "signed_token_eddsa_keyset_url_stale": signed_token_eddsa_keyset_url_stale,
+        "signed_token_issuer_configured": signed_token_issuer_configured,
+        "signed_token_audience_configured": signed_token_audience_configured,
+        "signed_token_max_ttl_seconds": signed_token_max_ttl_seconds,
+        "signed_token_require_jti": signed_token_require_jti,
+        "blocking_gaps": blocking_gaps,
+    }))
 }
 
 const TRACE_OPERATIONAL_METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -49898,6 +50414,243 @@ async fn revocation_propagation_worker_handler(
     Ok(Json(response))
 }
 
+/// Per-IP cap on `GET /v1/public/register-stats` per window.
+///
+/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
+/// hop, which any caller can set, so this bucket is trivially escaped by
+/// anyone who wants to. It keeps one ordinary misbehaving client from being
+/// the whole load; the global cap below is what actually bounds the endpoint.
+const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
+/// The real bound: a cap no per-request header can escape, so a distributed
+/// flood is limited too.
+const REGISTER_STATS_GLOBAL_LIMIT: u32 = 1200;
+/// Publicly cacheable: the figures move only when the refresh worker runs, and
+/// a cache in front of this is the cheapest defence it has.
+const REGISTER_STATS_CACHE_CONTROL: &str = "public, max-age=300";
+/// What the published figures actually cover, verbatim to clients.
+///
+/// Deliberately not a tenant-shaped word: it names an operator-chosen cohort,
+/// not the register as a whole, and it must not read as an identifier.
+const REGISTER_STATS_SCOPE: &str = "configured_communities";
+/// Contributors below which the counts are withheld. High by default because
+/// the failure mode of guessing low is publishing one person's earnings.
+const REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR: i64 = 25;
+
+/// The register's aggregate figures. No identity, at any aggregation, ever.
+///
+/// SCOPE: these figures cover the tenants this deployment configured as
+/// communities (`state.community_tenant_ids`, the cohort the refresh worker
+/// aggregates), not every tenant the server holds. `scope` says so on the
+/// wire, because on an unauthenticated endpoint a bare `traces_accepted`
+/// otherwise reads as a claim about the whole register.
+#[derive(Debug, Serialize)]
+struct RegisterStats {
+    /// Absent whenever the counts below are, floor included. It counts
+    /// submissions rather than people, but below the floor the people are few
+    /// by construction, and one person's trace count -- and its delta between
+    /// refreshes, which is their submission rate -- is not an aggregate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traces_accepted: Option<i64>,
+    /// Absent below the contributor floor. Absent, not zero: a zero here would
+    /// read as "nobody has contributed" rather than "we are not saying".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contributors: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    points_issued: Option<i64>,
+    /// True when the operator's suppression flag, an uncomputed row, or the
+    /// contributor floor withheld every figure above.
+    withheld: bool,
+    /// What the figures cover. Constant, and not an identifier.
+    scope: &'static str,
+    as_of: DateTime<Utc>,
+    posture: trace_commons_server::credit_numbers::CreditPosture,
+}
+
+/// Whether the counts are withheld, and why.
+///
+/// Pure, and deliberately so: this is the one privacy-relevant decision in
+/// the endpoint, and CI never runs PostgreSQL, so a test that reached for a
+/// database would silently skip on every gating machine and guard nothing.
+///
+/// `refreshed` false withholds regardless of the counts. An unrefreshed row
+/// carries schema defaults, and publishing those would be a claim about the
+/// register that nobody computed.
+fn register_stats_withheld(contributors: i64, floor: i64, refreshed: bool) -> bool {
+    !refreshed || contributors < floor
+}
+
+/// Contributors below which the counts are withheld.
+///
+/// Configurable because the right number depends on the real contributor
+/// count. A malformed or negative value is ignored in favour of the default
+/// rather than parsed into a floor that suppresses nothing.
+fn register_stats_contributor_floor() -> i64 {
+    register_stats_floor_from(
+        std::env::var("TRACE_COMMONS_REGISTER_STATS_CONTRIBUTOR_FLOOR")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Parse the configured floor, or fall back to the default.
+///
+/// Pure so the fallback is testable without mutating process environment,
+/// which no parallel test can do safely. Unset, blank, malformed and negative
+/// all resolve to the default: every one of those is a misconfiguration, and
+/// the safe reading of a misconfigured floor is the high one, never a zero
+/// that suppresses nothing.
+fn register_stats_floor_from(raw: Option<&str>) -> i64 {
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|floor| *floor >= 0)
+        .unwrap_or(REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR)
+}
+
+/// Render one materialised row into what may be published.
+///
+/// Pure: no state, no database, no clock. The handler is then only transport,
+/// and every suppression rule below is unit-tested without PostgreSQL.
+///
+/// Three independent reasons to say nothing, and any one of them suffices:
+///
+/// - `row.suppressed` -- the operator's lever. No refresh writes it, so
+///   suppression set during an incident survives the next scheduled run.
+/// - `row.refreshed_at.is_none()` (equivalently `row.withheld`, the computed
+///   marker every refresh clears) -- nobody has computed these figures, and
+///   schema defaults are not a claim about the register.
+/// - contributors below the floor -- see `register_stats_withheld`.
+///
+/// EVERY figure is gated, `traces_accepted` included. It counts submissions
+/// rather than people, but below the floor the people are few by construction
+/// and `withheld: true` tells the caller so: on a small cohort that field is
+/// one person's trace count, and its delta between refreshes is that person's
+/// submission rate.
+fn register_stats_response(
+    row: &trace_commons_server::register_stats::RegisterStatsRow,
+    floor: i64,
+    settlement_mode: &str,
+) -> RegisterStats {
+    let computed = row.refreshed_at.is_some() && !row.withheld;
+    let withheld = row.suppressed
+        || !computed
+        || register_stats_withheld(row.contributors, floor, row.refreshed_at.is_some());
+
+    RegisterStats {
+        traces_accepted: (!withheld).then_some(row.traces_accepted),
+        contributors: (!withheld).then_some(row.contributors),
+        points_issued: (!withheld).then_some(row.points_issued),
+        withheld,
+        scope: REGISTER_STATS_SCOPE,
+        as_of: row.as_of,
+        posture: trace_commons_server::credit_numbers::CreditPosture::current(
+            settlement_mode,
+            false,
+        ),
+    }
+}
+
+/// `GET /v1/public/register-stats` — aggregate register facts, to anyone.
+///
+/// UNAUTHENTICATED by design, and registered outside every auth layer beside
+/// `/v1/source`. It reads one materialised row through the least-privileged
+/// `trace_commons_public_read` role and never queries a live table: a figure
+/// computed per request is a figure someone can poll to watch a single
+/// submission land.
+async fn register_stats_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<(
+    [(axum::http::HeaderName, HeaderValue); 1],
+    Json<RegisterStats>,
+)> {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("register-stats-ip:{client_ip}"),
+        REGISTER_STATS_PER_IP_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
+
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::fetch_public_register_stats_row(db.as_ref())
+        .await
+        .map_err(internal_error)?;
+
+    Ok((
+        [(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static(REGISTER_STATS_CACHE_CONTROL),
+        )],
+        Json(register_stats_response(
+            &row,
+            register_stats_contributor_floor(),
+            state.near_settlement_mode_label(),
+        )),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterStatsRefreshResponse {
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed_at: DateTime<Utc>,
+}
+
+/// Recompute the public aggregate row.
+///
+/// Batch-only and idempotent. It writes the single `trace_register_stats`
+/// row and stamps `refreshed_at`; until it has run at least once the public
+/// endpoint publishes nothing, because zeros would be a claim nobody made.
+///
+/// Scoped to `state.community_tenant_ids` -- the same configured cohort
+/// `compute_corpus_analytics_summary` uses for the community-analytics
+/// snapshot -- rather than an unscoped enumeration: these are the tenants
+/// already judged safe to aggregate into a public-facing figure. When that
+/// list is empty (enumerate every tenant), `compute_register_stats_totals`
+/// refuses rather than write a zero if its own fallback query comes back
+/// empty, so this handler never silently publishes a wrong number.
+///
+/// Nothing schedules this yet -- an operator wires it to a timer. That is a
+/// decision left to whoever runs the deployment, not one made here.
+async fn register_stats_refresh_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<RegisterStatsRefreshResponse>> {
+    let tenant = authenticate(state.as_ref(), &headers)?;
+    require_register_stats_operator(&tenant)?;
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "register stats refresh requires configured DB mirror",
+        ));
+    };
+    let row = trace_commons_server::register_stats::run_register_stats_refresh(
+        db.as_ref(),
+        state.community_tenant_ids.as_ref(),
+    )
+    .await
+    .map_err(internal_error)?;
+    let refreshed_at = row.refreshed_at.ok_or_else(|| {
+        internal_error(anyhow::anyhow!(
+            "register stats refresh did not stamp refreshed_at"
+        ))
+    })?;
+    Ok(Json(RegisterStatsRefreshResponse {
+        traces_accepted: row.traces_accepted,
+        contributors: row.contributors,
+        points_issued: row.points_issued,
+        refreshed_at,
+    }))
+}
+
 fn require_purge_purpose(
     dry_run: bool,
     purge_expired_before: Option<DateTime<Utc>>,
@@ -50299,6 +51052,22 @@ async fn evaluate_and_record_gate(
     // Shadow-mode cross-trace dedup (simhash-only in v1; embedding side deferred).
     // Best-effort: a failure logs hash-only and never blocks the gate decision.
     let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
+    // Which renderer and simhash algorithm produced the value above. Rows
+    // stamped differently are not comparable to it, however close the two
+    // numbers are, so this scopes the candidate set below (V57, #211).
+    //
+    // Normalised the same way the candidates are. A stored row reads its
+    // stamp through `effective_signal_version`, which maps NULL and empty
+    // alike to the legacy name; the incoming one used to be taken raw. A gate
+    // service returning `""` would then match no candidate at all -- every
+    // submission a permanent singleton, `dup_pen = 1`, duplicates earning
+    // full credit -- and nothing would report an error. Both sides must
+    // normalise, or neither does.
+    let dedup_signal_version = if decision.dedup_signal_version.is_empty() {
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
+    } else {
+        decision.dedup_signal_version.clone()
+    };
     let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
     let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
     // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
@@ -50309,26 +51078,40 @@ async fn evaluate_and_record_gate(
     // (`run_recluster_dedup_pass`), which also assigns against one
     // representative-keyed candidate per cluster; without this, inline and
     // batch clustering could disagree on membership.
-    let mut reps: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
+    //
+    // The representative carries its own signal version alongside its
+    // simhash, for the same reason: a cluster's version is the version of the
+    // row that created it, and a row may only join a cluster derived the same
+    // way it was. Borrowed from `signals`, which outlives every map built
+    // from it — the stamp is a short fixed name and copying it once per
+    // cluster bought nothing.
+    let mut reps: std::collections::HashMap<uuid::Uuid, (i64, &str)> =
+        std::collections::HashMap::new();
     for s in &signals {
         if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
-            reps.entry(cid).or_insert(sh);
+            reps.entry(cid)
+                .or_insert((sh, s.effective_signal_version()));
             *sizes.entry(cid).or_insert(0) += 1;
         }
     }
-    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+    // No version filter here: `assign_cluster` refuses a differently stamped
+    // candidate itself, so the gate is in one place and a new call site
+    // cannot forget it.
+    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
         .iter()
-        .map(
-            |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+        .map(|(cluster_id, (simhash, version))| {
+            trace_commons_server::dedup_assign::ClusterCandidate {
                 cluster_id: *cluster_id,
                 size: *sizes.get(cluster_id).unwrap_or(&0),
                 simhash: *simhash as u64,
                 embed_cosine_micros: None,
-            },
-        )
+                signal_version: version,
+            }
+        })
         .collect();
     let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
         dedup_simhash as u64,
+        &dedup_signal_version,
         &candidates,
         &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
     ) {
@@ -50343,9 +51126,12 @@ async fn evaluate_and_record_gate(
         .update_trace_gate_decision_dedup(
             tenant_id,
             decision_id,
-            dedup_simhash,
-            cluster_id,
-            new_size,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: new_size,
+                dedup_signal_version,
+            },
         )
         .await
     {
@@ -50396,7 +51182,29 @@ async fn evaluate_and_record_gate(
                 .map(|sh| *sh as u64)
                 .collect::<Vec<u64>>(),
         );
-        let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> =
+        // CORRECTION CLUSTERING IS UNVERSIONED. See #538.
+        //
+        // The correction signal's derivation is the simhash algorithm alone:
+        // `correction_simhash_from_plaintext` takes it over
+        // `outcome.human_correction`, which no event renderer touches, and
+        // ends in `trace_simhash` — so a tokenizer bump would split every
+        // correction cluster exactly as a render bump splits the trace ones.
+        //
+        // It would, and nothing here stops it. `trace_correction_value`
+        // stores no stamp beside `correction_simhash`, so the constant below
+        // is both every candidate's `signal_version` and the incoming one:
+        // the version comparison inside `assign_cluster` is structurally
+        // false, not a gate. On a `DEDUP_SIMHASH_ALGORITHM` bump every stored
+        // correction simhash silently acquires the new label and old and new
+        // values fuse -- precisely the defect the trace-side stamp exists to
+        // prevent.
+        //
+        // Passing the constant is what the signature requires, not a claim of
+        // protection. Closing this needs a `correction_signal_version` column,
+        // which is a migration and belongs with the re-derivation pass, not
+        // here.
+        let correction_version = trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM;
+        let correction_candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> =
             correction_reps
                 .iter()
                 .map(
@@ -50405,11 +51213,13 @@ async fn evaluate_and_record_gate(
                         size: *correction_sizes.get(cluster_id).unwrap_or(&0),
                         simhash: *simhash as u64,
                         embed_cosine_micros: None,
+                        signal_version: correction_version,
                     },
                 )
                 .collect();
         let correction_cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
             correction_simhash as u64,
+            correction_version,
             &correction_candidates,
             &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
         ) {
@@ -50971,6 +51781,15 @@ struct ReclusterDedupSummary {
 /// recorded simhash cannot be clustered and are left untouched (not counted,
 /// not written).
 ///
+/// Candidates are scoped to the row's own `dedup_signal_version` (V57) by
+/// `assign_cluster` itself: the pass reads stored simhashes and never
+/// re-renders, so two values derived by different renderers or different
+/// simhash algorithms are not comparable and must never fuse. `NULL` is read
+/// as the legacy v1 stamp, so a corpus that has not yet been re-derived
+/// clusters exactly as it did before V57 -- and is left NULL, because reading
+/// a row as v1 is not the same as recording that it is v1. The pass writes
+/// the two cluster columns and nothing else.
+///
 /// Final cluster sizes are computed AFTER the full sweep completes, so every
 /// member of a cluster is written with the same total membership count — not
 /// its position-in-sweep size. A write failure on one decision is logged
@@ -50987,16 +51806,22 @@ async fn run_recluster_dedup_pass(
     let rows = db.list_dedup_signals(effective_limit).await?;
 
     // Pass 1: single deterministic sweep building cluster assignments over
-    // the snapshot. `reps` holds each cluster's representative simhash (the
-    // simhash of the row that created it); `counts` holds each cluster's
-    // running (and, after the loop, final) membership.
-    let mut reps: std::collections::HashMap<uuid::Uuid, u64> = std::collections::HashMap::new();
+    // the snapshot. `reps` holds each cluster's representative simhash AND
+    // the signal version it was derived under (both taken from the row that
+    // created the cluster); `counts` holds each cluster's running (and, after
+    // the loop, final) membership.
+    let mut reps: std::collections::HashMap<uuid::Uuid, (u64, &str)> =
+        std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
-    let mut assigned: Vec<(
-        &trace_commons_server::trace_corpus_storage::DedupSignalRow,
-        i64,
-        uuid::Uuid,
-    )> = Vec::new();
+    /// One row the sweep placed, carrying what pass 2 needs to write it --
+    /// which is the cluster and nothing else. The simhash and the stamp are
+    /// deliberately absent: the pass read them, it did not derive them, so it
+    /// has nothing to say about them.
+    struct AssignedRow<'a> {
+        row: &'a trace_commons_server::trace_corpus_storage::DedupSignalRow,
+        cluster_id: uuid::Uuid,
+    }
+    let mut assigned: Vec<AssignedRow<'_>> = Vec::new();
 
     for row in &rows {
         let Some(simhash_i64) = row.dedup_simhash else {
@@ -51005,44 +51830,63 @@ async fn run_recluster_dedup_pass(
             continue;
         };
         let simhash_u64 = simhash_i64 as u64;
-        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate> = reps
+        // NULL reads as the legacy v1 stamp, never as unknown (V57, D2), so a
+        // pre-V57 row and a freshly stamped v1 row still cluster together.
+        // Borrowed from `rows`, which outlives every map built from it.
+        let row_version = row.effective_signal_version();
+        // No version filter here: `assign_cluster` refuses a differently
+        // stamped candidate itself. That gate is what keeps the transition
+        // window honest — the pass reads stored simhashes and never
+        // re-renders, so without it a corpus holding both versions would fuse
+        // them silently.
+        let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
             .iter()
-            .map(
-                |(cluster_id, simhash)| trace_commons_server::dedup_assign::ClusterCandidate {
+            .map(|(cluster_id, (simhash, version))| {
+                trace_commons_server::dedup_assign::ClusterCandidate {
                     cluster_id: *cluster_id,
                     size: *counts.get(cluster_id).unwrap_or(&0),
                     simhash: *simhash,
                     embed_cosine_micros: None,
-                },
-            )
+                    signal_version: version,
+                }
+            })
             .collect();
         let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
             simhash_u64,
+            row_version,
             &candidates,
             &trace_commons_server::dedup_assign::DEDUP_CONSTANTS_V1,
         ) {
             trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
             trace_commons_server::dedup_assign::ClusterAssignment::New => {
                 let id = uuid::Uuid::new_v4();
-                reps.insert(id, simhash_u64);
+                reps.insert(id, (simhash_u64, row_version));
                 id
             }
         };
         *counts.entry(cluster_id).or_insert(0) += 1;
-        assigned.push((row, simhash_i64, cluster_id));
+        assigned.push(AssignedRow { row, cluster_id });
     }
 
     // Pass 2: write every assigned row with its cluster's FINAL total
     // membership count (computed after the whole sweep above).
     let mut summary = ReclusterDedupSummary::default();
-    for (row, simhash_i64, cluster_id) in assigned {
+    for assignment in assigned {
+        let row = assignment.row;
+        let cluster_id = assignment.cluster_id;
         let final_size =
             i32::try_from(counts.get(&cluster_id).copied().unwrap_or(1)).unwrap_or(i32::MAX);
+        // Cluster columns only. The pass derives neither the simhash nor the
+        // stamp, so it writes neither -- and in particular it does not
+        // materialise the legacy literal into a row whose stamp is NULL.
+        // That row is READ as the legacy version; writing the reading back
+        // would make it indistinguishable from a row the re-derivation pass
+        // has actually re-stamped, which is the precise reason V57 refuses a
+        // column DEFAULT.
         match db
-            .update_trace_gate_decision_dedup(
+            .update_trace_gate_decision_dedup_cluster(
                 &row.tenant_id,
                 row.decision_id,
-                simhash_i64,
                 cluster_id,
                 final_size,
             )
@@ -51988,6 +52832,13 @@ async fn gate_evaluate_worker_handler(
             // in `evaluate_and_record_gate` against the real decision, so
             // there is nothing meaningful to compute for this throwaway copy.
             dedup_simhash: 0,
+            // Same reason: with no simhash to describe, there is no
+            // derivation to name. A stamp no derivation produces, so that if
+            // this copy ever does reach a row, `dedup_simhash: 0` above joins
+            // nothing -- under the legacy stamp it would be Hamming-close to
+            // every low-weight v1 signal in the corpus.
+            dedup_signal_version:
+                trace_commons_server::dedup_assign::PLACEHOLDER_DEDUP_SIGNAL_VERSION.to_string(),
             // Same reason: this throwaway copy carries no plaintext, and the
             // correction value already ran inline against the real decision.
             correction_simhash: None,
@@ -53371,6 +54222,7 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
         TokenRole::CompetitionReadWorker => {
             StorageTraceTenantAccessGrantRole::CompetitionReadWorker
         }
+        TokenRole::RegisterStatsWorker => StorageTraceTenantAccessGrantRole::RegisterStatsWorker,
     }
 }
 
@@ -54382,6 +55234,17 @@ fn require_utility_operator(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
+fn require_register_stats_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::RegisterStatsWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or register stats worker token required",
+        ))
+    }
+}
+
 fn require_ranking_label_source_operator(
     auth: &TenantAuth,
     label_source: StorageTraceRankingLabelSource,
@@ -54592,6 +55455,40 @@ fn visible_submission_records_for_account(
     records
         .into_iter()
         .filter(|r| set.contains(&r.auth_principal_ref))
+        .collect()
+}
+
+/// Account-only visibility predicate for credit-ledger events, paired with
+/// `visible_submission_records_for_account` immediately above. Pure
+/// `&AccountPrincipalSet` set-membership, same as its sibling: NO
+/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard
+/// (unlike `visible_credit_events`/`can_access_credit_event_scoped`, which
+/// serve the reviewer/contributor surface and must keep both).
+///
+/// Unlike its submission sibling, this one IS on the request path
+/// (`GET /v1/account/credit-summary`): the credit ledger has no per-principal
+/// SQL filter to enforce membership at the query layer the way
+/// `list_account_trace_submissions_keyset` does for submissions --
+/// `list_trace_credit_events` returns every event for a tenant -- so this
+/// predicate is where "which ledger rows belong to this account" is actually
+/// decided, after the caller has already scoped `records`/`owner_by_submission`
+/// to the account via the SQL-scoped submission read.
+///
+/// MUST NOT COMPILE (Hardening C, same guarantee as `visible_submission_records_for_account`):
+/// ```compile_fail
+/// # // A `&TenantAuth` cannot be laundered into the account surface, which
+/// # // wants `&AccountPrincipalSet`:
+/// let auth: TenantAuth = unimplemented!();
+/// let events: Vec<TraceCommonsCreditLedgerRecord> = vec![];
+/// let _ = visible_credit_events_for_account(&auth, events); // E0308: expected &AccountPrincipalSet
+/// ```
+fn visible_credit_events_for_account(
+    set: &AccountPrincipalSet,
+    events: Vec<TraceCommonsCreditLedgerRecord>,
+) -> Vec<TraceCommonsCreditLedgerRecord> {
+    events
+        .into_iter()
+        .filter(|event| set.contains(&event.auth_principal_ref))
         .collect()
 }
 
@@ -55991,19 +56888,80 @@ fn status_for_risk(
 /// `reconcile_consent_declarations` (both call sites run
 /// `rescrub_trace_envelope` first, which does it), or an under-reported flag
 /// skips the hold -- the case that function's own comment exists to prevent.
+///
+/// # The witness bypass
+///
+/// `witness` and `bypass_config` are the redaction-witness bypass, and they
+/// are consulted at exactly this one call site. When an operator has pinned a
+/// witness and a certificate over the submitted bytes verified against that
+/// pin, a trace that would have been held is left `Accepted` instead.
+///
+/// **What that skips is the async backstop's CLASSIFIER stage, and only
+/// that.** It is not a wholesale bypass and it needs no exemption from the
+/// deterministic sweep, because the sweep has already run: both call sites
+/// invoke `rescrub_trace_envelope` -- the deterministic pass over
+/// `redacted_content` and `structured_payload`, plus `residual_envelope_scan`
+/// -- synchronously before reaching this function. That ordering is the
+/// entire safety argument, and
+/// `the_synchronous_rescrub_runs_before_the_hold_is_decided` pins it against
+/// the handler source. Moving this call above the rescrub turns the feature
+/// into a wholesale bypass and must turn that test red.
+///
+/// **A verified certificate never means the trace is clean.** It means a known
+/// program in a pinned enclave reached a `Low` verdict over the originating
+/// redaction pass. A credential the prose classifier itself emitted survives
+/// that verdict -- which is why the `risk_status == Accepted` precondition
+/// below is load-bearing rather than free tidiness: it is what keeps the
+/// server's own residual scan authoritative, so a certificate can never lift a
+/// quarantine the synchronous pass just imposed.
+///
+/// Five conditions, all required: the bypass is configured, a certificate
+/// verified, its verdict is `Low`, its policy alias is allowlisted, and the
+/// risk-derived status is already `Accepted`. The alias check is its own
+/// condition because a `deterministic-only` witness never ran a classifier, so
+/// admitting its alias would mean no classifier ever reads that trace's prose.
 fn corpus_status_with_pii_backstop_hold(
     risk_status: TraceCorpusStatus,
     consent: &ConsentMetadata,
     backstop_enabled: bool,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
 ) -> TraceCorpusStatus {
     let carries_raw_content = consent.message_text_included
         || consent.tool_payloads_included
         || consent.correction_included;
     if risk_status == TraceCorpusStatus::Accepted && carries_raw_content && backstop_enabled {
+        if witness_admits_trace(risk_status, witness, bypass_config) {
+            return TraceCorpusStatus::Accepted;
+        }
         TraceCorpusStatus::AwaitingPiiBackstop
     } else {
         risk_status
     }
+}
+
+/// Whether a verified witness certificate lets this trace skip the hold.
+///
+/// Split out from the decision above so the five conditions read as one list
+/// rather than as a nested `if`, and so the ingest tests can name it. It is
+/// not a public seam: the only caller is
+/// [`corpus_status_with_pii_backstop_hold`].
+///
+/// `risk_status` is re-checked here even though the caller has already
+/// established it. That is deliberate duplication: this predicate is the thing
+/// a future reader will lift to a second call site, and it must not be safe to
+/// lift only when the caller happens to have checked first.
+fn witness_admits_trace(
+    risk_status: TraceCorpusStatus,
+    witness: Option<&VerifiedWitnessCertificate>,
+    bypass_config: Option<&WitnessBypassConfig>,
+) -> bool {
+    let (Some(witness), Some(config)) = (witness, bypass_config) else {
+        return false;
+    };
+    risk_status == TraceCorpusStatus::Accepted
+        && witness.residual_risk_verdict() == ResidualPiiRisk::Low
+        && config.policy_version_allowed(witness.redaction_policy_version())
 }
 
 /// The contributor-facing sentence describing what will happen to the credit
@@ -56015,22 +56973,33 @@ fn corpus_status_with_pii_backstop_hold(
 /// figure, and a blank `FINAL` column, and could not tell "switched off" from
 /// "still working on it". Whichever posture is configured, the receipt says
 /// it, so the two can never drift apart again.
+///
+/// The wording itself lives once, in
+/// `trace_commons_server::credit_numbers::settlement_status_sentence`, which
+/// the credit-numbers API also renders through -- this function only maps the
+/// enum to that function's string labels. Do not put the sentences back here.
 fn settlement_posture_explanation(mode: NearSettlementMode) -> &'static str {
-    match mode {
-        // Deliberate and fail-safe, not a fault. Say both halves: the credit
-        // is real and recorded, and nothing is going to settle it here.
-        NearSettlementMode::Disabled => {
-            "Credit is recorded but not settled: on-chain settlement is not \
-             enabled on this deployment, so this figure stays pending."
-        }
-        // The outbox advances with synthetic transaction hashes and no funds.
-        // A settled-looking row here is not an on-chain credit.
-        NearSettlementMode::DryRun => {
-            "Settlement is running in dry-run: the credit ledger advances with \
-             synthetic transaction hashes and no on-chain credit is issued."
-        }
-        NearSettlementMode::Http => "Credit is queued for on-chain settlement.",
-    }
+    // `as_label`, not a second inline match. The credit endpoints reach the
+    // same sentence through that method, and two hand-maintained mappings with
+    // nothing asserting they agree drift silently: a label this copy got wrong
+    // would fall into `settlement_status_sentence`'s `_` arm, so the receipt
+    // would say "disabled" while the credit endpoints said "dry_run" about the
+    // same deployment.
+    trace_commons_server::credit_numbers::settlement_status_sentence(mode.as_label())
+}
+
+/// Whether this row was admitted by a verified witness certificate rather
+/// than by the ordinary path.
+///
+/// Reads the allowlisted status-reason label the submit handler wrote. It is
+/// deliberately not a re-derivation of the bypass conditions: the receipt has
+/// no certificate to inspect, and a second copy of that predicate would drift
+/// from the one that decided the status.
+fn witness_admitted_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    record
+        .last_status_reason
+        .as_deref()
+        .is_some_and(|reason| reason == WITNESS_ADMITTED_STATUS_REASON)
 }
 
 fn receipt_from_record(
@@ -56038,11 +57007,33 @@ fn receipt_from_record(
     settlement_mode: NearSettlementMode,
 ) -> TraceSubmissionReceipt {
     let explanation = match record.status {
-        TraceCorpusStatus::Accepted => vec![
-            "Accepted into the private redacted corpus.".to_string(),
-            settlement_posture_explanation(settlement_mode).to_string(),
-            format!("Attributed to tenant {}", record.tenant_storage_ref),
-        ],
+        TraceCorpusStatus::Accepted => {
+            let mut lines = vec!["Accepted into the private redacted corpus.".to_string()];
+            // #445's argument, applied to a second indistinguishable pair of
+            // outcomes: a trace admitted on a witness certificate was admitted
+            // on a DIFFERENT BASIS from one admitted on the server's own
+            // queued re-check, and a contributor is entitled to know which.
+            //
+            // The sentence deliberately claims nothing about cleanliness. It
+            // says a pinned enclave's redaction was accepted in place of the
+            // server's queued re-check, which is exactly what happened, and it
+            // carries no measurement and no address -- those are operator
+            // configuration and have no business on a contributor surface.
+            if witness_admitted_record(record) {
+                lines.push(
+                    "Admitted on an attested redaction witness certificate, in place of the \
+                     server's queued privacy re-check. The deterministic redaction sweep and \
+                     residual scan ran on this submission as they do on every submission."
+                        .to_string(),
+                );
+            }
+            lines.push(settlement_posture_explanation(settlement_mode).to_string());
+            lines.push(format!(
+                "Attributed to tenant {}",
+                record.tenant_storage_ref
+            ));
+            lines
+        }
         TraceCorpusStatus::Quarantined => vec![
             "Quarantined for privacy review; credit is pending review.".to_string(),
             format!("Attributed to tenant {}", record.tenant_storage_ref),
@@ -56362,6 +57353,23 @@ fn trace_record_artifact_object_store_for_ref(
         .to_string()
 }
 
+/// Exempt from the `canonical_json` treatment the other envelope-hashing
+/// paths got, deliberately.
+///
+/// This serializes a typed struct, so the serializer writes its fields in
+/// declaration order with no map involved -- `serde_json/preserve_order`
+/// cannot move them. The only ordering-sensitive part is the nested
+/// `structured_payload` values, and those arrive here already key-ordered:
+/// the envelope is read back from stored bytes, and the redaction pipeline
+/// canonicalizes every payload before it is stored
+/// (`canonicalize_event_payloads` in `trace-commons-protocol`).
+///
+/// Making it canonical anyway would mean either cloning the whole envelope
+/// to sort payloads in a copy, or routing it through `serde_json::to_value`
+/// -- and that second one would sort the *struct* fields too and move this
+/// hash today, which is exactly what the canonicalization work was required
+/// not to do. Nothing re-verifies a stored value of this hash against a
+/// rebuild in any case; the export verifier re-hashes raw file bytes.
 fn envelope_plaintext_hash(envelope: &TraceContributionEnvelope) -> anyhow::Result<String> {
     let envelope_json = serde_json::to_string_pretty(envelope)
         .context("failed to serialize trace envelope for hashing")?;
@@ -60816,6 +61824,20 @@ fn build_derived_precheck(
     }
 }
 
+/// Identifier for the derivation behind `trace_derived_records.summary_model`
+/// and `embedding_analysis.embedding_model`: the redacted-content summary
+/// hash the precheck computes, not a learned model. One name in one place
+/// because it is written from three call sites and read as a version by
+/// anything that decides whether a stored `canonical_summary_hash` is
+/// comparable to a freshly computed one; three copies of a literal are three
+/// chances to bump two of them.
+///
+/// Matches the V1 column default, which is deliberately NOT re-pointed at
+/// this const: every insert path sets the field explicitly through
+/// [`build_derived_record`], and changing a column default during a rolling
+/// deploy leaves two writers disagreeing about rows neither of them names.
+const SUMMARY_MODEL: &str = "redacted-summary-hash-precheck-v1";
+
 fn apply_embedding_precheck(
     envelope: &mut TraceContributionEnvelope,
     precheck: &TraceCommonsDerivedPrecheck,
@@ -60824,7 +61846,7 @@ fn apply_embedding_precheck(
         .embedding_analysis
         .take()
         .unwrap_or(EmbeddingAnalysisMetadata {
-            embedding_model: Some("redacted-summary-hash-precheck-v1".to_string()),
+            embedding_model: Some(SUMMARY_MODEL.to_string()),
             canonical_summary_hash: String::new(),
             trace_vector_id: None,
             nearest_trace_ids: Vec::new(),
@@ -60836,7 +61858,7 @@ fn apply_embedding_precheck(
         });
 
     if embedding.embedding_model.is_none() {
-        embedding.embedding_model = Some("redacted-summary-hash-precheck-v1".to_string());
+        embedding.embedding_model = Some(SUMMARY_MODEL.to_string());
     }
     embedding.canonical_summary_hash = precheck.canonical_summary_hash.clone();
     embedding.nearest_trace_ids = precheck.nearest_trace_ids.clone();
@@ -60867,7 +61889,7 @@ fn build_derived_record(
         task_success: format!("{:?}", envelope.outcome.task_success),
         canonical_summary: precheck.canonical_summary,
         canonical_summary_hash: precheck.canonical_summary_hash,
-        summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+        summary_model: SUMMARY_MODEL.to_string(),
         event_count: envelope.events.len(),
         tool_sequence: envelope.replay.required_tools.clone(),
         tool_categories: envelope
@@ -67416,6 +68438,20 @@ fn sha256_prefixed(input: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
+/// `sha256_prefixed` over key-ordered JSON, for the drill evidence hashes.
+///
+/// Each of those is a hash of a `serde_json::Value` built by `json!`, whose
+/// map is key-ordered only while `serde_json::Map` is a `BTreeMap`. Routing
+/// them all through one canonicalizing helper keeps a dependency enabling
+/// `serde_json/preserve_order` from quietly changing every stored evidence
+/// hash. A no-op under today's feature set -- these hashes do not move.
+fn json_evidence_hash(evidence: &serde_json::Value) -> String {
+    sha256_prefixed(
+        &trace_commons_protocol::canonical_json::to_canonical_string(evidence)
+            .unwrap_or_else(|_| evidence.to_string()),
+    )
+}
+
 fn hash_fragment(hash: &str, len: usize) -> String {
     hash.strip_prefix("sha256:")
         .unwrap_or(hash)
@@ -71873,6 +72909,7 @@ impl TraceOperationalSummaryResponse {
             &promotion_gates,
             &inputs.rollout_smoke_evidence,
             inputs.generated_at,
+            inputs.state.near_attestation_client.is_some(),
         );
         Self {
             tenant_storage_ref: tenant_storage_ref(&inputs.tenant_id),
@@ -72161,6 +73198,248 @@ fn trace_revocation_propagation_summary_from_audit_event(
     })())
 }
 
+/// Build the NEAR AI attestation client from env, or `None` when the
+/// endpoint is not fully configured.
+///
+/// A partial configuration returns `None` rather than failing startup: the
+/// drill's job is to name missing controls, and a boot failure would name it
+/// to nobody. [`near_attestation_missing_controls`] is what turns the `None`
+/// back into a list an operator can act on.
+fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<dyn NearAttestationClient>>>
+{
+    let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
+    let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
+    let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
+    let (Some(base_url), Some(model), Some(api_key)) = (base_url, model, api_key) else {
+        return Ok(None);
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let timeout_seconds = match trimmed_env(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
+        Some(raw) => raw.parse::<u64>().with_context(|| {
+            format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
+        })?,
+        None => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
+    };
+    anyhow::ensure!(
+        timeout_seconds > 0,
+        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
+    );
+    let client = HttpAttestationClient::new(
+        base_url,
+        model,
+        SecretString::from(api_key),
+        pccs_url,
+        StdDuration::from_secs(timeout_seconds),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(Some(Arc::new(client)))
+}
+
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Which of the endpoint controls the drill needs are not configured.
+///
+/// Read from env at call time rather than cached at boot, because the only
+/// thing this is used for is telling an operator what to set; process env
+/// does not change underneath it.
+fn near_attestation_missing_controls() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL).is_none() {
+        missing.push(NEAR_ATTESTATION_BASE_URL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL).is_none() {
+        missing.push(NEAR_ATTESTATION_MODEL_CONTROL);
+    }
+    if trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY).is_none() {
+        missing.push(NEAR_ATTESTATION_API_KEY_CONTROL);
+    }
+    missing
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TraceNearAttestationDrillRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    record_evidence: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceNearAttestationDrillResponse {
+    tenant_id: String,
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose: String,
+    ready: bool,
+    evidence_hash: String,
+    /// Named so an operator reading a refusal knows what to set.
+    expected_measurements_env: &'static str,
+    /// Absent when the drill did not run at all -- a missing endpoint control
+    /// or an unparseable pin set. Absent is not a pass; `ready` is false and
+    /// `blocking_gaps` says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<NearAttestationDrillOutcome>,
+    blocking_gaps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
+}
+
+fn near_attestation_drill_evidence_hash(
+    tenant: &TenantAuth,
+    purpose: &str,
+    outcome: Option<&NearAttestationDrillOutcome>,
+    blocking_gaps: &[String],
+) -> String {
+    let evidence = serde_json::json!({
+        "schema": "trace_commons_near_attestation_drill.v1",
+        "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
+        "actor_principal_ref": tenant.principal_ref,
+        "purpose_hash": sha256_prefixed(purpose),
+        "outcome": outcome,
+        "blocking_gaps": blocking_gaps,
+    });
+    sha256_prefixed(&evidence.to_string())
+}
+
+/// Prove the inference endpoint is the enclave we think it is.
+///
+/// The drill is deliberately cheap to fail and expensive only to pass: every
+/// check that costs nothing runs first, and the paid completion is reached
+/// only once the endpoint has been established as a TDX enclave running a
+/// pinned image and answering our nonce. See
+/// `docs/operator/near-attestation-drill.md`.
+async fn run_near_attestation_drill(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceNearAttestationDrillRequest,
+) -> ApiResult<TraceNearAttestationDrillResponse> {
+    let generated_at = Utc::now();
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_near_attestation_drill")
+        .to_string();
+
+    let mut blocking_gaps: Vec<String> = Vec::new();
+    let mut outcome = None;
+
+    // Fail closed on configuration before anything reaches the network, so a
+    // misconfigured deployment gets a named control rather than a timeout.
+    let expected = match expected_measurements_from_env() {
+        Ok(expected) => expected,
+        Err(error) => {
+            // The error names a key, never a value.
+            blocking_gaps.push(format!("expected_measurements_config_invalid:{error}"));
+            None
+        }
+    };
+    let expected_measurements_valid = blocking_gaps.is_empty();
+
+    match state.near_attestation_client.as_ref() {
+        Some(client) if expected_measurements_valid => {
+            let nonce = generate_drill_nonce();
+            let now_unix = state
+                .near_attestation_verification_clock
+                .unwrap_or(generated_at)
+                .timestamp()
+                .max(0) as u64;
+            outcome = Some(
+                run_near_attestation_drill_steps(
+                    client.as_ref(),
+                    expected.as_ref(),
+                    &nonce,
+                    now_unix,
+                )
+                .await,
+            );
+        }
+        Some(_) => {}
+        None => {
+            let missing = near_attestation_missing_controls();
+            if missing.is_empty() {
+                // The endpoint controls are all set yet no client exists.
+                // That should be unreachable -- both come from the same env
+                // read at boot -- but an empty gap list beside `ready:false`
+                // would be a refusal with no stated reason, which is worse
+                // than a slightly awkward label.
+                blocking_gaps.push("near_attestation_client_unavailable".to_string());
+            }
+            for control in missing {
+                blocking_gaps.push(format!("missing_control:{control}"));
+            }
+        }
+    }
+
+    if let Some(outcome) = outcome.as_ref() {
+        blocking_gaps.extend(outcome.blocking_steps());
+    }
+    let ready = blocking_gaps.is_empty() && outcome.as_ref().is_some_and(|outcome| outcome.passed);
+    let evidence_hash =
+        near_attestation_drill_evidence_hash(tenant, &purpose, outcome.as_ref(), &blocking_gaps);
+
+    let mut response = TraceNearAttestationDrillResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at,
+        purpose: purpose.clone(),
+        ready,
+        evidence_hash,
+        expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
+        outcome,
+        blocking_gaps,
+        recorded_evidence: None,
+    };
+
+    if request.record_evidence {
+        let evidence = TraceRolloutSmokeEvidenceResponse {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+            check_name: "near_attestation".to_string(),
+            status: if response.ready {
+                TraceRolloutSmokeEvidenceStatus::Passed
+            } else {
+                TraceRolloutSmokeEvidenceStatus::Failed
+            },
+            evidence_hash: response.evidence_hash.clone(),
+            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
+            actor_principal_ref: tenant.principal_ref.clone(),
+            recorded_at: Utc::now(),
+        };
+        append_audit_event_with_db_mirror(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .map_err(internal_error)?;
+        response.recorded_evidence = Some(evidence);
+    }
+
+    Ok(response)
+}
+
+async fn near_attestation_drill_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceNearAttestationDrillRequest>,
+) -> ApiResult<Json<TraceNearAttestationDrillResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let response = run_near_attestation_drill(state.as_ref(), &tenant, request).await?;
+    Ok(Json(response))
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "submit_status",
     "tenant_canary_isolation",
@@ -72179,6 +73458,7 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "benchmark_pipeline",
     "ranking_model_readiness",
     "credit_settlement",
+    "near_attestation",
     "object_primary_reads",
     "object_store_migration",
     "postgres_rls_readiness",
@@ -72186,6 +73466,33 @@ const TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS: &[&str] = &[
     "object_deletion_refs",
     "worker_queue_invalidation",
 ];
+/// Checks that are required only when the surface they cover is in use.
+///
+/// `near_attestation` proves the NEAR AI inference endpoint is the enclave we
+/// pinned. A deployment that routes no inference through NEAR AI has nothing
+/// for it to prove, and holding a permanently red required check over such a
+/// deployment teaches operators to ignore red checks -- which is the failure
+/// this whole surface exists to prevent.
+///
+/// This keys on **whether the surface is configured at all**, never on the
+/// drill's result. A deployment that does use NEAR AI cannot opt out of a red
+/// drill; there is no allow-list, no severity dial and no acknowledgement
+/// flag. That distinction is the whole of it.
+const TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS: &[&str] = &["near_attestation"];
+
+/// The required checks for a deployment, given which conditional surfaces it
+/// has configured.
+fn rollout_smoke_required_checks(near_attestation_configured: bool) -> Vec<&'static str> {
+    TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        .iter()
+        .copied()
+        .filter(|check| {
+            !TRACE_OPERATIONAL_ROLLOUT_SMOKE_CONDITIONAL_CHECKS.contains(check)
+                || (*check == "near_attestation" && near_attestation_configured)
+        })
+        .collect()
+}
+
 const TRACE_OPERATIONAL_ROLLOUT_SMOKE_EVIDENCE_MAX_AGE: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -72405,6 +73712,11 @@ struct TraceOperationalRolloutSmokeSummary {
     failed_evidence_count: usize,
     stale_evidence_count: usize,
     required_checks: Vec<String>,
+    /// Conditional checks this deployment does not require, and why they are
+    /// absent from `required_checks`. Reported rather than silently omitted:
+    /// a check that vanished from the list without a word would be
+    /// indistinguishable from one that was quietly dropped.
+    not_applicable_checks: Vec<String>,
     passed_evidence_checks: Vec<String>,
     missing_evidence_checks: Vec<String>,
     failed_evidence_checks: Vec<String>,
@@ -72417,16 +73729,26 @@ impl TraceOperationalRolloutSmokeSummary {
         promotion_gates: &TraceOperationalPromotionGateSummary,
         evidence: &[TraceRolloutSmokeEvidenceResponse],
         generated_at: DateTime<Utc>,
+        near_attestation_configured: bool,
     ) -> Self {
-        let required_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+        let applicable = rollout_smoke_required_checks(near_attestation_configured);
+        let required_checks = applicable
             .iter()
             .map(|check| (*check).to_string())
             .collect::<Vec<_>>();
-        let latest_evidence_by_check =
-            latest_rollout_smoke_evidence_map(evidence.iter().filter(|record| {
-                TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
-                    .contains(&record.check_name.as_str())
-            }));
+        let not_applicable_checks = TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS
+            .iter()
+            .filter(|check| !applicable.contains(check))
+            .map(|check| (*check).to_string())
+            .collect::<Vec<_>>();
+        // Evidence for a check this deployment does not require must not
+        // count towards stale or failed either -- it is not a gap, and
+        // counting it would reintroduce the red check by another route.
+        let latest_evidence_by_check = latest_rollout_smoke_evidence_map(
+            evidence
+                .iter()
+                .filter(|record| applicable.contains(&record.check_name.as_str())),
+        );
         let stale_evidence_checks = latest_evidence_by_check
             .iter()
             .filter_map(|(check, record)| {
@@ -72506,6 +73828,7 @@ impl TraceOperationalRolloutSmokeSummary {
             failed_evidence_count: failed_evidence_checks.len(),
             stale_evidence_count: stale_evidence_checks.len(),
             required_checks,
+            not_applicable_checks,
             passed_evidence_checks,
             missing_evidence_checks,
             failed_evidence_checks,
@@ -74157,6 +75480,146 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         Json(self).into_response()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Intel DCAP collateral, for a contributor verifying a witness enclave.
+//
+// The client half of the redaction-witness design has to run `verify_quote`
+// before it sends a raw session anywhere, and `verify_quote` takes collateral
+// as a parameter. Nothing supplies it to a client today.
+//
+// It is served here rather than by the witness for two reasons. `dcap-qvl`'s
+// own collateral client cannot go in `trace-commons-contributor`: its `report`
+// feature pulls a second `reqwest` carrying the aws-lc-rs rustls provider
+// alongside this workspace's ring one, and rustls then panics at the first TLS
+// use unless a binary installs a default explicitly -- which `main()` here
+// does. `trace-commons-contributor` is a library inside a CLI, a GTK binary, a
+// Swift app and a Windows shell; a landmine only a `main()` can defuse does
+// not belong in it. And putting it on the witness would give the enclave an
+// outbound Intel dependency and enlarge the image, which enlarges the
+// measurement a contributor pins.
+//
+// **This does not make ingest a trust dependency.** Collateral is Intel-signed
+// and its validity window is evaluated against the clock the *client* passes,
+// so an intermediary can withhold it but cannot forge it. A client that gets
+// none refuses rather than verifying without it.
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/attestation-collateral` request body.
+///
+/// `deny_unknown_fields`: a caller sending a field this route does not
+/// understand may believe it is scoping the request somehow.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationCollateralRequest {
+    /// The quote to fetch collateral for, as bare hex. No `0x` prefix, for
+    /// the same reason `ContributorNonce::parse_hex` refuses one: one
+    /// encoding means a client and this route cannot disagree about which
+    /// bytes were asked about.
+    quote_hex: String,
+}
+
+/// The refusal for a quote that is not bare hex.
+const ATTESTATION_COLLATERAL_QUOTE_MALFORMED: &str = "attestation_collateral_quote_malformed";
+/// The refusal when the collateral could not be obtained from Intel.
+///
+/// Read only by the `near-attestation-collateral` arm below. Without the
+/// feature this binary cannot fetch collateral at all and refuses earlier,
+/// with the missing-control name instead.
+#[cfg_attr(
+    not(feature = "near-attestation-collateral"),
+    expect(
+        dead_code,
+        reason = "read only by the collateral client, which the \
+                  near-attestation-collateral feature compiles in"
+    )
+)]
+const ATTESTATION_COLLATERAL_UNAVAILABLE: &str = "attestation_collateral_unavailable";
+
+/// The collateral route.
+///
+/// Unauthenticated and outside tenant context, like `GET /v1/source`, and
+/// merged into `app` outside every auth layer on purpose. A contributor needs
+/// collateral *before* they have decided to trust anything, so requiring a
+/// claim to obtain it would make verifying an enclave depend on already being
+/// enrolled with the operator whose enclave it is. That is the wrong order,
+/// and it would make the verification worth less than it looks.
+///
+/// A separate `Router` rather than a line in `app`, so the reachability tests
+/// can drive the real routing table without constructing an `AppState`. A
+/// handler can be correct and unreachable; that exact defect has been found
+/// in this repository before.
+fn attestation_collateral_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/v1/attestation-collateral",
+        post(attestation_collateral_handler),
+    )
+}
+
+/// Fetch Intel collateral for a quote.
+///
+/// No logging at all, hash-only or otherwise. The quote itself is public, but
+/// *which* client asked about *which* enclave and when is a correlation this
+/// route must not be the source of.
+async fn attestation_collateral_handler(
+    Json(request): Json<AttestationCollateralRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Emptiness is checked separately: `hex::decode("")` succeeds and yields
+    // an empty quote, so leaving it to the parse would let a caller reach the
+    // fetch with nothing to fetch collateral for.
+    if request.quote_hex.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        ));
+    }
+    // The error carries no offset and no length. Both are derived from caller
+    // input, and an offset tells a prober exactly how far its guess got.
+    let quote = hex::decode(&request.quote_hex).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        )
+    })?;
+
+    Ok(Json(fetch_attestation_collateral(&quote).await?))
+}
+
+/// The collateral fetch, or the missing control that stands in for it.
+///
+/// Two arms behind the `near-attestation-collateral` feature, mirroring
+/// `HttpAttestationClient::fetch_collateral`. The feature-off arm refuses with
+/// the same control name that path uses, so an operator sees one name for one
+/// missing control. It never returns a 200 with an empty body, which a client
+/// checking only the status could not tell from real collateral -- and a
+/// client verifying against empty collateral verifies nothing at all.
+#[cfg(feature = "near-attestation-collateral")]
+async fn fetch_attestation_collateral(
+    quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    let unavailable = || {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ATTESTATION_COLLATERAL_UNAVAILABLE,
+        )
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let client = dcap_qvl::collateral::CollateralClient::with_default_http(&pccs_url)
+        .map_err(|_| unavailable())?;
+    let collateral = client.fetch(quote).await.map_err(|_| unavailable())?;
+    serde_json::to_value(&collateral).map_err(|_| unavailable())
+}
+
+#[cfg(not(feature = "near-attestation-collateral"))]
+async fn fetch_attestation_collateral(
+    _quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    Err(api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+    ))
 }
 
 #[cfg(test)]

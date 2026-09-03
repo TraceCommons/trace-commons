@@ -96,6 +96,7 @@ impl Harness {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -115,6 +116,7 @@ impl Harness {
                     entry_id,
                     session_hash: "preview-body-test-hash".into(),
                     source: "claude-code".into(),
+                    declared_source: None,
                     project_key: "/Users/testuser/code/myproj".into(),
                     project_label: "myproj".into(),
                     path: session_ref.path.clone(),

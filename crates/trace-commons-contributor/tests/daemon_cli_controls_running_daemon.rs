@@ -81,6 +81,7 @@ impl Running {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
         let mut settings = DaemonSettings::load(&store).unwrap();
@@ -117,6 +118,7 @@ impl Running {
                     entry_id,
                     session_hash: hash.to_string(),
                     source: "claude-code".to_string(),
+                    declared_source: None,
                     project_key: project_key.to_string(),
                     project_label: "proj".to_string(),
                     path: self.session_path.clone(),

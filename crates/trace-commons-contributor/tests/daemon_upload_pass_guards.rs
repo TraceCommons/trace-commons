@@ -123,6 +123,7 @@ impl Harness {
                 display_handle: None,
                 public_bio: None,
                 public_since: None,
+                witness: None,
             })
             .unwrap();
 
@@ -440,6 +441,7 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         })
         .unwrap();
     let claude_root = dir.path().join("projects");

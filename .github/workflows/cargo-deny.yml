@@ -1,0 +1,93 @@
+# deny.toml has carried the AGPL-combinability licence allow list and the
+# RUSTSEC advisory ignore list since the licence split, and CONTRIBUTING.md
+# / AGENTS.md instruct contributors to run `cargo deny check licenses` by
+# hand before pushing -- but nothing enforced it. This workflow does.
+#
+# Licences and sources run under `--all-features`, not under a list of
+# named feature sets. A named list has to stay in step with every
+# independently deployable graph, and it did not: the server declares
+# gcs-client, gcp-kms, local-gpu-models-cuda and near-attestation-collateral
+# beyond the three a first draft of this file checked, and production builds
+# use them -- cloudbuild.yaml builds ingest with
+# `--features gcs-client,gcp-kms,near-ai-scorer`, and deploy/pilot-gcp adds
+# near-attestation-collateral. `--all-features` resolves 2,272 crates, a
+# superset of every named graph (the largest, local-gpu-models-cuda, is
+# 2,086), so one job covers each of them conservatively and cannot drift
+# when a feature is added. Measured 2026-09-01: licences and sources pass on
+# every graph individually and on the union.
+#
+# Advisories run under `--all-features` too, for the same reason: the graph
+# production ships is not the default graph, and a named list of feature
+# sets drifts. cloudbuild.yaml builds ingest with
+# `--features gcs-client,gcp-kms,near-ai-scorer` and deploy/pilot-gcp adds
+# near-attestation-collateral, so advisories on the default graph said
+# nothing about the code that actually serves requests.
+#
+# Two of the findings that gap was hiding were bumped away rather than
+# ignored (crossbeam-epoch 0.9.18 -> 0.9.20 for RUSTSEC-2026-0204, lru
+# 0.18.0 -> 0.18.3 for RUSTSEC-2026-0253, an unsound use-after-free in a
+# direct dependency of trace-commons-gate-enclave). The five that remain
+# are in deny.toml's ignore list, each with the reason no upgrade reaches
+# it from this tree. Read that list rather than trusting this comment's
+# count: it is the thing that has to stay true.
+#
+# One of those five, RUSTSEC-2026-0118, is a live remote-input
+# vulnerability (an unbounded loop in hickory-proto's NSEC3 validation,
+# reachable when the ingest host resolves NEAR AI endpoints). It is carried
+# because hickory-proto is pinned by hickory-resolver 0.25.x, which reqwest
+# 0.13.3 requires by semver -- the fix needs a reqwest release, not a
+# lockfile bump. It is the first thing to re-check when reqwest moves.
+#
+# `check bans` is omitted: [bans] sets only `multiple-versions = "allow"`
+# and configures no deny/skip list, so the check is a standing no-op today.
+#
+# Action pinning (last reviewed 2026-09-02): cargo-deny-action's v2 tag
+# pins cargo-deny 0.20.2 in its own Dockerfile, the version these jobs were
+# verified with locally. `v2` is mutable, so treat a bump of it as a
+# re-verify rather than a rubber stamp.
+#
+# A red advisories job on a PR that touches no dependency usually means a
+# new advisory landed upstream: `check advisories` clones the RustSec
+# database at run time, on purpose, so the gate reflects today rather than
+# the day it was written.
+
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  # Deliberately unfiltered by base branch. This repository uses stacked
+  # PRs, and a `branches: [main]` filter here means a PR targeting another
+  # branch gets no CI at all -- the work is only ever tested once it reaches
+  # main, which is exactly when a failure is most expensive to unwind. A PR
+  # should be tested against the branch it will actually merge into.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny-all-features:
+    name: cargo deny licences and sources (all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --all-features
+          command-arguments: licenses sources
+
+  cargo-deny-advisories:
+    name: cargo deny advisories (all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: info
+          arguments: --all-features
+          command-arguments: advisories

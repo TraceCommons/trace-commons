@@ -35,6 +35,7 @@ the link.
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
+| Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
@@ -50,6 +51,8 @@ the link.
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
+| Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
+| Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
@@ -109,8 +112,21 @@ Every runbook in this directory, with a one-line description.
   next `app-v*` tag.
 - [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
   the authoritative top-of-funnel doc.
+- [`../../deploy/witness/README.md`](../../deploy/witness/README.md) — deploying
+  the redaction witness in a dstack TDX guest. The project's first
+  trusted-execution deployment, and the doc lives beside its compose files
+  rather than here because the manifest, the image and the procedure have to
+  stay in step. Covers what to pin (MRTD and MRCONFIGID, not RTMR0 or RTMR3),
+  the allowlist-before-deploy upgrade order, why a guest-API surface migration
+  is a key rotation and not an upgrade, that the image is **not** reproducibly
+  buildable, and the limit on what a witness certificate attests.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
+- [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI
+  attestation drill: what its nine steps prove, what the paid completion
+  costs, where expected measurements legitimately come from (a verified
+  quote, never the endpoint's own JSON), and why a measurement mismatch after
+  an image upgrade is fixed by re-pinning and never by disabling the check.
 - [`./env-reference.md`](./env-reference.md) — table of every
   `TRACE_COMMONS_*` env, default, required/optional, and surface touched.
 - [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) — append-only ledger of

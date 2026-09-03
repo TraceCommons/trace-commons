@@ -56,6 +56,7 @@ fn cfg(device_key_id: String) -> ContributorConfig {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     }
 }
 
@@ -121,6 +122,7 @@ impl Harness {
             entry_id: entry_id_for("sha256:aa"),
             session_hash: "sha256:aa".into(),
             source: "claude-code".into(),
+            declared_source: None,
             project_key: "/Users/testuser/code/proj".into(),
             project_label: "proj".into(),
             path: session_ref.path.clone(),

@@ -313,9 +313,74 @@ public static class DigestText
     }
 
     /// <summary>
-    /// "a", "a and b", "a, b and c" -- the spec's own list form. An empty
-    /// list yields an empty string, so the sentence degrades to "3 sessions
-    /// ready." rather than trailing a dangling "from".
+    /// The contribution half: what went out unasked since the last digest.
+    /// Null when nothing did -- a line reading "0 sessions contributed" is
+    /// worse than no line.
+    /// </summary>
+    /// <remarks>
+    /// The daemon composes the same sentence for its own local notifier
+    /// (<c>daemon::notify::contribution_text</c>), the Linux shell in
+    /// <c>notify::contribution_body</c>, and macOS in
+    /// <c>DigestCopy.contributionLine</c>. All four follow the same rules and
+    /// are tested against them separately, because each platform words the
+    /// surrounding text differently.
+    /// </remarks>
+    public static string? ContributionLine(
+        int contributedCount,
+        IReadOnlyList<string> projectLabels,
+        double creditPending)
+    {
+        ArgumentNullException.ThrowIfNull(projectLabels);
+
+        if (contributedCount <= 0)
+        {
+            return null;
+        }
+
+        string noun = contributedCount == 1 ? "session" : "sessions";
+        string from = JoinProjects(projectLabels);
+        string line = $"{contributedCount} {noun} contributed{from}.";
+
+        // Only when there is some: "0 credit pending" reads as a failure
+        // rather than as a fresh start, and the first digest after arming a
+        // project is exactly when that would show. Always "pending", never
+        // "earned" -- settlement is off on every deployment shipped so far.
+        if (creditPending > 0)
+        {
+            // Rounded half away from zero explicitly, matching the daemon and
+            // the other two shells. "0.0" already rounds that way here while
+            // Rust's {:.1} and Swift's %.1f round half to even, so 4.25 read
+            // as 4.3 here and 4.2 there -- the same contribution, a different
+            // figure depending which machine the contributor read it on.
+            // Stated rather than relied on, so the agreement is visible.
+            line += string.Format(
+                CultureInfo.InvariantCulture,
+                " {0:0.0} credit pending.",
+                Math.Round(creditPending, 1, MidpointRounding.AwayFromZero));
+        }
+
+        return line;
+    }
+
+    /// <summary>
+    /// The most names a notification will list before summarising the rest
+    /// as a count. A contributor with fifteen active projects wants a
+    /// digest, not a manifest.
+    /// </summary>
+    /// <remarks>
+    /// Three, matching the daemon's <c>digest_text</c> and
+    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
+    /// and macOS's <c>DigestCopy.joined</c>. This shell listed every name,
+    /// so the same eight-project contributor read a one-line summary on
+    /// Linux and macOS and a paragraph on Windows.
+    /// </remarks>
+    private const int MaxNamedProjects = 3;
+
+    /// <summary>
+    /// "a", "a and b", "a, b and c", then "a, b, c and N more" -- the spec's
+    /// own list form. An empty list yields an empty string, so the sentence
+    /// degrades to "3 sessions ready." rather than trailing a dangling
+    /// "from".
     /// </summary>
     private static string JoinProjects(IReadOnlyList<string> labels)
     {
@@ -326,6 +391,13 @@ public static class DigestText
             {
                 named.Add(label);
             }
+        }
+
+        if (named.Count > MaxNamedProjects)
+        {
+            int more = named.Count - MaxNamedProjects;
+            string head = string.Join(", ", named.GetRange(0, MaxNamedProjects));
+            return $" from {head} and {more} more";
         }
 
         return named.Count switch

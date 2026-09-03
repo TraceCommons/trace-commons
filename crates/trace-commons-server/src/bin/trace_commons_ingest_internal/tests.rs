@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+
+/// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
+fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
+    SubmitBody::for_test(envelope)
+}
 use axum::http::HeaderValue;
 use trace_commons_protocol::llm::recording::{TraceFile, TraceResponse, TraceStep};
 use trace_commons_protocol::trace_contribution::{
@@ -547,9 +552,13 @@ async fn contributor_credit_visibility_broadens_to_account_scope() {
         envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
         envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
-        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-            .await
-            .expect("submission mirrors to DB");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(token),
+            submit_body(envelope),
+        )
+        .await
+        .expect("submission mirrors to DB");
         let Json(event) = append_credit_event_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -1139,9 +1148,13 @@ async fn seed_settlement_credit(state: &Arc<AppState>, token: &str, points: f32)
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
     envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let submission_id = envelope.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-        .await
-        .expect("submission mirrors to DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(token),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
     let Json(event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -2926,6 +2939,264 @@ async fn insert_account_test_submission_with_status(
     submission_id
 }
 
+/// Insert a credit-ledger row directly via the DB mirror, mirroring
+/// `insert_account_test_submission`'s direct-write shape but for
+/// `trace_credit_ledger`. Bypasses the reviewer-gated
+/// `append_credit_event_handler` HTTP surface (ABAC tenant policy, reviewer
+/// role, `db_reviewer_reads` wiring) -- none of which the credit-summary read
+/// path cares about; only the stored `submission_id`/`points_delta` matter to
+/// it.
+async fn insert_account_test_credit_event(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: Uuid,
+    credit_account_ref: &str,
+    points_delta: f32,
+) {
+    backend
+        .append_trace_credit_event(StorageTraceCreditEventWrite {
+            credit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            credit_account_ref: credit_account_ref.to_string(),
+            event_type: StorageTraceCreditEventType::TrainingUtility,
+            points_delta: format!("{points_delta}"),
+            reason: "test fixture credit".to_string(),
+            external_ref: Some(format!("test-fixture:{submission_id}")),
+            actor_principal_ref: "review-token-a".to_string(),
+            actor_role: "reviewer".to_string(),
+            settlement_state: StorageTraceCreditSettlementState::Pending,
+        })
+        .await
+        .expect("insert credit event");
+}
+
+/// The account's own figures, summed over its whole principal set: a
+/// contributor with a device key AND a passkey is one contributor, not one
+/// per credential -- and never anything belonging to another account.
+///
+/// Seeds the three-way shape `account_traces_list_returns_only_owned_submissions`
+/// below uses (owned / foreign-same-tenant / other-tenant), but with a credit
+/// ledger row on each submission rather than just the submission itself, since
+/// this handler sums ledger rows, not submission-level `credit_points_pending`.
+#[tokio::test]
+async fn credit_summary_scopes_to_the_calling_accounts_principal_set() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // Link token-a's device principal to a durable account under tenant-a via
+    // the real mint+redeem ceremony, and keep the resulting session cookie: a
+    // device bearer alone no longer resolves to an `AccountCtx` (#262), so
+    // `account_ctx_ext` needs the cookie the redeemed session issues, not
+    // `auth_headers` directly.
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+
+    // Owned: a submission + credit event for the account's own principal.
+    let owned_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        owned_submission,
+        &device_principal,
+        7.0,
+    )
+    .await;
+
+    // Foreign, same tenant: a principal that is NOT linked to this account.
+    let foreign_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", "principal_someone_else")
+            .await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        foreign_submission,
+        "principal_someone_else",
+        1000.0,
+    )
+    .await;
+
+    // A different tenant entirely, same device principal -- must not leak
+    // across tenants even though the principal ref string matches.
+    let other_tenant_submission =
+        insert_account_test_submission(backend.as_ref(), "tenant-b", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-b",
+        other_tenant_submission,
+        &device_principal,
+        2000.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+
+    assert_eq!(
+        summary.points.earned_this_period, 7,
+        "only the account's own credit event counts, not the foreign or other-tenant ones"
+    );
+    assert_eq!(summary.points.lifetime_earned, 7);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-b").await;
+}
+
+/// A deployment with no configured rate has made no claim about what a point
+/// is worth. Asserted over the SERIALIZED value, not the struct field: a
+/// struct assertion passes even when the `#[serde(skip_serializing_if)]`
+/// attribute is wrong, and that attribute is the mechanism actually carrying
+/// the property.
+#[tokio::test]
+async fn credit_summary_omits_currency_when_no_rate_is_configured() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        3.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    assert!(
+        value.get("currency").is_none(),
+        "no rate is configured in this test environment, so the currency key \
+         must be absent entirely, not present and zero: got {value}"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The server sees submissions, not anyone's inference bill, and must never
+/// imply otherwise. Scans the whole serialized response -- keys and string
+/// values -- for anything naming or containing "spent" or "spend", rather
+/// than checking one specific path, so a spend figure added anywhere in the
+/// shape trips this test.
+#[tokio::test]
+async fn credit_summary_never_reports_a_spend_figure() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let device_principal = static_token_principal_ref("token-a");
+    let submission_id =
+        insert_account_test_submission(backend.as_ref(), "tenant-a", &device_principal).await;
+    insert_account_test_credit_event(
+        backend.as_ref(),
+        "tenant-a",
+        submission_id,
+        &device_principal,
+        5.0,
+    )
+    .await;
+
+    let ext = account_ctx_ext(
+        &state,
+        &cookie_request_headers("tc_account_session", &cookie_value),
+    )
+    .await;
+    let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
+        .await
+        .expect("credit summary succeeds");
+    let value = serde_json::to_value(&summary).expect("summary serializes");
+
+    fn assert_no_spend_mentions(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let lower = key.to_ascii_lowercase();
+                    assert!(
+                        !lower.contains("spent") && !lower.contains("spend"),
+                        "response key names spend at {path}.{key}"
+                    );
+                    assert_no_spend_mentions(child, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    assert_no_spend_mentions(item, &format!("{path}[{i}]"));
+                }
+            }
+            serde_json::Value::String(s) => {
+                let lower = s.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("spent") && !lower.contains("spend"),
+                    "response value names spend at {path}: {s}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_no_spend_mentions(&value, "$");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn account_traces_list_returns_only_owned_submissions() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -3743,7 +4014,7 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
             output_object_ref: None,
             canonical_summary: None,
             canonical_summary_hash: Some("sha256:summary".to_string()),
-            summary_model: "redacted-summary-hash-precheck-v1".to_string(),
+            summary_model: SUMMARY_MODEL.to_string(),
             task_success: None,
             privacy_risk: Some("low".to_string()),
             event_count: Some(1),
@@ -3816,7 +4087,17 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
         .await
         .expect("gate decision writes");
     backend
-        .update_trace_gate_decision_dedup("tenant-a", decision_id, 42_i64, Uuid::new_v4(), 3)
+        .update_trace_gate_decision_dedup(
+            "tenant-a",
+            decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 42,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 3,
+                dedup_signal_version:
+                    trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string(),
+            },
+        )
         .await
         .expect("dedup assignment writes");
 
@@ -3848,6 +4129,24 @@ async fn account_trace_withdraw_evicts_vector_entry_and_dedup_cluster() {
     assert_eq!(
         dedup_cluster, None,
         "the withdrawn trace must leave its dedup cluster"
+    );
+
+    // ...and its stamp goes with it. The version names the derivation behind
+    // `dedup_simhash`, and the withdrawal NULLs that simhash, so a row left
+    // holding the stamp would claim a derivation it no longer carries the
+    // output of -- and would read to the recluster sweep as a row whose
+    // version is known rather than one with nothing to cluster.
+    let dedup_stamp = read_scalar_text(
+        backend.as_ref(),
+        "tenant-a",
+        "SELECT dedup_signal_version FROM trace_gate_decisions
+         WHERE tenant_id = $1 AND submission_id = $2",
+        owned,
+    )
+    .await;
+    assert_eq!(
+        dedup_stamp, None,
+        "the withdrawn trace must lose the stamp naming how its simhash was made"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -4743,6 +5042,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         root,
+        near_attestation_client: None,
+        near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -4834,6 +5135,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        witness_bypass: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -5504,6 +5806,55 @@ fn trace_vector_search_neighbors_validate_active_tenant_scoped_entries() {
     assert_eq!(neighbors[0].score, 0.91);
 }
 
+/// The precheck summary model is named ONCE, and `build_derived_record`
+/// writes that name.
+///
+/// It was three identical string literals across two functions, which is how
+/// a summary-model bump ships with two of the three moved: the derived record
+/// claims `-v2` while the embedding metadata beside it still claims `-v1`,
+/// and the branch-2 decision cache keys on a hash whose model nobody can name
+/// consistently. The value is unchanged here — this pins the indirection, so
+/// the bump in PR 2 of sub-project D is a one-line edit that cannot be
+/// partially applied.
+#[tokio::test]
+async fn build_derived_record_writes_the_named_summary_model() {
+    let envelope = sample_envelope().await;
+    let precheck = build_derived_precheck(&envelope, &[]);
+    let record = build_derived_record("tenant-a", TraceCorpusStatus::Accepted, &envelope, precheck);
+    assert_eq!(
+        record.summary_model, SUMMARY_MODEL,
+        "build_derived_record must write the named const, not a literal that \
+         can drift from the two in apply_embedding_precheck"
+    );
+    // Pinned separately from the const so a rename cannot silently rewrite
+    // what every historical row already claims: this migration's value is
+    // unchanged, and PR 2 moves both lines together on purpose.
+    assert_eq!(SUMMARY_MODEL, "redacted-summary-hash-precheck-v1");
+
+    // The same name reaches the envelope's embedding metadata, which is the
+    // half that used to be able to disagree.
+    let mut with_precheck = sample_envelope().await;
+    let precheck = build_derived_precheck(&with_precheck, &[]);
+    apply_embedding_precheck(&mut with_precheck, &precheck);
+    let embedding_model = with_precheck
+        .embedding_analysis
+        .as_ref()
+        .and_then(|analysis| analysis.embedding_model.as_deref());
+    assert_eq!(embedding_model, Some(SUMMARY_MODEL));
+
+    // The drift check proper: the two producers against EACH OTHER, with no
+    // const in between. Every assertion above routes through `SUMMARY_MODEL`,
+    // so all of them still pass if the const is deleted and each site goes
+    // back to writing its own literal -- which is the drift they claim to
+    // prevent. This one does not: two literals that disagree fail here.
+    assert_eq!(
+        Some(record.summary_model.as_str()),
+        embedding_model,
+        "build_derived_record and apply_embedding_precheck must name the same \
+         model -- whether or not either goes through a shared const"
+    );
+}
+
 async fn sample_envelope() -> TraceContributionEnvelope {
     sample_envelope_with_user_input("Please inspect the workspace").await
 }
@@ -5597,7 +5948,7 @@ async fn submit_rejects_out_of_range_training_dynamics() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("out-of-range mean_confidence must be rejected");
@@ -5626,7 +5977,7 @@ async fn submit_accepts_reduced_training_dynamics() {
     let result = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await;
     if let Err((status, _)) = &result {
@@ -5835,7 +6186,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("invalid envelope reaches validation while under the rate limit");
@@ -5845,7 +6196,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
     let (status, Json(error)) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("principal over the submission rate limit is denied");
@@ -5855,7 +6206,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
     let (status, _) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_B),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("a different principal retains an independent bucket");
@@ -5876,7 +6227,7 @@ async fn submit_rate_limit_handler_honors_explicit_test_override() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("first request reaches validation under the configured test limit");
@@ -5885,7 +6236,7 @@ async fn submit_rate_limit_handler_honors_explicit_test_override() {
     let (status, Json(error)) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("second request exceeds the configured test limit");
@@ -5909,7 +6260,7 @@ async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
         let (status, Json(error)) = submit_trace_handler(
             State(state.clone()),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(envelope.clone()),
+            submit_body(envelope.clone()),
         )
         .await
         .expect_err("grantless authenticated submission is forbidden under the rate limit");
@@ -5920,7 +6271,7 @@ async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
     let (status, Json(error)) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("grantless authenticated submission over the rate limit is denied early");
@@ -5985,7 +6336,7 @@ async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(&token_a),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("principal A reaches validation while under its rate limit");
@@ -5994,15 +6345,16 @@ async fn submit_rate_limit_separates_delimiter_colliding_signed_principals() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&token_a),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("principal A exhausts its own bucket");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
-    let (status, _) = submit_trace_handler(State(state), auth_headers(&token_b), Json(invalid))
-        .await
-        .expect_err("principal B retains an independent bucket");
+    let (status, _) =
+        submit_trace_handler(State(state), auth_headers(&token_b), submit_body(invalid))
+            .await
+            .expect_err("principal B retains an independent bucket");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -6063,7 +6415,7 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
         let (status, _) = submit_trace_handler(
             State(state.clone()),
             auth_headers(&signed_token),
-            Json(invalid.clone()),
+            submit_body(invalid.clone()),
         )
         .await
         .expect_err("signed principal reaches validation while under its rate limit");
@@ -6072,15 +6424,19 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&signed_token),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("signed principal exhausts its own bucket");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
-    let (status, _) = submit_trace_handler(State(state), auth_headers(static_token), Json(invalid))
-        .await
-        .expect_err("static principal retains an independent bucket");
+    let (status, _) = submit_trace_handler(
+        State(state),
+        auth_headers(static_token),
+        submit_body(invalid),
+    )
+    .await
+    .expect_err("static principal retains an independent bucket");
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -6182,7 +6538,7 @@ async fn submit_rate_limit_caps_in_flight_requests() {
             submit_trace_handler(
                 State(state),
                 auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-                Json(envelope),
+                submit_body(envelope),
             )
             .await
         }));
@@ -6199,7 +6555,7 @@ async fn submit_rate_limit_caps_in_flight_requests() {
         submit_trace_handler(
             State(state),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid),
+            submit_body(invalid),
         ),
     )
     .await
@@ -6241,7 +6597,7 @@ async fn submit_rate_limit_releases_guard_when_request_completes() {
         submit_trace_handler(
             State(state),
             auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-            Json(invalid),
+            submit_body(invalid),
         )
         .await
     });
@@ -6280,7 +6636,7 @@ async fn submit_authentication_precedes_rate_limit_accounting() {
     let (status, _) = submit_trace_handler(
         State(state.clone()),
         HeaderMap::new(),
-        Json(invalid.clone()),
+        submit_body(invalid.clone()),
     )
     .await
     .expect_err("unauthenticated submission is rejected");
@@ -6293,7 +6649,7 @@ async fn submit_authentication_precedes_rate_limit_accounting() {
     let (status, _) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(invalid),
+        submit_body(invalid),
     )
     .await
     .expect_err("authenticated request reaches validation");
@@ -6315,7 +6671,7 @@ async fn submit_under_rate_limits_succeeds_end_to_end() {
     let Json(receipt) = submit_trace_handler(
         State(state),
         auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission under both limits succeeds");
@@ -6339,7 +6695,7 @@ async fn submit_rescrubs_and_stores_under_authenticated_tenant() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission succeeds");
@@ -6377,7 +6733,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let Json(first_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(first.clone()),
+        submit_body(first.clone()),
     )
     .await
     .expect("first submission quarantines");
@@ -6396,7 +6752,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let Json(remediated) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(corrected.clone()),
+        submit_body(corrected.clone()),
     )
     .await
     .expect("owned quarantined remediation supersedes");
@@ -6417,7 +6773,7 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     let blocked = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(corrected),
+        submit_body(corrected),
     )
     .await
     .expect_err("other principal cannot remediate");
@@ -6429,9 +6785,10 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     again.submission_id = first.submission_id;
     make_metadata_only_low_risk(&mut again);
     again.privacy.residual_pii_risk = ResidualPiiRisk::High;
-    let Json(idempotent) = submit_trace_handler(State(state), auth_headers("token-a"), Json(again))
-        .await
-        .expect("accepted remains idempotent");
+    let Json(idempotent) =
+        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(again))
+            .await
+            .expect("accepted remains idempotent");
     assert_eq!(idempotent.status, "accepted");
     let final_record = read_submission_record(temp.path(), "tenant-a", first.submission_id)
         .expect("record reads")
@@ -6455,7 +6812,7 @@ async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("medium-risk submission quarantines");
@@ -6513,7 +6870,7 @@ async fn submit_accepts_medium_risk_when_pilot_flag_enabled() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission succeeds");
@@ -6537,7 +6894,7 @@ async fn submit_ignores_forged_envelope_tenant_scope_at_store_boundary() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds under authenticated tenant");
@@ -6571,7 +6928,7 @@ async fn file_backed_metadata_writes_reject_tenant_storage_drift_before_write() 
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("tenant-a submission succeeds");
 
@@ -6646,7 +7003,7 @@ async fn revoke_rejects_cross_tenant_submission_before_writing_tombstone() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -6694,7 +7051,7 @@ async fn revocation_leaves_awarded_final_credit_unchanged() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -6749,7 +7106,7 @@ async fn revocation_deletes_stored_envelope_body_and_encrypted_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -6821,7 +7178,7 @@ async fn revocation_fails_closed_when_artifact_store_is_unconfigured() {
     let _ = submit_trace_handler(
         State(state_with_store),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds with an artifact store configured");
@@ -6870,7 +7227,7 @@ async fn revocation_tombstone_carries_no_identity_path_or_content() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -6930,7 +7287,7 @@ async fn revoking_twice_is_idempotent() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -6983,7 +7340,7 @@ async fn revoke_rejects_mismatched_file_record_tenant_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7020,7 +7377,7 @@ async fn revocation_requires_db_mirror_before_file_side_effects_when_required() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds before DB mirror is required");
@@ -7062,7 +7419,7 @@ async fn review_decision_requires_db_mirror_before_file_side_effects_when_requir
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds before DB mirror is required");
@@ -7121,7 +7478,7 @@ async fn review_rejects_mismatched_file_record_tenant_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7154,7 +7511,7 @@ async fn review_rejects_mismatched_envelope_tenant_scope_before_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7210,7 +7567,7 @@ async fn reviewer_read_surfaces_reject_mismatched_file_record_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7256,7 +7613,7 @@ async fn contributor_credit_read_rejects_mismatched_file_ledger_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7298,7 +7655,7 @@ async fn audit_read_rejects_mismatched_file_event_tenant() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -7427,7 +7784,7 @@ async fn submit_rejects_mismatched_file_revocation_tenant_before_side_effects() 
     )
     .expect("corrupt revocation writes");
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("mismatched revocation tenant fails closed");
     assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
@@ -7528,14 +7885,14 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let Json(first_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("first submission succeeds");
     let Json(retry_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("idempotent retry bypasses quota");
@@ -7548,7 +7905,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let blocked = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("new tenant submission is rate limited");
@@ -7558,7 +7915,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
     let _ = submit_trace_handler(
         State(state),
         auth_headers("token-b"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("quota is isolated by tenant");
@@ -7578,14 +7935,14 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("first principal submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("different contributor in same tenant is not blocked by principal quota");
@@ -7593,7 +7950,7 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
     let blocked = submit_trace_handler(
         State(state),
         auth_headers("token-a"),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("same principal is rate limited");
@@ -7613,9 +7970,13 @@ async fn submit_quota_ignores_revoked_submissions() {
     );
     let first = sample_envelope().await;
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     revoke_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
@@ -7629,9 +7990,13 @@ async fn submit_quota_ignores_revoked_submissions() {
         Some("Please inspect a different quota-safe workspace".to_string());
     replacement.privacy.redaction_hash = sha256_prefixed("quota replacement trace");
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(replacement))
-        .await
-        .expect("revoked submission no longer consumes quota");
+    let _ = submit_trace_handler(
+        State(state),
+        auth_headers("token-a"),
+        submit_body(replacement),
+    )
+    .await
+    .expect("revoked submission no longer consumes quota");
 }
 
 #[test]
@@ -9162,15 +9527,16 @@ async fn submit_rejects_scope_disallowed_by_tenant_policy() {
     let error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect_err("tenant policy rejects disallowed consent scope");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers("token-b"), Json(envelope))
-        .await
-        .expect("tenant without explicit policy can submit");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers("token-b"), submit_body(envelope))
+            .await
+            .expect("tenant without explicit policy can submit");
     assert_eq!(receipt.status, "quarantined");
 }
 
@@ -9207,7 +9573,7 @@ async fn submit_rejects_allowed_use_disallowed_by_tenant_policy() {
         .allowed_uses
         .push(TraceAllowedUse::ModelTraining);
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("tenant policy rejects disallowed allowed use");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
@@ -9240,7 +9606,7 @@ async fn signed_claim_reviewer_cannot_review_decision_outside_source_scope_befor
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers(&contributor_token),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-scoped quarantined submission succeeds");
@@ -9290,7 +9656,7 @@ async fn tenant_policy_blocks_maintenance_purge_for_disallowed_source_before_del
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only source submission succeeds");
@@ -9349,7 +9715,7 @@ async fn tenant_policy_blocks_privileged_revocation_but_not_owner_revocation() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only source submission succeeds");
@@ -9410,7 +9776,7 @@ async fn privileged_revocation_requires_explicit_reason_after_source_abac() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -9455,15 +9821,16 @@ async fn submit_requires_explicit_tenant_policy_when_configured() {
     let error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect_err("tenant without policy cannot submit when required");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
-        .await
-        .expect("tenant with policy can submit");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+            .await
+            .expect("tenant with policy can submit");
     assert_eq!(receipt.status, "quarantined");
 }
 
@@ -12194,9 +12561,13 @@ async fn ranker_export_skips_source_without_required_allowed_use_when_no_policy(
     source.trace_card.allowed_uses = vec![TraceAllowedUse::Evaluation];
     source.value.submission_score = 0.95;
     let submission_id = source.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(source))
-        .await
-        .expect("source can submit before export source ABAC");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(source),
+    )
+    .await
+    .expect("source can submit before export source ABAC");
 
     let Json(candidates) = ranker_training_candidates_handler(
         State(state),
@@ -12242,7 +12613,7 @@ async fn submit_writes_encrypted_artifact_receipt_when_configured() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12291,7 +12662,7 @@ async fn backfill_object_ref_preserves_record_artifact_store_across_store_cutove
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("legacy encrypted submission succeeds");
@@ -12398,7 +12769,7 @@ async fn encrypted_object_ref_reads_require_matching_configured_store_alias() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("encrypted submission succeeds");
@@ -12459,7 +12830,7 @@ async fn revocation_tombstone_redaction_hash_blocks_reingest_without_summary_has
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12492,7 +12863,7 @@ async fn revocation_tombstone_redaction_hash_blocks_reingest_without_summary_has
     let duplicate_error = submit_trace_handler(
         State(state),
         auth_headers("token-a"),
-        Json(duplicate_envelope),
+        submit_body(duplicate_envelope),
     )
     .await
     .expect_err("redaction-only tombstone blocks reingest");
@@ -12509,7 +12880,7 @@ async fn tenant_token_scopes_metadata_and_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12555,15 +12926,27 @@ async fn ingestion_writes_derived_analytics_and_duplicate_precheck() {
         }
     }
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(third))
-        .await
-        .expect("third similar submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(third),
+    )
+    .await
+    .expect("third similar submission succeeds");
 
     let derived = read_all_derived_records(temp.path(), "tenant-a").expect("derived reads");
     assert_eq!(derived.len(), 3);
@@ -12668,7 +13051,7 @@ async fn analytics_broad_release_query_fails_closed_when_privacy_budget_blocks()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -12719,7 +13102,7 @@ async fn analytics_broad_release_requires_noise_calibration_when_cells_clear() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -12768,7 +13151,7 @@ async fn analytics_broad_release_applies_configured_noise_without_leaking_key() 
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -12841,7 +13224,7 @@ async fn analytics_broad_release_fails_closed_when_epsilon_budget_exhausted() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -12928,7 +13311,7 @@ async fn analytics_read_requires_db_mirror_before_file_audit_when_required() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds before required DB mirror mode");
@@ -12979,7 +13362,7 @@ async fn analytics_release_drill_records_smoke_evidence_without_leaking_noise_ke
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -13064,7 +13447,7 @@ async fn reviewer_can_approve_quarantined_trace_and_export_dataset() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -13257,12 +13640,20 @@ async fn reviewer_batch_decision_route_applies_bounded_common_decision() {
     let second = sample_envelope().await;
     let second_id = second.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
 
     let response = app(state.clone())
         .oneshot(
@@ -13334,12 +13725,20 @@ async fn review_routing_summary_reports_queue_pressure_without_trace_bodies() {
     let first = sample_envelope().await;
     let second = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second submission succeeds");
 
     let response = app(state.clone())
         .oneshot(
@@ -13389,7 +13788,7 @@ async fn review_decision_requires_quarantined_status() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -13429,7 +13828,7 @@ async fn review_decision_blocks_unmaintained_expired_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13473,7 +13872,7 @@ async fn review_rejects_extended_retention_expiration_before_body_read() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13523,7 +13922,7 @@ async fn review_decision_blocks_purged_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -13570,7 +13969,7 @@ async fn review_decision_blocks_retention_ineligible_approval() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("aggregate-only quarantined submission succeeds");
@@ -13613,7 +14012,7 @@ async fn trace_review_escalation_marks_high_risk_and_overdue_items() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("submission succeeds");
 
@@ -13664,14 +14063,14 @@ async fn quarantine_queue_prioritizes_escalated_review_items() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(fresh_envelope),
+        submit_body(fresh_envelope),
     )
     .await
     .expect("fresh submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(urgent_envelope),
+        submit_body(urgent_envelope),
     )
     .await
     .expect("urgent submission succeeds");
@@ -13729,7 +14128,7 @@ async fn process_evaluation_worker_attaches_labels_to_accepted_trace() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -15544,7 +15943,7 @@ async fn audit_backfill_enriches_submitted_metadata_from_file_record() {
     make_metadata_only_low_risk(&mut envelope);
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect("submission succeeds");
     let record = read_submission_record(temp.path(), "tenant-a", submission_id)
@@ -15950,7 +16349,7 @@ async fn process_evaluation_worker_can_emit_idempotent_ranking_label() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16074,7 +16473,7 @@ async fn process_evaluation_worker_rejects_non_system_ranking_label_source_befor
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16134,7 +16533,7 @@ async fn process_evaluation_worker_rejects_disallowed_ranking_label_before_body_
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -16205,7 +16604,7 @@ async fn process_evaluation_worker_run_uses_external_evaluator_for_hash_only_ran
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -16225,7 +16624,7 @@ async fn process_evaluation_worker_run_uses_external_evaluator_for_hash_only_ran
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b accepted submission succeeds");
@@ -16423,7 +16822,7 @@ async fn process_evaluation_worker_rejects_policy_disallowed_sources_before_body
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark-only submission succeeds under tenant policy");
@@ -16489,7 +16888,7 @@ async fn process_evaluation_worker_allows_policy_evaluation_sources() {
     let Json(receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-allowed submission succeeds under tenant policy");
@@ -16674,7 +17073,7 @@ async fn replay_export_rejects_extended_retention_expiration_before_body_read() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -16721,7 +17120,7 @@ async fn benchmark_convert_rejects_extended_retention_expiration_before_artifact
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -16771,7 +17170,7 @@ async fn ranker_candidates_reject_extended_retention_expiration_before_export_si
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -16848,7 +17247,7 @@ async fn bulk_export_limit_cap_is_applied_by_export_callers() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -16934,7 +17333,7 @@ async fn export_access_grants_gate_replay_dataset_call_site() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -17065,7 +17464,7 @@ async fn export_access_grants_gate_benchmark_and_ranker_call_sites() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -17546,7 +17945,7 @@ async fn export_worker_claims_and_runs_queued_replay_job_from_safe_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission writes file and DB metadata");
@@ -17796,7 +18195,7 @@ async fn export_worker_claims_and_runs_queued_benchmark_job_from_safe_metadata()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission writes file and DB metadata");
@@ -18098,7 +18497,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking source submission writes file and DB metadata");
@@ -20456,12 +20855,20 @@ async fn revoked_traces_are_excluded_from_export_and_benchmark_with_manifest_art
     ];
     let kept_id = kept.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(revoked))
-        .await
-        .expect("revoked candidate submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(kept))
-        .await
-        .expect("kept submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(revoked),
+    )
+    .await
+    .expect("revoked candidate submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(kept),
+    )
+    .await
+    .expect("kept submission succeeds");
     revoke_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
@@ -20611,21 +21018,21 @@ async fn benchmark_conversion_dedupes_exact_summary_duplicates_before_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original benchmark submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate benchmark submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct benchmark submission succeeds");
@@ -20727,7 +21134,7 @@ async fn benchmark_conversion_writes_provenance_and_revocation_invalidates_it() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -20970,7 +21377,7 @@ async fn benchmark_conversion_artifact_tracks_registry_and_evaluator_state() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21033,7 +21440,7 @@ async fn benchmark_lifecycle_update_persists_registry_and_evaluator_state() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21129,7 +21536,7 @@ async fn benchmark_lifecycle_rejects_publish_without_passed_evaluation() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21206,7 +21613,7 @@ async fn benchmark_lifecycle_rejects_publish_without_evaluator_score() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21373,7 +21780,7 @@ async fn benchmark_evaluation_worker_run_marks_candidate_passed_without_publishi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21488,7 +21895,7 @@ async fn benchmark_evaluation_worker_run_uses_configured_external_evaluator() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21619,7 +22026,7 @@ async fn benchmark_evaluation_worker_dry_run_does_not_call_external_evaluator() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21699,7 +22106,7 @@ async fn benchmark_registry_publication_worker_publishes_passed_evaluations_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -21807,7 +22214,7 @@ async fn benchmark_registry_publication_enqueues_external_registry_outbox() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -22025,7 +22432,7 @@ async fn operational_summary_reports_benchmark_lifecycle_readiness() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -23450,35 +23857,35 @@ async fn ranker_training_exports_are_tenant_scoped_and_exclude_revoked_traces() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_best),
+        submit_body(tenant_a_best),
     )
     .await
     .expect("tenant a best submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_lower),
+        submit_body(tenant_a_lower),
     )
     .await
     .expect("tenant a lower submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_quarantined),
+        submit_body(tenant_a_quarantined),
     )
     .await
     .expect("tenant a quarantined submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_revoked),
+        submit_body(tenant_a_revoked),
     )
     .await
     .expect("tenant a revoked submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -23755,21 +24162,21 @@ async fn ranker_training_candidates_dedupe_exact_summary_duplicates_before_credi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original ranker submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate ranker submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct ranker submission succeeds");
@@ -23902,21 +24309,21 @@ async fn ranker_training_pairs_dedupe_exact_summary_duplicates_before_credit() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(original),
+        submit_body(original),
     )
     .await
     .expect("original ranker pair submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(duplicate),
+        submit_body(duplicate),
     )
     .await
     .expect("duplicate ranker pair submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(distinct),
+        submit_body(distinct),
     )
     .await
     .expect("distinct ranker pair submission succeeds");
@@ -24021,14 +24428,14 @@ async fn ranker_exports_write_provenance_and_maintenance_invalidates_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranker source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranker source submission succeeds");
@@ -24236,28 +24643,28 @@ async fn active_learning_queue_is_tenant_scoped_and_excludes_revoked_traces() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_quarantined),
+        submit_body(tenant_a_quarantined),
     )
     .await
     .expect("tenant a quarantined submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_accepted),
+        submit_body(tenant_a_accepted),
     )
     .await
     .expect("tenant a accepted submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_revoked),
+        submit_body(tenant_a_revoked),
     )
     .await
     .expect("tenant a revoked submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_quarantined),
+        submit_body(tenant_b_quarantined),
     )
     .await
     .expect("tenant b quarantined submission succeeds");
@@ -24369,14 +24776,14 @@ async fn maintenance_is_tenant_scoped_denies_contributors_and_prunes_revoked_exp
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a),
+        submit_body(tenant_a),
     )
     .await
     .expect("tenant a submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -24523,7 +24930,7 @@ async fn maintenance_marks_expired_traces_and_excludes_them_from_exports() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -24718,7 +25125,7 @@ async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -24753,7 +25160,7 @@ async fn maintenance_purges_expired_trace_objects_only_with_explicit_cutoff() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -24899,7 +25306,7 @@ async fn retention_maintenance_scheduler_tick_purges_tenant_expired_objects_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -24921,7 +25328,7 @@ async fn retention_maintenance_scheduler_tick_purges_tenant_expired_objects_only
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -25045,7 +25452,7 @@ async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission succeeds");
@@ -25082,7 +25489,7 @@ async fn maintenance_purges_filesystem_remote_object_primary_artifact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b object-primary submission succeeds");
@@ -25233,7 +25640,7 @@ async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25246,7 +25653,7 @@ async fn retention_dry_run_drill_records_smoke_evidence_and_preserves_records() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -25432,7 +25839,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector drill source mirrors into DB");
@@ -25446,7 +25853,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b vector drill source mirrors into DB");
@@ -25576,6 +25983,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         root: temp.path().to_path_buf(),
+        near_attestation_client: None,
+        near_attestation_verification_clock: None,
         driver_liveness: Arc::new(
             trace_commons_server::driver_liveness::DriverLivenessRegistry::default(),
         ),
@@ -25669,6 +26078,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        witness_bypass: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -25719,7 +26129,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25800,7 +26210,7 @@ async fn maintenance_rejects_tampered_retention_legal_hold_before_side_effects()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -25867,7 +26277,7 @@ async fn maintenance_rejects_extended_retention_expiration_before_side_effects()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -26042,7 +26452,7 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -27571,7 +27981,7 @@ async fn revocation_propagation_drill_records_pending_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -27590,7 +28000,7 @@ async fn revocation_propagation_drill_records_pending_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission mirrors to DB");
@@ -27759,7 +28169,7 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -27770,7 +28180,7 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission mirrors to DB");
@@ -28035,7 +28445,7 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -28460,7 +28870,7 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -28693,7 +29103,7 @@ async fn revocation_effects_drill_records_remote_credit_reversal_and_object_dele
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission mirrors to DB");
@@ -29081,7 +29491,7 @@ async fn canary_read_drill_records_core_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -29275,7 +29685,7 @@ async fn object_primary_read_drill_records_smoke_evidence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission succeeds");
@@ -29433,7 +29843,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary submission succeeds");
@@ -29482,7 +29892,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback submission succeeds");
@@ -29558,7 +29968,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a replay source mirrors to DB");
@@ -29604,7 +30014,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed replay source mirrors to DB");
@@ -29622,7 +30032,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored replay source succeeds");
@@ -29727,7 +30137,7 @@ async fn db_tenant_policy_reads_tenant_allowlist_keeps_fallback_tenant_policy_ba
     let tenant_a_error = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect_err("tenant-a allowlisted submit obeys DB tenant policy");
@@ -29741,7 +30151,7 @@ async fn db_tenant_policy_reads_tenant_allowlist_keeps_fallback_tenant_policy_ba
     let Json(tenant_b_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b non-allowlisted submit keeps static tenant policy fallback");
@@ -29783,7 +30193,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a source mirrors to DB");
@@ -29842,7 +30252,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed source mirrors to DB");
@@ -29869,7 +30279,7 @@ async fn db_contributor_reads_tenant_allowlist_keeps_fallback_tenant_file_backed
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored source succeeds");
@@ -29961,7 +30371,7 @@ async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backe
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary quarantined submission succeeds");
@@ -30016,7 +30426,7 @@ async fn object_primary_review_tenant_allowlist_keeps_fallback_tenant_file_backe
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback quarantined submission succeeds");
@@ -30125,7 +30535,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a object-primary submission succeeds");
@@ -30224,7 +30634,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b fallback submission succeeds");
@@ -30812,7 +31222,7 @@ async fn rollback_drill_records_smoke_evidence_and_preserves_db_rows() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -31126,7 +31536,7 @@ async fn audit_chain_drill_records_passed_evidence_without_raw_failures() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -31196,7 +31606,7 @@ async fn audit_chain_drill_records_failed_evidence_with_failure_hashes() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -31402,7 +31812,7 @@ async fn maintenance_reconciliation_reports_envelope_object_ref_store_mismatch()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("encrypted submission mirrors to DB");
@@ -31636,7 +32046,7 @@ async fn maintenance_reconciliation_reports_submitted_audit_metadata_drift() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -31905,7 +32315,7 @@ async fn revoke_trace_handler_mirrors_hash_only_revocation_audit_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -32312,7 +32722,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a submission mirrors to DB");
@@ -32331,7 +32741,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_file_envelope),
+        submit_body(tenant_b_file_envelope),
     )
     .await
     .expect("tenant-b file-backed submission mirrors to DB");
@@ -32341,7 +32751,7 @@ async fn db_reviewer_reads_tenant_allowlist_keeps_fallback_tenant_file_backed() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_db_only_envelope),
+        submit_body(tenant_b_db_only_envelope),
     )
     .await
     .expect("tenant-b DB-mirrored submission succeeds");
@@ -32720,13 +33130,17 @@ async fn maintenance_backfill_reports_malformed_submission_metadata() {
     make_metadata_only_low_risk(&mut malformed);
     let malformed_id = malformed.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(valid))
-        .await
-        .expect("valid submission writes file metadata");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(malformed),
+        submit_body(valid),
+    )
+    .await
+    .expect("valid submission writes file metadata");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(malformed),
     )
     .await
     .expect("submission to corrupt writes file metadata");
@@ -32800,7 +33214,7 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .unwrap_or_else(|error| {
@@ -32817,7 +33231,7 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(expired_candidate),
+        submit_body(expired_candidate),
     )
     .await
     .expect("expired candidate source mirrors into DB before local expiration marker");
@@ -32934,7 +33348,7 @@ async fn vector_index_worker_uses_configured_external_embedder() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission mirrors into DB");
@@ -33038,9 +33452,13 @@ async fn vector_index_worker_uses_stored_vector_payloads_for_model_backed_neighb
     first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let first_submission_id = first.submission_id;
     let first_trace_id = first.trace_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(
         backend.as_ref(),
         "tenant-a",
@@ -33067,9 +33485,13 @@ async fn vector_index_worker_uses_stored_vector_payloads_for_model_backed_neighb
     second.trace_card.consent_scope = ConsentScope::RankingTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(backend.as_ref(), "tenant-a", second_submission_id, "")
         .await;
     let Json(response) = vector_index_handler(
@@ -33166,9 +33588,13 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
     first.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let first_trace_id = first.trace_id;
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first vector source submission mirrors into DB");
     let _ = vector_index_handler(
         State(state.clone()),
         auth_headers("vector-worker-token-a"),
@@ -33204,9 +33630,13 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
     second.trace_card.consent_scope = ConsentScope::RankingTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::RankingModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second vector source submission mirrors into DB");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second vector source submission mirrors into DB");
     overwrite_pg_derived_summary_for_test(backend.as_ref(), "tenant-a", second_submission_id, "")
         .await;
     let Json(response) = vector_index_handler(
@@ -33293,7 +33723,7 @@ async fn admin_vector_index_drill_records_neighbor_policy_gap_evidence() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("vector source submission mirrors into DB");
@@ -33518,7 +33948,7 @@ async fn vector_index_worker_missing_db_fails_before_retention_side_effects() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission succeeds");
@@ -33596,7 +34026,7 @@ async fn admin_vector_entries_list_returns_safe_bounded_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("vector source submission mirrors into DB");
@@ -34308,7 +34738,7 @@ async fn revoked_trace_cannot_be_approved_or_receive_credit_and_listing_skips_by
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -34395,7 +34825,7 @@ async fn reviewer_tokens_are_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -34424,7 +34854,7 @@ async fn contributor_cannot_access_trace_list_or_audit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -34927,7 +35357,7 @@ async fn maintenance_can_verify_file_audit_chain() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35005,16 +35435,24 @@ async fn reviewer_trace_list_filters_metadata_by_status_tool_tag_and_risk() {
     let quarantined = sample_envelope().await;
     let quarantined_id = quarantined.submission_id;
 
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(shell))
-        .await
-        .expect("shell submission succeeds");
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(browser))
-        .await
-        .expect("browser submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(quarantined),
+        submit_body(shell),
+    )
+    .await
+    .expect("shell submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(browser),
+    )
+    .await
+    .expect("browser submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(quarantined),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -35137,14 +35575,14 @@ async fn reviewer_trace_list_filters_by_export_purpose() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(accepted),
+        submit_body(accepted),
     )
     .await
     .expect("accepted submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(quarantined),
+        submit_body(quarantined),
     )
     .await
     .expect("quarantined submission succeeds");
@@ -35214,14 +35652,14 @@ async fn audit_events_are_tenant_scoped_for_reviewers() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a),
+        submit_body(tenant_a),
     )
     .await
     .expect("tenant a submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b),
+        submit_body(tenant_b),
     )
     .await
     .expect("tenant b submission succeeds");
@@ -35301,7 +35739,7 @@ async fn reviewer_can_append_delayed_credit_event() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35342,7 +35780,7 @@ async fn delayed_credit_requires_reason_artifact_ref_and_bounded_delta() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35407,7 +35845,7 @@ async fn manual_training_credit_rejects_source_without_model_training_use() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -35448,7 +35886,7 @@ async fn manual_benchmark_credit_rejects_source_without_benchmark_generation_use
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("evaluation-only submission succeeds");
@@ -35503,7 +35941,7 @@ async fn signed_claim_reviewer_cannot_append_ranking_credit_outside_claim_scope(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&contributor_token),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking-scoped source submission succeeds");
@@ -35555,7 +35993,7 @@ async fn contributor_sees_own_delayed_credit_events_in_summary() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35685,7 +36123,7 @@ async fn admin_credit_settlement_finalizes_pending_utility_once_and_enqueues_nea
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35853,7 +36291,7 @@ async fn credit_settlement_uses_configured_near_contract_and_rejects_drift() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -35957,7 +36395,7 @@ async fn credit_settlement_required_near_contract_blocks_live_without_config() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36075,7 +36513,7 @@ async fn credit_settlement_policy_allowlist_blocks_live_unapproved_policy() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36275,7 +36713,7 @@ async fn admin_credit_settlement_persists_central_issuer_approval_hash() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36550,7 +36988,7 @@ async fn credit_settlement_can_require_central_issuer_approval_for_live_batches(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -36891,7 +37329,7 @@ async fn credit_settlement_rejects_stale_central_issuer_approval_when_max_age_co
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37050,7 +37488,7 @@ async fn contributor_credit_summary_nets_revocation_reversal_against_settled_bal
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -37141,7 +37579,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -37225,7 +37663,7 @@ async fn credit_settlement_rejects_malformed_near_contract_before_outbox_side_ef
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37295,7 +37733,7 @@ async fn credit_settlement_account_cap_blocks_large_live_settlement_without_outb
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37397,7 +37835,7 @@ async fn operational_summary_blocks_credit_settlement_without_account_cap() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37516,7 +37954,7 @@ async fn operational_summary_blocks_credit_settlement_without_central_issuer_gat
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37739,7 +38177,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapters() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -37908,9 +38346,13 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     let Json(first_event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -37934,7 +38376,7 @@ async fn operational_summary_blocks_credit_settlement_with_held_or_over_cap_acco
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(second),
+        submit_body(second),
     )
     .await
     .expect("second submission succeeds");
@@ -38129,7 +38571,7 @@ async fn operational_summary_blocks_credit_settlement_without_near_adapter_auth(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38282,7 +38724,7 @@ async fn credit_settlement_drill_requires_issuer_account_cap_by_default() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38420,7 +38862,7 @@ async fn credit_settlement_drill_blocks_incomplete_central_issuer_profile() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38528,7 +38970,7 @@ async fn live_credit_settlement_blocks_incomplete_central_issuer_profile() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38627,7 +39069,7 @@ async fn live_credit_settlement_blocks_without_rollout_smoke_when_required() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38724,7 +39166,7 @@ async fn credit_settlement_drill_requires_central_issuer_approval_when_configure
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -38944,7 +39386,7 @@ async fn credit_settlement_drill_requires_near_adapters_by_default() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39083,7 +39525,7 @@ async fn credit_settlement_drill_requires_near_adapter_auth_when_requested() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -39191,7 +39633,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(high_utility),
+        submit_body(high_utility),
     )
     .await
     .expect("high utility submission succeeds");
@@ -39218,7 +39660,7 @@ async fn admin_credit_settlement_drill_dry_runs_risk_and_records_smoke_evidence(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(held_utility),
+        submit_body(held_utility),
     )
     .await
     .expect("held utility submission succeeds");
@@ -39406,7 +39848,7 @@ async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_sc
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("training submission succeeds");
@@ -39456,7 +39898,7 @@ async fn credit_settlement_worker_run_finalizes_pending_utility_without_admin_sc
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -39612,7 +40054,7 @@ async fn credit_settlement_scheduler_tick_uses_worker_surface_for_dry_run_and_li
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("training submission succeeds");
@@ -39737,7 +40179,7 @@ async fn credit_settlement_worker_run_respects_source_event_limit() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -39848,7 +40290,7 @@ async fn credit_settlement_drill_source_event_limit_matches_worker_approval_batc
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -40003,7 +40445,7 @@ async fn admin_credit_settlement_source_event_limit_matches_drill_approval_batch
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("training submission succeeds");
@@ -40204,7 +40646,7 @@ async fn credit_settlement_retry_recovers_missing_near_outbox_after_append_failu
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -40292,9 +40734,13 @@ async fn admin_credit_summary_counts_tenant_wide_settled_line_items() {
         envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
         envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
         let submission_id = envelope.submission_id;
-        let _ = submit_trace_handler(State(state.clone()), auth_headers(token), Json(envelope))
-            .await
-            .expect("submission succeeds");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers(token),
+            submit_body(envelope),
+        )
+        .await
+        .expect("submission succeeds");
         let _ = append_credit_event_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
@@ -41792,7 +42238,7 @@ async fn benchmark_pipeline_scheduler_tick_evaluates_then_publishes_passed_artif
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -41903,7 +42349,7 @@ async fn benchmark_pipeline_scheduler_tick_dry_run_leaves_lifecycle_and_outbox_u
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission succeeds");
@@ -42008,7 +42454,7 @@ async fn process_evaluation_scheduler_tick_evaluates_and_appends_system_ranking_
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted evaluation source submission succeeds");
@@ -42096,7 +42542,7 @@ async fn process_evaluation_scheduler_tick_dry_run_skips_evaluator_and_trace_wri
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted evaluation source submission succeeds");
@@ -43395,7 +43841,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -43439,7 +43885,7 @@ async fn near_credit_outbox_submit_worker_sends_pending_calls_and_marks_submitte
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -43764,7 +44210,7 @@ async fn credit_settlement_requires_promotable_calibration_for_ranking_utility()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44020,7 +44466,7 @@ async fn ranking_utility_settlement_requires_active_model() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44159,7 +44605,7 @@ async fn ranking_utility_settlement_requires_prediction_ref() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44362,7 +44808,7 @@ async fn ranking_prediction_credit_worker_appends_prediction_bound_credit_once()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -44916,7 +45362,7 @@ async fn ranking_feature_worker_creates_reserved_server_provenance_features() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45010,7 +45456,7 @@ async fn ranking_feature_worker_requires_and_uses_active_vector_metadata() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission mirrors into DB");
@@ -45111,7 +45557,7 @@ async fn ranking_feature_worker_skips_sources_without_vector_metadata_when_requi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45231,7 +45677,7 @@ async fn ranking_prediction_credit_worker_run_batches_uncredited_predictions_ide
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking submission succeeds");
@@ -45819,7 +46265,7 @@ async fn ranking_prediction_credit_worker_run_records_failed_status_on_fatal_err
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -45961,7 +46407,7 @@ async fn ranking_prediction_credit_run_skips_models_with_uncleared_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(calibration_envelope),
+        submit_body(calibration_envelope),
     )
     .await
     .expect("calibration ranking submission succeeds");
@@ -46070,7 +46516,7 @@ async fn ranking_prediction_credit_run_skips_models_with_uncleared_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("post-calibration ranking submission succeeds");
@@ -46347,7 +46793,7 @@ async fn ranking_credit_paths_block_unreliable_calibration_labelers_when_gate_en
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(issue_envelope),
+        submit_body(issue_envelope),
     )
     .await
     .expect("unrelated model-training source submission succeeds");
@@ -46671,7 +47117,7 @@ async fn ranking_prediction_credit_worker_requires_active_positive_prediction() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -46839,7 +47285,7 @@ async fn ranking_credit_paths_reject_stale_or_underdiverse_calibration_when_gate
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -47156,7 +47602,7 @@ async fn ranking_model_promotion_activates_promotable_candidate() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -47542,7 +47988,7 @@ async fn operational_summary_reports_ranking_adjudication_issues() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("source submission succeeds");
@@ -47642,7 +48088,7 @@ async fn seed_credit_cycle_candidate_with_prediction(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking source submission succeeds");
@@ -48792,7 +49238,7 @@ async fn seed_pairwise_ranking_prediction_source(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("pairwise source submission succeeds");
@@ -48856,7 +49302,7 @@ async fn credit_cycle_worker_runs_ranking_credit_settlement_sequence() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -49346,7 +49792,7 @@ async fn credit_cycle_scheduler_runs_next_eligible_model() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b training submission succeeds");
@@ -50898,7 +51344,7 @@ async fn credit_cycle_scheduler_reports_missing_joined_label_evidence_before_cla
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("unjoined ranking label source submission succeeds");
@@ -51346,7 +51792,7 @@ async fn ranking_model_promotion_worker_run_promotes_calibrated_candidates_only(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -51559,7 +52005,7 @@ async fn ranking_calibration_worker_run_persists_calibration_and_worker_ledger()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -51817,7 +52263,7 @@ async fn ranking_model_promotion_rejects_stale_calibration_dataset_after_model_r
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -51946,7 +52392,7 @@ async fn ranking_model_promotion_rejects_current_evidence_drift_since_calibratio
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("ranking submission succeeds");
@@ -52138,7 +52584,7 @@ async fn admin_credit_hold_blocks_settlement_and_moves_points_to_held_projection
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52216,7 +52662,7 @@ async fn admin_credit_hold_release_unblocks_settlement() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52381,7 +52827,7 @@ async fn admin_credit_hold_routes_are_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52508,7 +52954,7 @@ async fn admin_credit_holds_enqueue_near_account_freeze_transitions_when_configu
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52665,7 +53111,7 @@ async fn credit_hold_mutations_require_authorized_central_issuer() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -52785,7 +53231,7 @@ async fn admin_credit_risk_summary_is_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(tenant_a_envelope),
+        submit_body(tenant_a_envelope),
     )
     .await
     .expect("tenant-a submission succeeds");
@@ -52812,7 +53258,7 @@ async fn admin_credit_risk_summary_is_tenant_scoped() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(tenant_b_envelope),
+        submit_body(tenant_b_envelope),
     )
     .await
     .expect("tenant-b submission succeeds");
@@ -52933,9 +53379,13 @@ async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first submission succeeds");
     let Json(first_event) = append_credit_event_handler(
         State(state.clone()),
         auth_headers("review-token-a"),
@@ -52959,7 +53409,7 @@ async fn admin_credit_risk_summary_reports_hashed_pending_over_cap_accounts() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a-2"),
-        Json(second),
+        submit_body(second),
     )
     .await
     .expect("second submission succeeds");
@@ -53365,7 +53815,7 @@ async fn credit_control_plane_required_db_mirror_blocks_hold_writes_without_db()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds before required mirror mode");
@@ -53429,7 +53879,7 @@ async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -53457,7 +53907,7 @@ async fn credit_control_plane_dual_writes_and_reads_postgres_when_enabled() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-b"),
-        Json(other_envelope),
+        submit_body(other_envelope),
     )
     .await
     .expect("other tenant submission mirrors to DB");
@@ -53860,7 +54310,7 @@ async fn revocation_leaves_settled_credit_and_enqueues_no_near_reverse_receipt()
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors to DB");
@@ -54008,7 +54458,7 @@ async fn revocation_leaves_settled_benchmark_conversion_credit_intact() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("benchmark source submission mirrors to DB");
@@ -54333,7 +54783,7 @@ async fn utility_attestation_records_hash_only_evidence_and_appends_credit_once(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -54543,7 +54993,7 @@ async fn ranking_evidence_pipeline_records_hash_only_predictions_and_labels() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -54830,14 +55280,14 @@ async fn ranking_preference_evidence_records_hash_only_pairwise_labels() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -54922,14 +55372,14 @@ async fn ranking_label_sources_require_matching_authority_role() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -55196,14 +55646,14 @@ async fn ranker_training_pairs_include_explicit_preference_labels_before_score_h
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(preferred),
+        submit_body(preferred),
     )
     .await
     .expect("preferred ranking source submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(rejected),
+        submit_body(rejected),
     )
     .await
     .expect("rejected ranking source submission succeeds");
@@ -55281,7 +55731,7 @@ async fn ranking_pairwise_evaluation_report_scores_model_ordering_against_prefer
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("ranking source submission succeeds");
@@ -55679,7 +56129,7 @@ async fn ranking_adjudication_report_surfaces_unresolved_label_and_pairwise_conf
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(disputed_envelope),
+        submit_body(disputed_envelope),
     )
     .await
     .expect("disputed source submission succeeds");
@@ -55693,7 +56143,7 @@ async fn ranking_adjudication_report_surfaces_unresolved_label_and_pairwise_conf
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(conflicting_envelope),
+        submit_body(conflicting_envelope),
     )
     .await
     .expect("conflicting source submission succeeds");
@@ -55856,9 +56306,13 @@ async fn ranking_labeler_reliability_report_hashes_actors_and_counts_conflicts()
     first.trace_card.consent_scope = ConsentScope::ModelTraining;
     first.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let first_submission_id = first.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(first))
-        .await
-        .expect("first source submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(first),
+    )
+    .await
+    .expect("first source submission succeeds");
 
     let mut second = sample_envelope().await;
     make_metadata_only_low_risk(&mut second);
@@ -55866,9 +56320,13 @@ async fn ranking_labeler_reliability_report_hashes_actors_and_counts_conflicts()
     second.trace_card.consent_scope = ConsentScope::ModelTraining;
     second.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     let second_submission_id = second.submission_id;
-    let _ = submit_trace_handler(State(state.clone()), auth_headers("token-a"), Json(second))
-        .await
-        .expect("second source submission succeeds");
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(second),
+    )
+    .await
+    .expect("second source submission succeeds");
 
     let _ = ranking_label_handler(
         State(state.clone()),
@@ -56000,7 +56458,7 @@ async fn ranking_predictions_require_registered_model_policy_and_feature_hash() 
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56273,7 +56731,7 @@ async fn ranking_calibration_run_persists_hash_only_model_quality_gate() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56455,7 +56913,7 @@ async fn ranking_calibration_run_applies_server_min_label_count_floor() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56566,7 +57024,7 @@ async fn ranking_calibration_run_deduplicates_repeated_labels_per_submission_sou
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56694,7 +57152,7 @@ async fn ranking_calibration_run_excludes_latest_disputed_labels_from_joined_evi
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -56831,7 +57289,7 @@ async fn ranking_calibration_run_applies_server_quality_thresholds() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57380,7 +57838,7 @@ async fn ranking_calibration_run_requires_label_source_diversity() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57502,7 +57960,7 @@ async fn ranking_calibration_run_requires_distinct_label_actors_for_source_diver
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -57632,7 +58090,7 @@ async fn ranking_calibration_run_rejects_bad_label_source_cohort_error() {
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
-            Json(envelope),
+            submit_body(envelope),
         )
         .await
         .expect("submission succeeds");
@@ -57777,7 +58235,7 @@ async fn direct_active_ranking_model_registration_requires_target_scoped_promoti
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -58037,14 +58495,14 @@ async fn active_ranking_model_risk_report_flags_post_calibration_evidence_drift(
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(calibration_envelope),
+        submit_body(calibration_envelope),
     )
     .await
     .expect("calibration submission succeeds");
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("drift submission succeeds");
@@ -59074,7 +59532,7 @@ async fn ranking_utility_settlement_blocks_uncleared_active_model_risk() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(drift_envelope),
+        submit_body(drift_envelope),
     )
     .await
     .expect("post-calibration drift submission succeeds");
@@ -59240,7 +59698,7 @@ async fn ranking_model_promotion_rejects_latest_nonpromotable_calibration() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -61012,6 +61470,7 @@ fn rollout_smoke_latest_evidence_uses_recorded_at_not_input_order() {
         },
         &out_of_order_evidence,
         Utc::now(),
+        true,
     );
     assert_eq!(summary.passed_evidence_checks, vec!["audit_reads"]);
     assert!(summary.failed_evidence_checks.is_empty());
@@ -61047,6 +61506,9 @@ fn rollout_smoke_summary_blocks_stale_passed_evidence() {
         },
         &old_passed_evidence,
         generated_at,
+        // Every check in the catalogue, including the conditional one, so
+        // the counts below are over the full set.
+        true,
     );
 
     assert!(!summary.ready);
@@ -62293,7 +62755,7 @@ async fn ranking_evidence_routes_mirror_and_read_from_db_when_reviewer_reads_are
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission mirrors into DB");
@@ -62488,7 +62950,7 @@ async fn other_same_tenant_contributor_cannot_see_delayed_credit_events() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62529,7 +62991,7 @@ async fn contributor_cannot_append_delayed_credit_event() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62567,7 +63029,7 @@ async fn central_issuer_allowlist_blocks_positive_credit_issuance() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62762,7 +63224,7 @@ async fn central_issuer_allowlist_blocks_credit_bearing_process_evaluation_befor
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("accepted submission succeeds");
@@ -62924,7 +63386,7 @@ async fn reviewer_can_append_negative_abuse_penalty() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -62959,9 +63421,13 @@ async fn rejects_unknown_tenant_token() {
     let state = test_state(temp.path().to_path_buf());
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("bad-token"), Json(envelope))
-        .await
-        .expect_err("unknown token is rejected");
+    let error = submit_trace_handler(
+        State(state),
+        auth_headers("bad-token"),
+        submit_body(envelope),
+    )
+    .await
+    .expect_err("unknown token is rejected");
 
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 }
@@ -62984,7 +63450,7 @@ async fn rejects_expired_tenant_token_through_submit_handler() {
     let error = submit_trace_handler(
         State(state),
         auth_headers("expired-token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect_err("expired token is rejected");
@@ -63008,9 +63474,13 @@ async fn accepts_unexpired_tenant_token_through_submit_handler() {
     let state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers("fresh-token-a"), Json(envelope))
-        .await
-        .expect("unexpired token is accepted");
+    let _ = submit_trace_handler(
+        State(state),
+        auth_headers("fresh-token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("unexpired token is accepted");
 }
 
 #[tokio::test]
@@ -63038,7 +63508,7 @@ async fn accepts_signed_tenant_token_and_attributes_to_claim_tenant() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("signed tenant token is accepted");
 
@@ -63079,7 +63549,7 @@ async fn accepts_eddsa_signed_tenant_token_and_attributes_to_claim_tenant() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("EdDSA signed tenant token is accepted");
 
@@ -63246,7 +63716,7 @@ async fn rejects_static_tenant_token_when_eddsa_required() {
     let state = test_state_with_required_eddsa_and_static_tokens(temp.path().to_path_buf());
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("static tenant token is rejected when EdDSA is required");
 
@@ -63272,7 +63742,7 @@ async fn rejects_static_tenant_token_when_managed_eddsa_required() {
     state_mut.require_managed_eddsa_signed_tokens = true;
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers("token-a"), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
         .await
         .expect_err("static tenant token is rejected when managed EdDSA is required");
 
@@ -63320,7 +63790,7 @@ async fn rejects_hs256_signed_claim_when_eddsa_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 signed tenant claim is rejected when EdDSA is required");
 
@@ -63355,7 +63825,7 @@ async fn rejects_hs256_signed_claim_when_managed_eddsa_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 signed tenant claim is rejected when managed EdDSA is required");
 
@@ -63381,7 +63851,7 @@ async fn accepts_eddsa_signed_claim_when_eddsa_required() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("EdDSA signed tenant token is accepted when EdDSA is required");
 
@@ -63412,7 +63882,7 @@ async fn accepts_managed_eddsa_signed_claim_when_managed_eddsa_required() {
     let envelope = sample_envelope().await;
     let submission_id = envelope.submission_id;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("managed EdDSA signed tenant token is accepted when required");
 
@@ -63475,7 +63945,7 @@ async fn managed_eddsa_signed_claim_requires_managed_kid() {
     let missing_kid_error = submit_trace_handler(
         State(state.clone()),
         auth_headers(&missing_kid_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("managed EdDSA requires a key id");
@@ -63489,7 +63959,7 @@ async fn managed_eddsa_signed_claim_requires_managed_kid() {
     let unmanaged_kid_error = submit_trace_handler(
         State(state),
         auth_headers(&unmanaged_kid_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("managed EdDSA rejects unmanaged key ids");
@@ -63510,7 +63980,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&old_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("old managed key is initially accepted");
@@ -63549,7 +64019,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&new_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect("new managed key is accepted after refresh");
@@ -63557,7 +64027,7 @@ async fn managed_eddsa_keyset_refresh_rotates_accepted_kids() {
     let retired_error = submit_trace_handler(
         State(state),
         auth_headers(&old_token),
-        Json(sample_envelope().await),
+        submit_body(sample_envelope().await),
     )
     .await
     .expect_err("retired managed key is rejected after refresh");
@@ -63641,7 +64111,7 @@ async fn accepts_keyed_eddsa_signed_tenant_token_for_rotation() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("keyed EdDSA signed tenant token is accepted");
 }
@@ -63684,7 +64154,7 @@ async fn accepts_eddsa_signed_tenant_token_from_active_managed_keyset() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("active managed EdDSA key is accepted");
 }
@@ -63727,7 +64197,7 @@ async fn rejects_eddsa_signed_tenant_token_with_inactive_managed_key() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("inactive managed EdDSA key is rejected");
     assert_eq!(error.0, StatusCode::FORBIDDEN);
@@ -63909,7 +64379,7 @@ async fn rejects_hs256_signed_token_when_only_eddsa_key_is_configured() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("HS256 token cannot use EdDSA verifier");
 
@@ -63944,7 +64414,7 @@ async fn accepts_keyed_signed_tenant_token_for_rotation() {
     );
     let envelope = sample_envelope().await;
 
-    let _ = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let _ = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect("keyed signed tenant token is accepted");
 }
@@ -63969,7 +64439,7 @@ async fn rejects_expired_signed_tenant_token_through_submit_handler() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("expired signed token is rejected");
 
@@ -64000,7 +64470,7 @@ async fn rejects_signed_tenant_token_missing_iat_when_max_ttl_configured() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("max-ttl signed token policy requires issued-at");
 
@@ -64033,7 +64503,7 @@ async fn rejects_signed_tenant_token_exceeding_max_ttl_policy() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("max-ttl signed token policy rejects long-lived tokens");
 
@@ -64067,9 +64537,10 @@ async fn accepts_signed_tenant_token_within_max_ttl_policy() {
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
-        .await
-        .expect("max-ttl signed token policy accepts bounded tokens");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
+            .await
+            .expect("max-ttl signed token policy accepts bounded tokens");
 
     assert_eq!(receipt.status, "accepted");
 }
@@ -64097,7 +64568,7 @@ async fn rejects_signed_tenant_token_missing_jti_when_required() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("signed token jti policy rejects missing jti");
 
@@ -64130,9 +64601,10 @@ async fn accepts_signed_tenant_token_with_required_jti() {
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
 
-    let Json(receipt) = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
-        .await
-        .expect("signed token jti policy accepts jti-bearing token");
+    let Json(receipt) =
+        submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
+            .await
+            .expect("signed token jti policy accepts jti-bearing token");
 
     assert_eq!(receipt.status, "accepted");
 }
@@ -64159,7 +64631,7 @@ async fn rejects_signed_tenant_token_disallowed_submission_use() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("signed token use restriction is rejected");
 
@@ -64198,7 +64670,7 @@ async fn signed_claim_abac_controls_export_surfaces_and_source_filtering() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&benchmark_submit_token),
-        Json(benchmark_source),
+        submit_body(benchmark_source),
     )
     .await
     .expect("benchmark-scoped signed contributor can submit benchmark source");
@@ -64224,7 +64696,7 @@ async fn signed_claim_abac_controls_export_surfaces_and_source_filtering() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&ranking_submit_token),
-        Json(ranking_source),
+        submit_body(ranking_source),
     )
     .await
     .expect("ranking-scoped signed contributor can submit ranking source");
@@ -64339,7 +64811,7 @@ async fn signed_claim_abac_controls_process_eval_and_utility_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&eval_submit_token),
-        Json(eval_source),
+        submit_body(eval_source),
     )
     .await
     .expect("evaluation-scoped signed contributor can submit eval source");
@@ -64364,7 +64836,7 @@ async fn signed_claim_abac_controls_process_eval_and_utility_sources() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers(&model_submit_token),
-        Json(model_source),
+        submit_body(model_source),
     )
     .await
     .expect("model-scoped signed contributor can submit model source");
@@ -64486,7 +64958,7 @@ async fn rejects_revoked_signed_tenant_token_jti() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("revoked signed token jti is rejected");
 
@@ -64515,7 +64987,7 @@ async fn rejects_unknown_signed_tenant_token_kid() {
     );
     let envelope = sample_envelope().await;
 
-    let error = submit_trace_handler(State(state), auth_headers(&token), Json(envelope))
+    let error = submit_trace_handler(State(state), auth_headers(&token), submit_body(envelope))
         .await
         .expect_err("unknown signed token kid is rejected");
 
@@ -65594,6 +66066,10 @@ struct DecisionRowWithDedup {
     dedup_simhash: Option<i64>,
     dedup_cluster_id: Option<Uuid>,
     dedup_cluster_size: Option<i32>,
+    /// Migration V57's stamp. The outer `Option` is "no dedup row at all";
+    /// the inner one is the column's own NULL, i.e. a row recorded before the
+    /// stamp existed.
+    dedup_signal_version: Option<Option<String>>,
 }
 
 /// Test-only combined view of a `trace_gate_decisions` row plus its
@@ -65620,6 +66096,19 @@ struct DecisionRowWithContributorCap {
     contributor_cumulative_raw_micros: Option<i64>,
     contributor_cap_epoch: Option<i64>,
     contributor_cap_version: Option<i32>,
+}
+
+/// One entry of the in-memory `dedup` side table: what a single
+/// `update_trace_gate_decision_dedup` call recorded. Named rather than a
+/// 4-tuple so the write loop and the accessors read the fields by name — two
+/// of the four are opaque integers standing next to each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedDedup {
+    simhash: i64,
+    cluster_id: Uuid,
+    cluster_size: i32,
+    /// The column's own NULL: a row recorded before V57 existed.
+    signal_version: Option<String>,
 }
 
 struct PerplexityDriverTestDb {
@@ -65655,7 +66144,7 @@ struct PerplexityDriverTestDb {
     /// rather than fields on `StorageTraceGateDecisionRow` itself, so the
     /// isolation test can assert the base row is byte-identical before and
     /// after the dedup write.
-    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), (i64, Uuid, i32)>>,
+    dedup: std::sync::RwLock<std::collections::HashMap<(String, Uuid), RecordedDedup>>,
     /// Shadow-mode correction values written by
     /// `update_trace_gate_decision_correction_value`, keyed by `(tenant_id,
     /// decision_id)`: (simhash, cluster_id, cluster_size, novelty_micros,
@@ -65818,13 +66307,36 @@ impl PerplexityDriverTestDb {
             .read()
             .unwrap()
             .get(&(tenant_id.to_string(), decision_id))
-            .copied();
+            .cloned();
         Some(DecisionRowWithDedup {
             row,
-            dedup_simhash: dedup.map(|(h, _, _)| h),
-            dedup_cluster_id: dedup.map(|(_, c, _)| c),
-            dedup_cluster_size: dedup.map(|(_, _, s)| s),
+            dedup_simhash: dedup.as_ref().map(|d| d.simhash),
+            dedup_cluster_id: dedup.as_ref().map(|d| d.cluster_id),
+            dedup_cluster_size: dedup.as_ref().map(|d| d.cluster_size),
+            dedup_signal_version: dedup.map(|d| d.signal_version),
         })
+    }
+
+    /// Overwrite ONLY the `dedup_signal_version` of a recorded dedup
+    /// assignment, leaving the simhash, cluster id and size exactly as they
+    /// are.
+    ///
+    /// No server code path can do this — the stamp is always written in the
+    /// same statement as the simhash it names — and that is precisely why the
+    /// helper exists: it manufactures the two row shapes a real corpus holds
+    /// but a test cannot otherwise produce, a pre-V57 row (`None`) and a row
+    /// derived under a renderer this build no longer has.
+    fn overwrite_dedup_signal_version_for_tests(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_signal_version: Option<&str>,
+    ) {
+        let mut dedup = self.dedup.write().unwrap();
+        let entry = dedup
+            .get_mut(&(tenant_id.to_string(), decision_id))
+            .expect("dedup assignment must exist before its stamp is overwritten");
+        entry.signal_version = dedup_signal_version.map(str::to_string);
     }
 
     /// Look up a `trace_gate_decisions` row by its primary key `(tenant_id,
@@ -66686,22 +67198,55 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for Perplexity
         Ok(())
     }
     /// In-memory analogue of the Postgres `update_trace_gate_decision_dedup`
-    /// impl: record the three dedup values in a side table keyed by
+    /// impl: record the four dedup values in a side table keyed by
     /// `(tenant_id, decision_id)`, exactly like the real backend's UPDATE,
     /// without touching the stored `StorageTraceGateDecisionRow` at all — so
-    /// isolation is structural, not just asserted.
+    /// isolation is structural, not just asserted. The version stamp lands in
+    /// the same write as the simhash it names, as the real UPDATE does.
     async fn update_trace_gate_decision_dedup(
         &self,
         tenant_id: &str,
         decision_id: Uuid,
-        dedup_simhash: i64,
-        dedup_cluster_id: Uuid,
-        dedup_cluster_size: i32,
+        write: trace_commons_server::trace_corpus_storage::DedupAssignmentWrite,
     ) -> Result<(), DatabaseError> {
         self.dedup.write().unwrap().insert(
             (tenant_id.to_string(), decision_id),
-            (dedup_simhash, dedup_cluster_id, dedup_cluster_size),
+            RecordedDedup {
+                simhash: write.dedup_simhash,
+                cluster_id: write.dedup_cluster_id,
+                cluster_size: write.dedup_cluster_size,
+                signal_version: Some(write.dedup_signal_version),
+            },
         );
+        Ok(())
+    }
+
+    /// In-memory analogue of the Postgres
+    /// `update_trace_gate_decision_dedup_cluster` impl: move ONLY the cluster
+    /// id and size of an already-recorded assignment, leaving the simhash and
+    /// its stamp untouched -- so a NULL stamp survives a recluster sweep here
+    /// exactly as it does in the real UPDATE, whose SET list does not mention
+    /// the column.
+    ///
+    /// A decision with no recorded assignment has no dedup columns in this
+    /// representation and is left alone. The sweep never reaches one: it
+    /// skips every row whose `dedup_simhash` is `None`.
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        dedup_cluster_id: Uuid,
+        dedup_cluster_size: i32,
+    ) -> Result<(), DatabaseError> {
+        if let Some(entry) = self
+            .dedup
+            .write()
+            .unwrap()
+            .get_mut(&(tenant_id.to_string(), decision_id))
+        {
+            entry.cluster_id = dedup_cluster_id;
+            entry.cluster_size = dedup_cluster_size;
+        }
         Ok(())
     }
     /// In-memory analogue of the Postgres
@@ -66902,8 +67447,12 @@ impl Database for PerplexityDriverTestDb {
                 trace_commons_server::trace_corpus_storage::DedupSignalRow {
                     tenant_id: tenant_id.clone(),
                     decision_id: row.decision_id,
-                    dedup_cluster_id: seen.map(|(_, c, _)| *c),
-                    dedup_simhash: seen.map(|(h, _, _)| *h),
+                    dedup_cluster_id: seen.map(|d| d.cluster_id),
+                    dedup_simhash: seen.map(|d| d.simhash),
+                    // Flattened exactly as the real SELECT flattens it: a row
+                    // that has never been through a dedup pass and a row
+                    // written before V57 both surface as `None`.
+                    dedup_signal_version: seen.and_then(|d| d.signal_version.clone()),
                 }
             })
             .collect())
@@ -66974,7 +67523,7 @@ impl Database for PerplexityDriverTestDb {
                         .map(|(q, _, _)| *q);
                     let dedup_cluster_size = dedup
                         .get(&(tenant_id.clone(), row.decision_id))
-                        .map(|(_, _, s)| *s);
+                        .map(|d| d.cluster_size);
                     Some(
                         trace_commons_server::trace_corpus_storage::ContributorCapSignalRow {
                             tenant_id: tenant_id.clone(),
@@ -68031,8 +68580,8 @@ async fn update_trace_gate_decision_credit_quality_touches_only_credit_columns()
 }
 
 /// Unit test for the isolation invariant: `update_trace_gate_decision_dedup`
-/// sets ONLY the three cross-trace dedup values (migration V40) — the base
-/// decision row (perplexity, novelty, tail-fraction, status, credit) is
+/// sets ONLY the four cross-trace dedup values (migrations V40 and V57) — the
+/// base decision row (perplexity, novelty, tail-fraction, status, credit) is
 /// byte-identical before and after.
 #[tokio::test]
 async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
@@ -68043,18 +68592,35 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
     db.seed_gate_decision("tenant-a", before_row.clone());
 
     let cluster = Uuid::from_u128(7);
-    db.update_trace_gate_decision_dedup("tenant-a", decision_id, 42i64, cluster, 3)
-        .await
-        .expect("dedup update succeeds");
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        decision_id,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 42,
+            dedup_cluster_id: cluster,
+            dedup_cluster_size: 3,
+            dedup_signal_version: "events.v1+fnv1a-2shingle.v1".to_string(),
+        },
+    )
+    .await
+    .expect("dedup update succeeds");
 
     let after = db
         .gate_decision_with_dedup_by_id("tenant-a", decision_id)
         .expect("row still present");
 
-    // The three dedup values changed to exactly what we passed.
+    // The four dedup values changed to exactly what we passed.
     assert_eq!(after.dedup_simhash, Some(42));
     assert_eq!(after.dedup_cluster_id, Some(cluster));
     assert_eq!(after.dedup_cluster_size, Some(3));
+    // The stamp lands in the same write as the simhash it names: a row that
+    // held one without the other would read as the legacy version to the
+    // recluster sweep for as long as the gap lasted.
+    assert_eq!(
+        after.dedup_signal_version,
+        Some(Some("events.v1+fnv1a-2shingle.v1".to_string())),
+        "dedup_signal_version was set in the same write as the simhash"
+    );
 
     // Every base-row column is byte-identical to before.
     assert_eq!(after.row.decision_id, before_row.decision_id);
@@ -68101,6 +68667,80 @@ async fn update_trace_gate_decision_dedup_touches_only_dedup_columns() {
         after.row.peak_novelty_micros,
         before_row.peak_novelty_micros
     );
+    assert_eq!(after.row.chunk_count, before_row.chunk_count);
+    assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
+}
+
+/// The narrower sibling: `update_trace_gate_decision_dedup_cluster` moves ONLY
+/// `dedup_cluster_id` and `dedup_cluster_size`. The simhash and its version
+/// stamp are left exactly as they were, INCLUDING a stamp that is NULL.
+///
+/// This is what the recluster sweep uses, and the whole point of a second,
+/// narrower write is that a row recorded before V57 comes out of a sweep
+/// still recorded before V57. If the pass wrote the version it read the row
+/// as, every pre-column row would acquire the legacy literal on the first
+/// sweep -- the schema-level assertion V57's header refuses a DEFAULT for,
+/// made by a background job instead, and no later pass could then tell a
+/// row it re-derived from a row it merely re-clustered.
+#[tokio::test]
+async fn update_trace_gate_decision_dedup_cluster_touches_only_cluster_columns() {
+    let db = PerplexityDriverTestDb::new();
+    let submission_id = Uuid::new_v4();
+    let before_row = rescore_test_decision_row(submission_id);
+    let decision_id = before_row.decision_id;
+    db.seed_gate_decision("tenant-a", before_row.clone());
+
+    // A row as it exists before V57: a simhash, a cluster, and no stamp.
+    db.update_trace_gate_decision_dedup(
+        "tenant-a",
+        decision_id,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 42,
+            dedup_cluster_id: Uuid::from_u128(7),
+            dedup_cluster_size: 3,
+            dedup_signal_version: "events.v1+fnv1a-2shingle.v1".to_string(),
+        },
+    )
+    .await
+    .expect("dedup update succeeds");
+    db.overwrite_dedup_signal_version_for_tests("tenant-a", decision_id, None);
+
+    let moved = Uuid::from_u128(9);
+    db.update_trace_gate_decision_dedup_cluster("tenant-a", decision_id, moved, 5)
+        .await
+        .expect("cluster update succeeds");
+
+    let after = db
+        .gate_decision_with_dedup_by_id("tenant-a", decision_id)
+        .expect("row still present");
+
+    // The two cluster values moved to exactly what we passed.
+    assert_eq!(after.dedup_cluster_id, Some(moved));
+    assert_eq!(after.dedup_cluster_size, Some(5));
+
+    // The two derived values did not.
+    assert_eq!(
+        after.dedup_simhash,
+        Some(42),
+        "the sweep re-clusters a stored simhash; it never recomputes one"
+    );
+    assert_eq!(
+        after.dedup_signal_version,
+        Some(None),
+        "a NULL stamp survives the write: the pass reads the row as the \
+         legacy version but has no evidence to record that it IS one"
+    );
+
+    // Every base-row column is byte-identical to before.
+    assert_eq!(after.row.decision_id, before_row.decision_id);
+    assert_eq!(after.row.submission_id, before_row.submission_id);
+    assert_eq!(after.row.gate_version_hash, before_row.gate_version_hash);
+    assert_eq!(after.row.perplexity_micros, before_row.perplexity_micros);
+    assert_eq!(
+        after.row.novelty_score_micros,
+        before_row.novelty_score_micros
+    );
+    assert_eq!(after.row.decided_at, before_row.decided_at);
     assert_eq!(after.row.chunk_count, before_row.chunk_count);
     assert_eq!(after.row.chunks_capped, before_row.chunks_capped);
 }
@@ -68284,6 +68924,144 @@ async fn evaluate_and_record_gate_clusters_duplicate_traces_by_simhash() {
         third.dedup_cluster_size,
         Some(1),
         "the distinct trace is a singleton cluster"
+    );
+}
+
+/// Run one submission through `evaluate_and_record_gate` and return the
+/// decision id it recorded, panicking on any outcome but `Scored`. Shared by
+/// the dedup tests that need several sequential real gate evaluations and
+/// care about what each one clustered against.
+async fn score_submission_for_dedup_test(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Uuid {
+    let outcome = evaluate_and_record_gate(state.as_ref(), tenant_id, submission_id)
+        .await
+        .expect("evaluate_and_record_gate succeeds");
+    let GateOutcome::Scored { decision_id, .. } = outcome else {
+        panic!("expected GateOutcome::Scored, got {outcome:?}");
+    };
+    decision_id
+}
+
+/// The inline half of V57's version scoping, through three real
+/// `evaluate_and_record_gate` calls over BYTE-IDENTICAL text — so every
+/// simhash here is the same number and the stamp is the only variable.
+///
+/// Two claims, in order:
+///
+///  1. `NULL` maps to the legacy v1 stamp (D2). The first decision's stamp is
+///     dropped to `NULL` — the shape of every row recorded before the column
+///     existed — and the second decision, stamped v1 by the enclave path,
+///     must still join its cluster. If `NULL` were read as its own version,
+///     the entire pre-transition corpus would fall out of clustering the
+///     moment this column shipped: a worse split than the one it exists to
+///     prevent, and a silent one.
+///  2. Two named versions never join. Both earlier rows are then re-stamped
+///     to a v2, and the third decision — still v1 — must mint its own cluster
+///     at Hamming distance 0 from both.
+#[tokio::test]
+async fn evaluate_and_record_gate_clusters_only_within_one_dedup_signal_version() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, decryptor, _object_store_name) =
+        fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+    let tenant_id = "tenant-a";
+    const V2_STAMP: &str = "events.v2+fnv1a-2shingle.v1";
+
+    let shared_text = "the quick brown fox jumps over the lazy dog near the riverbank at dawn";
+    let (db, submission_ids) = seed_perplexity_driver_test_db_with_texts(
+        &artifact_store,
+        tenant_id,
+        &[shared_text, shared_text, shared_text],
+    );
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        Some(artifact_store),
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).gate_service =
+        Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+
+    // --- 1. The enclave path stamps the composed v1 version. ---
+    let first_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[0]).await;
+    let first = db
+        .gate_decision_with_dedup_by_id(tenant_id, first_id)
+        .expect("first decision row present");
+    let v1_stamp = format!(
+        "{}+{}",
+        trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+        trace_commons_server::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
+    );
+    assert_eq!(
+        first.dedup_signal_version,
+        Some(Some(v1_stamp.clone())),
+        "the enclave path names both halves of its derivation"
+    );
+    assert_eq!(
+        v1_stamp,
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+        "PR 1 leaves behaviour byte-identical: what the code stamps today and \
+         what a pre-column row is read as are the same string"
+    );
+
+    // --- 2. A NULL stamp still clusters with a v1 one. ---
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, None);
+    let second_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[1]).await;
+    let second = db
+        .gate_decision_with_dedup_by_id(tenant_id, second_id)
+        .expect("second decision row present");
+    assert!(
+        first.dedup_cluster_id.is_some(),
+        "first decision must be assigned a cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_id, first.dedup_cluster_id,
+        "a NULL-stamped row reads as the legacy v1 stamp, so an incoming v1 \
+         decision joins its cluster"
+    );
+    assert_eq!(
+        second.dedup_cluster_size,
+        Some(2),
+        "the second decision observes cluster size 2"
+    );
+
+    // --- 3. A differently stamped cluster is not a candidate at all. ---
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, first_id, Some(V2_STAMP));
+    db.overwrite_dedup_signal_version_for_tests(tenant_id, second_id, Some(V2_STAMP));
+    let third_id = score_submission_for_dedup_test(&state, tenant_id, submission_ids[2]).await;
+    let third = db
+        .gate_decision_with_dedup_by_id(tenant_id, third_id)
+        .expect("third decision row present");
+    assert_ne!(
+        third.dedup_cluster_id, first.dedup_cluster_id,
+        "identical canonical text must NOT join a cluster whose representative \
+         was rendered by a different version"
+    );
+    assert_eq!(
+        third.dedup_cluster_size,
+        Some(1),
+        "the version-isolated decision is a singleton despite Hamming 0"
+    );
+    assert_eq!(
+        third.dedup_signal_version,
+        Some(Some(v1_stamp)),
+        "and it stamps its own version, not the one it declined to join"
+    );
+    assert_eq!(
+        third.dedup_simhash, first.dedup_simhash,
+        "the split is the stamp's doing: the simhashes are identical"
     );
 }
 
@@ -68715,6 +69493,7 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
 
     let shared_simhash: i64 = 0x1234_5678_9abc_def0;
     let distinct_simhash: i64 = 0x0f0f_0f0f_0f0f_0f0f;
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
 
     let row_a = rescore_test_decision_row(Uuid::new_v4());
     let row_b = rescore_test_decision_row(Uuid::new_v4());
@@ -68730,27 +69509,36 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row_a.decision_id,
-        shared_simhash,
-        Uuid::new_v4(),
-        1,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: shared_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_a dedup");
     db.update_trace_gate_decision_dedup(
         "tenant-b",
         row_b.decision_id,
-        shared_simhash,
-        Uuid::new_v4(),
-        1,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: shared_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_b dedup");
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row_c.decision_id,
-        distinct_simhash,
-        Uuid::new_v4(),
-        1,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: distinct_simhash,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 1,
+            dedup_signal_version: V1_STAMP.to_string(),
+        },
     )
     .await
     .expect("seed row_c dedup");
@@ -68835,6 +69623,236 @@ async fn recluster_dedup_pass_clusters_cross_tenant_and_leaves_other_columns_unt
         credit_after.credit_quality_micros, None,
         "recluster pass must never touch the credit-quality side table"
     );
+}
+
+/// Sibling of the test above, for the property migration V57 exists to give
+/// the pass: `run_recluster_dedup_pass` never fuses rows whose
+/// `dedup_signal_version` differs, however close their simhashes are.
+///
+/// The pass reads stored simhashes and never re-renders, so once a renderer
+/// bump lands, a corpus holds two populations whose numbers are not measuring
+/// the same thing. Four rows carry the IDENTICAL simhash: two stamped v1, one
+/// stamped NULL (recorded before the column existed), and one stamped v2. The
+/// three v1-effective rows must form one cluster of three — NULL reads as the
+/// legacy v1 stamp (D2), not as its own version and not as "matches
+/// everything" — and the v2 row must sit alone at Hamming distance 0 from all
+/// three.
+#[tokio::test]
+async fn recluster_dedup_pass_never_clusters_across_dedup_signal_versions() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    // One simhash for every row: the ONLY thing separating them is the stamp.
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    const V1_STAMP: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    const V2_STAMP: &str = "events.v2+fnv1a-2shingle.v1";
+
+    let row_v1_a = rescore_test_decision_row(Uuid::new_v4());
+    let row_v1_b = rescore_test_decision_row(Uuid::new_v4());
+    let row_null = rescore_test_decision_row(Uuid::new_v4());
+    let row_v2 = rescore_test_decision_row(Uuid::new_v4());
+
+    // Insertion order is the sweep order (`list_dedup_signals` mirrors the
+    // real `decided_at ASC`), so the v1 rows form their cluster first and the
+    // v2 row meets an established, differently-stamped candidate.
+    db.seed_gate_decision("tenant-a", row_v1_a.clone());
+    db.seed_gate_decision("tenant-b", row_v1_b.clone());
+    db.seed_gate_decision("tenant-a", row_null.clone());
+    db.seed_gate_decision("tenant-a", row_v2.clone());
+
+    for (tenant, row, stamp) in [
+        ("tenant-a", &row_v1_a, V1_STAMP),
+        ("tenant-b", &row_v1_b, V1_STAMP),
+        ("tenant-a", &row_null, V1_STAMP),
+        ("tenant-a", &row_v2, V2_STAMP),
+    ] {
+        db.update_trace_gate_decision_dedup(
+            tenant,
+            row.decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: shared_simhash,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 1,
+                dedup_signal_version: stamp.to_string(),
+            },
+        )
+        .await
+        .expect("seed dedup");
+    }
+    // Drop the third row's stamp to NULL. Nothing in the server can write a
+    // simhash without a stamp; this is what a row recorded before V57 looks
+    // like, and the pass has to read it as v1 rather than as its own version.
+    db.overwrite_dedup_signal_version_for_tests("tenant-a", row_null.decision_id, None);
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(
+        summary.reclustered, 4,
+        "all 4 rows must be reclustered: {summary:?}"
+    );
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_v1_a = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_v1_a.decision_id)
+        .expect("row_v1_a present");
+    let after_v1_b = db
+        .gate_decision_with_dedup_by_id("tenant-b", row_v1_b.decision_id)
+        .expect("row_v1_b present");
+    let after_null = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_null.decision_id)
+        .expect("row_null present");
+    let after_v2 = db
+        .gate_decision_with_dedup_by_id("tenant-a", row_v2.decision_id)
+        .expect("row_v2 present");
+
+    assert_eq!(
+        after_v1_a.dedup_cluster_id, after_v1_b.dedup_cluster_id,
+        "the same simhash under the same stamp still clusters cross-tenant"
+    );
+    assert_eq!(
+        after_null.dedup_cluster_id, after_v1_a.dedup_cluster_id,
+        "a NULL stamp reads as the legacy v1 stamp, so a pre-V57 row clusters \
+         with freshly stamped v1 rows"
+    );
+    assert_eq!(
+        after_v1_a.dedup_cluster_size,
+        Some(3),
+        "the v1-effective cluster holds all three v1-effective rows"
+    );
+    assert_ne!(
+        after_v2.dedup_cluster_id, after_v1_a.dedup_cluster_id,
+        "an identical simhash under a different stamp must NEVER join: the \
+         two numbers are not measuring the same thing"
+    );
+    assert_eq!(
+        after_v2.dedup_cluster_size,
+        Some(1),
+        "the v2 row is a singleton despite Hamming distance 0 from three peers"
+    );
+
+    // The pass writes NO stamp at all: it re-clusters stored simhashes and
+    // never re-renders, so it derives neither the simhash nor the version and
+    // has nothing to say about either. Every row keeps exactly the stamp it
+    // arrived with.
+    assert_eq!(
+        after_v1_a.dedup_signal_version,
+        Some(Some(V1_STAMP.to_string()))
+    );
+    assert_eq!(
+        after_null.dedup_signal_version,
+        Some(None),
+        "a NULL stamp is READ as the legacy version and STAYS NULL: the pass \
+         has no evidence for the reading, and a row it stamped would be \
+         indistinguishable from one the re-derivation pass actually \
+         re-derived -- which is the reason V57 refuses a column DEFAULT"
+    );
+    assert_eq!(
+        after_v2.dedup_signal_version,
+        Some(Some(V2_STAMP.to_string())),
+        "the v2 row keeps its own stamp"
+    );
+
+    // The simhash itself is untouched: only the cluster columns move.
+    for after in [&after_v1_a, &after_v1_b, &after_null, &after_v2] {
+        assert_eq!(after.dedup_simhash, Some(shared_simhash));
+    }
+}
+
+/// The version gate, exercised with the two stamps this build actually
+/// writes rather than a synthetic v2: a deterministic service's
+/// `digest-prefix.v1` and the enclave's composed render+simhash.
+///
+/// A deterministic service never sees plaintext, so its `dedup_simhash` is an
+/// eight-byte window of the decision digest -- not a simhash of anything. It
+/// lands in the same column as the enclave's, enters the same sweep, and
+/// before V57 nothing recorded the difference. Both rows here carry an
+/// IDENTICAL value, which is the case a threshold cannot save you from:
+/// Hamming distance 0 between two numbers that are not measuring the same
+/// thing.
+#[tokio::test]
+async fn recluster_dedup_pass_never_clusters_a_deterministic_row_with_an_enclave_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = Arc::new(PerplexityDriverTestDb::new());
+    let db_mirror: Arc<dyn Database> = db.clone();
+    let state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+
+    let shared_simhash: i64 = 0x1234_5678_9abc_def0;
+    const ENCLAVE: &str = trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION;
+    const DETERMINISTIC: &str =
+        trace_commons_server::trace_gate_service::DETERMINISTIC_DEDUP_SIGNAL_VERSION;
+
+    let enclave_row = rescore_test_decision_row(Uuid::new_v4());
+    let deterministic_row = rescore_test_decision_row(Uuid::new_v4());
+    db.seed_gate_decision("tenant-a", enclave_row.clone());
+    db.seed_gate_decision("tenant-b", deterministic_row.clone());
+
+    for (tenant, row, stamp) in [
+        ("tenant-a", &enclave_row, ENCLAVE),
+        ("tenant-b", &deterministic_row, DETERMINISTIC),
+    ] {
+        db.update_trace_gate_decision_dedup(
+            tenant,
+            row.decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: shared_simhash,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 1,
+                dedup_signal_version: stamp.to_string(),
+            },
+        )
+        .await
+        .expect("seed dedup");
+    }
+
+    let summary = run_recluster_dedup_pass(state.clone(), None)
+        .await
+        .expect("recluster pass succeeds");
+    assert_eq!(summary.reclustered, 2, "both rows sweep: {summary:?}");
+    assert_eq!(summary.failed, 0, "no row should fail: {summary:?}");
+
+    let after_enclave = db
+        .gate_decision_with_dedup_by_id("tenant-a", enclave_row.decision_id)
+        .expect("enclave row present");
+    let after_deterministic = db
+        .gate_decision_with_dedup_by_id("tenant-b", deterministic_row.decision_id)
+        .expect("deterministic row present");
+
+    assert_ne!(
+        after_enclave.dedup_cluster_id, after_deterministic.dedup_cluster_id,
+        "a digest window and a text simhash must never share a cluster, \
+         however equal the two numbers are"
+    );
+    assert_eq!(after_enclave.dedup_cluster_size, Some(1));
+    assert_eq!(after_deterministic.dedup_cluster_size, Some(1));
 }
 
 // -----------------------------------------------------------------------
@@ -69044,9 +70062,13 @@ async fn recompute_contributor_caps_touches_only_contributor_columns() {
     db.update_trace_gate_decision_dedup(
         "tenant-a",
         row.decision_id,
-        0x1111_2222_3333_4444,
-        Uuid::new_v4(),
-        2,
+        trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 0x1111_2222_3333_4444,
+            dedup_cluster_id: Uuid::new_v4(),
+            dedup_cluster_size: 2,
+            dedup_signal_version: trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
+                .to_string(),
+        },
     )
     .await
     .expect("seed dedup");
@@ -70206,42 +71228,88 @@ fn base_gate_version_hash() -> String {
     )
 }
 
-/// The gate version hash MUST move when the chunk-SELECTION algorithm
-/// changes, not just when the chunk-packing knobs do.
+/// Every gate version hash the baseline config has ever produced, oldest
+/// first, each labelled with the dimension whose arrival moved it.
 ///
-/// Before coverage-preserving strided selection, the canonical string ended
-/// at the `chunking=` line and carried nothing identifying which chunks
-/// survive the cap. Prefix truncation and stride selection therefore stamped
-/// identical hashes while producing scores that are not comparable to each
-/// other. The pre-stride golden below is the hash the baseline config
-/// produced then; the current hash must differ from it, and must equal the
-/// post-stride golden so the stamp cannot drift again unnoticed.
-#[test]
-fn gate_version_hash_moved_for_strided_chunk_selection() {
-    /// sha256 of the canonical string WITHOUT a `chunk_selection=` line.
-    const PRE_STRIDE_GOLDEN: &str =
-        "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68";
-    /// sha256 of the canonical string WITH
-    /// `chunk_selection=stride_endpoint_inclusive.v1`.
-    const POST_STRIDE_GOLDEN: &str =
-        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac";
+/// One list rather than a golden per rotation. The per-rotation form chained
+/// -- each new test pinned the current value and the previous test's golden
+/// became "the one before" -- and by the second rotation the same number was
+/// written in three places, where a rotation that updated two of them leaves
+/// the third passing against a stamp nothing produces. Here the current value
+/// is whichever entry is last, and there is exactly one of it.
+///
+/// Appending a row is the deliberate act that records a rotation. Editing an
+/// existing row is not: those are hashes already stamped onto decisions in
+/// the field, and rewriting one makes a historical stamp unattributable.
+const GATE_VERSION_HASH_HISTORY: &[(&str, &str)] = &[
+    // Before coverage-preserving strided selection the canonical string ended
+    // at the `chunking=` line, so prefix truncation and stride selection
+    // stamped the same hash while producing scores not comparable to each
+    // other.
+    (
+        "pre-chunk-selection",
+        "sha256:863113e492e9a05069d0e09dd1966fc2d22d07cb07fdf5b08438275bf959df68",
+    ),
+    // `chunk_selection=` arrived. Which chunks survive the cap was covered;
+    // what the text inside them says was not.
+    (
+        "pre-render",
+        "sha256:d416ef056358d3748cb95d3e45f8732c6bc4ba042d4cbd0836391b4d202680ac",
+    ),
+    // `render=events.v1` arrived (#211, design D7). Selecting identical
+    // chunks says nothing about comparability if the text inside them was
+    // rendered differently -- the premise of sub-project D is that a render
+    // change moves perplexity, novelty and the simhash at once. PR 1 binds
+    // the name with the VALUE unchanged, so this rotation measures the
+    // plumbing and nothing else; PR 2 bumps the value and appends a row.
+    (
+        "events.v1",
+        "sha256:d1db609337e39b60a15e29339e8e61c0133eb044676ee5e6930592c6ec78eb97",
+    ),
+];
 
-    // The golden is only meaningful while the enclave still names this
-    // algorithm exactly this way; the two are pinned together on purpose.
+/// The stamp is what the history says it is, and every rotation in it was
+/// real.
+///
+/// Distinctness is the load-bearing half: two equal entries would mean a
+/// dimension was added to the canonical string without moving the hash, which
+/// is the exact failure both retired tests existed to catch, and it is caught
+/// here for every pair at once rather than for the one pair a new test
+/// remembered to compare.
+#[test]
+fn the_gate_version_hash_history_ends_at_todays_stamp() {
+    // The goldens are only meaningful while the enclave still names these two
+    // const-valued dimensions exactly this way; they are pinned together on
+    // purpose, because bumping either must append a row.
     assert_eq!(
         trace_commons_gate_enclave::chunker::CHUNK_SELECTION_ALGORITHM,
         "stride_endpoint_inclusive.v1",
-        "bumping the selection algorithm must also move the golden below"
-    );
-
-    let base = base_gate_version_hash();
-    assert_ne!(
-        base, PRE_STRIDE_GOLDEN,
-        "changing chunk selection MUST break the gate version stamp"
+        "bumping the selection algorithm must also append to the history"
     );
     assert_eq!(
-        base, POST_STRIDE_GOLDEN,
-        "gate version hash drifted without a deliberate stamp change"
+        trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+        "events.v1",
+        "bumping the canonical renderer must also append to the history"
+    );
+
+    for (i, (label, hash)) in GATE_VERSION_HASH_HISTORY.iter().enumerate() {
+        for (other_label, other_hash) in &GATE_VERSION_HASH_HISTORY[i + 1..] {
+            assert_ne!(
+                hash, other_hash,
+                "{label} and {other_label} stamp the same hash: a dimension \
+                 was added to the canonical string without moving the stamp"
+            );
+        }
+    }
+
+    let (label, current) = GATE_VERSION_HASH_HISTORY
+        .last()
+        .expect("the history is never empty");
+    assert_eq!(
+        &base_gate_version_hash().as_str(),
+        current,
+        "gate version hash drifted without a deliberate stamp change; the \
+         newest history entry is {label}"
     );
 }
 
@@ -70467,6 +71535,11 @@ fn compute_gate_version_hash_changes_on_any_dimension() {
             "gate_version_hash must change when {label} changes"
         );
     }
+
+    // The chunk-selection algorithm and the canonical renderer arrive as
+    // consts rather than arguments, so they cannot be permuted through this
+    // helper at all. They are covered by GATE_VERSION_HASH_HISTORY, which is
+    // the only place today's stamp is written down.
 }
 
 /// A2.3 production-gate init test. Exercises
@@ -77338,7 +78411,7 @@ async fn seed_pending_near_outbox_for_token_a(state: &Arc<AppState>) {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("submission succeeds");
@@ -81213,6 +82286,7 @@ fn backstop_consent(message_text: bool, tool_payloads: bool, correction: bool) -
         message_text_included: message_text,
         tool_payloads_included: tool_payloads,
         correction_included: correction,
+        routing_metadata_included: false,
         revocable: true,
     }
 }
@@ -81230,7 +82304,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop
     );
@@ -81239,7 +82315,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(true, false, false),
-            false
+            false,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -81249,7 +82327,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Accepted
     );
@@ -81259,7 +82339,9 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Quarantined,
             &backstop_consent(true, false, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::Quarantined
     );
@@ -81277,7 +82359,9 @@ fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, true, false),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "tool payloads are raw content and must be re-examined before the corpus"
@@ -81304,7 +82388,9 @@ fn any_content_flag_alone_is_enough_to_hold() {
             corpus_status_with_pii_backstop_hold(
                 TraceCorpusStatus::Accepted,
                 &backstop_consent(message_text, tool_payloads, correction),
-                true
+                true,
+                None,
+                None,
             ),
             expected,
             "message_text={message_text} tool_payloads={tool_payloads} \
@@ -81325,7 +82411,9 @@ fn pii_backstop_holds_a_correction_bearing_trace_with_no_other_content() {
         corpus_status_with_pii_backstop_hold(
             TraceCorpusStatus::Accepted,
             &backstop_consent(false, false, true),
-            true
+            true,
+            None,
+            None,
         ),
         TraceCorpusStatus::AwaitingPiiBackstop,
         "an unredacted correction must be re-examined before the corpus"
@@ -84024,7 +85112,7 @@ async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
     let _ = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope),
+        submit_body(envelope),
     )
     .await
     .expect("object-primary submission mirrors to DB");
@@ -87485,7 +88573,7 @@ async fn submit_records_the_basis_for_the_risk_it_stored() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -87519,7 +88607,7 @@ async fn operator_rescrub_rewrites_the_basis_beside_the_risk() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("medium-risk submission quarantines");
@@ -87609,7 +88697,7 @@ async fn the_storage_mirror_carries_the_basis_from_the_record() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -87648,7 +88736,7 @@ async fn a_record_written_before_v51_reads_as_not_recorded_not_as_empty() {
     let Json(_receipt) = submit_trace_handler(
         State(state.clone()),
         auth_headers("token-a"),
-        Json(envelope.clone()),
+        submit_body(envelope.clone()),
     )
     .await
     .expect("submission is stored");
@@ -87718,5 +88806,1592 @@ fn classify_policy_env_defaults_closed() {
             Some(value) => std::env::set_var(VAR, value),
             None => std::env::remove_var(VAR),
         }
+    }
+}
+
+// -- Public register-stats endpoint -----------------------------------------
+//
+// Every assertion below runs WITHOUT PostgreSQL, on purpose. CI does not run
+// the pg suite, so the `let Some(backend) = ... else { return }` idiom used
+// elsewhere in this file makes a test that silently skips on every gating
+// machine. The suppression rule is the privacy-relevant behaviour in this
+// endpoint, so it lives in pure functions and is tested here directly.
+
+/// A materialised row in whatever state the assertion needs.
+fn register_stats_row_fixture(
+    traces_accepted: i64,
+    contributors: i64,
+    points_issued: i64,
+    refreshed: bool,
+) -> trace_commons_server::register_stats::RegisterStatsRow {
+    trace_commons_server::register_stats::RegisterStatsRow {
+        traces_accepted,
+        contributors,
+        points_issued,
+        // What a refresh leaves behind: the schema default is TRUE and every
+        // successful refresh clears it.
+        withheld: !refreshed,
+        // Not suppressed: the operator lever is off unless a test sets it.
+        suppressed: false,
+        as_of: Utc::now(),
+        refreshed_at: refreshed.then(Utc::now),
+    }
+}
+
+#[test]
+fn register_stats_withholds_one_contributor_below_the_floor() {
+    // The boundary in both directions, so an off-by-one in either sense fails.
+    assert!(register_stats_withheld(24, 25, true), "floor-1 is withheld");
+    assert!(
+        !register_stats_withheld(25, 25, true),
+        "the floor itself is not withheld"
+    );
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_however_large_the_count() {
+    // An unrefreshed row carries schema defaults. Publishing those would be a
+    // claim about the register that nobody computed.
+    assert!(register_stats_withheld(1_000_000, 25, false));
+}
+
+#[test]
+fn register_stats_withholds_an_unrefreshed_row_even_with_a_floor_of_zero() {
+    // A floor of 0 disables the cohort rule; it must not also disable the
+    // never-computed rule, which is a separate reason to say nothing.
+    assert!(register_stats_withheld(0, 0, false));
+    assert!(!register_stats_withheld(0, 0, true));
+}
+
+#[test]
+fn a_misconfigured_floor_falls_back_to_the_high_default_not_to_zero() {
+    // The literal, not the constant. Comparing against the constant would
+    // pass just as happily if someone set it to 0 and deleted the privacy
+    // floor along with it, which is the whole thing this guards.
+    assert_eq!(
+        REGISTER_STATS_DEFAULT_CONTRIBUTOR_FLOOR, 25,
+        "lowering the default floor publishes smaller cohorts; change it \
+         deliberately, against a real contributor count, not incidentally"
+    );
+    // Every one of these is a misconfiguration, and the safe reading of a
+    // misconfigured floor is the high one: a zero would suppress nothing.
+    for raw in [None, Some(""), Some("   "), Some("many"), Some("-5")] {
+        assert_eq!(
+            register_stats_floor_from(raw),
+            25,
+            "raw {raw:?} must fall back to the default floor"
+        );
+    }
+    assert_eq!(register_stats_floor_from(Some("40")), 40);
+    // Explicitly disabling the floor is allowed, but only explicitly.
+    assert_eq!(register_stats_floor_from(Some("0")), 0);
+}
+
+#[test]
+fn register_stats_below_the_floor_omits_the_counts_rather_than_zeroing_them() {
+    // Absent, never a small number and never a zero: with few contributors a
+    // known cohort plus a total is one person's earnings, and a zero would
+    // read as nobody having contributed rather than as us declining to say.
+    let row = register_stats_row_fixture(900, 2, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+    // traces_accepted too. It counts submissions rather than people, but
+    // below the floor the people are few by construction and `withheld: true`
+    // says so, which makes this one person's trace count -- and its delta
+    // between refreshes is that person's submission rate.
+    assert!(body.get("traces_accepted").is_none());
+}
+
+#[test]
+fn the_operator_suppression_lever_withholds_a_perfectly_good_row() {
+    // Distinct from every other reason to withhold: the row is refreshed, the
+    // cohort is well above the floor, and the figures are real. An operator
+    // said not to publish, and that is sufficient on its own.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.suppressed = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn a_refresh_does_not_lift_the_operator_suppression() {
+    // The lever must survive the scheduled refresh, or it is not a lever. A
+    // refresh clears `withheld` and stamps `refreshed_at` -- exactly the row
+    // built here -- and `suppressed` still withholds. The other half of this
+    // property, that the refresh SQL never writes the column at all, is
+    // `the_refresh_never_clears_the_operator_suppression` in db::postgres.
+    let mut refreshed = register_stats_row_fixture(900, 50, 4_500, true);
+    refreshed.suppressed = true;
+    assert!(!refreshed.withheld, "a refresh clears the computed marker");
+    assert!(refreshed.refreshed_at.is_some(), "a refresh stamps the row");
+    let body = serde_json::to_value(register_stats_response(&refreshed, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("contributors").is_none());
+}
+
+#[test]
+fn register_stats_above_the_floor_reports_the_counts() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], false);
+    assert_eq!(body["contributors"], 50);
+    assert_eq!(body["points_issued"], 4_500);
+    assert_eq!(body["traces_accepted"], 900);
+}
+
+#[test]
+fn an_unrefreshed_register_publishes_no_figure_at_all() {
+    // Not even the trace count: an unrefreshed zero is a false claim either
+    // way, and `as_of` plus a posture is all an unwired deployment may say.
+    let row = register_stats_row_fixture(0, 0, 0, false);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+    assert!(body.get("points_issued").is_none());
+}
+
+#[test]
+fn the_stored_computed_marker_stops_publication_on_its_own() {
+    // `withheld` on the row is the computed/never-computed marker, and a row
+    // still carrying it has not been computed whatever `refreshed_at` says.
+    // It is NOT the operator lever -- every refresh clears it, which is why
+    // `suppressed` exists separately.
+    let mut row = register_stats_row_fixture(900, 50, 4_500, true);
+    row.withheld = true;
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["withheld"], true);
+    assert!(body.get("traces_accepted").is_none());
+    assert!(body.get("contributors").is_none());
+}
+
+#[test]
+fn register_stats_carries_no_identifying_field() {
+    // The response is aggregate or it is nothing. Any of these appearing means
+    // a breakdown was added that can be differenced back to a person.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let text = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises")
+        .to_string();
+    for forbidden in ["tenant", "account", "principal", "submission_id", "sha256:"] {
+        assert!(!text.contains(forbidden), "response leaked {forbidden}");
+    }
+}
+
+#[test]
+fn register_stats_says_what_the_figures_cover() {
+    // The refresh is scoped to the configured community tenants, not to every
+    // tenant the server holds, so a client drawing a headline number can read
+    // what it is looking at without consulting a runbook.
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "disabled"))
+        .expect("register stats serialises");
+    assert_eq!(body["scope"], "configured_communities");
+}
+
+#[test]
+fn register_stats_reports_the_deployments_settlement_posture() {
+    let row = register_stats_row_fixture(900, 50, 4_500, true);
+    let body = serde_json::to_value(register_stats_response(&row, 25, "dry_run"))
+        .expect("register stats serialises");
+    assert_eq!(body["posture"]["settlement"], "dry_run");
+    assert_eq!(body["posture"]["graded"], false);
+}
+
+/// The transport, end to end, including `SET ROLE trace_commons_public_read`.
+///
+/// Skips without PostgreSQL, so it proves nothing in CI -- which is exactly
+/// why the suppression rules above do not depend on it.
+#[tokio::test]
+async fn register_stats_handler_needs_no_credential() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    // No headers, no bearer, no session cookie: the handler takes no auth
+    // extractor at all, which is what makes it servable outside every layer.
+    let (_, Json(body)) = register_stats_handler(State(state), HeaderMap::new())
+        .await
+        .expect("public register stats succeeds");
+    assert_eq!(body.scope, "configured_communities");
+}
+
+// -- NEAR AI attestation drill --------------------------------------------
+//
+// The verification logic itself is exercised against a stub endpoint in
+// `near_attestation::drill`. What these cover is the part that only exists
+// here: admin auth, the refusal when the endpoint is not configured, the
+// rollout-smoke evidence row, and that nothing secret reaches the response
+// body an operator will paste into a ticket.
+
+/// A stub endpoint that serves the captured fixture report and collateral.
+///
+/// It signs receipts with a key that is emphatically not the attested one --
+/// nobody outside the enclave holds that -- so a drill driven by this stub
+/// gets all the way to the last step and fails there. That is the strongest
+/// end-to-end shape available offline, and it is what proves the handler
+/// really hands its client to the drill.
+/// 2026-09-01T12:00:00Z, the day the report and collateral fixtures were
+/// captured. The same constant the `near_attestation::drill` tests pin.
+const FIXTURE_COLLATERAL_CAPTURED_AT: i64 = 1_788_264_000;
+
+struct FixtureAttestationEndpoint;
+
+#[async_trait::async_trait]
+impl trace_commons_server::near_attestation::client::AttestationClient
+    for FixtureAttestationEndpoint
+{
+    fn model(&self) -> &str {
+        "Qwen/Qwen3.6-35B-A3B-FP8"
+    }
+
+    async fn fetch_report(
+        &self,
+        _nonce: &str,
+    ) -> Result<
+        trace_commons_server::near_attestation::AttestationReport,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        Ok(
+            trace_commons_server::near_attestation::AttestationReport::from_json(include_str!(
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_report.json"
+            ))
+            .expect("fixture report parses"),
+        )
+    }
+
+    async fn fetch_collateral(
+        &self,
+        _quote: &[u8],
+    ) -> Result<
+        trace_commons_server::near_attestation::quote::Collateral,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        Ok(
+            trace_commons_server::near_attestation::quote::parse_collateral(include_str!(
+                "../../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+            ))
+            .expect("fixture collateral parses"),
+        )
+    }
+
+    async fn complete(
+        &self,
+        _request_body: &[u8],
+    ) -> Result<
+        trace_commons_server::near_attestation::client::CompletionOutcome,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        unreachable!("the drill must never pay for a completion after an earlier step failed")
+    }
+
+    async fn fetch_receipt(
+        &self,
+        _chat_id: &str,
+    ) -> Result<
+        trace_commons_server::near_attestation::receipt::ReceiptPayload,
+        trace_commons_server::near_attestation::client::AttestationClientError,
+    > {
+        unreachable!("no receipt is fetched without a completion")
+    }
+}
+
+#[tokio::test]
+async fn near_attestation_drill_requires_an_admin() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = near_attestation_drill_handler(
+        State(state),
+        auth_headers("token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect_err("a contributor token must not run an admin drill");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn near_attestation_drill_refuses_when_the_endpoint_is_not_configured() {
+    // A missing endpoint is a named refusal, never a skip to a pass.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect("the drill reports a refusal rather than failing the request");
+
+    assert!(!drill.ready);
+    assert!(drill.outcome.is_none());
+    assert!(
+        !drill.blocking_gaps.is_empty(),
+        "a refusal must say why: {drill:?}"
+    );
+    assert!(drill.recorded_evidence.is_none());
+    assert_eq!(
+        drill.expected_measurements_env,
+        "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS"
+    );
+}
+
+#[tokio::test]
+async fn near_attestation_drill_records_failed_smoke_evidence() {
+    // A red drill must record red evidence. Recording a pass here is the
+    // single most damaging thing this route could do.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest {
+            purpose: Some("drill an unconfigured endpoint".to_string()),
+            record_evidence: true,
+        }),
+    )
+    .await
+    .expect("the drill records evidence for a refusal");
+
+    let evidence = drill.recorded_evidence.expect("evidence was recorded");
+    assert_eq!(evidence.check_name, "near_attestation");
+    assert_eq!(evidence.status, TraceRolloutSmokeEvidenceStatus::Failed);
+    assert_eq!(evidence.evidence_hash, drill.evidence_hash);
+    // The check name must be one rollout-smoke actually requires, or the
+    // evidence is recorded into a bucket nothing reads.
+    assert!(TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.contains(&"near_attestation"));
+}
+
+#[tokio::test]
+async fn near_attestation_drill_runs_the_configured_endpoint_and_leaks_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state(temp.path().to_path_buf());
+    {
+        let state = Arc::get_mut(&mut state).expect("the test holds the only reference");
+        state.near_attestation_client = Some(Arc::new(FixtureAttestationEndpoint));
+        // Pin the verification clock to the day the collateral fixture was
+        // captured. Without this the handler passes `Utc::now()`, the
+        // fixture's `nextUpdate` (2026-09-30T23:45:01Z) lapses, and this
+        // test starts failing on a calendar date rather than on a code
+        // change -- which is worse than not having the test.
+        state.near_attestation_verification_clock =
+            Some(DateTime::from_timestamp(FIXTURE_COLLATERAL_CAPTURED_AT, 0).expect("valid"));
+    }
+
+    let Json(drill) = near_attestation_drill_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceNearAttestationDrillRequest::default()),
+    )
+    .await
+    .expect("the drill runs against the configured endpoint");
+
+    // The handler really passed its client through: the quote was fetched
+    // and verified rather than the drill refusing on configuration.
+    let outcome = drill.outcome.as_ref().expect("the drill ran");
+    assert_eq!(
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.step
+                == trace_commons_server::near_attestation::drill::NearAttestationDrillStep::QuoteVerified)
+            .map(|step| step.status),
+        Some(trace_commons_server::near_attestation::drill::NearAttestationStepStatus::Passed)
+    );
+    assert!(!drill.ready);
+
+    let body = serde_json::to_string(&drill).expect("the response serializes");
+    for forbidden in ["sk-", "Bearer", "0x"] {
+        assert!(
+            !body.contains(forbidden),
+            "drill response leaked {forbidden}"
+        );
+    }
+    assert!(!body.contains("e5d0fec43b001f181a3410b96715ec54171f36da"));
+}
+
+#[test]
+fn near_attestation_is_required_only_where_a_near_ai_endpoint_is_configured() {
+    // The ruling this implements: key on whether the surface is in use at
+    // all, never on the drill's result. A deployment routing no inference
+    // through NEAR AI has nothing for the drill to prove, and a permanently
+    // red required check teaches operators to ignore red checks.
+    let configured = rollout_smoke_required_checks(true);
+    let unconfigured = rollout_smoke_required_checks(false);
+
+    assert!(configured.contains(&"near_attestation"));
+    assert!(!unconfigured.contains(&"near_attestation"));
+    assert_eq!(configured.len(), unconfigured.len() + 1);
+    // Nothing else moved. A filter that dropped a second check would be a
+    // silent weakening of the promotion gate.
+    assert_eq!(
+        configured
+            .iter()
+            .filter(|check| **check != "near_attestation")
+            .copied()
+            .collect::<Vec<_>>(),
+        unconfigured
+    );
+    assert_eq!(
+        configured.len(),
+        TRACE_OPERATIONAL_ROLLOUT_SMOKE_REQUIRED_CHECKS.len()
+    );
+}
+
+#[test]
+fn an_unconfigured_near_attestation_check_is_reported_not_applicable_not_passed() {
+    // Absent from `required_checks` is not the same as green, and it must
+    // not be indistinguishable from a check that was quietly dropped.
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        &[],
+        Utc::now(),
+        false,
+    );
+    assert_eq!(
+        summary.not_applicable_checks,
+        vec!["near_attestation".to_string()]
+    );
+    assert!(
+        !summary
+            .passed_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(
+        !summary
+            .missing_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(
+        !summary
+            .required_checks
+            .contains(&"near_attestation".to_string())
+    );
+}
+
+#[test]
+fn a_configured_near_attestation_check_cannot_be_opted_out_of_by_failing() {
+    // The other half of the ruling: once the surface is configured, a red
+    // drill blocks. There is no path from "the drill failed" back to "not
+    // applicable".
+    let failed = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: "tenant-a".to_string(),
+        tenant_storage_ref: tenant_storage_ref("tenant-a"),
+        check_name: "near_attestation".to_string(),
+        status: TraceRolloutSmokeEvidenceStatus::Failed,
+        evidence_hash: sha256_prefixed("a red attestation drill"),
+        evidence_ref_hash: None,
+        actor_principal_ref: static_token_principal_ref("admin-token-a"),
+        recorded_at: Utc::now(),
+    };
+    let summary = TraceOperationalRolloutSmokeSummary::from_promotion_gates_and_evidence(
+        &TraceOperationalPromotionGateSummary {
+            ready: true,
+            ..TraceOperationalPromotionGateSummary::default()
+        },
+        &[failed],
+        Utc::now(),
+        true,
+    );
+    assert!(!summary.ready);
+    assert!(
+        summary
+            .failed_evidence_checks
+            .contains(&"near_attestation".to_string())
+    );
+    assert!(summary.not_applicable_checks.is_empty());
+    assert_eq!(summary.evidence_status, "failed_rehearsal_evidence");
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/attestation-collateral
+// ---------------------------------------------------------------------------
+
+/// Build a collateral request against the real routing table.
+///
+/// Two routers are exercised below. `app(state)` is what says the route is
+/// actually wired into the deployed surface, outside every auth layer;
+/// `attestation_collateral_routes()` is what lets the refusal tests run
+/// without an `AppState`. A handler can be correct and unreachable, so the
+/// reachability assertion is the one that goes through `app`.
+fn collateral_request(body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/attestation-collateral")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+async fn collateral_response(
+    request: axum::http::Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(request)
+        .await
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// A contributor needs collateral *before* they have decided to trust
+/// anything, so requiring a claim to obtain it would make verifying an enclave
+/// depend on already being enrolled with the operator whose enclave it is.
+#[tokio::test]
+async fn the_collateral_route_is_reachable_without_authentication() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the collateral route ended up behind an auth layer"
+    );
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the collateral route is not wired into app()"
+    );
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn a_malformed_quote_is_refused_by_name_and_echoes_nothing() {
+    // A distinctive marker, so "the refusal echoed the input" cannot pass by
+    // coincidence.
+    const MARKER: &str = "zzq-collateral-marker-zzq";
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": format!("nothex{MARKER}") }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+    assert!(
+        !body.to_string().contains(MARKER),
+        "the refusal echoed the caller's input"
+    );
+    // And no offset or length, which would tell a prober how far its guess got.
+    assert_eq!(
+        body.as_object().map(|map| map.len()),
+        Some(1),
+        "the refusal body grew a field beyond its label"
+    );
+}
+
+/// `hex::decode("")` succeeds, so an empty quote would otherwise reach the
+/// fetch with nothing to fetch collateral for.
+#[tokio::test]
+async fn an_empty_quote_is_refused_rather_than_decoding_to_nothing() {
+    let (status, body) =
+        collateral_response(collateral_request(serde_json::json!({ "quote_hex": "" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+/// Odd-length hex is not hex, and a route that truncated it would fetch
+/// collateral for bytes the caller never sent.
+#[tokio::test]
+async fn an_odd_length_quote_is_refused_rather_than_truncated() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "abc" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "attestation_collateral_quote_malformed");
+}
+
+#[tokio::test]
+async fn an_unknown_field_on_the_collateral_request_is_refused() {
+    let (status, _) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff", "tenant": "someone" }),
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a field this route does not understand was accepted and ignored"
+    );
+}
+
+/// The missing-control path. Never a 200 with an empty body: a client
+/// checking only the status could not tell that from real collateral, and a
+/// client verifying against empty collateral verifies nothing at all.
+///
+/// Compiled only without the feature, because with it this binary really can
+/// fetch collateral and the assertion would be about a network call.
+#[cfg(not(feature = "near-attestation-collateral"))]
+#[tokio::test]
+async fn a_build_without_the_collateral_client_refuses_by_missing_control() {
+    let (status, body) = collateral_response(collateral_request(
+        serde_json::json!({ "quote_hex": "00ff" }),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body["error"],
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+        "the refusal must name the control an operator turns on, not a generic failure"
+    );
+}
+
+// ---------------------------------------------------------------------
+// The redaction-witness PII-backstop bypass.
+//
+// A verified certificate keeps a submission OUT OF THE HOLD and does nothing
+// else. It changes no risk tier, lifts no quarantine, and never means the
+// trace is clean.
+//
+// The whole safety argument is an ORDERING: `rescrub_trace_envelope` -- the
+// deterministic sweep over `redacted_content` and `structured_payload`, plus
+// `residual_envelope_scan` -- runs synchronously in the submit handler before
+// the hold is decided. So the only thing skipping the hold removes is the
+// async backstop's classifier stage. The first test below is the one that
+// pins that, and it is the most important test in this section.
+// ---------------------------------------------------------------------
+
+mod witness_bypass {
+    use super::*;
+    use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
+    use trace_commons_server::redaction_witness::certificate::{
+        CertificateDetails, WitnessCertificate,
+    };
+    use trace_commons_server::redaction_witness::config::{
+        WitnessBypassConfig, witness_bypass_config_from_values,
+    };
+    use trace_commons_server::redaction_witness::correspondence::check_correspondence;
+    use trace_commons_server::redaction_witness::verification::{
+        VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
+    };
+
+    /// The measurement the pin admits. Nothing here depends on its value; it
+    /// only has to be the same on both sides.
+    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+    /// A `full-pipeline` alias -- deterministic pass AND prose classifier.
+    /// The only kind an operator should ever allowlist.
+    const FULL_PIPELINE_ALIAS: &str =
+        "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
+
+    /// The bytes every certificate in this module covers, unless the test is
+    /// about a mismatch.
+    const ARTIFACT: &str = "the submitted envelope bytes";
+
+    fn signing_key() -> SigningKey {
+        let bytes = Keccak256::digest(b"witness-bypass-test-witness");
+        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
+    }
+
+    fn signing_address() -> String {
+        let key = signing_key();
+        let point = key.verifying_key().to_encoded_point(false);
+        let digest = Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    /// Sign as the witness enclave would: EIP-191 over the canonical signing
+    /// bytes, 65-byte hex with a 27/28 recovery byte.
+    fn sign(certificate: &WitnessCertificate) -> String {
+        let message = certificate.signing_bytes();
+        let mut hasher = Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(&message);
+        let (signature, recovery) = signing_key()
+            .sign_prehash_recoverable(&hasher.finalize())
+            .expect("prehash signs");
+        format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        )
+    }
+
+    /// A genuinely verified certificate over [`ARTIFACT`].
+    ///
+    /// Built the only way one can be: a correspondence proof, a real
+    /// signature, and a real `verify_witness_certificate` call against a real
+    /// pin. There is no test constructor for `VerifiedWitnessCertificate` and
+    /// there must not be -- a fake would let these tests pass over a
+    /// verification path that does not work.
+    fn verified_certificate(
+        verdict: ResidualPiiRisk,
+        policy_version: &str,
+    ) -> VerifiedWitnessCertificate {
+        let proof =
+            check_correspondence(ARTIFACT, ARTIFACT, &[]).expect("an empty span list applies");
+        let certificate = WitnessCertificate::from_proof(
+            proof,
+            CertificateDetails {
+                residual_risk_verdict: verdict,
+                redaction_policy_version: policy_version.to_string(),
+                witness_measurement: MEASUREMENT.to_string(),
+                timestamp: 1_788_000_000,
+            },
+        );
+        let signature = sign(&certificate);
+        let pin = WitnessPin::new(&signing_address(), [MEASUREMENT.to_string()])
+            .expect("the pin is well formed");
+        verify_witness_certificate(certificate, &signature, Some(&pin), ARTIFACT.as_bytes())
+            .expect("the certificate verifies against the artifact it covers")
+    }
+
+    fn low_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, FULL_PIPELINE_ALIAS)
+    }
+
+    fn medium_verdict_certificate() -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Medium, FULL_PIPELINE_ALIAS)
+    }
+
+    fn certificate_with_policy(alias: &str) -> VerifiedWitnessCertificate {
+        verified_certificate(ResidualPiiRisk::Low, alias)
+    }
+
+    fn bypass_config_allowing(aliases: &[&str]) -> WitnessBypassConfig {
+        witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signing_address()),
+            Some(MEASUREMENT),
+            Some(&aliases.join(",")),
+        )
+        .expect("the bypass configures")
+        .expect("the switch is on")
+    }
+
+    fn bypass_config() -> WitnessBypassConfig {
+        bypass_config_allowing(&[FULL_PIPELINE_ALIAS])
+    }
+
+    fn content_bearing_consent() -> ConsentMetadata {
+        backstop_consent(true, false, false)
+    }
+
+    /// THE test of this slice.
+    ///
+    /// The bypass is only safe because `rescrub_trace_envelope` -- the
+    /// deterministic sweep over `redacted_content` and `structured_payload`,
+    /// plus `residual_envelope_scan` -- has already run on these bytes by the
+    /// time the hold is decided. Read the handler source and assert the
+    /// order, because no runtime observation distinguishes "ran before" from
+    /// "ran at all".
+    ///
+    /// If a future change moves the hold decision above the rescrub, this
+    /// feature becomes a wholesale backstop bypass and this test must go red.
+    #[test]
+    fn the_synchronous_rescrub_runs_before_the_hold_is_decided() {
+        let source = include_str!("../trace-commons-ingest.rs");
+        let rescrub = source
+            .find("rescrub_trace_envelope(&mut envelope)")
+            .expect("submit rescrubs");
+        let hold = source
+            .find("corpus_status_with_pii_backstop_hold(")
+            .expect("submit decides the hold");
+        // `find` takes the FIRST occurrence, so this test would quietly start
+        // measuring the function's own definition if every call site were
+        // removed or moved below it -- and then it would pass while proving
+        // nothing. Require the occurrence it found to be a call.
+        let definition = source
+            .find("fn corpus_status_with_pii_backstop_hold(")
+            .expect("the decision function is defined here");
+        assert!(
+            hold < definition,
+            "the first occurrence must be a call site, not the definition; this test \
+             measures the order of the submit handler, not of the file",
+        );
+        assert!(
+            rescrub < hold,
+            "the hold decision must follow the synchronous rescrub; moving it above turns \
+             this feature into a wholesale backstop bypass",
+        );
+    }
+
+    /// Ground truth from outside the decision function: an envelope carrying a
+    /// credential of exactly the kind the prose classifier writes back into a
+    /// field it was handed. The synchronous pass must raise the risk, so
+    /// `status_for_risk` yields a non-Accepted status and the bypass never
+    /// sees an `Accepted` to skip the hold on.
+    ///
+    /// This is what makes "the certificate can never lift a quarantine" a
+    /// measured fact rather than a claim about the code's shape.
+    #[tokio::test]
+    async fn a_witness_emitted_credential_is_caught_before_the_bypass_can_act() {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, "aws key AKIAIOSFODNN7EXAMPLE in output");
+        assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub succeeds");
+
+        let risk_status = status_for_risk(envelope.privacy.residual_pii_risk, false);
+        assert_ne!(
+            risk_status,
+            TraceCorpusStatus::Accepted,
+            "the synchronous pass must have raised the risk off Low, or this test \
+             proves nothing about the bypass",
+        );
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                risk_status,
+                &envelope.consent,
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            risk_status,
+            "a verified certificate must never lift a quarantine",
+        );
+    }
+
+    #[test]
+    fn a_verified_low_certificate_with_an_allowlisted_alias_skips_the_hold() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::Accepted,
+        );
+    }
+
+    /// A `Medium` verdict is the witness reporting that it found and removed
+    /// PII. That is exactly the population the server's own classifier pass
+    /// exists to re-examine, so it holds.
+    #[test]
+    fn a_medium_verdict_still_holds() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&medium_verdict_certificate()),
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The sharpest edge in the design: a `deterministic-only` witness never
+    /// ran a classifier, so skipping the server's would mean no classifier
+    /// ever reads this trace's prose. The allowlist is what stops it, and it
+    /// is a separate control from the measurement pin for that reason.
+    #[test]
+    fn a_deterministic_only_policy_alias_is_not_allowlisted_and_still_holds() {
+        let config = bypass_config_allowing(&[FULL_PIPELINE_ALIAS]);
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&certificate_with_policy(
+                    "ironclaw-deterministic-secret-path-v3"
+                )),
+                Some(&config),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// Ship-disabled, at the decision. With no configured bypass an arriving
+    /// certificate is ignored entirely and the trace holds exactly as today.
+    #[test]
+    fn no_configured_bypass_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                Some(&low_verdict_certificate()),
+                None,
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The mirror case: configured, but no certificate arrived. An ordinary
+    /// unwitnessed submission on a deployment that has the bypass on.
+    #[test]
+    fn a_configured_bypass_with_no_certificate_holds_exactly_as_today() {
+        assert_eq!(
+            corpus_status_with_pii_backstop_hold(
+                TraceCorpusStatus::Accepted,
+                &content_bearing_consent(),
+                true,
+                None,
+                Some(&bypass_config()),
+            ),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The bypass must not reach past the hold. With the backstop driver
+    /// switched off entirely there is no hold to skip, and the answer is the
+    /// risk-derived status either way -- a certificate must not turn a
+    /// non-Accepted risk into an acceptance.
+    #[test]
+    fn a_certificate_changes_nothing_when_the_backstop_is_disabled() {
+        for risk_status in [TraceCorpusStatus::Accepted, TraceCorpusStatus::Quarantined] {
+            assert_eq!(
+                corpus_status_with_pii_backstop_hold(
+                    risk_status,
+                    &content_bearing_consent(),
+                    false,
+                    Some(&low_verdict_certificate()),
+                    Some(&bypass_config()),
+                ),
+                risk_status,
+                "{risk_status:?}",
+            );
+        }
+    }
+
+    /// Group D in the spec. The credit-zeroing branch in the submit handler
+    /// keys on `!= Accepted`, so a bypassed trace takes the non-zeroing path
+    /// and keeps its pending credit. Silent failure otherwise: a contributor
+    /// whose trace was admitted on a certificate would be paid zero.
+    #[tokio::test]
+    async fn a_bypassed_trace_keeps_its_pending_credit() {
+        let mut envelope = sample_envelope().await;
+        apply_credit_estimate_to_envelope(&mut envelope);
+        let before = envelope.value.credit_points_pending;
+        assert!(before > 0.0, "the fixture must have credit to lose");
+
+        let status = corpus_status_with_pii_backstop_hold(
+            TraceCorpusStatus::Accepted,
+            &content_bearing_consent(),
+            true,
+            Some(&low_verdict_certificate()),
+            Some(&bypass_config()),
+        );
+
+        assert_eq!(status, TraceCorpusStatus::Accepted);
+        assert_eq!(
+            envelope.value.credit_points_pending, before,
+            "the credit-zeroing branch keys on != Accepted, so a bypassed trace must \
+             keep the credit an ordinarily-accepted one keeps",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Reading the certificate off the request, at receipt.
+//
+// The half that is easy to build wrong. `rescrub_trace_envelope` takes
+// `&mut envelope` and rewrites `privacy.residual_pii_risk`,
+// `redaction_counts`, `pii_labels_present`, `redaction_pipeline_version`,
+// `warnings` and `redaction_hash`, so THE STORED BYTES ARE NEVER THE RECEIVED
+// BYTES. Taking the body as `Bytes` is necessary and not sufficient: a
+// handler that took `Bytes` and verified after the rescrub would fail every
+// honest witnessed submission.
+// ---------------------------------------------------------------------
+
+mod witness_receipt {
+    use super::*;
+    use axum::body::Body;
+    use k256::ecdsa::SigningKey;
+    use sha3::Keccak256;
+    use tower::ServiceExt;
+    use trace_commons_server::redaction_witness::config::witness_bypass_config_from_values;
+    use trace_commons_server::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+
+    const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+    const ALIAS: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
+
+    fn signing_key() -> SigningKey {
+        let bytes = Keccak256::digest(b"witness-receipt-test-witness");
+        SigningKey::from_slice(&bytes).expect("seed is a valid scalar")
+    }
+
+    fn signing_address() -> String {
+        let point = signing_key().verifying_key().to_encoded_point(false);
+        let digest = Keccak256::digest(&point.as_bytes()[1..]);
+        format!("0x{}", hex::encode(&digest[12..]))
+    }
+
+    /// A certificate over `body`, encoded exactly as the witness service's
+    /// route serves it, plus its signature.
+    ///
+    /// Built from the real digest of the real bytes and signed with the real
+    /// key, so nothing here can pass by a fixture agreeing with a bug.
+    fn certificate_over(body: &[u8], verdict: &str) -> (String, String) {
+        let json = serde_json::json!({
+            "redacted_sha256": hex::encode(sha2::Sha256::digest(body)),
+            "residual_risk_verdict": verdict,
+            "redaction_policy_version": ALIAS,
+            "witness_measurement": MEASUREMENT,
+            "timestamp": 1_788_000_000i64,
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json).expect("the certificate serialises"));
+
+        // Sign the same way the enclave does: the decoder rebuilds the
+        // certificate and the signature must recover over ITS signing bytes,
+        // so this goes through the decoder rather than reconstructing them.
+        let mut headers = HeaderMap::new();
+        headers.insert(CERTIFICATE_HEADER, encoded.parse().expect("a header value"));
+        headers.insert(SIGNATURE_HEADER, "0x00".parse().expect("a header value"));
+        let (certificate, _) =
+            trace_commons_server::redaction_witness::request::witness_headers(&headers)
+                .expect("the fixture certificate decodes")
+                .expect("both headers are present");
+
+        let message = certificate.signing_bytes();
+        let mut hasher = Keccak256::new();
+        hasher.update(b"\x19Ethereum Signed Message:\n");
+        hasher.update(message.len().to_string().as_bytes());
+        hasher.update(&message);
+        let (signature, recovery) = signing_key()
+            .sign_prehash_recoverable(&hasher.finalize())
+            .expect("prehash signs");
+        let signature_hex = format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        );
+        (encoded, signature_hex)
+    }
+
+    /// A state with the bypass pinned AND the backstop driver enabled, which
+    /// is the only configuration in which the bypass can be observed: with
+    /// the driver off there is no hold to skip.
+    fn witnessed_state(root: PathBuf) -> Arc<AppState> {
+        let mut state = test_state(root);
+        let state_mut = Arc::get_mut(&mut state).expect("the test state is unshared");
+        state_mut.witness_bypass = Some(
+            witness_bypass_config_from_values(
+                Some("true"),
+                Some(&signing_address()),
+                Some(MEASUREMENT),
+                Some(ALIAS),
+            )
+            .expect("the bypass configures")
+            .expect("the switch is on"),
+        );
+        // A content flag forces the residual risk to Medium, so a deployment
+        // that refuses medium risk quarantines every content-bearing trace and
+        // never reaches the hold at all. Accepting medium risk is therefore
+        // part of the only configuration in which this feature is reachable.
+        state_mut.accept_medium_risk_submissions = true;
+        state_mut.pii_backstop_driver = Some(PiiBackstopDriverConfig {
+            interval: StdDuration::from_secs(60),
+            batch_size: 1,
+            max_attempts: 3,
+            backoff_base_seconds: 1,
+            per_submission_timeout: StdDuration::from_secs(30),
+        });
+        state
+    }
+
+    /// An envelope the synchronous pass leaves `Accepted` and that declares
+    /// message text, so it is exactly the population the hold applies to.
+    async fn holdable_envelope() -> TraceContributionEnvelope {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, "please list the files in the workspace");
+        envelope.consent.message_text_included = true;
+        envelope
+    }
+
+    async fn post_through_the_real_router(
+        state: Arc<AppState>,
+        body: Vec<u8>,
+        witness: Option<(&str, &str)>,
+    ) -> axum::http::Response<Body> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(AUTHORIZATION, "Bearer token-a")
+            .header(CONTENT_TYPE, "application/json");
+        if let Some((certificate, signature)) = witness {
+            request = request
+                .header(CERTIFICATE_HEADER, certificate)
+                .header(SIGNATURE_HEADER, signature);
+        }
+        app(state)
+            .oneshot(request.body(Body::from(body)).expect("request builds"))
+            .await
+            .expect("response")
+    }
+
+    fn stored_status(root: &std::path::Path, submission_id: Uuid) -> TraceCorpusStatus {
+        read_submission_record(root, "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists")
+            .status
+    }
+
+    fn stored_envelope_bytes(root: &std::path::Path, submission_id: Uuid) -> Vec<u8> {
+        let record = read_submission_record(root, "tenant-a", submission_id)
+            .expect("record reads")
+            .expect("record exists");
+        std::fs::read(root.join(record.object_key)).expect("stored envelope reads")
+    }
+
+    /// The control: the same envelope, the same state, no certificate. It
+    /// holds. Everything below is measured against this, so a test that
+    /// asserts `Accepted` is asserting the bypass acted rather than that the
+    /// fixture was never holdable in the first place.
+    #[tokio::test]
+    async fn an_unwitnessed_submission_holds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+
+        let response = post_through_the_real_router(state, body, None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+            "the fixture must be holdable, or every test below proves nothing",
+        );
+    }
+
+    /// The regression this test exists for. `rescrub_trace_envelope` rewrites
+    /// the envelope in place, so verifying off the stored or re-serialised
+    /// envelope fails this honest submission.
+    ///
+    /// Ground truth from outside: assert the envelope really was mutated, so
+    /// the test cannot pass by the rescrub having been a no-op on this
+    /// fixture.
+    #[tokio::test]
+    async fn an_honest_witnessed_submission_verifies_despite_the_rescrub_mutating_the_envelope() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(&body, "low");
+
+        let response =
+            post_through_the_real_router(state, body.clone(), Some((&certificate, &signature)))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            stored_envelope_bytes(temp.path(), envelope.submission_id),
+            body,
+            "the fixture must actually be rewritten by the rescrub, or this test proves nothing",
+        );
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::Accepted,
+            "a certificate over the bytes as received must verify, even though the \
+             rescrub has rewritten the envelope since",
+        );
+    }
+
+    /// A re-serialised envelope has a different digest. Feed a body whose key
+    /// order is not what `serde_json` would emit and a certificate over those
+    /// exact bytes, and require it to verify -- which it can only do if the
+    /// handler digested the received bytes rather than a round trip through
+    /// serde.
+    #[tokio::test]
+    async fn the_digest_is_taken_over_the_body_as_received() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+
+        // Re-emit the body with the top-level keys in reverse order. It is
+        // the same envelope to serde and a different byte string to SHA-256.
+        let value: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&envelope).expect("serialises"))
+                .expect("parses");
+        let object = value.as_object().expect("an envelope is an object");
+        let mut reordered = serde_json::Map::new();
+        for (key, field) in object.iter().rev() {
+            reordered.insert(key.clone(), field.clone());
+        }
+        let body = serde_json::to_vec(&serde_json::Value::Object(reordered)).expect("serialises");
+        assert_ne!(
+            body,
+            serde_json::to_vec(&envelope).expect("serialises"),
+            "the fixture must differ byte-wise from a canonical re-serialisation",
+        );
+
+        let (certificate, signature) = certificate_over(&body, "low");
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::Accepted,
+        );
+    }
+
+    /// Fail open on the submission, closed on the bypass. A witness outage
+    /// must not become a submission outage.
+    #[tokio::test]
+    async fn a_submission_with_an_unverifiable_certificate_is_still_accepted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+
+        let response =
+            post_through_the_real_router(state, body, Some(("not-a-certificate", "0xgarbage")))
+                .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a garbage certificate must refuse the bypass, never the submission",
+        );
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The same, for a well-formed certificate that covers different bytes --
+    /// the shape a replay or a client that re-encoded the body produces.
+    #[tokio::test]
+    async fn a_certificate_over_other_bytes_refuses_the_bypass_and_keeps_the_submission() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(b"some entirely other artifact", "low");
+
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// Ship-disabled, end to end. On a deployment with no bypass configured a
+    /// genuinely valid certificate changes nothing at all.
+    #[tokio::test]
+    async fn a_valid_certificate_does_nothing_when_the_bypass_is_unconfigured() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = witnessed_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state)
+            .expect("the test state is unshared")
+            .witness_bypass = None;
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).expect("the envelope serialises");
+        let (certificate, signature) = certificate_over(&body, "low");
+
+        let response =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        );
+    }
+
+    /// The handler must verify at receipt, above the rescrub.
+    ///
+    /// This anchors on the CALL, not on `verify_witness_certificate`, which
+    /// appears first inside `verified_witness_for_submission`'s own body --
+    /// a definition that sits above the handler and would therefore satisfy
+    /// any ordering assertion for free. A mutation moving the call below the
+    /// rescrub left an earlier version of this test green, which is what
+    /// "documentation, not a test" looks like from the inside.
+    ///
+    /// What actually makes the honest path safe is stronger than this
+    /// ordering and is pinned by
+    /// `the_digest_is_taken_over_the_body_as_received`: `SubmitBody` captures
+    /// the bytes in the extractor, before any handler code runs, and the
+    /// rescrub mutates the parsed envelope rather than those bytes. This test
+    /// keeps the call where a reader expects to find it, so nobody later
+    /// concludes from its position that verification reads the mutated value.
+    #[test]
+    fn the_certificate_is_verified_before_the_rescrub_runs() {
+        let source = include_str!("../trace-commons-ingest.rs");
+        let verify = source
+            .find("verified_witness_for_submission(state.as_ref()")
+            .expect("submit verifies the certificate");
+        let rescrub = source
+            .find("rescrub_trace_envelope(&mut envelope)")
+            .expect("submit rescrubs");
+        assert!(
+            verify < rescrub,
+            "the certificate must be verified against the body as received, above the \
+             rescrub; the bytes survive it either way, but the call belongs where a \
+             reader will look for it",
+        );
+    }
+
+    /// The property the ordering test above is only a proxy for: the bytes
+    /// the witness digest is taken over are captured by the extractor, so
+    /// nothing the handler does to the parsed envelope can reach them.
+    ///
+    /// Stated as a test because it is the actual safety argument for this
+    /// half of the slice, and because the mutation that moved the
+    /// verification call below the rescrub did NOT break the honest path --
+    /// which is only true because of this.
+    #[tokio::test]
+    async fn the_rescrub_cannot_reach_the_bytes_the_certificate_covers() {
+        let envelope = holdable_envelope().await;
+        let raw = serde_json::to_vec(&envelope).expect("serialises");
+        let body = SubmitBody::for_test(envelope);
+        let captured = body.raw.clone();
+        let SubmitBody {
+            mut envelope,
+            raw: held,
+        } = body;
+
+        rescrub_trace_envelope(&mut envelope).expect("rescrub runs");
+
+        assert_ne!(
+            serde_json::to_vec(&envelope).expect("serialises"),
+            raw,
+            "the fixture must actually be rewritten, or this test proves nothing",
+        );
+        assert_eq!(
+            held, captured,
+            "the received bytes must be untouched by the pass that rewrites the envelope",
+        );
+    }
+
+    /// The submit handler's rejection behaviour is client-visible and must be
+    /// exactly what `Json` gave before the body became `Bytes`. Every client
+    /// depends on it, including the overwhelming majority that never send a
+    /// certificate.
+    #[tokio::test]
+    async fn the_malformed_body_rejection_is_unchanged() {
+        for (content_type, body, expected) in [
+            ("application/json", "{ not json", StatusCode::BAD_REQUEST),
+            (
+                "application/json",
+                r#"{"submission_id":1}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("text/plain", "{}", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let state = witnessed_state(temp.path().to_path_buf());
+            let response = app(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header(AUTHORIZATION, "Bearer token-a")
+                        .header(CONTENT_TYPE, content_type)
+                        .body(Body::from(body))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{content_type} {body}");
+        }
+    }
+
+    /// The content-type predicate is reimplemented rather than reached for,
+    /// so it has to be pinned against the cases `axum::Json` documents.
+    #[test]
+    fn json_content_type_matches_axum() {
+        for (value, expected) in [
+            ("application/json", true),
+            ("application/json; charset=utf-8", true),
+            ("application/json;charset=utf-8", true),
+            ("application/cloudevents+json", true),
+            ("text/json", false),
+            ("application/xml", false),
+            ("", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            if !value.is_empty() {
+                headers.insert(CONTENT_TYPE, value.parse().expect("a header value"));
+            }
+            assert_eq!(json_content_type(&headers), expected, "{value:?}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Telling the contributor which pass admitted their trace.
+//
+// #445's argument applied a second time: a trace admitted on a witness
+// certificate was admitted on a DIFFERENT BASIS from one admitted on the
+// server's own queued re-check, and every accepted trace was getting the same
+// explanation. The sentence must not claim clean, and must carry no
+// measurement and no address.
+// ---------------------------------------------------------------------
+
+mod witness_receipt_wording {
+    use super::*;
+
+    fn record_with(status: &str, reason: Option<&str>) -> TraceCommonsSubmissionRecord {
+        let mut record = submission_record_with_principal("principal-a");
+        record.status = match status {
+            "accepted" => TraceCorpusStatus::Accepted,
+            "held" => TraceCorpusStatus::AwaitingPiiBackstop,
+            "quarantined" => TraceCorpusStatus::Quarantined,
+            other => panic!("unhandled status {other}"),
+        };
+        record.last_status_reason = reason.map(str::to_string);
+        record
+    }
+
+    fn witness_admitted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", Some(WITNESS_ADMITTED_STATUS_REASON))
+    }
+
+    fn ordinary_accepted_record() -> TraceCommonsSubmissionRecord {
+        record_with("accepted", None)
+    }
+
+    fn held_record() -> TraceCommonsSubmissionRecord {
+        record_with("held", None)
+    }
+
+    #[test]
+    fn a_witness_admitted_receipt_says_so() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        assert!(
+            receipt
+                .explanation
+                .iter()
+                .any(|line| line.contains("attested redaction witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    #[test]
+    fn an_ordinarily_accepted_receipt_is_unchanged() {
+        let receipt =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled);
+        assert!(
+            !receipt
+                .explanation
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains("witness")),
+            "{:?}",
+            receipt.explanation,
+        );
+    }
+
+    /// The lines an ordinary receipt already carried must all still be there,
+    /// in order. A new sentence that displaced the settlement posture would
+    /// re-open #445 while fixing its sibling.
+    #[test]
+    fn the_witness_sentence_is_added_and_displaces_nothing() {
+        let ordinary =
+            receipt_from_record(&ordinary_accepted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        let witnessed =
+            receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled)
+                .explanation;
+        assert_eq!(
+            witnessed.len(),
+            ordinary.len() + 1,
+            "exactly one line is added: {witnessed:?}",
+        );
+        for line in &ordinary {
+            assert!(witnessed.contains(line), "{line} was displaced");
+        }
+    }
+
+    /// The rule that outranks every other sentence on this surface. A witness
+    /// certificate says a known program in a pinned enclave reached a `Low`
+    /// verdict. It never says the trace is clean, and no receipt line may
+    /// imply otherwise.
+    #[test]
+    fn no_receipt_line_claims_the_trace_is_clean() {
+        for record in [
+            witness_admitted_record(),
+            ordinary_accepted_record(),
+            held_record(),
+        ] {
+            for line in receipt_from_record(&record, NearSettlementMode::Disabled).explanation {
+                let lower = line.to_ascii_lowercase();
+                for claim in [
+                    "verified clean",
+                    "no pii",
+                    "free of",
+                    "guaranteed",
+                    "contains no",
+                    "is clean",
+                ] {
+                    assert!(!lower.contains(claim), "{line}");
+                }
+            }
+        }
+    }
+
+    /// A measurement and a signing address are operator configuration. They
+    /// have no business on a contributor surface, and the repo's hash-only
+    /// rule puts them out of bounds regardless.
+    #[test]
+    fn no_receipt_line_carries_a_measurement_or_an_address() {
+        let receipt = receipt_from_record(&witness_admitted_record(), NearSettlementMode::Disabled);
+        for line in receipt.explanation {
+            assert!(!line.contains("mrtd:"), "{line}");
+            assert!(!line.contains("0x"), "{line}");
+        }
+    }
+
+    /// The label the receipt keys on has to survive the storage allowlist,
+    /// or the submit handler writes "other" and the sentence never appears
+    /// on a real row.
+    #[test]
+    fn the_witness_status_reason_is_allowlisted_for_storage() {
+        assert_eq!(
+            safe_status_reason_label(WITNESS_ADMITTED_STATUS_REASON),
+            WITNESS_ADMITTED_STATUS_REASON,
+            "an unallowlisted label becomes \"other\" and the receipt sentence is lost",
+        );
+    }
+
+    /// The label is not a residual-risk condition and must never be read as
+    /// one. Putting it in `residual_risk_basis` would make that column's
+    /// invariant -- an empty basis means Low, and only Low -- contradict the
+    /// risk stored beside it.
+    #[test]
+    fn the_witness_status_reason_is_not_a_residual_risk_condition() {
+        assert!(
+            ResidualRiskCondition::from_label(WITNESS_ADMITTED_STATUS_REASON).is_none(),
+            "a witness admission is not a risk condition",
+        );
     }
 }

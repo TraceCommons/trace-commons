@@ -38,6 +38,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   consent scope but had no way to claim the handle that scope is about, so
   the "Go public" flow and the settings profile panel were unreachable from
   every application. See ["The public profile"](#the-public-profile).
+- `status.routing` — whether the IronWire proxy overlay is declared and
+  whether it is producing anything, in three states rather than two. Before
+  this, a contributor who declared a proxy that never produced a row saw the
+  same nothing as one who never declared it, and a declaration change did
+  not take effect until the daemon was restarted. It now applies on the
+  `set_settings` call. See ["`routing`"](#routing).
 - `list_projects` now reports **discovered** projects as well as configured
   ones, each with the mode actually in force and a `configured` boolean. An
   onboarding screen that asks a contributor to exclude a repository has to
@@ -403,9 +409,11 @@ history record, audit entry, notification text, or IPC response.
 | `refresh_history` | — | `requested: true` | |
 | `list_audit` | `limit` (optional, default 50, max 1000) | `entries[]`, newest first | see "Audit log" below |
 | `queue_outcome_counts` | — | `reasons: {label: count}` | see "queue_outcome_counts" below; does **not** cover sessions never queued |
+| `probe_routing` | `port` (required), `token_dir` (optional absolute directory) | `outcome`, plus `token_path` or `port` | asks a declared IronWire proxy whether it is there; performs real loopback I/O and **never returns the token**; see "`probe_routing`" below |
+| `discover_routing` | — | `found`, plus `port` and optionally `token_path` when found | reads the pointer a running IronWire published, so the declaring flow can pre-fill instead of asking; no network I/O and **never returns the token**; see "`discover_routing`" below |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential and local paths reported as booleans only | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `ironwire`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -441,7 +449,8 @@ history record, audit entry, notification text, or IPC response.
     "blocked": true,
     "blocked_entries": 14,
     "blocked_bytes": 137283584
-  }
+  },
+  "routing": { "state": "not_declared", "last_refresh_at": null }
 }
 ```
 
@@ -485,6 +494,45 @@ Counts and timestamps only. No entry id, hash, or path appears here.
 Approved entries are not listed by `list_pending`, which returns `pending`
 entries only, so this is the only place the condition is reported; there is
 no per-entry equivalent.
+
+#### `routing`
+
+Additive, and the protocol version is unchanged: `trace_commons.daemon.v1_1`
+stays as it is. Every shell ignores keys it does not know — the Swift models
+decode declared keys only, the GTK models carry no `deny_unknown_fields`, and
+the Windows deserializer is left at its default — so an older shell against a
+newer daemon behaves exactly as it did before, which is the rule this
+document's "additive" status already states.
+
+Whether the IronWire proxy overlay is declared and whether it is producing
+anything. **Three states, not two.**
+
+| `state` | meaning |
+| --- | --- |
+| `not_declared` | no proxy declared; the daemon holds no ledger and reads nothing |
+| `awaiting_rows` | declared, and the daemon holds a ledger, but no row has arrived yet |
+| `rows_seen` | declared, and the last refresh window had rows |
+
+`awaiting_rows` is **not an error** and a client must not render it as one.
+A machine whose proxy was installed this morning reports it, and so does one
+whose declaration changed a second ago: `set_settings` rebuilds the ledger in
+place — no restart — and a rebuilt ledger starts cold by construction. Say
+"nothing seen yet", not "broken".
+
+The distinction `not_declared` carries cannot be recovered from row counts:
+a daemon holding no ledger and a daemon holding a ledger that has read
+nothing both have zero rows, and reporting them the same way tells a
+contributor whose declaration never took that everything is fine.
+
+`last_refresh_at` is when a refresh last **reached** the proxy and came back
+readable — RFC 3339, or `null` when none ever has. It is not stamped on a
+failed attempt, which is what makes it useful: rows say data exists, not that
+the proxy answers now, and a proxy that died an hour ago still has rows. With
+`awaiting_rows`, a non-null `last_refresh_at` means the proxy answered and
+this window genuinely had nothing in it; a null one means nothing has
+answered yet.
+
+No port, token, or row content appears here.
 
 ### `preview`
 
@@ -1239,11 +1287,107 @@ On timeout the daemon answers `busy` / `quiesce-timeout` and un-parks itself.
 The caller leaves the update staged and retries later. There is no forced
 path.
 
+### `probe_routing`
+
+```json
+{ "outcome": "reachable" }
+{ "outcome": "token_unreadable", "token_path": "/Users/x/.ironwire/control.token" }
+{ "outcome": "unreachable", "port": 8463 }
+```
+
+Asks the IronWire proxy a contributor is about to declare whether it is
+actually there, so that declaring can answer instead of failing silently.
+
+The routing *reader* deliberately treats absence and failure as the same
+state: a proxy that vanished must never cost anyone a trace, so nothing on
+the submission path reports an error. That is right for reading and wrong
+for declaring. Without this method a contributor can name a wrong port or an
+unreachable token, see no error and no indicator, and have every trace carry
+no routing data. This method runs only when a human asks; it touches no
+daemon state and cannot affect a submission.
+
+`token_dir` is resolved exactly as the reader resolves it -- the declared
+directory, then the `token_path` in IronWire's discovery pointer, then
+`IRONWIRE_HOME`, then `~/.ironwire` -- through the same function, so the
+path reported is the file that would actually be read.
+
+The three outcomes:
+
+- **`reachable`** -- the proxy answered and the token was accepted.
+- **`token_unreadable`** -- carries `token_path`, the absolute path that was
+  tried. Covers no readable `control.token` there and a proxy that answered
+  and refused the one that was. A GUI-launched daemon never sees
+  `IRONWIRE_HOME`, so it reads `~/.ironwire/control.token` whatever the
+  contributor set in a shell; that produces a missing file on one machine
+  and a stale token on another, and naming the directory fixes both.
+  `token_path` is absent only when nothing resolves at all -- no declared
+  directory, no `IRONWIRE_HOME`, no discoverable home.
+- **`unreachable`** -- carries `port`, the port that was tried. Also the
+  answer when something answered but did not serve the ledger (a 404, a
+  500): the usual cause is a number naming some other local service, so the
+  port is still the actionable fact.
+
+**No outcome ever carries the token.** It is a credential for an API that
+can rewrite the contributor's agent configuration, and this answer crosses a
+socket to a shell. The token *directory* is not the token, and the path is
+the whole point.
+
+Refusals are `bad_params` / `port-invalid` (missing, non-integer, `0`, or
+above 65535) and `bad_params` / `token-dir-invalid` (present but not a
+non-empty string -- refused rather than treated as absent, which would
+answer about a path the caller did not ask about).
+
+### `discover_routing`
+
+```json
+{ "found": true, "port": 8463, "token_path": "/Users/x/.ironwire/control.token" }
+{ "found": false }
+```
+
+Reads `~/.ironwire/endpoint.json`, the pointer IronWire writes when its
+daemon binds and removes on a clean stop, and reports what it says. The
+point is that a contributor should not be asked for two things the machine
+already knows.
+
+Takes no parameters and performs no network I/O -- it reads one small local
+file. `probe_routing` is the other half: this method reports a proxy that
+published itself, the probe checks a proxy the contributor named.
+
+`found` is a boolean and not a vocabulary of outcome names on purpose. There
+is one distinction to draw -- a pointer was read, or it was not -- and every
+reason it was not (IronWire not installed, not running, a version that does
+not publish a pointer, a file this reader will not act on) is the same fact
+to the caller and the same next step for the contributor: type the port. A
+set of outcome strings would invite matching on one, and a name that is a
+prefix of another is how a shell comes to treat `unreachable` as
+`reachable`.
+
+`token_path` is absent when the pointer named none, or named a relative one.
+Its presence is informational -- something to show beside the port. A caller
+does **not** need to pass it back: the daemon resolves the same pointer
+itself whenever it opens a token, so a declaration that names no `token_dir`
+finds it anyway.
+
+**The answer never carries the token**, for the same reason `probe_routing`
+does not: it is a credential for an API that can rewrite the contributor's
+agent configuration, and this answer crosses a socket to a shell. The
+pointer itself never contains a token either -- it names a path.
+
+The pointer's **port is advisory**. It is offered here, to a flow where a
+human confirms it, and it is deliberately not used to override a port
+already declared in settings: IronWire removes the pointer on a clean stop,
+so a crash leaves one behind, and a stale port silently overriding a correct
+declaration would make every trace carry either nothing or another local
+service's data while the settings file and the probe both still agreed on
+the declared port. A missing or stale pointer costs at most one refused
+connection, which is what a daemon that never ran would cost.
+
 ### `set_settings`
 
 Takes a JSON object of settings to change. Every top-level key must be one
 of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
-`local_notifications`, `claude_root`, `codex_root`, `max_uploads_per_day`,
+`local_notifications`, `claude_root`, `codex_root`, `claude_source`,
+`codex_source`, `gemini_source`, `ironwire`, `max_uploads_per_day`,
 `max_bytes_per_day` -- a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently

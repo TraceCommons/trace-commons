@@ -290,6 +290,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");
@@ -377,6 +378,7 @@ mod tests {
             entry_id: crate::daemon::queue::entry_id_for(hash),
             session_hash: hash.into(),
             source: "claude-code".into(),
+            declared_source: None,
             project_key: "/Users/z/code/proj".into(),
             project_label: "proj".into(),
             path: std::path::PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),

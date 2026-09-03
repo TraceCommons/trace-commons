@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCBridge
 import TCShellCore
 import TCUpdates
 
@@ -51,6 +52,20 @@ struct SettingsContent: View {
     /// background refresh cannot rewrite what is being typed.
     @State private var handleDraft = ""
     @State private var bioDraft = ""
+    /// The routing card's three controls, held here rather than bound to
+    /// the daemon's answer.
+    ///
+    /// Seeded from the declaration on appear and after a write, for the same
+    /// reason the profile fields are: a background refresh landing mid-edit
+    /// would otherwise replace a half-typed port with the declared one.
+    /// `nil` means not seeded yet.
+    @State private var routingDraft: RoutingForm?
+
+    /// The project a contributor has asked to arm, held while the
+    /// confirmation is on screen. Nil means no sheet. It is the row and not
+    /// a bool because the sheet names the project, and a bool would leave
+    /// the name to be looked up from a selection that has already moved.
+    @State private var armingCandidate: ProjectRow?
 
     /// Spec §5.4: the Settings content column is `max-width:520px` ("prose
     /// column, kept narrow on purpose"), narrower than the 660 that
@@ -68,6 +83,7 @@ struct SettingsContent: View {
             consent
             publicProfile
             watching
+            routing
             projects
             audit
         }
@@ -108,11 +124,13 @@ struct SettingsContent: View {
                 }
             }
             if let settings = model.daemonSettings {
-                // Booleans only. The contract reports the credential and both
-                // session roots as configured-or-not, and this view has
-                // nowhere to put a value even if it were sent one.
-                checkRow("Claude Code sessions folder set", settings.claudeRootConfigured)
-                checkRow("Codex sessions folder set", settings.codexRootConfigured)
+                // No path and no credential: the contract keeps both off the
+                // wire, and this view has nowhere to put one even if it were
+                // sent it. The two session rows are driven by the MODE --
+                // `*_root_configured` is `mode == "watch"` and cannot tell
+                // "not declared" from "declared off".
+                sourceCheckRow(TCSourceChecks.claude, settings.routingSourceModes.claude)
+                sourceCheckRow(TCSourceChecks.codex, settings.routingSourceModes.codex)
                 checkRow("Extra privacy scan configured", settings.nearAIConfigured)
             }
         }
@@ -646,22 +664,212 @@ struct SettingsContent: View {
         }
     }
 
-    // Only `ask` <-> `ignore` is offered here, same as onboarding screen 5:
-    // arming `auto_upload` outside a deliberate confirmation flow is still
-    // not built. Changing a mind about "ignore" -- set during onboarding or
-    // never revisited since -- should not require a terminal, so that half
-    // is wired to `AppModel.setProjectMode`, the same real `set_project_mode`
-    // call the onboarding screen uses.
+    // MARK: - Tools: the local proxy
+
+    /// What each tool does with the first hop out of this machine, and the
+    /// declaration that lets Trace Commons ask.
+    ///
+    /// Every string on this card comes from
+    /// `trace_commons_contributor::routing_copy` through `RoutingCopy` --
+    /// none is written here. Exactly one of those words claims privacy, and
+    /// a hand-written copy of that claim would stop matching the day the
+    /// claim changes with nothing to notice. The card renders nothing at all
+    /// if the payload did not arrive, rather than falling back to wording of
+    /// its own.
+    @ViewBuilder
+    private var routing: some View {
+        if let copy = model.routingCopy {
+            let form = routingDraft ?? model.routingForm
+            VStack(alignment: .leading, spacing: TC.Space.sm) {
+                TCSectionHeader(title: copy.toolsHeading)
+
+                // The per-tool words come first, because they are what
+                // somebody opened this card to read. Each is IronWire's own
+                // answer about that tool, never this app's switch.
+                ForEach(
+                    RoutingSurface.toolRows(
+                        sourceModes: model.daemonSettings?.routingSourceModes ?? .unset,
+                        evidence: model.routingEvidence,
+                        copy: copy,
+                        calls: model.routingCalls
+                    ),
+                    id: \.name
+                ) { row in
+                    HStack {
+                        Text(row.name).font(TC.Font_.body)
+                        Spacer()
+                        // The tone rides on the row, decided by the same
+                        // shared table that chose the word. Nothing here
+                        // reads the word to paint it.
+                        TCTag(text: row.word, tone: tone(row.tone))
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(row.name): \(row.word)")
+                }
+
+                Text(copy.intro)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Toggle(copy.toggle, isOn: Binding(
+                    get: { form.on },
+                    set: { on in
+                        var next = form
+                        next.on = on
+                        routingDraft = next
+                        model.applyIronWire(next)
+                    }
+                ))
+                .toggleStyle(.switch)
+                .tint(TC.green)
+                .font(TC.Font_.body)
+
+                routingState(copy: copy)
+
+                // The port and folder are the override, and they are live
+                // only while the switch is on.
+                VStack(alignment: .leading, spacing: TC.Space.xs) {
+                    TCFieldLabel(copy.portTitle)
+                    TextField(
+                        "",
+                        value: Binding(
+                            get: { Int(form.port) },
+                            set: { value in
+                                var next = form
+                                // Out of range is left as it was rather than
+                                // clamped to something nobody typed. Port 0
+                                // in particular is the ask-the-kernel
+                                // sentinel, which the daemon refuses.
+                                if let port = UInt16(exactly: value), port > 0 { next.port = port }
+                                routingDraft = next
+                            }
+                        ),
+                        format: .number.grouping(.never)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 120, alignment: .leading)
+                    .accessibilityLabel(copy.portTitle)
+                    Text(copy.portNote)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .disabled(!form.on)
+
+                VStack(alignment: .leading, spacing: TC.Space.xs) {
+                    TCFieldLabel(copy.folderTitle)
+                    TextField("", text: Binding(
+                        get: { form.tokenDir },
+                        set: { value in
+                            var next = form
+                            next.tokenDir = value
+                            routingDraft = next
+                        }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel(copy.folderTitle)
+                    Text(copy.folderNote)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .disabled(!form.on)
+
+                Button(model.routingChecking ? copy.checking : copy.apply) {
+                    model.applyIronWire(form)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!form.on || model.routingChecking)
+
+                if let probeLine = model.routingProbeLine {
+                    Text(probeLine)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Said out loud because the obvious worry is that it is not
+                // true. Nothing on this card waits on the app being started
+                // again: a changed declaration is applied to the running
+                // daemon and read on its next poll.
+                Text(copy.appliesAtOnce)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                routingDraft = model.routingForm
+                model.refreshRoutedTools()
+            }
+        }
+    }
+
+    /// The daemon's own three-state view of what it is seeing, and when it
+    /// last got an answer.
+    ///
+    /// `awaiting_rows` is held, never a fault: a reader built a moment ago
+    /// starts empty by construction, so this is what a contributor sees
+    /// immediately after changing anything here.
+    @ViewBuilder
+    private func routingState(copy: RoutingCopy) -> some View {
+        let state = model.status.routing.state
+        // From the state, never from the sentence it produced. `tone` maps
+        // only the three values this surface can take, so nothing here can
+        // reach a fault colour whatever the daemon reports.
+        let stateTone = tone(RoutingSurface.tone(forState: state, calls: model.routingCalls))
+        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+            Text(RoutingSurface.stateLine(state, copy: copy, calls: model.routingCalls))
+                .font(TC.Font_.body)
+                .foregroundStyle(stateTone.textColor)
+                .fixedSize(horizontal: false, vertical: true)
+            // "Last checked" is a stamp on the running daemon -- never an
+            // install date, never a connected-since -- so it is only shown
+            // on a state that has actually had an answer.
+            if RoutingSurface.showsLastChecked(forState: state, calls: model.routingCalls),
+               let at = model.status.routing.lastRefreshAt,
+               let line = TCRoutingCopy.lastChecked(
+                   when: Self.lastChecked.localizedString(for: at, relativeTo: Date())
+               ) {
+                Text(line)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The humanised time is the one part of this surface each shell renders
+    /// for itself: it is a rendering of a timestamp, not wording about
+    /// routing. The sentence around it comes from the Rust.
+    private static let lastChecked: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
+
+    private func tone(_ tone: RoutingTone) -> TC.Tone {
+        switch tone {
+        case .clear: return .clear
+        case .held: return .held
+        case .neutral: return .neutral
+        }
+    }
+
+    // Every mode is offered here, arming included -- the Linux and Windows
+    // shells have offered it from their settings for some time, and until
+    // now a macOS contributor's only route to it was the CLI. Onboarding
+    // still withholds it, deliberately: arming before anyone has seen a
+    // single preview asks for trust they have no basis to give yet
+    // (`OnboardingProjectsView`). By the time someone is in Settings they
+    // have that basis, which is the difference between the two surfaces.
     //
-    // That call now names the project by the opaque id `list_projects` mints.
-    // It used to send `project_label` as a `project_key` and be refused with
-    // `project-key-unrecognized` for every real project, which this comment
-    // used to describe as expected; it is not expected any more.
+    // The list comes from `ProjectRow.offerableModes` rather than from
+    // `ProjectMode`'s cases, because the daemon refuses `auto_upload` for
+    // the unresolvable bucket and a control offering it there would be a
+    // choice that cannot be delivered.
     //
-    // When the arming flow IS built, it must consult `ProjectRow.canBeArmed`
-    // rather than listing every `ProjectMode`. The daemon refuses
-    // `auto_upload` for the unresolvable bucket, so a control offering it
-    // there would be a choice that cannot be delivered.
+    // `setProjectMode` names the project by the opaque id `list_projects`
+    // mints. It used to send `project_label` as a `project_key` and be
+    // refused with `project-key-unrecognized` for every real project; that
+    // is not expected any more.
     private var projects: some View {
         VStack(alignment: .leading, spacing: TC.Space.sm) {
             TCSectionHeader(title: "Projects")
@@ -682,22 +890,13 @@ struct SettingsContent: View {
                             // matching on because it is display text.
                             Text(project.displayLabel)
                             Spacer()
-                            Text(modeSentence(project.mode)).foregroundStyle(.secondary)
-                            if project.mode == .ask || project.mode == .ignore {
-                                Button(project.mode == .ignore ? "Ask again" : "Ignore") {
-                                    model.setProjectMode(
-                                        project,
-                                        mode: project.mode == .ignore ? .ask : .ignore
-                                    )
-                                }
-                                .buttonStyle(.bordered)
-                            }
+                            modePicker(project)
                         }
                         // Why this row is different, said on the row rather
-                        // than in a footnote -- and it also corrects the
-                        // section's closing sentence for this one project,
-                        // which otherwise reads as a promise that arming
-                        // becomes possible later. For this row it never does.
+                        // than in a footnote. Its picker is short one option
+                        // and that absence would otherwise be unexplained --
+                        // a contributor comparing two rows would be left to
+                        // guess whether it was a bug.
                         if project.isUnresolvedBucket {
                             Text(ProjectCopy.unresolvedBucketNote)
                                 .font(TC.Font_.caption)
@@ -707,14 +906,72 @@ struct SettingsContent: View {
                     }
                     .font(TC.Font_.body)
                 }
-                Text("""
-                Arming a project so it contributes without asking is a deliberate \
-                confirmation flow, and it is not built yet.
-                """)
-                .font(TC.Font_.caption)
-                .foregroundStyle(.secondary)
             }
         }
+        // Presented from the section rather than from each row: one sheet
+        // for the list, named by whichever row is being armed. A modifier
+        // per row would build as many dialogs as there are projects, and
+        // two of them can be presented at once.
+        .confirmationDialog(
+            armingCandidate.map { ProjectArmingCopy.confirmationTitle(project: $0.displayLabel) }
+                ?? "",
+            isPresented: Binding(
+                get: { armingCandidate != nil },
+                // Any dismissal -- the Escape key, a click outside, either
+                // button -- clears the candidate. Leaving it set would show
+                // the sheet again the next time anything else republished
+                // this view.
+                set: { if !$0 { armingCandidate = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: armingCandidate
+        ) { project in
+            // `.destructive` is the wrong role: arming destroys nothing and
+            // is reversible from this same picker. It is emphasised rather
+            // than alarmed -- the Linux shell marks it destructive, which
+            // this shell deliberately does not follow, because on macOS that
+            // role means data is about to be lost and none is.
+            Button(ProjectArmingCopy.confirm) {
+                model.setProjectMode(project, mode: .autoUpload)
+                armingCandidate = nil
+            }
+            Button(ProjectArmingCopy.cancel, role: .cancel) { armingCandidate = nil }
+        } message: { _ in
+            Text(ProjectArmingCopy.confirmationBody)
+        }
+    }
+
+    /// The mode control for one project row.
+    ///
+    /// The binding reads through to `project.mode` -- the daemon's own
+    /// answer, republished by `refreshProjects` -- and never to local state,
+    /// so a mode the daemon refuses leaves the picker showing what is
+    /// actually in force rather than what was clicked. That is also what
+    /// makes cancelling the arming sheet need no revert: nothing moved.
+    private func modePicker(_ project: ProjectRow) -> some View {
+        Picker(
+            "",
+            selection: Binding(
+                get: { project.mode },
+                set: { wanted in
+                    guard wanted != project.mode else { return }
+                    // Arming is allowed from here, but never silently.
+                    // Everything else is a direct call: changing a mind
+                    // about "ignore" should not cost a sheet.
+                    if wanted == .autoUpload {
+                        armingCandidate = project
+                    } else {
+                        model.setProjectMode(project, mode: wanted)
+                    }
+                }
+            )
+        ) {
+            ForEach(project.offerableModes, id: \.self) { mode in
+                Text(ProjectCopy.modeChoiceLabel(mode)).tag(mode)
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
     }
 
     // MARK: - The local change log
@@ -795,11 +1052,22 @@ struct SettingsContent: View {
         return "\(sentence) \(project)"
     }
 
-    private func modeSentence(_ mode: ProjectMode) -> String {
-        switch mode {
-        case .ask: return "Asks you first"
-        case .autoUpload: return "Contributed without asking"
-        case .ignore: return "Never offered"
+    /// One session-source row, worded by the Rust from the MODE.
+    ///
+    /// Not from `claudeRootConfigured`, which is `mode == "watch"` and so is
+    /// false for `off` as well as for `unset`. The GTK and Windows shells
+    /// branched on that boolean and printed "sessions read from the usual
+    /// place" for a tool the contributor had declared off; this view printed
+    /// an unticked "sessions folder set", which is not false but says
+    /// nothing about what `off` means. All three now render one sentence per
+    /// mode, from `trace_commons_contributor::source_copy`.
+    ///
+    /// Nothing is drawn if the ABI refused. A blank row is better than a
+    /// sentence about somebody's session folder written in Swift.
+    @ViewBuilder
+    private func sourceCheckRow(_ tool: String, _ sourceMode: String) -> some View {
+        if let line = TCSourceChecks.checkLine(tool: tool, sourceMode: sourceMode) {
+            checkRow(line, sourceMode == "watch")
         }
     }
 

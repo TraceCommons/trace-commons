@@ -213,10 +213,21 @@ enum AllocKind {
 static REGISTRY: LazyLock<Mutex<HashMap<usize, AllocKind>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Records `ptr` as a live allocation of `kind`.
+///
+/// Recovers from a poisoned mutex the same way `registry_take` and
+/// `registry_is` do. Dropping the insert instead used to cost a leak -- the
+/// allocation still worked, only its free was refused as unknown. Now that
+/// the six borrowing entry points consult the registry too, a dropped insert
+/// would hand the caller a handle that every one of them refuses forever, so
+/// the one accessor that silently gave up is the one that can least afford
+/// to.
 fn registry_insert(ptr: usize, kind: AllocKind) {
-    if let Ok(mut r) = REGISTRY.lock() {
-        r.insert(ptr, kind);
-    }
+    let mut r = match REGISTRY.lock() {
+        Ok(r) => r,
+        Err(p) => p.into_inner(),
+    };
+    r.insert(ptr, kind);
 }
 
 /// Removes `ptr` from the registry if, and only if, it is currently
@@ -229,10 +240,18 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
         Ok(r) => r,
         Err(p) => p.into_inner(),
     };
-    match r.remove(&ptr) {
-        Some(found) if found == kind => Ok(()),
-        Some(_) => Err("cross-type-free"),
-        None => Err("double-free-or-unknown-pointer"),
+    // Inspect BEFORE removing. `remove` first would delete the entry and
+    // only then report the mismatch, so a refused cross-type free would
+    // unregister a live allocation: the pointer stays valid but every
+    // `registry_is` check on it fails from then on, and its real free is
+    // refused as unknown. A refusal must leave the registry untouched.
+    match r.entry(ptr) {
+        std::collections::hash_map::Entry::Occupied(found) if *found.get() == kind => {
+            found.remove();
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err("cross-type-free"),
+        std::collections::hash_map::Entry::Vacant(_) => Err("double-free-or-unknown-pointer"),
     }
 }
 
@@ -240,10 +259,13 @@ fn registry_take(ptr: usize, kind: AllocKind) -> Result<(), &'static str> {
 ///
 /// This is what the borrowing accessors (`tc_preview_body`,
 /// `tc_preview_summary_json`, `tc_preview_search`) consult before they
-/// dereference. Without it they trusted the caller's pointer outright, so a
-/// stale (already-freed) or cross-type pointer was a use-after-free or a
-/// type confusion rather than the fixed error the rest of this ABI
-/// promises.
+/// dereference, and what `handle_pointer_is_live` consults on behalf of
+/// the six `tc_handle*` entry points that borrow rather than free a
+/// handle (`tc_daemon_stop`, `tc_call`, `tc_subscribe`, `tc_unsubscribe`,
+/// `tc_preview_open`, `tc_preview_turns_json`). Without it they trusted
+/// the caller's pointer outright, so a stale (already-freed) or
+/// cross-type pointer was a use-after-free or a type confusion rather
+/// than the fixed error the rest of this ABI promises.
 ///
 /// What this can and cannot guarantee, stated honestly:
 ///
@@ -752,6 +774,65 @@ fn stop_embedded(handle: &tc_handle) {
     .join();
 }
 
+/// The fixed label the handle entry points below report for a pointer
+/// that is not a live `tc_handle*`.
+const ERR_INVALID_HANDLE_POINTER: &str = "invalid-handle-pointer";
+
+/// The three other reasons `tc_subscribe` returns 0.
+///
+/// `tc_subscribe` returns 0 for a NULL handle, a non-live handle, a NULL
+/// callback, and a stopped daemon. Only the non-live case recorded a label,
+/// so a host following "token == 0, read `tc_last_error`" got a stale,
+/// unrelated label for the other three. Labelling all four makes that
+/// contract total.
+const ERR_NULL_HANDLE: &str = "null-handle";
+const ERR_NULL_CALLBACK: &str = "null-callback";
+const ERR_DAEMON_NOT_RUNNING: &str = "daemon-not-running";
+
+/// Validate a borrowed `tc_handle*` before any dereference, recording the
+/// fixed label itself.
+///
+/// Mirrors [`preview_pointer_is_live`] exactly, for the same reason and
+/// against the same threat. `tc_daemon_stop`, `tc_call`, `tc_subscribe`,
+/// `tc_unsubscribe`, `tc_preview_open`, and `tc_preview_turns_json` each
+/// null-checked `handle` and then dereferenced it, with nothing in
+/// between confirming it was ever a live `tc_handle*` at all -- a stale
+/// pointer (already freed by `tc_handle_free`) or a cross-type one (a
+/// `tc_preview*` passed here by mistake) was a use-after-free or a type
+/// confusion, not the fixed error the free functions and the preview
+/// accessors already promise. `registry_is`, not `registry_take`: every
+/// one of these six functions borrows the handle rather than consuming
+/// it, exactly like the preview accessors borrow the preview.
+///
+/// This runs *outside* [`guard`] where the existing null check already
+/// does (`tc_daemon_stop`, `tc_unsubscribe`), and immediately after the
+/// null check but still before the first dereference where the null
+/// check already lives inside a `guard`/`guard_forwarding` closure
+/// (`tc_call`, `tc_subscribe`, `tc_preview_open`,
+/// `tc_preview_turns_json`) -- in both places, strictly before any use of
+/// `handle` as a reference. The reason is the same one
+/// `preview_pointer_is_live` gives: `guard` discards the underlying error
+/// text and substitutes `"operation-failed"`, which would hide the one
+/// label a host needs to tell a stale or wrong-type handle from an
+/// ordinary failure. It performs no dereference and cannot panic (the
+/// registry mutex is poison-tolerant), so nothing is given up by running
+/// it before the panic guard.
+///
+/// Carries the same two caveats `registry_is`'s own doc states: it cannot
+/// make a concurrent free safe (this check and the dereference that
+/// follows are not atomic with a racing `tc_handle_free`), and a freed
+/// address can be reused by a later `tc_handle` allocation, in which case
+/// the check passes for a pointer whose original object is gone. The
+/// registry narrows accidental misuse to a clean error; it does not
+/// replace the caller's ownership discipline.
+fn handle_pointer_is_live(handle: *const tc_handle) -> bool {
+    if registry_is(handle as usize, AllocKind::Handle) {
+        return true;
+    }
+    set_last_error(ERR_INVALID_HANDLE_POINTER);
+    false
+}
+
 /// Stop the daemon loop. Idempotent, and safe to call from any thread --
 /// including from inside a `tc_subscribe` callback -- and safe to call
 /// concurrently with `tc_call`/`tc_preview_open`/`tc_subscribe` on other
@@ -761,6 +842,11 @@ fn stop_embedded(handle: &tc_handle) {
 /// memory, because this function does **not** free `handle`. Call
 /// `tc_handle_free` once nothing else will use `handle` again to reclaim
 /// it. Safe to call with NULL (no-op).
+///
+/// Detects and refuses a pointer that is not a live `tc_handle*` --
+/// already freed by `tc_handle_free`, or a `tc_preview*` passed here by
+/// mistake -- recording the fixed label `"invalid-handle-pointer"` via
+/// `tc_last_error` and returning without dereferencing it.
 ///
 /// Idempotent, but **not a teardown barrier for a second concurrent
 /// caller**: if two threads call this at once, one performs the teardown
@@ -781,6 +867,9 @@ fn stop_embedded(handle: &tc_handle) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_daemon_stop(handle: *mut tc_handle) {
     if handle.is_null() {
+        return;
+    }
+    if !handle_pointer_is_live(handle) {
         return;
     }
     let _ = guard(|| {
@@ -842,6 +931,11 @@ pub unsafe extern "C" fn tc_handle_free(handle: *mut tc_handle) {
 /// NULL `handle`/`method`/`params_json`, is reported as a JSON error frame
 /// rather than a null pointer or a crash.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` -- already freed,
+/// or a `tc_preview*` passed here by mistake -- is refused the same way:
+/// a JSON error frame (`bad_params` / `"invalid-handle-pointer"`) rather than a
+/// dereference of a pointer this crate cannot trust the type of.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start` (or NULL).
 /// `method` and `params_json`, if non-null, must be valid NUL-terminated C
@@ -856,6 +950,9 @@ pub unsafe extern "C" fn tc_call(
         let body: String = (|| {
             if handle.is_null() {
                 return error_frame(ERR_BAD_PARAMS, "null-handle");
+            }
+            if !handle_pointer_is_live(handle) {
+                return error_frame(ERR_BAD_PARAMS, ERR_INVALID_HANDLE_POINTER);
             }
             let handle = unsafe { &*handle };
             let method = match unsafe { borrow_str(method) } {
@@ -944,9 +1041,14 @@ pub unsafe extern "C" fn tc_invite_issuer_host(invite: *const c_char) -> *mut c_
 /// synthetic `{"event":"lagged","data":{"skipped":N}}` frame rather than
 /// silently dropped with no signal.
 ///
-/// Returns 0 on failure (a NULL `handle`, a NULL `cb`, or a stopped
-/// daemon) -- 0 is never a valid subscription token. On success, returns a
-/// nonzero token identifying this subscription for `tc_unsubscribe`.
+/// Returns 0 on failure -- 0 is never a valid subscription token. On
+/// success, returns a nonzero token identifying this subscription for
+/// `tc_unsubscribe`.
+///
+/// Every zero return records a fixed label retrievable with
+/// `tc_last_error`, so "token == 0, read `tc_last_error`" is a total
+/// contract: `"null-handle"`, `"invalid-handle-pointer"` (not a live
+/// `tc_handle*`), `"null-callback"`, or `"daemon-not-running"`.
 ///
 /// The callback runs on a background thread and is not itself unwind-safe
 /// across languages: a callback that panics on the Swift/C# side is that
@@ -966,13 +1068,19 @@ pub unsafe extern "C" fn tc_subscribe(
 ) -> u64 {
     let outcome = guard(|| {
         if handle.is_null() {
+            set_last_error(ERR_NULL_HANDLE);
+            return Ok(0u64);
+        }
+        if !handle_pointer_is_live(handle) {
             return Ok(0u64);
         }
         let handle_ref = unsafe { &*handle };
         let Some(cb) = cb else {
+            set_last_error(ERR_NULL_CALLBACK);
             return Ok(0u64);
         };
         let Some(shared) = shared_of(handle_ref) else {
+            set_last_error(ERR_DAEMON_NOT_RUNNING);
             return Ok(0u64);
         };
         // Raw pointers are not `Send`; `ctx` is a caller-supplied opaque
@@ -1046,6 +1154,11 @@ pub unsafe extern "C" fn tc_subscribe(
 /// A no-op if `token` is 0 or unknown (already unsubscribed, or never
 /// valid).
 ///
+/// Also a no-op, recording the fixed label `"invalid-handle-pointer"` via
+/// `tc_last_error`, if `handle` is non-null but not a live `tc_handle*`
+/// -- refused before any dereference, the same as every other entry
+/// point in this file.
+///
 /// Must be called from a plain thread that is not inside any tokio runtime
 /// context -- in particular, never from inside a `tc_subscribe` callback,
 /// including that subscription's own callback unsubscribing itself. Doing
@@ -1068,7 +1181,18 @@ pub unsafe extern "C" fn tc_subscribe(
 /// no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
-    if handle.is_null() || token == 0 {
+    if handle.is_null() {
+        return;
+    }
+    // Liveness first, then the token. Checking `token == 0` alongside the
+    // null check would let a freed or wrong-kind handle paired with a zero
+    // token return silently, with no `tc_last_error` -- and this function's
+    // own contract, and the header's, promise the label for every non-null
+    // handle that is not live.
+    if !handle_pointer_is_live(handle) {
+        return;
+    }
+    if token == 0 {
         return;
     }
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -1130,6 +1254,10 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
 /// than silently editing that content is the only option that keeps that
 /// promise.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused the
+/// same way, before any dereference: NULL plus `*err` set to the fixed
+/// label `"invalid-handle-pointer"`.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` must
 /// be a valid NUL-terminated C string (or NULL). `err`, if non-null, must
@@ -1150,6 +1278,9 @@ pub unsafe extern "C" fn tc_preview_open(
     let outcome = guard_forwarding(|| {
         if handle.is_null() {
             anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;
@@ -1242,6 +1373,10 @@ pub unsafe extern "C" fn tc_preview_open(
 /// Carries no redacted trace text: event-type labels, tool names the
 /// envelope already records as metadata, and byte offsets.
 ///
+/// A non-NULL `handle` that is not a live `tc_handle*` is refused the
+/// same way, before any dereference: NULL plus `*err` set to the fixed
+/// label `"invalid-handle-pointer"`.
+///
 /// # Safety
 /// `handle` must be a live pointer from `tc_daemon_start`. `entry_id` and
 /// `body_digest` must be valid NUL-terminated C strings (or NULL, which is
@@ -1261,6 +1396,9 @@ pub unsafe extern "C" fn tc_preview_turns_json(
     let outcome = guard_forwarding(|| {
         if handle.is_null() {
             anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
         }
         let handle = unsafe { &*handle };
         let entry_id = unsafe { borrow_str(entry_id) }?;
@@ -1575,6 +1713,377 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
     })
     .unwrap_or_else(|_| {
         set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// Every fixed word on the routing surface, in one call.
+///
+/// Needs no handle: it describes the build, not a running daemon.
+///
+/// Returns an owned JSON object whose keys are `RoutingCopy`'s fields; free
+/// it with [`tc_string_free`].
+///
+/// ONE CALL, NOT ONE PER STRING. `tc_scrub_detector_names` answers a single
+/// question and returns a single list; this is a whole screen's wording and
+/// must arrive as a set. Exporting the words one at a time would let a shell
+/// take four of them and hand-write the fifth, and a hand-written word on
+/// this surface is a privacy claim that silently stops matching the one the
+/// other two shells print.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_copy() -> *mut c_char {
+    guard(|| {
+        let copy = trace_commons_contributor::routing_copy::routing_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The C ABI's spelling of
+/// [`trace_commons_contributor::routing_copy::ToolWiring`].
+///
+/// Anything outside 0..=1 is [`ToolWiring::Unknown`], which is the value
+/// that claims nothing. That is deliberate rather than an error: a shell
+/// built against a later header, or one that passed a value this build has
+/// never heard of, must produce no verdict rather than a confident one.
+fn tool_wiring_from_abi(value: i32) -> trace_commons_contributor::routing_copy::ToolWiring {
+    use trace_commons_contributor::routing_copy::ToolWiring;
+    match value {
+        TC_TOOL_WIRING_WIRED => ToolWiring::Wired,
+        TC_TOOL_WIRING_NOT_WIRED => ToolWiring::NotWired,
+        _ => ToolWiring::Unknown,
+    }
+}
+
+/// IronWire listed this tool and said it is pointed at a local address.
+const TC_TOOL_WIRING_WIRED: i32 = 0;
+/// IronWire listed this tool and said it is not.
+const TC_TOOL_WIRING_NOT_WIRED: i32 = 1;
+
+/// The tone values [`tc_routing_tool_tone`] and [`tc_routing_state_tone`]
+/// answer in.
+///
+/// ONE NUMBERING FOR BOTH. A tool word can never be `HELD` -- only a daemon
+/// state waits on something -- but giving the two calls separate numberings
+/// would mean two `1`s meaning different things on one ABI, and a shell that
+/// mapped the wrong one would mispaint a privacy claim rather than fail.
+const TC_ROUTING_TONE_NEUTRAL: i32 = 0;
+const TC_ROUTING_TONE_HELD: i32 = 1;
+const TC_ROUTING_TONE_CLEAR: i32 = 2;
+
+/// One tool's word, from what the contributor said about that tool's
+/// sessions and what IronWire said about that tool.
+///
+/// `source_mode` is `get_settings`'s `*_source_mode` -- `off`, `watch` or
+/// `unset`. `wiring` is `TC_TOOL_WIRING_*`; anything else is the unknown
+/// state, which claims nothing.
+///
+/// THE BRANCH TABLE CROSSES, NOT ONLY THE WORDS. [`tc_routing_copy`] hands
+/// a shell four words; without this call each shell also decides which of
+/// the four a tool gets, and three native copies of that decision can drift
+/// apart silently while every string stays identical. The words could not
+/// drift; the branching could, in three places, and nothing in this repo
+/// would have noticed.
+///
+/// Pair every call with [`tc_routing_tool_tone`] rather than comparing the
+/// returned word against the private one. `Private` is a substring of the
+/// denial that must never come back.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. Returns NULL
+/// for a NULL or non-UTF-8 `source_mode`, recording `null-pointer` or
+/// `invalid-utf8`: a shell that cannot say what the contributor declared
+/// should get no word rather than one built on a guess.
+///
+/// # Safety
+/// `source_mode` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_tool_word(
+    source_mode: *const c_char,
+    wiring: i32,
+) -> *mut c_char {
+    guard_forwarding(|| {
+        let source_mode = unsafe { borrow_str(source_mode) }?;
+        Ok(to_owned_cstring(
+            trace_commons_contributor::routing_copy::tool_word(
+                source_mode,
+                tool_wiring_from_abi(wiring),
+            ),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
+/// How the word [`tc_routing_tool_word`] returned is painted:
+/// `TC_ROUTING_TONE_NEUTRAL` or `TC_ROUTING_TONE_CLEAR`.
+///
+/// Takes the same two inputs as the word, so the two stay in step by
+/// construction. **A shell must not recover this by comparing the rendered
+/// word against the private one** -- that is a text comparison against a
+/// privacy claim, and `Private` is a substring of `Not private`.
+///
+/// Answers `TC_ROUTING_TONE_NEUTRAL` -- the tone that claims nothing -- for a
+/// NULL or non-UTF-8 `source_mode` and on a caught panic. There is no
+/// failure value: a styling call that returned an error would leave a shell
+/// choosing a tone for itself, which is the thing this exists to stop.
+///
+/// # Safety
+/// `source_mode` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_tool_tone(source_mode: *const c_char, wiring: i32) -> i32 {
+    use trace_commons_contributor::routing_copy::ToolTone;
+    guard(|| {
+        let Ok(source_mode) = (unsafe { borrow_str(source_mode) }) else {
+            return Ok(TC_ROUTING_TONE_NEUTRAL);
+        };
+        Ok(
+            match trace_commons_contributor::routing_copy::tool_tone(
+                source_mode,
+                tool_wiring_from_abi(wiring),
+            ) {
+                ToolTone::Neutral => TC_ROUTING_TONE_NEUTRAL,
+                ToolTone::Clear => TC_ROUTING_TONE_CLEAR,
+            },
+        )
+    })
+    .unwrap_or(TC_ROUTING_TONE_NEUTRAL)
+}
+
+/// The daemon's routing state, in words.
+///
+/// Exported for the same reason [`tc_routing_tool_word`] is: the sentences
+/// were already shared, but the mapping from `awaiting_rows` / `rows_seen`
+/// / anything-else onto them was written out again in each shell, and three
+/// copies of a branch can disagree while three copies of a string cannot.
+///
+/// A state this build has never heard of -- and a NULL or non-UTF-8 `state`
+/// -- reads as the off line, which claims nothing. It never falls through
+/// to either "on" sentence.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_state_line(state: *const c_char) -> *mut c_char {
+    guard(|| {
+        // An unreadable state is a state this build does not know, and the
+        // rule for those is already the safe one: say what off says.
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::routing_copy::ironwire_state_line(state),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// How firmly the sentence [`tc_routing_state_line`] returned reads:
+/// `TC_ROUTING_TONE_NEUTRAL`, `_HELD` or `_CLEAR`.
+///
+/// Exported for the reason the sentence is. This was the last routing branch
+/// table still written out natively in all three shells -- `routing_tone` in
+/// GTK, `tone(forState:)` in Swift, `StateTone` in C# -- three copies of one
+/// decision that agreed today and could drift apart in silence tomorrow.
+///
+/// None of the three states is a fault, and none of them can reach a fault
+/// tone through here: `awaiting_rows` is `HELD` and never an error, because a
+/// reader built a moment ago starts empty by construction and that is the
+/// state a contributor sees immediately after touching anything on this card.
+///
+/// Answers `TC_ROUTING_TONE_NEUTRAL` -- the tone that claims nothing -- for a
+/// state this build has never heard of, for a NULL or non-UTF-8 `state`, and
+/// on a caught panic. There is no failure value, for the reason on
+/// [`tc_routing_tool_tone`].
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_state_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::routing_copy::StateTone;
+    guard(|| {
+        // An unreadable state is a state this build does not know, and the
+        // rule for those is already the safe one -- the same rule, and the
+        // same fallback, as `tc_routing_state_line`.
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::routing_copy::ironwire_state_tone(state) {
+                StateTone::Neutral => TC_ROUTING_TONE_NEUTRAL,
+                StateTone::Held => TC_ROUTING_TONE_HELD,
+                StateTone::Clear => TC_ROUTING_TONE_CLEAR,
+            },
+        )
+    })
+    .unwrap_or(TC_ROUTING_TONE_NEUTRAL)
+}
+
+/// The routing surface's "that file could not be used" sentence, assembled.
+///
+/// `token_path` may be NULL, which is the case where nothing resolved at
+/// all; the sentence for that says what to do instead of naming a file it
+/// does not have.
+///
+/// ASSEMBLED HERE, DELIBERATELY. The alternative -- exporting a template
+/// with a `{path}` in it and letting each shell format it -- would make the
+/// shells a fourth, fifth and sixth place this wording lives, each free to
+/// drop a clause around the hole, and nothing in this repo would notice.
+/// The sweep in `routing_copy` renders these sentences and checks them; it
+/// can only do that for sentences finished on this side.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `token_path`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_token_line(token_path: *const c_char) -> *mut c_char {
+    guard(|| {
+        // A NULL path is the "nothing resolved" case and not an error. Bytes
+        // that are not UTF-8 are treated the same way: this sentence exists
+        // to tell somebody what to do next, and refusing to produce it
+        // because a path is oddly encoded would leave the screen silent.
+        let path = if token_path.is_null() {
+            None
+        } else {
+            unsafe { borrow_str(token_path) }.ok()
+        };
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_token_line(path),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "nothing answered" sentence, assembled.
+///
+/// `port` outside 1..=65535 -- including the 0 a caller passes for "no port
+/// was tried" -- produces the sentence that names no port, rather than one
+/// that names a port number nobody used.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`].
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_unreachable_line(port: i32) -> *mut c_char {
+    guard(|| {
+        let port = u16::try_from(port).ok().filter(|p| *p != 0);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_unreachable_line(port),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The routing surface's "Last checked ..." sentence, assembled.
+///
+/// `when` is the shell's own humanised time -- "an hour ago", "yesterday".
+/// That is the one piece of this surface each shell renders for itself,
+/// because it is a rendering of a timestamp and not wording about routing.
+/// The words around it are still written once, here.
+///
+/// A NULL or non-UTF-8 `when` returns NULL and records an error: unlike the
+/// two sentences above there is no meaningful shorter form of this one --
+/// "Last checked " with nothing after it is worse than no line at all -- and
+/// a shell that has no timestamp should not be calling it.
+///
+/// Uses [`guard_forwarding`] rather than [`guard`], which the rule on that
+/// function permits here: the closure's only error paths are
+/// [`borrow_str`]'s two fixed labels, `null-pointer` and `invalid-utf8`.
+/// Neither embeds any caller content, so forwarding them is exactly as safe
+/// as the fixed label, and a shell can tell the two apart.
+///
+/// Returns an owned string; free it with [`tc_string_free`].
+///
+/// # Safety
+/// `when` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let when = unsafe { borrow_str(when) }?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::last_checked_line(when),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
+/// The settings screen's session-source row for one tool, assembled.
+///
+/// `tool` is `claude`, `codex` or `gemini`. `source_mode` is
+/// `get_settings`'s `*_source_mode` -- `watch`, `off` or `unset`.
+///
+/// THREE MODES, THREE SENTENCES. `*_root_configured` is `mode == "watch"`
+/// and is therefore false for both `off` and `unset`; a shell that branches
+/// on it tells a contributor who declared a tool OFF that their sessions are
+/// being read from the usual place, which is false in the fail-open
+/// direction on the one screen they would check. A shell must call this with
+/// the mode word and render what comes back, not derive a second branch from
+/// the boolean.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`]. Do not
+/// reassemble it from parts, and do not build the `off` line as the `unset`
+/// line with a "not" in front: no word on this surface may deny a privacy
+/// claim another word makes.
+///
+/// A mode this build does not know reads as `unset`, deliberately -- see
+/// `source_copy::source_check_line`. A `tool` this build does not know is an
+/// error, because there is no safe sentence for a tool with no name.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL with
+/// `unknown-source-tool`, `null-pointer`, `invalid-utf8` or `panic` on
+/// [`tc_last_error`].
+///
+/// Uses [`guard_forwarding`], which the rule on that function permits here:
+/// every error label is fixed and none embeds caller content.
+///
+/// # Safety
+/// `tool` and `source_mode` must point to valid, NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_source_check_line(
+    tool: *const c_char,
+    source_mode: *const c_char,
+) -> *mut c_char {
+    guard_forwarding(|| {
+        let tool = unsafe { borrow_str(tool) }?;
+        let source_mode = unsafe { borrow_str(source_mode) }?;
+        let tool = trace_commons_contributor::source_copy::SourceTool::from_key(tool)
+            .ok_or_else(|| anyhow::anyhow!("unknown-source-tool"))?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::source_copy::source_check_line(tool, source_mode),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
         std::ptr::null_mut()
     })
 }

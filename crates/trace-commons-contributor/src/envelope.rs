@@ -527,7 +527,8 @@ fn build_raw_contribution_with_id(
             .unwrap_or_else(|| "unknown".to_string()),
     );
 
-    let events: Vec<RawTraceContributionEvent> = raw_events_for(&t.events, now);
+    let events: Vec<RawTraceContributionEvent> =
+        raw_events_for_with_routing(&t.events, &t.routing, now);
     // Which tools a replay would have to stand up. The list was empty on every
     // envelope this client ever sent, which also zeroed the scorecard's
     // coverage term for a transcript that plainly covered tools.
@@ -538,10 +539,16 @@ fn build_raw_contribution_with_id(
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
-    let replayable = !events.is_empty();
+    // Routing rows are attribution metadata, not mappable conversation
+    // content -- a session with zero real events but one routing row is not
+    // replayable just because `events` is non-empty. See
+    // `compute_value_scorecard`'s matching guard in the protocol crate.
+    let replayable = events
+        .iter()
+        .any(|event| event.event_type != TraceContributionEventType::RoutingDecision);
     // The declaration describes the payload above, rather than asserting a
     // constant. See `declared_content_presence`.
-    let (message_text_included, tool_payloads_included) = declared_content_presence(&events);
+    let presence = declared_content_presence(&events);
     // Built before the consent block so the declaration can describe it. A
     // correction is its own content class, not message text: see
     // `ConsentMetadata::correction_included`. `false` unless the caller
@@ -584,9 +591,10 @@ fn build_raw_contribution_with_id(
                     parsed
                 }
             },
-            message_text_included,
-            tool_payloads_included,
+            message_text_included: presence.message_text,
+            tool_payloads_included: presence.tool_payloads,
             correction_included,
+            routing_metadata_included: presence.routing_metadata,
             revocable: true,
         },
         contributor: ContributorMetadata {
@@ -660,19 +668,12 @@ pub fn parse_use_names(names: &[String]) -> Vec<TraceAllowedUse> {
 
 /// Overwrite the envelope's consent metadata and trace card with the
 /// claim-granted set. Called after redaction, before size check/upload.
-pub fn apply_granted_scopes(
-    envelope: &mut TraceContributionEnvelope,
-    granted_scopes: &[ConsentScope],
-    granted_uses: &[TraceAllowedUse],
-) {
-    envelope.consent.scopes = granted_scopes.to_vec();
-    envelope.trace_card.allowed_uses = granted_uses.to_vec();
-    envelope.trace_card.consent_scope = granted_scopes
-        .iter()
-        .find(|s| **s != ConsentScope::PublicAttribution)
-        .copied()
-        .unwrap_or(ConsentScope::DebuggingEvaluation);
-}
+///
+/// Moved to `trace-commons-protocol` and re-exported here so no caller moved.
+/// The redaction witness has to apply the grants before it serialises and
+/// digests the envelope -- a grant stamped afterwards is a byte change the
+/// certificate does not cover -- and it cannot reach this crate to do it.
+pub use trace_commons_protocol::trace_contribution::apply_granted_scopes;
 
 /// Stamp the contributor's verdict onto an already-redacted envelope.
 ///
@@ -704,9 +705,19 @@ pub fn apply_verdict(envelope: &mut TraceContributionEnvelope, verdict: Contribu
 ///
 /// Derived from the events as built, after any content gating, so the
 /// declaration and the payload cannot disagree.
-fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, bool) {
-    let mut message_text = false;
-    let mut tool_payloads = false;
+///
+/// A struct rather than a tuple of three bools: the call site at the envelope
+/// builder reads them apart, and three positional bools is exactly the shape
+/// that silently swaps two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeclaredPresence {
+    message_text: bool,
+    tool_payloads: bool,
+    routing_metadata: bool,
+}
+
+fn declared_content_presence(events: &[RawTraceContributionEvent]) -> DeclaredPresence {
+    let mut presence = DeclaredPresence::default();
 
     for event in events {
         let has_content = event
@@ -719,10 +730,10 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
                 | TraceContributionEventType::AssistantMessage
                 | TraceContributionEventType::Reasoning
                 | TraceContributionEventType::RoutingDecision
-                | TraceContributionEventType::Feedback => message_text = true,
+                | TraceContributionEventType::Feedback => presence.message_text = true,
                 TraceContributionEventType::ToolCall
                 | TraceContributionEventType::ToolResult
-                | TraceContributionEventType::HttpExchange => tool_payloads = true,
+                | TraceContributionEventType::HttpExchange => presence.tool_payloads = true,
             }
         }
         // A structured payload is tool-call content regardless of event kind.
@@ -734,14 +745,31 @@ fn declared_content_presence(events: &[RawTraceContributionEvent]) -> (bool, boo
         // free-form as the string beside it. All of that is the same rule the
         // server half applies, from the same function, because the two
         // derivations are required to agree.
+        //
+        // Must agree with `derive_envelope_content_presence` in the protocol
+        // crate. If the client declares honestly and the server then corrects
+        // that declaration upward, the contributor is penalised for telling
+        // the truth. `the_two_content_derivations_agree` pins this.
+        //
+        // That upward-correction mechanism does not exist for
+        // `routing_metadata`: `reconcile_consent_declarations` has no arm for
+        // it, deliberately, because nothing consumes
+        // `consent.routing_metadata_included` as a protective gate the way it
+        // consumes the other two flags. Concordance is still worth keeping
+        // here (a client and server that disagree about what an envelope
+        // contains is a bug either way), it just is not backstopped by a
+        // server-side correction the way the other two flags are.
         if trace_commons_protocol::trace_contribution::payload_carries_readable_content(
             &event.structured_payload,
         ) {
-            tool_payloads = true;
+            match event.event_type {
+                TraceContributionEventType::RoutingDecision => presence.routing_metadata = true,
+                _ => presence.tool_payloads = true,
+            }
         }
     }
 
-    (message_text, tool_payloads)
+    presence
 }
 
 /// Map a whole transcript, so a result can name the call it answers.
@@ -794,6 +822,69 @@ fn raw_events_for(events: &[SessionEvent], now: DateTime<Utc>) -> Vec<RawTraceCo
     }
 
     mapped
+}
+
+/// [`raw_events_for`] plus one `RoutingDecision` per joined inference hop.
+///
+/// The routing events are appended rather than interleaved. A hop is not a
+/// step in the transcript -- it is how a step was served -- and giving it a
+/// position in the sequence would assert an ordering the ledger cannot
+/// support: rows are timestamped by the proxy, session events by the harness,
+/// and the two clocks are not the same clock.
+fn raw_events_for_with_routing(
+    events: &[SessionEvent],
+    routing: &[crate::routing::RoutedExchange],
+    now: DateTime<Utc>,
+) -> Vec<RawTraceContributionEvent> {
+    let mut mapped = raw_events_for(events, now);
+    mapped.extend(routing.iter().map(raw_routing_event_for));
+    mapped
+}
+
+/// One inference hop as an envelope event.
+///
+/// Numbers go in the typed fields the event already carries. Only the labels
+/// with no typed home -- backend, rung, attempts, the requested/served model
+/// pair, the cache token split -- go in `structured_payload`, and that is what
+/// `routing_metadata` declares. `content` stays empty: nothing here is text
+/// from the session, and a routing event that carried prose would declare
+/// `message_text` and mean something else entirely.
+fn raw_routing_event_for(row: &crate::routing::RoutedExchange) -> RawTraceContributionEvent {
+    RawTraceContributionEvent {
+        event_id: Uuid::new_v4(),
+        parent_event_id: None,
+        event_type: TraceContributionEventType::RoutingDecision,
+        timestamp: row.started_at,
+        content: None,
+        structured_payload: serde_json::json!({
+            "backend": row.backend,
+            "facade": row.facade,
+            "rung": row.rung,
+            "attempts": row.attempts,
+            "requested_model": row.requested_model,
+            "served_model": row.served_model,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "status": row.status,
+        }),
+        tool_name: None,
+        tool_call_id: None,
+        latency_ms: row.total_ms.and_then(|ms| u64::try_from(ms).ok()),
+        token_counts: match (row.input_tokens, row.output_tokens) {
+            (Some(input), Some(output)) => Some(TokenCounts {
+                input_tokens: u32::try_from(input).unwrap_or(u32::MAX),
+                output_tokens: u32::try_from(output).unwrap_or(u32::MAX),
+            }),
+            // `None`, never a fabricated zero: an unreported count that summed
+            // as zero would understate what the session actually consumed.
+            _ => None,
+        },
+        cost_usd: row.cost_usd.and_then(|usd| {
+            trace_commons_protocol::trace_contribution::Decimal::try_from(usd).ok()
+        }),
+        success: None,
+        failure_modes: Vec::new(),
+    }
 }
 
 fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEvent {
@@ -862,7 +953,26 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
                 input_tokens,
                 output_tokens,
             }),
-        cost_usd: None,
+        // What the step would have cost at the provider's published list
+        // price -- not a bill, and not money the contributor was charged;
+        // most sessions run under a subscription. `None` wherever the
+        // transcript does not say enough to price it honestly, which is
+        // every source that reports no model or an incomplete usage report,
+        // and every model absent from the price table. Never a zero: a
+        // fabricated zero would silently understate. See `crate::pricing`.
+        cost_usd: match (e.token_counts, e.served_by.as_ref()) {
+            (Some((input_tokens, output_tokens)), Some(served)) => crate::pricing::list_price_usd(
+                &served.model,
+                &crate::pricing::TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens: served.cache_read_tokens,
+                    cache_write_5m_tokens: served.cache_write_5m_tokens,
+                    cache_write_1h_tokens: served.cache_write_1h_tokens,
+                },
+            ),
+            _ => None,
+        },
         success: e.success,
         failure_modes: Vec::new(),
     }
@@ -881,6 +991,27 @@ mod tests {
         src.load(&refs[0]).unwrap()
     }
 
+    fn sample_routed_exchange() -> crate::routing::RoutedExchange {
+        crate::routing::RoutedExchange {
+            id: None,
+            started_at: chrono::Utc::now(),
+            client_session_id: Some("s-1".to_string()),
+            total_ms: Some(1200),
+            facade: "anthropic".to_string(),
+            backend: "claude-sub".to_string(),
+            requested_model: Some("claude-opus-4-6".to_string()),
+            served_model: Some("claude-opus-4-6".to_string()),
+            rung: "same_model".to_string(),
+            attempts: 1,
+            input_tokens: Some(1000),
+            cache_read_tokens: Some(500),
+            cache_write_tokens: None,
+            output_tokens: Some(200),
+            cost_usd: Some(0.02),
+            status: 200,
+        }
+    }
+
     fn test_config() -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -897,7 +1028,118 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
+    }
+
+    /// The contributor's serialised envelope is not sensitive to
+    /// `serde_json::Map` ordering, so gaining `trace-commons-attestation` --
+    /// and with it `dcap-qvl`, whose mandatory `std` feature turns on
+    /// `serde_json/preserve_order` -- moves no digest.
+    ///
+    /// # Why this was checked, and why it is not a blocker
+    ///
+    /// `preserve_order` swaps `serde_json::Map` from a `BTreeMap` to an
+    /// insertion-ordered `IndexMap`, and cargo unifies features across a
+    /// build, so one dependency anywhere can silently reorder every
+    /// `Value::Object` in every crate. That is not hypothetical: adding
+    /// `dcap-qvl` on a branch enabled it and moved a golden envelope digest in
+    /// a crate the branch never touched.
+    ///
+    /// It is not a blocker here, for a reason worth recording so the next
+    /// person does not have to re-derive it. **The feature was already on in
+    /// this crate's graph before the witness work**, reached through the
+    /// existing `cfg(not(windows))` dev-dependency on `trace-commons-server`
+    /// and from there `dcap-qvl` -- `cargo tree -p trace-commons-contributor
+    /// -e features -i serde_json` shows it. So this crate's suite, including
+    /// everything downstream of `redaction_hash`, has been running under an
+    /// `IndexMap` and passing all along. The only build graph the new
+    /// dependency changes is the standalone `--no-default-features` one, which
+    /// is a `cargo check` job rather than a test job, and
+    /// `trace_commons_protocol::canonical_json` plus the
+    /// `serde_json preserve_order guard` CI job exist for exactly that case.
+    ///
+    /// What this test pins is the invariant those rest on: every path whose
+    /// bytes are hashed routes through `canonicalize`, so the ordering of the
+    /// backing map cannot be observed in a digest. Under a `BTreeMap` the
+    /// assertion is true for free; under `preserve_order` it is real work, and
+    /// it is the version that runs in this crate's graph.
+    #[tokio::test]
+    async fn an_envelope_serialises_key_sorted_whatever_map_backs_this_build() {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceContributionEvent, TraceContributionEventType,
+        };
+
+        let transcript = fixture_transcript();
+        let cfg = test_config();
+        let mut raw = build_raw_contribution(&transcript, &cfg, chrono::Utc::now());
+        // Keys deliberately out of sorted order in the source. Under an
+        // `IndexMap` an uncanonicalized payload would serialise in exactly
+        // this order.
+        raw.events.push(RawTraceContributionEvent {
+            event_id: uuid::Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: chrono::Utc::now(),
+            content: None,
+            structured_payload: serde_json::json!({
+                "zeta": 1,
+                "alpha": {"omega": 2, "beta": 3},
+                "middle": "value",
+            }),
+            tool_name: Some("Bash".to_string()),
+            tool_call_id: Some("call-1".to_string()),
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+        });
+
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::new(vec![
+                "/Users/testuser".into(),
+            ])
+            .unwrap();
+        let envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let rendered = String::from_utf8(bytes.clone()).unwrap();
+
+        // Sorted order, not insertion order. Positions rather than a
+        // substring match, so the assertion cannot pass on a payload that
+        // happens to contain the keys somewhere.
+        let alpha = rendered.find("\"alpha\"").expect("the payload survived");
+        let middle = rendered.find("\"middle\"").expect("the payload survived");
+        let zeta = rendered.find("\"zeta\"").expect("the payload survived");
+        assert!(
+            alpha < middle && middle < zeta,
+            "an event payload reached the wire in insertion order, so a digest \
+             over it depends on which map backs the build"
+        );
+        // And nested objects too -- `canonicalize` recurses, and a shallow
+        // sort would leave a nested map ordering-dependent.
+        let beta = rendered
+            .find("\"beta\"")
+            .expect("the nested payload survived");
+        let omega = rendered
+            .find("\"omega\"")
+            .expect("the nested payload survived");
+        assert!(beta < omega, "a nested payload was not canonicalized");
+
+        // The digest the envelope carries is over those same canonical bytes,
+        // so it is stable across backing maps. Re-serialising and re-hashing
+        // must reproduce it exactly.
+        let reparsed: trace_commons_protocol::trace_contribution::TraceContributionEnvelope =
+            serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&reparsed).unwrap(),
+            bytes,
+            "a round trip moved bytes, so the digest depends on the backing map"
+        );
+        assert_eq!(
+            reparsed.privacy.redaction_hash,
+            envelope.privacy.redaction_hash
+        );
     }
 
     #[tokio::test]
@@ -1036,6 +1278,7 @@ mod tests {
 
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::User,
             timestamp: None,
             content: Some("please email bob@example.com about this".into()),
@@ -1109,6 +1352,7 @@ mod tests {
     async fn oversized_envelope_is_refused() {
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
@@ -1140,6 +1384,7 @@ mod tests {
         const _: () = assert!(HACKATHON_ENVELOPE_CONTENT_BYTES < MAX_ENVELOPE_BYTES);
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(HACKATHON_ENVELOPE_CONTENT_BYTES)),
@@ -1177,6 +1422,7 @@ mod tests {
         const CONTENT_BYTES: usize = 3_000_000;
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("y".repeat(CONTENT_BYTES)),
@@ -1206,6 +1452,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
@@ -1235,6 +1482,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::User,
                 timestamp: None,
                 content: Some("what does this function do?".to_string()),
@@ -1245,6 +1493,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::Assistant,
                 timestamp: None,
                 content: Some("it parses the config".to_string()),
@@ -1277,6 +1526,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1307,6 +1557,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1329,6 +1580,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
             content: Some(String::new()),
@@ -1348,6 +1600,7 @@ mod tests {
     #[test]
     fn reasoning_events_map_to_the_reasoning_event_type() {
         let event = crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::Reasoning,
             timestamp: None,
             content: Some("weighing two approaches".to_string()),
@@ -1437,6 +1690,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1447,6 +1701,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -1475,6 +1730,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1485,6 +1741,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -1515,6 +1772,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1540,6 +1798,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1845,6 +2104,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1872,6 +2132,7 @@ mod tests {
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events = vec![crate::source::SessionEvent {
+            served_by: None,
             kind: crate::source::SessionEventKind::ToolCall,
             timestamp: None,
             content: None,
@@ -1893,15 +2154,45 @@ mod tests {
 
     /// Both halves agree on the same envelope. Pinned because the server
     /// derivation is the one that can overrule this one.
+    ///
+    /// `fixture_transcript()` is a real captured claude-code session and
+    /// carries no `RoutingDecision` events on its own, so a
+    /// [`crate::routing::RoutedExchange`] is attached to `t.routing` and the
+    /// envelope is built by the real path (`build_raw_contribution`, which
+    /// now calls `raw_events_for_with_routing`) rather than by mutating
+    /// `raw.events` after the builder has already run. That is the gap this
+    /// test used to leave open: it pinned the derivation logic against a
+    /// hypothetical event shape, not against anything the real builder
+    /// emits.
     #[tokio::test]
     async fn the_two_content_derivations_agree() {
         use trace_commons_protocol::trace_contribution::derive_envelope_content_presence;
 
         let cfg = test_config();
-        let t = fixture_transcript();
+        let mut t = fixture_transcript();
+        t.routing = vec![sample_routed_exchange()];
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        let declared_message_text = raw.consent.message_text_included;
-        let declared_tool_payloads = raw.consent.tool_payloads_included;
+        let declared = declared_content_presence(&raw.events);
+
+        // The comparison above is worth nothing if `build_raw_contribution`
+        // never actually writes the derived presence into the consent block
+        // it returns -- a hardcoded `false` there would leave `declared`
+        // alone and this test would stay green. Assert the builder's output
+        // matches what it should have derived.
+        assert_eq!(
+            (
+                raw.consent.message_text_included,
+                raw.consent.tool_payloads_included,
+                raw.consent.routing_metadata_included,
+            ),
+            (
+                declared.message_text,
+                declared.tool_payloads,
+                declared.routing_metadata,
+            ),
+            "build_raw_contribution must write the derived presence into the \
+             consent block, not a hardcoded value"
+        );
 
         let redactor = build_deterministic_preview_redactor(t.cwd.as_deref());
         let envelope = redact_to_envelope(&redactor, raw)
@@ -1909,10 +2200,245 @@ mod tests {
             .expect("redaction succeeds");
         let presence = derive_envelope_content_presence(&envelope);
 
+        assert!(
+            declared.routing_metadata && presence.routing_metadata,
+            "the fixture must actually exercise routing_metadata on both \
+             sides, or this test proves nothing about it"
+        );
         assert_eq!(
-            (declared_message_text, declared_tool_payloads),
-            (presence.message_text, presence.tool_payloads),
+            (
+                declared.message_text,
+                declared.tool_payloads,
+                declared.routing_metadata,
+            ),
+            (
+                presence.message_text,
+                presence.tool_payloads,
+                presence.routing_metadata,
+            ),
             "the client declaration and the server derivation must not disagree"
+        );
+    }
+
+    /// A session event carries what the step would have cost at the
+    /// provider's list price, worked out here by hand from the published
+    /// rates rather than by calling the function under test.
+    ///
+    /// The fixture's first assistant record is served by `claude-fable-5`
+    /// and reports 100 input, 25 output, 1000 cache-read, and 500
+    /// cache-creation tokens split 200 (5m) / 300 (1h):
+    ///
+    /// ```text
+    ///   100 x $10        = $0.00100
+    ///    25 x $50        = $0.00125
+    ///  1000 x $1         = $0.00100
+    ///   200 x $12.50     = $0.00250
+    ///   300 x $20        = $0.00600   per million tokens
+    ///                       -------
+    ///                       $0.01175
+    /// ```
+    #[test]
+    fn a_priced_step_carries_what_it_would_have_cost() {
+        let t = fixture_transcript();
+        let events = raw_events_for(&t.events, chrono::Utc::now());
+        assert_eq!(
+            events[2].cost_usd,
+            Some(<trace_commons_protocol::trace_contribution::Decimal as std::str::FromStr>::from_str(
+                "0.01175"
+            )
+            .unwrap())
+        );
+    }
+
+    /// The step after it reports tokens but no cache report, so it cannot be
+    /// priced. The field is absent, not zero -- a zero here would read as a
+    /// step that cost nothing, and would silently understate any total built
+    /// by summing these.
+    #[test]
+    fn an_unpriceable_step_carries_no_cost_rather_than_a_zero() {
+        let t = fixture_transcript();
+        let events = raw_events_for(&t.events, chrono::Utc::now());
+        assert!(events[5].token_counts.is_some());
+        assert_eq!(events[5].cost_usd, None);
+        assert_ne!(
+            events[5].cost_usd,
+            Some(trace_commons_protocol::trace_contribution::Decimal::ZERO)
+        );
+    }
+
+    /// A step whose model is not in the price table is not priced at some
+    /// other model's rate. Nothing else about the event changes.
+    #[test]
+    fn a_step_served_by_an_unlisted_model_is_not_priced() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("hi".to_string()),
+            structured: Value::Null,
+            tool_name: None,
+            token_counts: Some((1_000_000, 1_000_000)),
+            tool_call_id: None,
+            success: None,
+            served_by: Some(crate::source::ServedBy {
+                model: "some-other-vendors-model".to_string(),
+                cache_read_tokens: 0,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+            }),
+        };
+        let listed = crate::source::SessionEvent {
+            served_by: Some(crate::source::ServedBy {
+                model: "claude-opus-5".to_string(),
+                cache_read_tokens: 0,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+            }),
+            ..event.clone()
+        };
+        let now = chrono::Utc::now();
+        // The listed model prices at $5 + $25 per million, which is what
+        // makes the `None` above a refusal rather than a dead code path.
+        assert_eq!(
+            raw_events_for(&[listed], now)[0].cost_usd,
+            Some(<trace_commons_protocol::trace_contribution::Decimal as std::str::FromStr>::from_str("30").unwrap())
+        );
+        assert_eq!(raw_events_for(&[event], now)[0].cost_usd, None);
+    }
+
+    /// Token counts alone are not enough to price a step, and a source that
+    /// reports them without a model or a cache report -- every adapter but
+    /// Claude Code today -- leaves the cost absent rather than guessing.
+    #[test]
+    fn token_counts_without_a_usage_report_are_not_priced() {
+        let event = crate::source::SessionEvent {
+            kind: crate::source::SessionEventKind::Assistant,
+            timestamp: None,
+            content: Some("hi".to_string()),
+            structured: Value::Null,
+            tool_name: None,
+            token_counts: Some((1_000_000, 1_000_000)),
+            tool_call_id: None,
+            success: None,
+            served_by: None,
+        };
+        let mapped = raw_events_for(&[event], chrono::Utc::now());
+        assert_eq!(
+            mapped[0].token_counts.as_ref().map(|t| t.input_tokens),
+            Some(1_000_000)
+        );
+        assert_eq!(mapped[0].cost_usd, None);
+    }
+
+    #[test]
+    fn a_routing_row_becomes_an_event_carrying_its_numbers_in_typed_fields() {
+        // The numbers go in the typed fields the event already has. Only the
+        // labels with no typed home go in `structured_payload`, and that is
+        // what the routing_metadata presence class exists to declare.
+        let events =
+            raw_events_for_with_routing(&[], &[sample_routed_exchange()], chrono::Utc::now());
+        let routing: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == TraceContributionEventType::RoutingDecision)
+            .collect();
+        assert_eq!(routing.len(), 1);
+        let e = routing[0];
+        assert_eq!(e.latency_ms, Some(1200));
+        assert!(e.cost_usd.is_some());
+        assert_eq!(e.token_counts.as_ref().map(|t| t.input_tokens), Some(1000));
+        assert!(
+            e.content.is_none(),
+            "the overlay is numbers and labels, never text -- Some(\"\") would \
+             also satisfy the old is_empty() check and is not the same claim"
+        );
+        assert_eq!(e.structured_payload["backend"], "claude-sub");
+    }
+
+    #[test]
+    fn routing_events_do_not_declare_a_tool_payload() {
+        // The whole point of task 1, asserted where the events are actually
+        // built.
+        let events =
+            raw_events_for_with_routing(&[], &[sample_routed_exchange()], chrono::Utc::now());
+        let presence = declared_content_presence(&events);
+        assert!(presence.routing_metadata);
+        assert!(!presence.tool_payloads);
+    }
+
+    /// A comparable projection of a mapped event: everything but `event_id`,
+    /// with `parent_event_id` rewritten as the parent's position in the
+    /// vector instead of its (randomly generated) uuid. `event_id` is
+    /// `Uuid::new_v4()` at every call, so two otherwise-identical runs of
+    /// `raw_events_for`/`raw_events_for_with_routing` can never compare equal
+    /// on the raw structs -- this is what lets the comparison look at
+    /// everything that actually describes the event.
+    ///
+    /// This hand-lists every field of `RawTraceContributionEvent` except
+    /// `event_id`, so it is complete as of this writing -- but it is a list,
+    /// not a projection derived from the struct. A field added to
+    /// `RawTraceContributionEvent` later does not fail to compile here; it
+    /// just never enters the comparison, and tests built on this function
+    /// silently stop covering it. Update this tuple (and its type) when the
+    /// struct gains a field.
+    fn normalize_for_comparison(
+        events: &[RawTraceContributionEvent],
+    ) -> Vec<(
+        Option<usize>,
+        TraceContributionEventType,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
+        serde_json::Value,
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<trace_commons_protocol::trace_contribution::TokenCounts>,
+        Option<trace_commons_protocol::trace_contribution::Decimal>,
+        Option<bool>,
+        Vec<trace_commons_protocol::trace_contribution::TraceFailureMode>,
+    )> {
+        let index_of: std::collections::HashMap<uuid::Uuid, usize> = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.event_id, i))
+            .collect();
+        events
+            .iter()
+            .map(|e| {
+                (
+                    e.parent_event_id.and_then(|id| index_of.get(&id).copied()),
+                    e.event_type,
+                    e.timestamp,
+                    e.content.clone(),
+                    e.structured_payload.clone(),
+                    e.tool_name.clone(),
+                    e.tool_call_id.clone(),
+                    e.latency_ms,
+                    e.token_counts.clone(),
+                    e.cost_usd,
+                    e.success,
+                    e.failure_modes.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_session_with_no_routing_rows_produces_exactly_what_it_did_before() {
+        // A real fixture's events, not `&[]` -- an empty slice in, an empty
+        // slice out proves nothing about whether routing rows change
+        // anything, since there is nothing there for them to change.
+        let events = fixture_transcript().events;
+        assert!(
+            !events.is_empty(),
+            "fixture sanity check: the comparison below needs real events"
+        );
+        let now = chrono::Utc::now();
+        let before = raw_events_for(&events, now);
+        let after = raw_events_for_with_routing(&events, &[], now);
+        assert_eq!(
+            normalize_for_comparison(&before),
+            normalize_for_comparison(&after),
+            "an empty routing slice must produce exactly what raw_events_for \
+             produced on its own"
         );
     }
 
@@ -1928,6 +2454,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1938,6 +2465,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -1962,6 +2490,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -1972,6 +2501,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("port = 8080".to_string()),
@@ -2001,6 +2531,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2011,6 +2542,7 @@ mod tests {
                 success: None,
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("permission denied".to_string()),
@@ -2035,6 +2567,7 @@ mod tests {
         let mut t = fixture_transcript();
         t.events = vec![
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolCall,
                 timestamp: None,
                 content: None,
@@ -2045,6 +2578,7 @@ mod tests {
                 success: Some(false),
             },
             crate::source::SessionEvent {
+                served_by: None,
                 kind: crate::source::SessionEventKind::ToolResult,
                 timestamp: None,
                 content: Some("ok".to_string()),

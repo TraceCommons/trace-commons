@@ -14,11 +14,12 @@ use uuid::Uuid;
 use std::collections::BTreeMap;
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, ResidualPiiRisk, TraceContributionEnvelope, TraceSubmissionReceipt,
-    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
+    ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate,
 };
 
-use crate::config::{ConfigStore, ContributorConfig, Receipt, allowlist_for};
+use crate::config::{ConfigStore, ContributorConfig, Receipt, WitnessSettings, allowlist_for};
 use crate::envelope::{
     MAX_ENVELOPE_BYTES, NearAiSettings, apply_granted_scopes, build_deterministic_preview_redactor,
     build_preview_raw_contribution, build_raw_contribution_with_verdict, build_redactor_with,
@@ -31,6 +32,11 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::transport::{
+    GrantedConsent, HttpWitnessTransport, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER,
+    WitnessedEnvelope, parse_witnessed_envelope,
+};
+use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
 /// Statuses that mean a session has already been accepted by the server;
 /// re-encountering a receipt with one of these statuses short-circuits the
@@ -434,6 +440,108 @@ impl<'a> SubmitContext<'a> {
     /// Independent of every other session: a refusal or failure here never
     /// affects a later call. The single exception is a fail-closed
     /// precondition (`SubmitPreconditionFailure`), which aborts the batch.
+    /// Mint a claim if the current one is stale, and return it.
+    ///
+    /// Extracted so a witnessed submission can mint **before** it sends
+    /// anything raw. On that path the order inverts: today the client redacts
+    /// first and mints afterwards, then stamps the granted scopes into the
+    /// finished envelope, and that stamp is a byte change a certificate does
+    /// not cover.
+    ///
+    /// `Ok(Err(outcome))` is a refusal the caller returns as-is, kept distinct
+    /// from `Err(..)` -- a precondition failure that aborts the whole pass --
+    /// because the two mean different things and folding them would turn a
+    /// contributor-visible refusal into a hard error.
+    async fn ensure_claim(
+        &mut self,
+        now: DateTime<Utc>,
+        session_hash: &str,
+    ) -> std::result::Result<
+        std::result::Result<ClaimToken, SubmitOutcome>,
+        SubmitPreconditionFailure,
+    > {
+        if !self
+            .claim
+            .as_ref()
+            .map(|c| c.is_fresh(now))
+            .unwrap_or(false)
+        {
+            let device = self
+                .device
+                .as_ref()
+                .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
+            match mint_claim(&self.issuer, self.cfg, device, now).await {
+                Ok(token) => self.claim = Some(token),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("consent scopes not permitted")
+                        || msg.contains("allowed uses not permitted")
+                    {
+                        println!("hint: re-run login --scopes with a narrower selection");
+                        return Ok(Err(refused("scopes-not-permitted", session_hash)));
+                    }
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: "claim-mint-failed".to_string(),
+                    }));
+                }
+            }
+        }
+        Ok(Ok(self
+            .claim
+            .as_ref()
+            .expect("a claim must be minted before applying granted scopes")
+            .clone()))
+    }
+
+    /// Build the envelope through a witness.
+    ///
+    /// Returns the parsed envelope -- for the size and residual-secret checks
+    /// downstream, which read fields -- alongside the response holding the
+    /// bytes **as received**. Only those bytes are ever submitted; the parsed
+    /// value is for reading.
+    ///
+    /// `Err(label)` is a refusal label. Never a fall back to local redaction:
+    /// the operator would otherwise see an uncertified submission from someone
+    /// enrolled as certified, which is the downgrade this design exists to
+    /// make noisy.
+    async fn witness_envelope(
+        &self,
+        settings: &WitnessSettings,
+        raw: RawTraceContribution,
+        token: &ClaimToken,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<(TraceContributionEnvelope, WitnessedEnvelope), &'static str> {
+        // A malformed pin and an absent one are different operator mistakes,
+        // and a contributor who mistyped a measurement should not be told they
+        // configured none.
+        let trust = settings
+            .trust()
+            .map_err(|_| "witness_expected_measurement_malformed")?;
+
+        let transport = HttpWitnessTransport::new(
+            settings.url.clone(),
+            self.cfg.ingest_url.clone(),
+            std::sync::Arc::new(allowlist_for(self.cfg.allowed_hosts.as_deref())),
+            std::time::Duration::from_secs(120),
+        )
+        .map_err(|e| e.refusal_label())?;
+
+        let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
+        let response = witness_session(
+            &transport,
+            &settings.url,
+            &trust,
+            now.timestamp().max(0) as u64,
+            raw,
+            &GrantedConsent { scopes, uses },
+        )
+        .await
+        .map_err(|e| e.refusal_label())?;
+
+        let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
+        Ok((parsed, response))
+    }
+
     pub async fn submit_one(
         &mut self,
         source: &dyn TraceSource,
@@ -534,8 +642,30 @@ impl<'a> SubmitContext<'a> {
         // path. It is what the residual-secret sweep runs with, and a
         // privacy filter that has gone bad must stop an upload whether or
         // not this particular envelope was built through it.
+        // Resolved before the envelope is built. A configured witness that
+        // cannot be used refuses the submission; it never falls back to local
+        // redaction, because the envelope would then carry a self-reported
+        // risk while the contributor believed it carried a certificate.
+        let witness_settings = self.cfg.witness.clone();
+        let mut witnessed: Option<WitnessedEnvelope> = None;
+
         let mut envelope = match approved_envelope {
-            Some(approved) => approved,
+            Some(approved) => {
+                // An approved envelope was built by the preview path, which
+                // under a configured witness refuses to build one at all
+                // (`witness_claim_unavailable`). So reaching here with both an
+                // approved envelope and a configured witness means the
+                // envelope predates the witness configuration, and uploading
+                // it would be an uncertified submission from a contributor who
+                // believes their submissions are certified.
+                if witness_settings.is_some() {
+                    return Ok(refused(
+                        "witness_certificate_missing",
+                        &transcript.session_hash,
+                    ));
+                }
+                approved
+            }
             None => {
                 let raw = if opts.unenrolled_preview {
                     build_preview_raw_contribution(&transcript, &self.effective_cfg, now)
@@ -555,10 +685,54 @@ impl<'a> SubmitContext<'a> {
                     let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
                     return Ok(refused_for_size(&transcript.session_hash, size));
                 }
-                match redact_to_envelope(&redactor, raw).await {
-                    Ok(e) => e,
-                    Err(_) => {
-                        return Ok(refused("redaction-failed", &transcript.session_hash));
+                match witness_settings {
+                    // Absent means the witness path is not entered at all, and
+                    // this is byte for byte what it was before the feature
+                    // existed.
+                    None => match redact_to_envelope(&redactor, raw).await {
+                        Ok(e) => e,
+                        Err(_) => {
+                            return Ok(refused("redaction-failed", &transcript.session_hash));
+                        }
+                    },
+                    Some(settings) => {
+                        // The pin is judged BEFORE the mint, which is before
+                        // anything reaches the network. An unpinned client
+                        // cannot judge any quote it receives, so minting a
+                        // claim for a submission that was always going to be
+                        // refused would spend a round trip to learn nothing.
+                        match settings.trust() {
+                            Ok(trust) if trust.is_pinned() => {}
+                            Ok(_) => {
+                                return Ok(refused(
+                                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                                    &transcript.session_hash,
+                                ));
+                            }
+                            Err(_) => {
+                                return Ok(refused(
+                                    "witness_expected_measurement_malformed",
+                                    &transcript.session_hash,
+                                ));
+                            }
+                        }
+                        // The claim is minted BEFORE anything raw is sent. The
+                        // grants have to be inside the certified bytes, and a
+                        // stamp afterwards is a byte change the certificate
+                        // does not cover.
+                        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
+                            Ok(token) => token,
+                            Err(outcome) => return Ok(outcome),
+                        };
+                        match self.witness_envelope(&settings, raw, &token, now).await {
+                            Ok((parsed, response)) => {
+                                witnessed = Some(response);
+                                parsed
+                            }
+                            Err(label) => {
+                                return Ok(refused(label, &transcript.session_hash));
+                            }
+                        }
                     }
                 }
             }
@@ -623,39 +797,17 @@ impl<'a> SubmitContext<'a> {
             });
         }
 
-        if !self
-            .claim
-            .as_ref()
-            .map(|c| c.is_fresh(now))
-            .unwrap_or(false)
-        {
-            let device = self
-                .device
-                .as_ref()
-                .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
-            match mint_claim(&self.issuer, self.cfg, device, now).await {
-                Ok(token) => self.claim = Some(token),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("consent scopes not permitted")
-                        || msg.contains("allowed uses not permitted")
-                    {
-                        println!("hint: re-run login --scopes with a narrower selection");
-                        return Ok(refused("scopes-not-permitted", &transcript.session_hash));
-                    }
-                    return Ok(SubmitOutcome::Failed {
-                        reason_label: "claim-mint-failed".to_string(),
-                    });
-                }
-            }
+        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
+            Ok(token) => token,
+            Err(outcome) => return Ok(outcome),
+        };
+        // A witnessed envelope is NOT stamped. The grants are already inside
+        // the bytes the certificate covers -- the witness applied them before
+        // it serialised -- so writing them again here would change those bytes
+        // and break the digest.
+        if witnessed.is_none() {
+            stamp_granted_scopes(&mut envelope, &self.effective_cfg, &token);
         }
-
-        let token = self
-            .claim
-            .as_ref()
-            .expect("a claim must be minted before applying granted scopes")
-            .clone();
-        stamp_granted_scopes(&mut envelope, &self.effective_cfg, &token);
 
         if let Some(outcome) =
             residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?
@@ -679,6 +831,7 @@ impl<'a> SubmitContext<'a> {
             &mut self.claim,
             &mut envelope,
             &self.effective_cfg,
+            witnessed.as_ref(),
         )
         .await
         {
@@ -1219,7 +1372,22 @@ fn stamp_granted_scopes(
     effective_cfg: &ContributorConfig,
     token: &ClaimToken,
 ) {
-    let (granted_scopes, granted_uses) = if token.consent_scopes.is_empty() {
+    let (granted_scopes, granted_uses) = granted_consent_for(effective_cfg, token);
+    apply_granted_scopes(envelope, &granted_scopes, &granted_uses);
+}
+
+/// The grant a claim carried, or the requested one when the issuer is old
+/// enough not to echo it back.
+///
+/// Split out of [`stamp_granted_scopes`] so a witnessed submission derives the
+/// grant identically -- it passes these values into the witness request
+/// instead of stamping them afterwards, and two derivations would eventually
+/// disagree about what a contributor consented to.
+fn granted_consent_for(
+    effective_cfg: &ContributorConfig,
+    token: &ClaimToken,
+) -> (Vec<ConsentScope>, Vec<TraceAllowedUse>) {
+    if token.consent_scopes.is_empty() {
         (
             parse_scope_names(&effective_cfg.consent_scopes),
             parse_use_names(&crate::consent::scopes_to_allowed_uses(
@@ -1231,8 +1399,7 @@ fn stamp_granted_scopes(
             parse_scope_names(&token.consent_scopes),
             parse_use_names(&token.allowed_uses),
         )
-    };
-    apply_granted_scopes(envelope, &granted_scopes, &granted_uses);
+    }
 }
 
 fn build_ingest_client(
@@ -1258,6 +1425,16 @@ fn build_ingest_client(
 /// restamped with the new token's granted scopes/uses (via
 /// `stamp_granted_scopes`, the same helper used before the first attempt)
 /// and re-checked for size before the retry.
+///
+/// # Witnessed submissions
+///
+/// `witnessed` carries the bytes the certificate covers. When it is `Some`,
+/// those bytes go on the wire **verbatim** through `call_bytes`, with the
+/// certificate and signature in headers, and `envelope` is not consulted for
+/// the body at all. A re-mint on that path **refuses** rather than restamping:
+/// the restamp would break the digest, and silently re-witnessing would send
+/// the raw session a second time on the strength of a verification made for a
+/// different exchange.
 async fn upload_with_retry(
     cfg: &ContributorConfig,
     issuer: &IssuerClient,
@@ -1265,6 +1442,7 @@ async fn upload_with_retry(
     claim: &mut Option<ClaimToken>,
     envelope: &mut TraceContributionEnvelope,
     effective_cfg: &ContributorConfig,
+    witnessed: Option<&WitnessedEnvelope>,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -1279,14 +1457,48 @@ async fn upload_with_retry(
             Err(e) => return Err(e.kind().to_string()),
         };
 
-        let result = client
-            .call_json::<TraceContributionEnvelope, TraceSubmissionReceipt>(
-                Method::POST,
-                "/v1/traces",
-                &[],
-                Some(&*envelope),
-            )
-            .await;
+        let result = match witnessed {
+            // The bytes as the witness emitted them. `call_bytes`, never
+            // `call_json`: the certificate binds a SHA-256 over exactly these
+            // bytes, and re-serialising would break the digest invisibly --
+            // the re-encoded bytes still parse as the same envelope, so the
+            // failure would only surface at the server's verification and
+            // would look like tampering.
+            Some(witnessed) => client
+                .call_bytes(
+                    Method::POST,
+                    "/v1/traces",
+                    &[],
+                    &witnessed.envelope_bytes,
+                    &[
+                        (
+                            WITNESS_CERTIFICATE_HEADER,
+                            witnessed.certificate_json.as_str(),
+                        ),
+                        (WITNESS_SIGNATURE_HEADER, witnessed.signature_hex.as_str()),
+                    ],
+                )
+                .await
+                .and_then(|body| {
+                    serde_json::from_str::<TraceSubmissionReceipt>(&body).map_err(|source| {
+                        OcError::MalformedResponse {
+                            url: cfg.ingest_url.clone(),
+                            body,
+                            source,
+                        }
+                    })
+                }),
+            None => {
+                client
+                    .call_json::<TraceContributionEnvelope, TraceSubmissionReceipt>(
+                        Method::POST,
+                        "/v1/traces",
+                        &[],
+                        Some(&*envelope),
+                    )
+                    .await
+            }
+        };
 
         match result {
             Ok(receipt) => return Ok(receipt),
@@ -1303,6 +1515,14 @@ async fn upload_with_retry(
                     return Err("auth-failed".to_string());
                 }
                 remint_attempted = true;
+                if witnessed.is_some() {
+                    // A re-mint cannot restamp certified bytes, and
+                    // re-witnessing here would send the raw session a second
+                    // time on a verification made for a different exchange.
+                    // The contributor re-runs, which re-verifies and
+                    // re-witnesses explicitly.
+                    return Err("witness_claim_expired".to_string());
+                }
                 match mint_claim(issuer, cfg, device, Utc::now()).await {
                     Ok(new_token) => {
                         stamp_granted_scopes(envelope, effective_cfg, &new_token);
@@ -1331,6 +1551,7 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
 
@@ -1522,6 +1743,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
     }
 
@@ -1571,6 +1793,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         assert_eq!(preview_cfg.tenant_id.len(), enrolled_cfg.tenant_id.len());
         assert_eq!(preview_cfg.tenant_id.len(), 71);
@@ -1707,6 +1930,7 @@ mod tests {
             message_text_included: message_text,
             tool_payloads_included: tool_payloads,
             correction_included: correction,
+            routing_metadata_included: false,
             revocable: true,
         }
     }
@@ -3310,6 +3534,480 @@ mod tests {
             written.lines().count(),
             2,
             "one signed document per chunk, newline-delimited"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6: the witness at the envelope-build site.
+    // -----------------------------------------------------------------
+
+    const WITNESS_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+
+    fn pinned_witness() -> WitnessSettings {
+        WitnessSettings {
+            url: "http://witness.invalid".into(),
+            signing_address: WITNESS_ADDRESS.into(),
+            expected_measurements: vec![format!(
+                "mrtd={},mrconfigid={}",
+                "aa".repeat(48),
+                "bb".repeat(48)
+            )],
+        }
+    }
+
+    fn unpinned_witness() -> WitnessSettings {
+        WitnessSettings {
+            expected_measurements: Vec::new(),
+            ..pinned_witness()
+        }
+    }
+
+    /// Run one submission against unreachable endpoints and report the label.
+    ///
+    /// Both the issuer and the witness are `.invalid`, so which refusal comes
+    /// back is a statement about ORDER: a refusal naming the issuer means the
+    /// mint ran first, and one naming the pin means the pin was judged before
+    /// the mint.
+    async fn witnessed_refusal(witness: Option<WitnessSettings>) -> SubmitOutcome {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.witness = witness;
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+        ctx.submit_one(source.as_ref(), session_ref).await.unwrap()
+    }
+
+    fn refusal_label_of(outcome: &SubmitOutcome) -> String {
+        match outcome {
+            SubmitOutcome::Refused { reason_label, .. } => reason_label.clone(),
+            SubmitOutcome::Failed { reason_label } => reason_label.clone(),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_client_takes_the_local_path_and_does_not_refuse_for_a_witness() {
+        // The default path is untouched by the feature. A dry run with no
+        // witness reaches the dry-run return, which means the envelope was
+        // built locally -- there is no other way to get there.
+        let outcome = witnessed_refusal(None).await;
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "the witness feature changed the default path: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_witness_url_without_a_pin_refuses_the_submission() {
+        let outcome = witnessed_refusal(Some(unpinned_witness())).await;
+        assert_eq!(
+            refusal_label_of(&outcome),
+            "witness_expected_measurement",
+            "an unpinned witness must refuse, never quietly redact locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_pin_is_refused_under_its_own_name() {
+        // Distinct from the unpinned case: a contributor who mistyped a
+        // measurement should not be told they configured none.
+        let mut settings = pinned_witness();
+        settings.expected_measurements = vec!["mrtd=nothex".to_string()];
+        let outcome = witnessed_refusal(Some(settings)).await;
+        assert_eq!(
+            refusal_label_of(&outcome),
+            "witness_expected_measurement_malformed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_submission_mints_its_claim_before_it_sends_anything_raw() {
+        // Both endpoints are unreachable. A pinned witness therefore fails at
+        // whichever step runs first, and the label says which: `claim-mint-
+        // failed` means the mint preceded the witness call. If the order
+        // inverted, this would come back as a witness transport refusal
+        // instead -- which is exactly the bug, because the grants would then
+        // have to be stamped after certification.
+        let outcome = witnessed_refusal(Some(pinned_witness())).await;
+        assert_eq!(
+            refusal_label_of(&outcome),
+            "claim-mint-failed",
+            "grants must be inside the certified bytes, not stamped after"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_envelope_under_a_configured_witness_refuses_rather_than_uploading_bare() {
+        // The preview path refuses to build an envelope under a configured
+        // witness, so an approved one here predates the configuration. Sending
+        // it would be an uncertified submission from a contributor who
+        // believes their submissions are certified.
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.witness = Some(pinned_witness());
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+
+        // An envelope built locally, as the previous release's preview would
+        // have left in the queue.
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+        let transcript = source.load(session_ref).unwrap();
+        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
+        let approved = redact_to_envelope(&redactor, raw).await.unwrap();
+        ctx.use_approved_envelope(Some(approved));
+
+        let outcome = ctx.submit_one(source.as_ref(), session_ref).await.unwrap();
+        assert_eq!(refusal_label_of(&outcome), "witness_certificate_missing");
+    }
+
+    #[test]
+    fn a_config_written_before_this_release_loads_with_no_witness() {
+        // `#[serde(default)]` on the field is load-bearing, not decorative:
+        // this struct is read from a file the previous release wrote, and that
+        // file has no `witness` key. Without the attribute every existing
+        // contributor's config would fail to parse on upgrade.
+        let previous_release = serde_json::json!({
+            "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "trace-commons-upload",
+            "tenant_id": "tenant-abc",
+            "instance_id": "instance-1",
+            "user_subject": "alice",
+            "device_key_id": "device-1",
+            "consent_scopes": ["debugging_evaluation"],
+            "pii_filter": serde_json::Value::Null,
+            "allowed_hosts": serde_json::Value::Null,
+        });
+        let cfg: ContributorConfig = serde_json::from_value(previous_release)
+            .expect("a config written before the witness field must still load");
+        assert!(cfg.witness.is_none(), "absent must mean off");
+    }
+
+    #[test]
+    fn witness_settings_parse_every_pinned_set_and_refuse_a_bad_one() {
+        let settings = WitnessSettings {
+            expected_measurements: vec![
+                format!("mrtd={},mrconfigid={}", "aa".repeat(48), "bb".repeat(48)),
+                format!("mrtd={},mrconfigid={}", "aa".repeat(48), "cc".repeat(48)),
+            ],
+            ..pinned_witness()
+        };
+        let trust = settings.trust().expect("both sets parse");
+        assert_eq!(trust.measurements.len(), 2, "an upgrade window needs both");
+        assert!(trust.is_pinned());
+
+        // A malformed entry is an error, never a skipped line: a silently
+        // dropped pin leaves a contributor believing they pinned something.
+        let mut broken = settings.clone();
+        broken
+            .expected_measurements
+            .push("mrtd=deadbeef".to_string());
+        assert!(broken.trust().is_err());
+
+        assert!(!unpinned_witness().trust().unwrap().is_pinned());
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_grant_is_derived_the_same_way_a_stamped_one_is() {
+        // The witness receives the grants instead of the envelope being
+        // stamped with them, so the two derivations must agree -- otherwise a
+        // witnessed and an unwitnessed submission from the same claim would
+        // consent to different things.
+        let cfg = cfg_for("http://issuer.invalid", "http://ingest.invalid", "device-1");
+        let token = ClaimToken {
+            access_token: "token".into(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            allowed_uses: vec!["debugging".into()],
+        };
+
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+        let transcript = source.load(session_ref).unwrap();
+        let redactor = build_redactor_with(&cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, &cfg, Utc::now(), None);
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        let (scopes, uses) = granted_consent_for(&cfg, &token);
+        stamp_granted_scopes(&mut envelope, &cfg, &token);
+        assert_eq!(envelope.consent.scopes, scopes);
+        assert_eq!(envelope.trace_card.allowed_uses, uses);
+        // A positive control: the derived grant is the claim's, not the
+        // config's wider request.
+        assert_ne!(
+            scopes.len(),
+            cfg.consent_scopes.len(),
+            "the fixture cannot tell a claim grant from a config request"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 7: what reaches POST /v1/traces.
+    // -----------------------------------------------------------------
+
+    use axum::response::IntoResponse as _;
+    use sha2::Digest as _;
+
+    /// One captured submission: the raw body bytes and the headers.
+    #[derive(Clone, Default)]
+    struct CapturedUpload {
+        bodies: Vec<Vec<u8>>,
+        headers: Vec<axum::http::HeaderMap>,
+    }
+
+    /// An ingest stub that keeps the body as **bytes**.
+    ///
+    /// `stub_ingest` parses into a `serde_json::Value`, which is exactly the
+    /// comparison that would pass over the bug this task exists to prevent: a
+    /// re-serialised envelope still parses to the same value. Byte capture is
+    /// what makes the digest assertion real.
+    fn stub_ingest_raw(captured: Arc<Mutex<CapturedUpload>>, first_status: u16) -> Router {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Router::new().route(
+            "/v1/traces",
+            post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let captured = captured.clone();
+                    let calls = calls.clone();
+                    async move {
+                        {
+                            let mut captured = captured.lock().unwrap();
+                            captured.bodies.push(body.to_vec());
+                            captured.headers.push(headers);
+                        }
+                        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if n == 0 && first_status != 200 {
+                            return (
+                                axum::http::StatusCode::from_u16(first_status).unwrap(),
+                                Json(serde_json::json!({"error": "claim expired"})),
+                            )
+                                .into_response();
+                        }
+                        Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                        .into_response()
+                    }
+                },
+            ),
+        )
+    }
+
+    fn stub_claim(now: DateTime<Utc>) -> ClaimToken {
+        ClaimToken {
+            access_token: "stub-claim-jwt".into(),
+            expires_at: now + chrono::Duration::hours(1),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            allowed_uses: vec!["debugging".into()],
+        }
+    }
+
+    /// A witnessed response over `bytes`, with a certificate that is not
+    /// checked here -- `upload_with_retry` forwards it, it does not verify it.
+    /// Verification is `witness::transport`'s job and is tested there.
+    fn witnessed_over(bytes: &[u8]) -> WitnessedEnvelope {
+        WitnessedEnvelope {
+            envelope_bytes: bytes.to_vec(),
+            certificate_json: serde_json::json!({
+                "redacted_sha256": hex::encode(sha2::Sha256::digest(bytes)),
+                "residual_risk_verdict": "low",
+                "redaction_policy_version": "deterministic-v1",
+                "witness_measurement": "aa".repeat(48),
+                "timestamp": 1_788_264_000i64,
+            })
+            .to_string(),
+            signature_hex: format!("0x{}", "ab".repeat(65)),
+        }
+    }
+
+    /// Envelope bytes whose compact re-serialisation is a DIFFERENT string, so
+    /// a `call_json` on this path would be caught rather than passing because
+    /// the fixture was already canonical.
+    ///
+    /// Not a real envelope: `upload_with_retry` never parses the witnessed
+    /// body, which is the property under test.
+    const UNCANONICAL_ENVELOPE: &[u8] = br#"{"zeta":1,"alpha": "two","gamma":1.50}"#;
+
+    async fn upload_once(
+        witnessed: Option<&WitnessedEnvelope>,
+        first_status: u16,
+    ) -> (
+        std::result::Result<TraceSubmissionReceipt, String>,
+        CapturedUpload,
+    ) {
+        let captured = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer_url = spawn(stub_issuer()).await;
+        let ingest_url = spawn(stub_ingest_raw(captured.clone(), first_status)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer_url, &ingest_url, &device.device_key_id);
+        let issuer = IssuerClient::new(allowlist_for(None)).unwrap();
+
+        let now = Utc::now();
+        let mut claim = Some(stub_claim(now));
+        let mut envelope = baseline_envelope(&cfg).await;
+
+        let result = upload_with_retry(
+            &cfg,
+            &issuer,
+            &device,
+            &mut claim,
+            &mut envelope,
+            &cfg,
+            witnessed,
+        )
+        .await;
+        let captured = captured.lock().unwrap().clone();
+        (result, captured)
+    }
+
+    async fn baseline_envelope(cfg: &ContributorConfig) -> TraceContributionEnvelope {
+        let selection = fixture_selection();
+        let (source, session_ref) = &selection[0];
+        let transcript = source.load(session_ref).unwrap();
+        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
+        let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
+        redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_submission_carries_the_certificate_in_headers_and_not_in_the_body() {
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 200).await;
+        result.expect("the stub accepted the submission");
+
+        let headers = &captured.headers[0];
+        assert!(headers.contains_key(WITNESS_CERTIFICATE_HEADER));
+        assert!(headers.contains_key(WITNESS_SIGNATURE_HEADER));
+
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(
+            body.get("witness_certificate").is_none(),
+            "the envelope grew a field it is hashed over"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bytes_on_the_wire_are_the_bytes_the_certificate_covers() {
+        // The test that catches a re-serialisation. Compares the captured
+        // request body against the witness's bytes BYTE FOR BYTE -- not field
+        // by field, and not by parsing both sides, which is the comparison
+        // that would pass over exactly the bug being hunted.
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 200).await;
+        result.expect("the stub accepted the submission");
+
+        assert_eq!(captured.bodies[0], witnessed.envelope_bytes);
+        let certificate: serde_json::Value = serde_json::from_str(
+            captured.headers[0][WITNESS_CERTIFICATE_HEADER]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            certificate["redacted_sha256"].as_str().unwrap(),
+            hex::encode(sha2::Sha256::digest(&captured.bodies[0])),
+        );
+        // The fixture must be one a re-serialisation would move, or the
+        // assertion above cannot fail.
+        let round_tripped = serde_json::to_vec(
+            &serde_json::from_slice::<serde_json::Value>(UNCANONICAL_ENVELOPE).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            round_tripped, UNCANONICAL_ENVELOPE,
+            "the fixture cannot detect a re-serialisation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwitnessed_submission_sends_its_envelope_and_no_new_headers() {
+        let (result, captured) = upload_once(None, 200).await;
+        result.expect("the stub accepted the submission");
+
+        assert!(
+            !captured.headers[0]
+                .keys()
+                .any(|k| k.as_str().starts_with("x-trace-witness")),
+            "an unwitnessed submission grew witness headers"
+        );
+        // And the body is the envelope, as it always was.
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(body.get("schema_version").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_re_mint_refuses_rather_than_restamping_certified_bytes() {
+        // upload_with_retry restamps granted scopes after a 401 re-mint,
+        // deliberately, so a stale grant is not resent. On a witnessed
+        // submission that write breaks the digest, and silently re-witnessing
+        // would send the raw session a second time on the strength of a
+        // verification made for a different exchange.
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) = upload_once(Some(&witnessed), 401).await;
+        assert_eq!(result.unwrap_err(), "witness_claim_expired");
+        assert_eq!(
+            captured.bodies.len(),
+            1,
+            "the witnessed session was offered a second time after a re-mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwitnessed_submission_still_retries_after_a_re_mint() {
+        // The positive control for the refusal above: without it, a
+        // upload_with_retry that refused every 401 would satisfy that test.
+        let (result, captured) = upload_once(None, 401).await;
+        result.expect("an unwitnessed submission re-mints and retries");
+        assert_eq!(captured.bodies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_residual_risk_field_is_unchanged_by_witnessing() {
+        // Both shapes are on the wire at once during the rollout, and the
+        // fields do not overlap: ingest reads privacy.residual_pii_risk
+        // exactly as it does today and the certificate is additional
+        // evidence. A server that ignores the headers accepts the submission
+        // unchanged.
+        let (_, captured) = upload_once(None, 200).await;
+        let body: serde_json::Value = serde_json::from_slice(&captured.bodies[0]).unwrap();
+        assert!(
+            body["privacy"]["residual_pii_risk"].is_string(),
+            "the client-computed residual risk left the envelope"
         );
     }
 }

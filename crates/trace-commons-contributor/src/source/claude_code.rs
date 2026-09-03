@@ -422,6 +422,8 @@ fn group_session_ref(
     let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
     Some(SessionRef {
         source: SOURCE_CLAUDE_CODE,
+        // A native adapter is what it is; nothing to declare.
+        declared_source: None,
         path,
         project: discovery_project,
         cwd,
@@ -921,6 +923,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         // reading as one that never delegated. Structural only: counts, no
         // content -- the same contract every other `Opaque` event honours.
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::Opaque,
             timestamp: None,
             content: None,
@@ -943,6 +946,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         // adapter cannot actually verify. Segment order is a fact; parentage
         // would be a claim.
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::Opaque,
             timestamp: None,
             content: None,
@@ -994,6 +998,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         events,
         subagent_count: kept,
         subagents_dropped: dropped,
+        routing: Vec::new(),
     })
 }
 
@@ -1057,6 +1062,7 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
             }
             other => {
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::Opaque,
                     timestamp: record_timestamp,
                     content: None,
@@ -1089,6 +1095,7 @@ fn map_user_record(
     match content {
         Some(Value::String(s)) => {
             events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::User,
                 timestamp,
                 content: Some(s.clone()),
@@ -1111,6 +1118,7 @@ fn map_user_record(
                     Some("tool_result") => {
                         let flattened = flatten_block_content(block.get("content"));
                         events.push(SessionEvent {
+                            served_by: None,
                             kind: SessionEventKind::ToolResult,
                             timestamp,
                             content: flattened,
@@ -1131,6 +1139,7 @@ fn map_user_record(
             }
             if !texts.is_empty() {
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::User,
                     timestamp,
                     content: Some(texts.join("\n")),
@@ -1181,10 +1190,14 @@ fn map_assistant_record(
         let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         (input, output)
     });
+    // What it would have cost needs more than those two counts, and is built
+    // only from a record that states all of it -- see `served_by_of`.
+    let served_by = usage.and_then(|u| served_by_of(record, u));
 
     let Some(Value::Array(blocks)) = record.pointer("/message/content") else {
         return;
     };
+    let record_start = events.len();
 
     // Contiguous runs of text blocks are joined into one Assistant event and
     // emitted where the run ends, so every block keeps its position relative
@@ -1199,10 +1212,12 @@ fn map_assistant_record(
     // across every run.
     let mut texts: Vec<String> = Vec::new();
     let mut token_counts_unused = token_counts;
+    let mut served_by_unused = served_by;
     macro_rules! flush_text {
         () => {
             if !texts.is_empty() {
                 events.push(SessionEvent {
+                    served_by: served_by_unused.take(),
                     kind: SessionEventKind::Assistant,
                     timestamp,
                     content: Some(texts.join("\n")),
@@ -1231,6 +1246,7 @@ fn map_assistant_record(
                     .map(|s| s.to_string());
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::ToolCall,
                     timestamp,
                     content: None,
@@ -1251,6 +1267,7 @@ fn map_assistant_record(
                 if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
                     if !t.is_empty() {
                         events.push(SessionEvent {
+                            served_by: None,
                             kind: SessionEventKind::Reasoning,
                             timestamp,
                             content: Some(t.to_string()),
@@ -1268,6 +1285,90 @@ fn map_assistant_record(
     }
 
     flush_text!();
+
+    // A record whose content is only tool calls (or only reasoning) emits no
+    // Assistant event, and its usage was dropped on the floor -- with it, the
+    // whole price of the step. Tool-only turns are most of a coding session,
+    // so where no text event claimed the usage, it goes to the first event
+    // the record did produce. Still once per record, never duplicated.
+    if let Some(first) = events.get_mut(record_start) {
+        if first.token_counts.is_none() {
+            first.token_counts = token_counts_unused.take();
+            first.served_by = served_by_unused.take();
+        }
+    }
+}
+
+/// The provider's complete usage report for one assistant record, or `None`
+/// where the record does not state one this crate can price.
+///
+/// Every branch that returns `None` here is a refusal to guess:
+///
+/// * an unnamed model -- a step served by an unknown model has no price;
+/// * a count the record did not state -- reading it as zero would understate
+///   the step, and `input_tokens`/`output_tokens` are checked here even
+///   though [`SessionEvent::token_counts`] reads them with a zero default,
+///   so a defaulted zero can never reach a price;
+/// * cache-creation tokens with no 5m/1h breakdown, or one that does not add
+///   up to the total the record itself reports -- the two durations are
+///   priced 1.25x and 2x base input, so guessing the cheaper one understates
+///   by up to 1.6x;
+/// * a pricing modifier [`crate::pricing`] does not model -- a non-standard
+///   service tier, fast mode, or US-pinned inference, each of which changes
+///   what the tokens cost.
+fn served_by_of(record: &Value, usage: &Value) -> Option<crate::source::ServedBy> {
+    let model = record
+        .pointer("/message/model")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())?;
+
+    // An absent field is the common case (older transcripts predate it) and
+    // means the default: standard tier, standard speed, global inference.
+    // A value that is present and not one this crate can price is a refusal.
+    // `not_available` is what Claude Code writes when the request carried no
+    // `inference_geo` at all, so it reads as the unpinned default; the 1.1x
+    // multiplier applies only to inference explicitly pinned to `us`.
+    fn modifier_is_standard(field: Option<&Value>, standard: &[&str]) -> bool {
+        match field {
+            None | Some(Value::Null) => true,
+            Some(Value::String(value)) => standard.contains(&value.as_str()),
+            Some(_) => false,
+        }
+    }
+    if !modifier_is_standard(usage.get("service_tier"), &["standard"])
+        || !modifier_is_standard(usage.get("speed"), &["standard"])
+        || !modifier_is_standard(usage.get("inference_geo"), &["global", "not_available"])
+    {
+        return None;
+    }
+
+    fn stated_count(object: &Value, key: &str) -> Option<u32> {
+        u32::try_from(object.get(key)?.as_u64()?).ok()
+    }
+
+    stated_count(usage, "input_tokens")?;
+    stated_count(usage, "output_tokens")?;
+    let cache_read_tokens = stated_count(usage, "cache_read_input_tokens")?;
+
+    let created = stated_count(usage, "cache_creation_input_tokens")?;
+    let (cache_write_5m_tokens, cache_write_1h_tokens) = if created == 0 {
+        (0, 0)
+    } else {
+        let split = usage.get("cache_creation")?;
+        let five_minute = stated_count(split, "ephemeral_5m_input_tokens")?;
+        let one_hour = stated_count(split, "ephemeral_1h_input_tokens")?;
+        if five_minute.checked_add(one_hour)? != created {
+            return None;
+        }
+        (five_minute, one_hour)
+    };
+
+    Some(crate::source::ServedBy {
+        model: model.to_string(),
+        cache_read_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -2600,6 +2701,216 @@ mod tests {
                     && e.content.as_deref() == Some("secret reasoning")),
             "reasoning is now captured as a first-class event"
         );
+    }
+
+    /// The two things a price needs beyond the token counts: which model
+    /// served the step, and how the cached tokens split across the two cache
+    /// durations. Both come from the fixture record, which states them the
+    /// way a real Claude Code transcript does.
+    #[test]
+    fn the_serving_model_and_cache_split_are_captured() {
+        let src = ClaudeCodeSource::new(fixture_root());
+        let r = &src.discover().unwrap()[0];
+        let t = src.load(r).unwrap();
+        assert_eq!(
+            t.events[2].served_by,
+            Some(crate::source::ServedBy {
+                model: "claude-fable-5".to_string(),
+                cache_read_tokens: 1000,
+                cache_write_5m_tokens: 200,
+                cache_write_1h_tokens: 300,
+            })
+        );
+    }
+
+    /// The second assistant record in the fixture reports only input and
+    /// output tokens -- no cache report at all, the shape an older transcript
+    /// has. Its tokens are still captured; it simply goes unpriced, rather
+    /// than being priced as though nothing was cached.
+    #[test]
+    fn a_record_with_no_cache_report_keeps_its_tokens_and_stays_unpriced() {
+        let src = ClaudeCodeSource::new(fixture_root());
+        let r = &src.discover().unwrap()[0];
+        let t = src.load(r).unwrap();
+        assert_eq!(t.events[5].token_counts, Some((150, 12)));
+        assert_eq!(t.events[5].served_by, None);
+    }
+
+    fn priceable_usage() -> Value {
+        json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 0,
+        })
+    }
+
+    fn record_with(usage: Value) -> Value {
+        json!({ "message": { "model": "claude-opus-5", "usage": usage } })
+    }
+
+    /// The baseline every case below mutates away from. Without this
+    /// assertion a `None` result would prove nothing -- it could mean the
+    /// helper never returns anything at all.
+    #[test]
+    fn a_complete_usage_report_is_read() {
+        let record = record_with(priceable_usage());
+        assert_eq!(
+            served_by_of(&record, record.pointer("/message/usage").unwrap()),
+            Some(crate::source::ServedBy {
+                model: "claude-opus-5".to_string(),
+                cache_read_tokens: 30,
+                cache_write_5m_tokens: 0,
+                cache_write_1h_tokens: 0,
+            })
+        );
+    }
+
+    /// Each of these is a record this crate must refuse to price. The list is
+    /// the specification: a count the record did not state (which must not
+    /// read as zero), a cache-creation total with no duration breakdown or
+    /// one that does not reconcile, and any pricing modifier the price table
+    /// does not model.
+    #[test]
+    fn an_incomplete_or_modified_usage_report_is_refused() {
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+
+        for missing in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ] {
+            let mut usage = priceable_usage();
+            usage.as_object_mut().unwrap().remove(missing);
+            cases.push((missing, usage));
+        }
+
+        let mut no_split = priceable_usage();
+        no_split["cache_creation_input_tokens"] = json!(500);
+        cases.push(("cache creation with no 5m/1h split", no_split));
+
+        let mut bad_split = priceable_usage();
+        bad_split["cache_creation_input_tokens"] = json!(500);
+        bad_split["cache_creation"] = json!({
+            "ephemeral_5m_input_tokens": 200,
+            "ephemeral_1h_input_tokens": 299,
+        });
+        cases.push(("a split that does not add up", bad_split));
+
+        let mut half_split = priceable_usage();
+        half_split["cache_creation_input_tokens"] = json!(500);
+        half_split["cache_creation"] = json!({ "ephemeral_5m_input_tokens": 500 });
+        cases.push(("a split missing the 1h half", half_split));
+
+        for (label, value) in [
+            ("service_tier", json!("priority")),
+            ("speed", json!("fast")),
+            ("inference_geo", json!("us")),
+        ] {
+            let mut usage = priceable_usage();
+            usage[label] = value;
+            cases.push((label, usage));
+        }
+
+        let mut too_large = priceable_usage();
+        too_large["input_tokens"] = json!(u64::from(u32::MAX) + 1);
+        cases.push(("a count wider than u32", too_large));
+
+        for (label, usage) in cases {
+            let record = record_with(usage);
+            assert_eq!(
+                served_by_of(&record, record.pointer("/message/usage").unwrap()),
+                None,
+                "must refuse to price: {label}"
+            );
+        }
+    }
+
+    /// The modifiers that leave standard pricing in force are read as such,
+    /// so the refusals above are refusing something real rather than
+    /// refusing every record that carries the fields at all.
+    #[test]
+    fn standard_pricing_modifiers_are_not_refused() {
+        for (label, value) in [
+            ("service_tier", json!("standard")),
+            ("speed", json!("standard")),
+            ("inference_geo", json!("global")),
+            ("inference_geo", json!("not_available")),
+        ] {
+            let mut usage = priceable_usage();
+            usage[label] = value.clone();
+            let record = record_with(usage);
+            assert!(
+                served_by_of(&record, record.pointer("/message/usage").unwrap()).is_some(),
+                "{label}={value} is standard pricing and must still be read"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_that_does_not_name_its_model_is_refused() {
+        for message in [
+            json!({ "usage": priceable_usage() }),
+            json!({ "model": "", "usage": priceable_usage() }),
+            json!({ "model": 7, "usage": priceable_usage() }),
+        ] {
+            let record = json!({ "message": message });
+            assert_eq!(
+                served_by_of(&record, record.pointer("/message/usage").unwrap()),
+                None
+            );
+        }
+    }
+
+    /// A turn made entirely of tool calls emits no assistant text event, and
+    /// its usage used to be dropped with it. Those turns are most of a coding
+    /// session, so a session total that skipped them was not a total.
+    #[test]
+    fn a_tool_only_turn_keeps_its_usage() {
+        let record = json!({
+            "message": {
+                "model": "claude-opus-5",
+                "usage": priceable_usage(),
+                "content": [
+                    { "type": "tool_use", "id": "tu_9", "name": "Read", "input": {} },
+                ],
+            }
+        });
+        let mut events = Vec::new();
+        map_assistant_record(&record, None, &mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, SessionEventKind::ToolCall);
+        assert_eq!(events[0].token_counts, Some((10, 20)));
+        assert!(events[0].served_by.is_some());
+    }
+
+    /// One record, one usage report: attaching it to more than one event
+    /// would double-count both the tokens and the price.
+    #[test]
+    fn usage_is_attached_exactly_once_per_record() {
+        let record = json!({
+            "message": {
+                "model": "claude-opus-5",
+                "usage": priceable_usage(),
+                "content": [
+                    { "type": "text", "text": "first" },
+                    { "type": "tool_use", "id": "tu_1", "name": "Read", "input": {} },
+                    { "type": "text", "text": "second" },
+                ],
+            }
+        });
+        let mut events = Vec::new();
+        map_assistant_record(&record, None, &mut events);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.iter().filter(|e| e.token_counts.is_some()).count(),
+            1
+        );
+        assert_eq!(events.iter().filter(|e| e.served_by.is_some()).count(), 1);
+        // The text event, not the tool call: unchanged from before there was
+        // a price to attach.
+        assert_eq!(events[0].token_counts, Some((10, 20)));
     }
 
     #[test]

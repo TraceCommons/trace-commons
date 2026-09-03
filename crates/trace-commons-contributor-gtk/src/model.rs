@@ -37,6 +37,27 @@ pub struct Status {
     /// spent budget came to be indistinguishable from a broken app.
     #[serde(default)]
     pub daily_budget: DailyBudget,
+    /// What the daemon is seeing from the local proxy it was told about.
+    ///
+    /// Absent on a daemon older than the block, and `RoutingStatus`'s
+    /// default is the state that claims nothing.
+    #[serde(default)]
+    pub routing: RoutingStatus,
+}
+
+/// `status.routing`. Three states and one per-process timestamp; nothing
+/// identifying, no port and no path.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RoutingStatus {
+    /// `not_declared`, `awaiting_rows` or `rows_seen`. Empty when the
+    /// daemon did not report the block at all, which reads as the first.
+    #[serde(default)]
+    pub state: String,
+    /// When the daemon last got an answer. **Per-process**: it starts
+    /// empty again every time the daemon comes back up, so it is a "last
+    /// checked" and never a date this install began.
+    #[serde(default)]
+    pub last_refresh_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `status.daily_budget`. Counts and one timestamp; nothing identifying.
@@ -84,9 +105,17 @@ pub struct QueueEntry {
     pub entry_id: String,
     #[serde(default)]
     pub session_hash: String,
-    /// `claude-code`, `codex`, or `trajectory`: which agent produced this.
+    /// `claude-code`, `codex`, or `trajectory`: which ADAPTER produced this.
     #[serde(default)]
     pub source: String,
+    /// What the transcript declares itself to be, when the daemon knew it.
+    ///
+    /// An imported Antigravity conversation is stored as a trajectory file,
+    /// so `source` says `trajectory` -- the storage format, not the tool the
+    /// contributor used. Absent for every native adapter, and for a
+    /// trajectory the daemon was handed by name rather than discovered.
+    #[serde(default)]
+    pub declared_source: Option<String>,
     #[serde(default)]
     pub project_id: String,
     #[serde(default)]
@@ -123,13 +152,27 @@ pub struct QueueEntry {
 impl QueueEntry {
     /// The agent that produced the session, in the words a contributor uses
     /// for it.
+    ///
+    /// Prefers what the transcript declares over the adapter that stores it.
+    /// An imported Antigravity conversation reads as "Antigravity", not as
+    /// the trajectory file it happens to be kept in.
+    ///
+    /// The fallback arm returns `self.source` rather than the declared
+    /// value: an unrecognised declaration is untrusted text out of a file,
+    /// and putting it on screen unmapped is a different decision from
+    /// mapping a slug this build knows.
     pub fn agent_label(&self) -> &str {
-        match self.source.as_str() {
+        match self
+            .declared_source
+            .as_deref()
+            .unwrap_or(self.source.as_str())
+        {
             "claude-code" => "Claude Code",
             "codex" => "Codex",
             "gemini-cli" => "Gemini CLI",
+            "antigravity" => "Antigravity",
             "trajectory" => "Trajectory",
-            other => other,
+            _ => self.source.as_str(),
         }
     }
 }
@@ -344,6 +387,21 @@ impl ApproveResult {
     }
 }
 
+/// `arming_suggestion`: the one project worth offering to arm right now.
+///
+/// The daemon answers with an empty object when there is nothing to suggest,
+/// which deserializes to `None` at the call site rather than to a
+/// zero-filled offer -- a shell that receives no suggestion must draw no
+/// card.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct ArmingOffer {
+    pub project_id: String,
+    #[serde(default)]
+    pub project_label: String,
+    #[serde(default)]
+    pub contributed_count: u32,
+}
+
 /// `list_projects`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Project {
@@ -461,10 +519,41 @@ pub struct Settings {
     pub local_notifications: bool,
     #[serde(default)]
     pub near_ai_configured: bool,
+    /// `watch`, `off` or `unset`, per source.
+    ///
+    /// `get_settings` also sends `claude_root_configured` /
+    /// `codex_root_configured`, and this shell deliberately does not read
+    /// them. That boolean is `mode == "watch"`, so it is false for `off` as
+    /// well as for `unset` -- and the settings screen printed one sentence
+    /// on that false branch, telling a contributor who declared a tool off
+    /// that its sessions were being read from the usual place. Only the mode
+    /// separates "watched somewhere else", "watched where it usually lives"
+    /// and "not used at all", and only the last of those reads "Not used".
     #[serde(default)]
-    pub claude_root_configured: bool,
+    pub claude_source_mode: String,
     #[serde(default)]
-    pub codex_root_configured: bool,
+    pub codex_source_mode: String,
+    #[serde(default)]
+    pub gemini_source_mode: String,
+    /// The local proxy declaration as the daemon holds it. Absent means
+    /// off -- there is no conventional fallback for a local service, so
+    /// unlike a source root there is no third state.
+    ///
+    /// Carries the declared *folder*, never a token: the daemon reads the
+    /// credential at call time and it never enters settings.
+    #[serde(default)]
+    pub ironwire: Option<RoutingDeclaration>,
+}
+
+/// `get_settings`'s `ironwire` block.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingDeclaration {
+    /// `watch` or `off`.
+    pub mode: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub token_dir: Option<String>,
 }
 
 /// `consent_options`.
@@ -661,5 +750,48 @@ mod tests {
             enrolled: true,
         };
         assert_eq!(s.scrubbed_line(), "scrubbed: 2 secrets, 1 email address");
+    }
+
+    /// The queue names what a trace came FROM, not how it is stored.
+    ///
+    /// An imported Antigravity conversation is staged as a trajectory file
+    /// and read by the trajectory adapter, so the adapter name alone would
+    /// label it "Trajectory" -- the storage format, and not the word the
+    /// contributor typed to collect it.
+    #[test]
+    fn an_imported_conversation_is_labelled_by_what_it_declares() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e1",
+            "source": "trajectory",
+            "declared_source": "antigravity",
+        }))
+        .unwrap();
+        assert_eq!(entry.agent_label(), "Antigravity");
+    }
+
+    /// A native session declares nothing and still reads correctly, which
+    /// is what stops this from being a one-source special case.
+    #[test]
+    fn a_session_that_declares_nothing_falls_back_to_its_adapter() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e2",
+            "source": "claude-code",
+        }))
+        .unwrap();
+        assert_eq!(entry.declared_source, None);
+        assert_eq!(entry.agent_label(), "Claude Code");
+    }
+
+    /// An unrecognised declaration is untrusted text from a file. It must
+    /// not reach the screen unmapped -- the adapter is shown instead.
+    #[test]
+    fn an_unknown_declaration_does_not_reach_the_screen() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "entry_id": "e3",
+            "source": "trajectory",
+            "declared_source": "something-this-build-has-never-heard-of",
+        }))
+        .unwrap();
+        assert_eq!(entry.agent_label(), "trajectory");
     }
 }

@@ -57,7 +57,13 @@ public sealed class DaemonHost : IAsyncDisposable
     /// use that.
     /// </para>
     /// </remarks>
-    public event Action<int>? DigestDue;
+    /// <summary>
+    /// A digest is due. Carries both halves: what is waiting for review, and
+    /// what was contributed without being asked about since the last one. It
+    /// used to carry the pending count alone, which meant a contributor whose
+    /// projects were all armed -- nothing ever queued -- was never notified.
+    /// </summary>
+    public event Action<DigestFacts>? DigestDue;
 
     /// <summary>
     /// Raised on the UI thread when the ABI reported dropped events. The view
@@ -270,7 +276,11 @@ public sealed class DaemonHost : IAsyncDisposable
                     break;
 
                 case DaemonProtocol.Events.DigestDue:
-                    DigestDue?.Invoke(evt.PendingCount);
+                    DigestDue?.Invoke(new DigestFacts(
+                        evt.PendingCount,
+                        evt.ContributedCount,
+                        evt.ContributedProjects,
+                        evt.CreditPending));
                     break;
 
                 case DaemonProtocol.Events.Lagged:

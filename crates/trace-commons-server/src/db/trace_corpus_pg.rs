@@ -4033,10 +4033,14 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let updated = tx
             .execute(
+                // The version stamp goes with the value it names (V57): a
+                // row holding a stamp but no simhash would claim a
+                // derivation it no longer carries the output of.
                 "UPDATE trace_gate_decisions
                     SET dedup_simhash = NULL,
                         dedup_cluster_id = NULL,
-                        dedup_cluster_size = NULL
+                        dedup_cluster_size = NULL,
+                        dedup_signal_version = NULL
                   WHERE tenant_id = $1 AND submission_id = $2",
                 &[&tenant_id, &submission_id],
             )
@@ -5391,8 +5395,11 @@ impl TraceCorpusStore for PgBackend {
         let row = tx
             .query_opt(
                 &format!(
+                    // `next_job` renames the claimed id so that the unqualified
+                    // `RETURNING {TRACE_EXPORT_JOB_COLUMNS}` list below stays
+                    // unambiguous across the `FROM next_job` join.
                     "WITH next_job AS (
-                        SELECT export_job_id
+                        SELECT export_job_id AS claimed_export_job_id
                           FROM trace_export_jobs
                          WHERE tenant_id = $1
                            AND status = $2
@@ -5411,7 +5418,7 @@ impl TraceCorpusStore for PgBackend {
                             updated_at = NOW()
                        FROM next_job
                       WHERE job.tenant_id = $1
-                        AND job.export_job_id = next_job.export_job_id
+                        AND job.export_job_id = next_job.claimed_export_job_id
                       RETURNING {TRACE_EXPORT_JOB_COLUMNS}"
                 ),
                 &[
@@ -6212,25 +6219,62 @@ impl TraceCorpusStore for PgBackend {
         &self,
         tenant_id: &str,
         decision_id: Uuid,
-        dedup_simhash: i64,
+        write: crate::trace_corpus_storage::DedupAssignmentWrite,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Update ONLY the four dedup columns on exactly this decision row.
+        // Perplexity, novelty, tail-fraction, vector-entry, gate status, and
+        // credit are left exactly as-is.
+        //
+        // The version stamp is set in the SAME statement as the simhash it
+        // describes (migration V57): a row that carries one without the other,
+        // even briefly, reads as the legacy version to the recluster sweep.
+        tx.execute(
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = $3,
+                    dedup_cluster_id = $4,
+                    dedup_cluster_size = $5,
+                    dedup_signal_version = $6
+             WHERE tenant_id = $1 AND decision_id = $2",
+            &[
+                &tenant_id,
+                &decision_id,
+                &write.dedup_simhash,
+                &write.dedup_cluster_id,
+                &write.dedup_cluster_size,
+                &write.dedup_signal_version,
+            ],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn update_trace_gate_decision_dedup_cluster(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
         dedup_cluster_id: Uuid,
         dedup_cluster_size: i32,
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        // Update ONLY the three dedup columns on exactly this decision row.
-        // Perplexity, novelty, tail-fraction, vector-entry, gate status, and
-        // credit are left exactly as-is.
+        // Update ONLY the two cluster columns. `dedup_simhash` and
+        // `dedup_signal_version` are deliberately absent from the SET list:
+        // the recluster sweep re-clusters values it read and derived neither
+        // of them, so re-writing the stamp would turn a NULL -- "recorded
+        // before the stamp existed" -- into a positive claim the pass has no
+        // evidence for.
         tx.execute(
             "UPDATE trace_gate_decisions
-                SET dedup_simhash = $3,
-                    dedup_cluster_id = $4,
-                    dedup_cluster_size = $5
+                SET dedup_cluster_id = $3,
+                    dedup_cluster_size = $4
              WHERE tenant_id = $1 AND decision_id = $2",
             &[
                 &tenant_id,
                 &decision_id,
-                &dedup_simhash,
                 &dedup_cluster_id,
                 &dedup_cluster_size,
             ],

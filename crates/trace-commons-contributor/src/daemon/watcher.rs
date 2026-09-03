@@ -120,10 +120,11 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 /// is a blocking filesystem or lock operation) and why `tick` runs it
 /// through `run_blocking`.
 fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
-    let (max_queue_entries, source_roots) = {
+    let max_queue_entries = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        s.max_queue_entries
     };
+    let source_roots = shared.source_roots_with_routing();
     tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
 }
 
@@ -194,10 +195,11 @@ pub async fn tick_paths(
     if shared.is_paused(now) {
         return Ok(TickReport::default());
     }
-    let (max_queue_entries, source_roots) = {
+    let max_queue_entries = {
         let s = shared.settings.lock().expect("settings lock");
-        (s.max_queue_entries, s.source_roots())
+        s.max_queue_entries
     };
+    let source_roots = shared.source_roots_with_routing();
     super::run_blocking(|| {
         tick_over_paths(
             shared,
@@ -559,17 +561,41 @@ fn visit_session(
         known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
     };
 
+    // Two independent restrictions on arming, and a fresh entry has to clear
+    // both. They arrived from different directions -- the settle window from
+    // #515, the staging exclusion from the trajectory-import work -- and each
+    // one dropped is a session sent unattended that should not have been, so
+    // they are ANDed rather than either replacing the other.
+
+    // A staged trajectory is never armed, whatever the project mode says.
+    //
+    // The daemon's only trajectory scope is the staging directory (see
+    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
+    // point IS an import. It was invisible to this daemon until the staging
+    // scope existed, and auto-uploading on first sight would send something
+    // the contributor may not remember importing, with no prompt. They
+    // armed a watched source they had declared; this is not one.
+    //
+    // The check is on the adapter rather than on `declared_source` on
+    // purpose: it must hold for every staged trajectory, including one a
+    // contributor dropped in by hand, not only for the ones that name
+    // themselves.
+    let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
+
     // A fresh entry from an armed project is queued `Pending` until it has
     // settled, not `Approved` on sight. The next poll promotes it once the
     // window has elapsed (site above), and a session that grows in the
     // meantime supersedes this entry -- free, where the same growth after an
     // upload would cost one of three re-uploads and a duplicate penalty.
-    let armed = mode == ProjectMode::AutoUpload && armed_settle_elapsed(obs.modified_at, ctx.now);
+    let armed = mode == ProjectMode::AutoUpload
+        && !from_staging
+        && armed_settle_elapsed(obs.modified_at, ctx.now);
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
         session_hash: transcript.session_hash.clone(),
         source: session_ref.source.to_string(),
+        declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
         project_label: disambiguated_label(&project_key, &known),
         path: obs.path.clone(),
@@ -1032,7 +1058,7 @@ mod tests {
         fn tick_counted(&self, now: DateTime<Utc>, loads: &Arc<AtomicUsize>) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()
@@ -1064,7 +1090,7 @@ mod tests {
         ) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()
@@ -1921,6 +1947,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         f.shared.store.save_config(&cfg).unwrap();
     }
@@ -2097,7 +2124,7 @@ mod tests {
         fn tick_refusing(&self, now: DateTime<Utc>, err: fn() -> anyhow::Error) -> TickReport {
             let (max_queue_entries, source_roots) = {
                 let s = self.shared.settings.lock().unwrap();
-                (s.max_queue_entries, s.source_roots())
+                (s.max_queue_entries, s.source_roots(&self.shared.store))
             };
             let sources = all_sources(&source_roots)
                 .into_iter()

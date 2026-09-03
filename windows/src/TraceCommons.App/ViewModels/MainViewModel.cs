@@ -75,6 +75,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _undoNoticeLine = string.Empty;
     private MainPane _pane = MainPane.Queue;
     private HealthCopy? _health;
+    private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
     private HistoryRollup _rollup = new();
 
@@ -206,6 +207,55 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string HealthTitle => _health?.Title ?? string.Empty;
 
     public string HealthDetail => _health?.Detail ?? string.Empty;
+
+    // --- The arming offer --------------------------------------------------
+    //
+    // The offer to stop being asked about one project, drawn above the cards
+    // it is about. The daemon decides whether there is anything to ask
+    // (ProjectPolicy::arming_suggestion) and both answers go back to it, so
+    // "Not now" is remembered across relaunches and across shells rather than
+    // being a dismissal this window forgets. This holds whichever offer
+    // arrived and renders it; it never decides one for itself.
+
+    /// <summary>Whether there is a project worth offering to arm.</summary>
+    public bool HasArmingOffer => _armingOffer is not null;
+
+    /// <summary>The evidence line, stated above the question.</summary>
+    public string ArmingOfferEvidence =>
+        _armingOffer is { } offer
+            ? ArmingOfferCopy.Evidence(offer.ProjectLabel, offer.ContributedCount)
+            : string.Empty;
+
+    public string ArmingOfferQuestion =>
+        _armingOffer is { } offer ? ArmingOfferCopy.Question(offer.ProjectLabel) : string.Empty;
+
+    public string ArmingOfferConfirm => ArmingOfferCopy.Confirm;
+
+    public string ArmingOfferDecline => ArmingOfferCopy.Decline;
+
+    /// <summary>
+    /// The offered project's opaque id, for the two calls the buttons make.
+    /// Empty when there is no offer, which the window treats as "do nothing"
+    /// rather than as a project to act on.
+    /// </summary>
+    public string ArmingOfferProjectId => _armingOffer?.ProjectId ?? string.Empty;
+
+    /// <summary>
+    /// Stores whichever offer the daemon last reported, or clears it.
+    /// </summary>
+    public void SetArmingOffer(ArmingOffer? offer)
+    {
+        if (Equals(_armingOffer, offer))
+        {
+            return;
+        }
+
+        _armingOffer = offer;
+        Raise(nameof(HasArmingOffer));
+        Raise(nameof(ArmingOfferEvidence));
+        Raise(nameof(ArmingOfferQuestion));
+        Raise(nameof(ArmingOfferProjectId));
+    }
 
     // --- The daily-budget banner -------------------------------------------
     //
@@ -884,6 +934,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             IReadOnlyList<QueueEntry> pending = await _host.ListPendingAsync().ConfigureAwait(true);
             ReplacePending(pending);
+
+            // Asked alongside the queue because it is drawn on the queue
+            // screen, and the daemon's answer changes on exactly the events
+            // that change the queue -- an upload landing is what moves a
+            // project past the threshold. An error frame leaves the previous
+            // offer alone rather than clearing it: a daemon that could not
+            // answer has not withdrawn the question.
+            DaemonResponse suggestion = await _host
+                .CallAsync(DaemonProtocol.Methods.ArmingSuggestion)
+                .ConfigureAwait(true);
+            if (!suggestion.IsError && suggestion.Result is { } offerBody)
+            {
+                SetArmingOffer(ArmingOffer.Parse(offerBody));
+            }
 
             DaemonResponse status = await _host
                 .CallAsync(DaemonProtocol.Methods.Status)

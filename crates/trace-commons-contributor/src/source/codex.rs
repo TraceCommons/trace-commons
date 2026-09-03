@@ -169,6 +169,7 @@ fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef>
         .map(|s| s.to_string());
     Some(SessionRef {
         source: SOURCE_CODEX,
+        declared_source: None,
         path,
         project,
         cwd,
@@ -434,6 +435,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
             }
             other => {
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::Opaque,
                     timestamp: record_timestamp,
                     content: None,
@@ -478,6 +480,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         events,
         subagent_count: 0,
         subagents_dropped: 0,
+        routing: Vec::new(),
     })
 }
 
@@ -497,6 +500,7 @@ fn map_response_item(
 ) {
     let Some(payload) = payload else {
         events.push(SessionEvent {
+            served_by: None,
             kind: SessionEventKind::Opaque,
             timestamp,
             content: None,
@@ -519,6 +523,7 @@ fn map_response_item(
                 "assistant" => SessionEventKind::Assistant,
                 _ => {
                     events.push(SessionEvent {
+                        served_by: None,
                         kind: SessionEventKind::Opaque,
                         timestamp,
                         content: None,
@@ -543,6 +548,7 @@ fn map_response_item(
                 })
                 .unwrap_or_default();
             events.push(SessionEvent {
+                served_by: None,
                 kind,
                 timestamp,
                 content: Some(text),
@@ -570,6 +576,7 @@ fn map_response_item(
                 None => Value::Null,
             };
             events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::ToolCall,
                 timestamp,
                 content: None,
@@ -592,6 +599,7 @@ fn map_response_item(
                 None => None,
             };
             events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::ToolResult,
                 timestamp,
                 content,
@@ -627,6 +635,7 @@ fn map_response_item(
             // emitting an empty event would only add noise to the transcript.
             if !parts.is_empty() {
                 events.push(SessionEvent {
+                    served_by: None,
                     kind: SessionEventKind::Reasoning,
                     timestamp,
                     content: Some(parts.join("\n")),
@@ -640,6 +649,7 @@ fn map_response_item(
         }
         other => {
             events.push(SessionEvent {
+                served_by: None,
                 kind: SessionEventKind::Opaque,
                 timestamp,
                 content: None,

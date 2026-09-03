@@ -35,6 +35,18 @@ public static class DaemonProtocol
         public const string Hello = "hello";
         public const string Status = "status";
         public const string ListPending = "list_pending";
+
+        /// <summary>
+        /// The one project worth offering to arm right now, or an empty
+        /// object. A read: asking does not consume the offer.
+        /// </summary>
+        public const string ArmingSuggestion = "arming_suggestion";
+
+        /// <summary>
+        /// "Not now" against one project's arming offer. The daemon silences
+        /// it for thirty days; it does not forget it.
+        /// </summary>
+        public const string DeclineArming = "decline_arming";
         public const string Pause = "pause";
         public const string Resume = "resume";
         public const string Approve = "approve";
@@ -69,6 +81,18 @@ public static class DaemonProtocol
         public const string SetProjectMode = "set_project_mode";
         public const string ListAudit = "list_audit";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
+
+        /// <summary>
+        /// Asks IronWire which tools on this machine are set to send through
+        /// it, one row per tool it knows about.
+        ///
+        /// The only input to a per-tool word on the routing surface. The
+        /// declaration this app holds is not one: declaring IronWire here has
+        /// no causal relation to whether a tool is configured to use it.
+        /// Called only from a human pressing a switch or a button; nothing on
+        /// the submission path calls it.
+        /// </summary>
+        public const string ProbeRoutedTools = "probe_routed_tools";
 
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
@@ -278,8 +302,21 @@ public sealed class QueueEntry
     [JsonPropertyName("session_hash")]
     public string? SessionHash { get; set; }
 
+    /// <summary>Which ADAPTER produced this. Not always the tool the
+    /// contributor used -- see <see cref="DeclaredSource"/>.</summary>
     [JsonPropertyName("source")]
     public string? Source { get; set; }
+
+    /// <summary>
+    /// What the transcript declares itself to be, when the daemon knew it.
+    ///
+    /// An imported Antigravity conversation is stored as a trajectory file,
+    /// so <see cref="Source"/> says <c>trajectory</c>: the storage format,
+    /// and not the word the contributor typed to collect it. Null for every
+    /// native adapter, and for a daemon predating the field.
+    /// </summary>
+    [JsonPropertyName("declared_source")]
+    public string? DeclaredSource { get; set; }
 
     [JsonPropertyName("project_id")]
     public string? ProjectId { get; set; }
@@ -363,6 +400,19 @@ public sealed class DaemonStatus
 
     [JsonPropertyName("health")]
     public DaemonHealth? Health { get; set; }
+
+    /// <summary>
+    /// What the daemon is seeing from the local proxy it was told about.
+    /// Null on a daemon older than the block, which reads as the state that
+    /// claims nothing.
+    /// </summary>
+    [JsonPropertyName("routing")]
+    public RoutingStatusSnapshot? Routing { get; set; }
+
+    /// <summary>
+    /// The routing state, or empty when the daemon did not report the block.
+    /// </summary>
+    public string RoutingState => Routing?.State ?? string.Empty;
 
     /// <summary>
     /// The daily volume caps, and how much already-approved work they are
@@ -559,6 +609,62 @@ public sealed class DaemonEvent
     /// an unknown number of sessions.
     /// </remarks>
     public int PendingCount => IntField("pending");
+
+    /// <summary>
+    /// How many sessions were contributed without being asked about since the
+    /// last digest, for a <c>digest_due</c> frame.
+    /// </summary>
+    /// <remarks>
+    /// Zero on a frame that carries no count, including every frame from a
+    /// daemon predating this field. That degrades the digest to the
+    /// waiting-only one that shipped before rather than to a wrong number.
+    /// An armed project never queues anything, so this is the only count that
+    /// is ever nonzero for a contributor who armed everything.
+    /// </remarks>
+    public int ContributedCount => IntField("contributed");
+
+    /// <summary>
+    /// Pending credit carried by those contributions. Pending, never earned:
+    /// settlement is off on every deployment shipped so far.
+    /// </summary>
+    public double CreditPending =>
+        Data is { } data
+        && data.ValueKind == JsonValueKind.Object
+        && data.TryGetProperty("credit_pending", out JsonElement credit)
+        && credit.TryGetDouble(out double value)
+            ? value
+            : 0;
+
+    /// <summary>
+    /// The project labels those contributions came from. Labels only: the
+    /// daemon has already reduced them from paths, and these go straight into
+    /// notification text that Windows may persist in its notification centre.
+    /// </summary>
+    public IReadOnlyList<string> ContributedProjects
+    {
+        get
+        {
+            if (Data is not { } data
+                || data.ValueKind != JsonValueKind.Object
+                || !data.TryGetProperty("contributed_projects", out JsonElement projects)
+                || projects.ValueKind != JsonValueKind.Array)
+            {
+                return Array.Empty<string>();
+            }
+
+            var labels = new List<string>();
+            foreach (JsonElement item in projects.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String
+                    && item.GetString() is { Length: > 0 } label)
+                {
+                    labels.Add(label);
+                }
+            }
+
+            return labels;
+        }
+    }
 
     /// <summary>
     /// The decoded payload of a <see cref="DaemonProtocol.Events.PreviewReady"/>
