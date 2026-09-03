@@ -193,9 +193,26 @@ for some time:
 | Windows | `TraceCommons.Interop.TranscriptMarkers` |
 
 All three carry the identical pattern
-`<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, which already covers BOTH
-marker families -- the numbered `<PRIVATE_LABEL_N>` form and every fixed
-`[REDACTED]` / `[REDACTED:label]` / `<REDACTED_PRIVATE_KEY>` form. The scan
+`<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, which covers the numbered
+`<PRIVATE_LABEL_N>` form and the square-bracketed `[REDACTED]` /
+`[REDACTED:label]` forms.
+
+**It does not cover `<REDACTED_PRIVATE_KEY>`, and that is a live defect.**
+That token is angle-bracketed like the first family but begins `<REDACTED_`,
+so it matches neither alternative -- not the `<PRIVATE_` arm, and not the
+`\[REDACTED` arm, which requires a square bracket. A PEM private key is
+therefore removed from the payload and its removal is **invisible in the
+transcript** in all three shells: the highest-stakes redaction there is, and
+the one a contributor cannot see happened.
+
+There is a second consequence. The pattern is shared with the chunker
+precisely so a marker is never cut in half; a token the pattern does not
+match is not protected, so `<REDACTED_PRIVATE_KEY>` can also be split across
+a chunk boundary and render as two fragments.
+
+Fixing it means widening one alternation in three separately-maintained
+copies of the constant, each with chunk-boundary tests behind it. That is
+its own change, not a rider on this one. The scan
 is deliberately shared with the chunker so a marker is never cut in half,
 and the chip styling is a considered choice recorded in its own doc comment:
 markers read as objects placed in the text, not as damage done to it.
