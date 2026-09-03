@@ -177,6 +177,16 @@ pub struct App {
     /// search term is the contributor's own sensitive string -- a client
     /// name, usually. It does not need to outlive the process to do its job.
     pub recent_searches: RefCell<Vec<String>>,
+    /// Which level of the queue is showing. Resolved against the live
+    /// folders on every render (`queue_folders::resolve`), so a folder that
+    /// empties while it is open returns to the list.
+    pub queue_location: RefCell<crate::queue_folders::Location>,
+    /// The same, for history. A second field rather than one shared with the
+    /// queue: the two screens hold different sets of projects -- history
+    /// keeps a folder the queue has emptied -- and sharing one location
+    /// would drop a contributor into a folder that does not exist on the
+    /// screen they just switched to.
+    pub history_location: RefCell<crate::queue_folders::Location>,
     quit_confirmed: Cell<bool>,
 }
 
@@ -320,6 +330,8 @@ impl App {
             withdrawals: RefCell::new(HashMap::new()),
             outcome_counts: RefCell::new(Default::default()),
             recent_searches: RefCell::new(Vec::new()),
+            queue_location: RefCell::new(crate::queue_folders::Location::Root),
+            history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
         });
 
@@ -663,7 +675,7 @@ impl App {
             Some(CardOutcome::Ready(summary)) => {
                 self.previews
                     .borrow_mut()
-                    .insert(entry_id.to_string(), summary);
+                    .insert(entry_id.to_string(), *summary);
                 queue::render(self);
             }
             Some(CardOutcome::TooLarge {
@@ -1122,7 +1134,11 @@ pub fn titled_paragraph(title: &str, body: &str) -> gtk::Box {
 /// to, once the wire object has been read -- see
 /// `App::handle_preview_request_result`.
 enum CardOutcome {
-    Ready(PreviewSummary),
+    /// Boxed because the two variants are otherwise wildly unequal -- a
+    /// summary is a few hundred bytes of maps and vectors, the refusal is
+    /// two integers -- and every `Option<CardOutcome>` would carry the
+    /// larger of the two.
+    Ready(Box<PreviewSummary>),
     TooLarge {
         raw_session_bytes: u64,
         limit_bytes: u64,
@@ -1140,7 +1156,7 @@ fn parse_preview_outcome(value: &serde_json::Value) -> Option<CardOutcome> {
     match value.get("state").and_then(|v| v.as_str()) {
         Some(STATE_READY) => {
             let summary = serde_json::from_value(value.get("summary")?.clone()).ok()?;
-            Some(CardOutcome::Ready(summary))
+            Some(CardOutcome::Ready(Box::new(summary)))
         }
         Some(STATE_TOO_LARGE) => Some(CardOutcome::TooLarge {
             raw_session_bytes: value.get("raw_session_bytes")?.as_u64()?,

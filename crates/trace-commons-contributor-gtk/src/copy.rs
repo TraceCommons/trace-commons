@@ -211,6 +211,18 @@ pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
     }
 }
 
+/// The back control at the head of a folder's sessions.
+pub const ALL_FOLDERS: &str = "All folders";
+
+/// A folder row's right-hand figures: how much is waiting, and how big.
+pub fn folder_summary(sessions: usize, bytes: u64) -> String {
+    let unit = if sessions == 1 { "session" } else { "sessions" };
+    format!(
+        "{sessions} {unit}  \u{00b7}  {}",
+        crate::model::human_bytes(bytes)
+    )
+}
+
 /// Shown instead of the toast's own sentence when `approve` itself refused
 /// the call -- an unrecognised `entry_id` or `project_id`, or any other
 /// transport failure. This is not a skip: nothing about the request was
@@ -1871,6 +1883,21 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_folder_summary_inflects_its_session_count() {
+        assert!(folder_summary(1, 1024).starts_with("1 session "));
+        assert!(folder_summary(2, 1024).starts_with("2 sessions "));
+    }
+
+    #[test]
+    fn a_folder_summary_carries_its_size() {
+        assert!(
+            folder_summary(2, 1024).ends_with("1 KB"),
+            "{}",
+            folder_summary(2, 1024)
+        );
+    }
     use super::*;
 
     use crate::model::human_bytes;
