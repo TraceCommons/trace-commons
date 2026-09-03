@@ -157,16 +157,18 @@ mod tests {
         assert_eq!(bare, trailing);
     }
 
+    // Gated whole rather than returning early inside the body: the early
+    // return compiles unconditionally, which makes every assertion below it
+    // unreachable under `-D warnings` and, when it did compile, left a test
+    // that proved nothing on Windows.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_directory_normalizes_to_its_target() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
         let link = dir.path().join("link");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        return;
         assert_eq!(
             normalize_project_key(link.to_str().unwrap()),
             normalize_project_key(real.to_str().unwrap())
