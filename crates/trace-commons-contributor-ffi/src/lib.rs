@@ -1596,6 +1596,67 @@ pub unsafe extern "C" fn tc_preview_search(
     }
 }
 
+/// Count occurrences of `needle` in an entry's PRE-redaction session text.
+///
+/// Returns the match count, or -1 on error. Reports a COUNT ONLY: no offsets,
+/// no context, no bytes.
+///
+/// Takes a handle and an entry id rather than a `tc_preview*` deliberately.
+/// `tc_preview` holds `body` and `summary_json`, both post-redaction, and must
+/// not acquire pre-redaction bytes: hanging the raw session off the preview
+/// would keep an unredacted transcript resident for as long as a sheet stays
+/// open. The daemon reads the file, counts, and drops it.
+///
+/// # Safety
+/// `handle` must be a live pointer from `tc_daemon_start` (or NULL, which
+/// returns -1), and must not be freed concurrently by another thread.
+/// `entry_id` and `needle` must be valid NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_search_original(
+    handle: *mut tc_handle,
+    entry_id: *const c_char,
+    needle: *const c_char,
+) -> i32 {
+    let outcome = guard(|| {
+        if handle.is_null() {
+            anyhow::bail!("null-handle");
+        }
+        if !handle_pointer_is_live(handle) {
+            anyhow::bail!("{ERR_INVALID_HANDLE_POINTER}");
+        }
+        let handle = unsafe { &*handle };
+        // Type inferred from `ipc::search_original`'s signature below: the
+        // `uuid` crate is a transitive dependency here, not a direct one this
+        // crate names, so naming it would add a dependency. Same reasoning as
+        // `tc_preview_open`.
+        let entry_id = unsafe { borrow_str(entry_id) }?
+            .parse()
+            .map_err(|_| anyhow::anyhow!("entry-id-invalid"))?;
+        let needle = unsafe { borrow_str(needle) }?.to_string();
+        let Some(shared) = shared_of(handle) else {
+            anyhow::bail!("daemon-stopped");
+        };
+        // A dedicated thread with its own runtime, for the same reason
+        // `tc_preview_open` uses one: this is callable from inside a
+        // `tc_subscribe` callback, where `block_on` on a runtime worker panics
+        // with "Cannot start a runtime from within a runtime".
+        let count = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(ipc::search_original(&shared, entry_id, &needle))
+                .map_err(|label| anyhow::anyhow!("{label}"))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("panic"))??;
+        i32::try_from(count).map_err(|_| anyhow::anyhow!("too-many-matches"))
+    });
+    outcome.unwrap_or_else(|e| {
+        set_last_error(&e);
+        -1
+    })
+}
+
 /// Free a preview handle. Safe to call with NULL (no-op). Invalidates every
 /// `const char*` previously returned by `tc_preview_body` /
 /// `tc_preview_summary_json` for this handle. Detects and refuses a double

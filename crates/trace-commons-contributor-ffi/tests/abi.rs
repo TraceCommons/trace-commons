@@ -14,7 +14,8 @@ use trace_commons_contributor_ffi::{
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
     tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone,
     tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -868,6 +869,41 @@ fn preview_summary_json_refuses_a_pointer_that_is_not_a_preview() {
             .unwrap_or(false)
     );
     stop(h);
+}
+
+#[test]
+fn search_original_refuses_a_dead_handle() {
+    let needle = cstr_str("anything");
+    let id = cstr_str("11111111-1111-1111-1111-111111111111");
+    let n = unsafe { tc_search_original(std::ptr::null_mut(), id.as_ptr(), needle.as_ptr()) };
+    assert_eq!(n, -1, "a null handle must be refused, not dereferenced");
+}
+
+#[test]
+fn search_original_refuses_an_unparseable_entry_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let needle = cstr_str("anything");
+    let id = cstr_str("not-a-uuid");
+    let n = unsafe { tc_search_original(h, id.as_ptr(), needle.as_ptr()) };
+    assert_eq!(n, -1);
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
+}
+
+/// An entry the daemon does not know is an error, never a zero. Reporting
+/// "not in this session" for a lookup that never happened would be the most
+/// dangerous wrong answer this call can give.
+#[test]
+fn search_original_refuses_an_unknown_entry_rather_than_reporting_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let needle = cstr_str("anything");
+    let id = cstr_str("11111111-1111-1111-1111-111111111111");
+    let n = unsafe { tc_search_original(h, id.as_ptr(), needle.as_ptr()) };
+    assert_eq!(n, -1);
+    unsafe { tc_daemon_stop(h) };
+    unsafe { tc_handle_free(h) };
 }
 
 #[test]
