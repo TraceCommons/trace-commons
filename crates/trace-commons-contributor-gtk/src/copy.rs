@@ -290,6 +290,18 @@ pub fn redaction_mark_tooltip(kind: &str) -> String {
 /// The back control at the head of a folder's sessions.
 pub const ALL_FOLDERS: &str = "All folders";
 
+/// A history folder row's right-hand figure. No byte total: a submitted
+/// trace's size is not a thing the account keeps, and inventing one would be
+/// worse than saying nothing.
+pub fn history_folder_summary(submissions: usize) -> String {
+    let unit = if submissions == 1 {
+        "submission"
+    } else {
+        "submissions"
+    };
+    format!("{submissions} {unit}")
+}
+
 /// A folder row's right-hand figures: how much is waiting, and how big.
 pub fn folder_summary(sessions: usize, bytes: u64) -> String {
     let unit = if sessions == 1 { "session" } else { "sessions" };
@@ -1962,6 +1974,12 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_history_folder_summary_inflects_its_count() {
+        assert_eq!(history_folder_summary(1), "1 submission");
+        assert_eq!(history_folder_summary(4), "4 submissions");
+    }
 
     /// The zero case names a doubt. It has to name the thing to do about it
     /// too, and that thing is the search tab -- which the card's chip now

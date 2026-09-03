@@ -364,7 +364,25 @@ pub fn render(app: &Rc<App>) {
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
 
-    app.set_queue_count(pending.len());
+    // The two facts the count cannot carry, both read off the previews the
+    // cards already hold: a session scrubbing matched NOTHING in, and one
+    // that was trimmed to fit the raw byte budget. An entry with no preview
+    // yet counts as neither -- it is not yet known to be either.
+    let previews = app.previews.borrow();
+    let nothing_matched = pending
+        .iter()
+        .filter(|e| {
+            previews
+                .get(&e.entry_id)
+                .is_some_and(|p| crate::redaction_labels::removed_total(&p.redactions) == 0)
+        })
+        .count();
+    drop(previews);
+    let trimmed = pending.iter().filter(|e| e.subagents_dropped > 0).count();
+    app.set_queue_count(
+        pending.len(),
+        crate::shield::state(pending.len(), nothing_matched, trimmed),
+    );
     view.empty.set_visible(pending.is_empty());
     view.scroller.set_visible(!pending.is_empty());
     view.heading.set_text(&copy::waiting_heading(pending.len()));

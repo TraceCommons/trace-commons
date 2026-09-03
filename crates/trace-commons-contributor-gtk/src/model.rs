@@ -476,7 +476,11 @@ pub struct Project {
 }
 
 /// `list_history`.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Default` is consistent with how it deserializes: every field carries
+/// `#[serde(default)]`, so an all-defaults value is what an empty object
+/// decodes to.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct HistoryRecord {
     /// The server's id for this submission, and the only handle `withdraw`
     /// takes. Not an identity and not a path -- an opaque uuid the daemon

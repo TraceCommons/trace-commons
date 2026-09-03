@@ -944,9 +944,32 @@ impl App {
     ///
     /// Called by `queue::render` rather than computed here, so there is
     /// exactly one place that decides which entries count as waiting.
-    pub fn set_queue_count(self: &Rc<Self>, waiting: usize) {
-        self.queue_badge.set_label(&waiting.to_string());
+    /// The sidebar's queue badge: the number, and a shield glyph beside it.
+    ///
+    /// The glyph is ADDED to the count, not substituted for it. At 149
+    /// waiting sessions the number is the signal a contributor reads, and an
+    /// icon meaning "there is a queue" says strictly less. What the glyph
+    /// adds is the one thing the number cannot carry: whether anything in
+    /// there wants looking at. See [`crate::shield`].
+    pub fn set_queue_count(self: &Rc<Self>, waiting: usize, shield: crate::shield::Shield) {
+        let label = match shield {
+            // Nothing waiting: the badge is hidden anyway, so the glyph
+            // would be a decoration on an invisible widget.
+            crate::shield::Shield::Clear => waiting.to_string(),
+            crate::shield::Shield::Waiting => format!("{waiting}"),
+            crate::shield::Shield::Attention => {
+                format!("{waiting} {}", style::Tone::Attention.glyph())
+            }
+        };
+        self.queue_badge.set_label(&label);
         self.queue_badge.set_visible(waiting > 0);
+        // A colour is never the only carrier: the glyph above is what
+        // survives greyscale, and this is what makes it findable.
+        if shield == crate::shield::Shield::Attention {
+            self.queue_badge.add_css_class("tc-attention");
+        } else {
+            self.queue_badge.remove_css_class("tc-attention");
+        }
     }
 
     /// Render the sentence `approve` earns -- see `crate::toast` -- and, when
