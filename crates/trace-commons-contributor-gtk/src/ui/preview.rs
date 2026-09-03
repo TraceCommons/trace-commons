@@ -1053,19 +1053,31 @@ impl Sheet {
         }
 
         let hits = search_hits(body, needle);
-        // What the redacted body says, on its own, before the daemon
-        // answers about the original. It is replaced in place by
+        // What the redacted body says, on its own, before the daemon answers
+        // about the original. It is replaced in place by
         // `apply_original_count` when that answer lands, and it is what
         // stands if the answer never does.
+        //
+        // Which is why the zero-hit case is drawn NEUTRAL rather than clear.
+        // Zero matches in the redacted body cannot tell "never here" from
+        // "removed", and it certainly cannot tell either from "the daemon
+        // has not answered yet" -- and this module's own doc says the one
+        // direction it must not fail in is reporting "not in this session"
+        // about a value that is in it. Printing the good-standing tick here
+        // did exactly that, synchronously, before anything was checked.
+        // `apply_original_count` is the only thing allowed to print a
+        // verdict.
         self.request_original_count(needle, hits.len() as u32);
-        // "0 matches" is the answer a contributor under an NDA came here
-        // for, so it is the one that gets the good-standing tone. A hit is
-        // not a failure -- it is something to weigh -- so it gets gold, not
-        // coral. Both carry a glyph and words as well as a colour.
+        // A hit is not a failure -- it is something to weigh -- so it gets
+        // gold, not coral. Every state carries a glyph and words as well as
+        // a colour.
         if hits.is_empty() {
-            self.set_summary_tone(Tone::Clear);
-            self.search_summary
-                .set_text(&format!("{}  0 matches", Tone::Clear.glyph()));
+            self.set_summary_tone(Tone::Neutral);
+            self.search_summary.set_text(&format!(
+                "{}  {}",
+                Tone::Neutral.glyph(),
+                copy::SEARCH_CHECKING_ORIGINAL
+            ));
             // A clean answer is still worth one caution, and the caution is
             // the gold one: a literal search finds the spelling it was
             // given and no other. Glyph, words and colour, so it survives
@@ -1126,11 +1138,18 @@ impl Sheet {
     /// answer. Until it does, the summary says what the redacted body says
     /// on its own -- an honest partial answer rather than a blank.
     ///
-    /// The reply is dropped unless the search box still holds the needle it
-    /// was asked about. Typing produces one call per keystroke and the
-    /// replies can land out of order, and a stale count printed against a
-    /// newer needle would be a wrong answer on the screen whose whole job is
-    /// to be right about this.
+    /// The reply is dropped unless the sheet is still showing the SAME ENTRY
+    /// and the search box still holds the needle it was asked about. Typing
+    /// produces one call per keystroke and the replies can land out of
+    /// order, and a stale count printed against a newer question would be a
+    /// wrong answer on the screen whose whole job is to be right about this.
+    ///
+    /// The entry half is not redundant with the needle half. `fill` re-runs
+    /// the search when the sheet advances to the next session, so advancing
+    /// with the box unchanged asks the same needle of a different entry --
+    /// and needle-only matching would let entry A's count paint over entry
+    /// B's, which is the case a contributor stepping through a queue hits
+    /// every time.
     fn request_original_count(self: &Rc<Self>, needle: &str, remaining: u32) {
         let Some(entry) = self.current() else {
             return;
@@ -1138,10 +1157,13 @@ impl Sheet {
         let entry_id = entry.entry_id.clone();
         let sheet = Rc::clone(self);
         let asked = needle.to_string();
-        let needle_sent = asked.clone();
+        let asked_of = entry_id.clone();
         self.app
-            .search_original(&entry_id, &needle_sent, move |_, original| {
-                if sheet.search_entry.text().trim() != asked {
+            .search_original(&entry_id, &asked.clone(), move |_, original| {
+                let still_here = sheet
+                    .current()
+                    .is_some_and(|entry| entry.entry_id == asked_of);
+                if !still_here || sheet.search_entry.text().trim() != asked {
                     return;
                 }
                 sheet.apply_original_count(remaining, original);
@@ -1152,16 +1174,16 @@ impl Sheet {
     /// from "removed". See `crate::original_search`.
     fn apply_original_count(&self, remaining: u32, original: Option<u32>) {
         let outcome = crate::original_search::classify(remaining, original);
-        self.set_summary_tone(if crate::original_search::is_alarming(&outcome) {
-            Tone::Attention
-        } else {
-            Tone::Clear
-        });
-        let glyph = if crate::original_search::is_alarming(&outcome) {
-            Tone::Attention.glyph()
-        } else {
-            Tone::Clear.glyph()
+        // Three tones, not two. An `Unknown` used to draw in the clear tone,
+        // putting the good-standing tick beside the sentence that says the
+        // check did not run. See `original_search::Emphasis`.
+        let tone = match crate::original_search::emphasis(&outcome) {
+            crate::original_search::Emphasis::Attention => Tone::Attention,
+            crate::original_search::Emphasis::Clear => Tone::Clear,
+            crate::original_search::Emphasis::Unchecked => Tone::Neutral,
         };
+        self.set_summary_tone(tone);
+        let glyph = tone.glyph();
         self.search_summary.set_text(&format!(
             "{glyph}  {}",
             crate::original_search::sentence(&outcome)

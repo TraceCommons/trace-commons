@@ -54,7 +54,15 @@ pub struct Placeholder {
 
 /// The label as a person reads it. Handles both cases the two forms use --
 /// `LOCAL_PATH` from a placeholder, `private_email` from a labelled token.
+///
+/// `URL_PATH` is spelled out rather than lowercased: the label is an
+/// initialism and "url path" reads as a typo. It is the one word in this
+/// vocabulary where case carries meaning, so it is the one exception, not
+/// the start of a table.
 pub fn display(label: &str) -> String {
+    if label == "URL_PATH" {
+        return "URL path".to_string();
+    }
     label.to_lowercase().replace('_', " ")
 }
 
@@ -87,6 +95,18 @@ fn classify(marker: &str) -> (Option<String>, Option<u32>) {
         } else {
             (None, None)
         };
+    }
+    // Two fixed tokens that name a category without the `:` form. Both are
+    // in `every_fixed_token_the_pipeline_emits_is_matched`'s list, so both
+    // reach here, and without these arms they fell through to "something
+    // removed" -- a mark that says less than its own text does.
+    if marker == "<REDACTED_PRIVATE_KEY>" {
+        return (Some("PRIVATE_KEY".to_string()), None);
+    }
+    if marker == "[REDACTED_PATH]" {
+        // A URL's path component, not a path on this machine. Naming it a
+        // local path would point a reader at the wrong thing entirely.
+        return (Some("URL_PATH".to_string()), None);
     }
     if let Some(inner) = marker
         .strip_prefix("[REDACTED")
@@ -251,13 +271,83 @@ mod tests {
     /// marked in the transcript at all, on any of the three shells.
     ///
     /// Not fixed here: `marker_spans` is shared with the CHUNKER, and
-    /// widening it changes where a body may be cut. This test exists so the
-    /// gap is a recorded fact rather than a surprise.
+    /// widening it changes where a body may be cut.
+    ///
+    /// Deliberately asserted against the shared scanner rather than against
+    /// a hardcoded "empty": whether this token is marked is `marker_spans`'
+    /// answer to give, and it changes the day that pattern is widened. What
+    /// this pins is that `classify` NAMES it either way, so the widening is
+    /// a one-line change over there and never a silently anonymous chip
+    /// over here.
     #[test]
-    fn a_pem_private_key_token_is_not_marked_by_the_shared_scanner() {
+    fn a_pem_private_key_token_is_named_whether_or_not_the_scanner_marks_it() {
+        assert_eq!(
+            classify("<REDACTED_PRIVATE_KEY>").0.as_deref(),
+            Some("PRIVATE_KEY")
+        );
+        let body = "key: <REDACTED_PRIVATE_KEY> done";
+        assert_eq!(
+            scan(body).len(),
+            crate::transcript_paging::marker_spans(body).len()
+        );
+    }
+
+    /// Every fixed token the pipeline emits is NAMED.
+    ///
+    /// The same five `transcript_paging`'s
+    /// `every_fixed_token_the_pipeline_emits_is_matched` enumerates, from
+    /// the same sources: `apply_redaction_ranges`,
+    /// `apply_pem_block_redaction`, `redacted_marker`, and `redaction.rs`'s
+    /// `REDACTED`. That guard proves the scanner FINDS them; this one
+    /// proves the naming has words for them. A token that is found and then
+    /// drawn as an anonymous block is the defect this pair exists to catch,
+    /// and neither test catches it alone.
+    ///
+    /// None carries an ordinal. There is no second number in any of these
+    /// tokens to report, and inventing one would claim a distinctness the
+    /// token does not have.
+    #[test]
+    fn every_fixed_token_the_pipeline_emits_is_named() {
+        for (token, expected) in [
+            ("[REDACTED]", None),
+            ("[REDACTED:aws_secret_key]", Some("aws secret key")),
+            ("[REDACTED:person_name]", Some("person name")),
+            ("[REDACTED_PATH]", Some("URL path")),
+            ("<REDACTED_PRIVATE_KEY>", Some("private key")),
+        ] {
+            let (label, ordinal) = classify(token);
+            assert_eq!(
+                label.as_deref().map(display),
+                expected.map(str::to_string),
+                "{token}"
+            );
+            assert_eq!(ordinal, None, "{token} carries no ordinal");
+        }
+    }
+
+    /// The naming is driven by the SHARED scan, not by a private grammar of
+    /// its own.
+    ///
+    /// This is the guard on the thing the spec forbids: a second marker pass
+    /// that could disagree with the one the chunker splits on. Whatever
+    /// `marker_spans` matches in a body of all five fixed tokens is exactly
+    /// what comes back here -- so a SIXTH token added to the pipeline and to
+    /// that pattern is picked up with no edit, and cannot silently go
+    /// unnamed. Deliberately not a hardcoded count: the pattern is the thing
+    /// under test, so asserting a number here would just assert a copy of it.
+    #[test]
+    fn the_named_marks_are_exactly_what_the_shared_scan_found() {
+        let body = "<PRIVATE_LOCAL_PATH_1> [REDACTED] [REDACTED:aws_secret_key] \
+                    [REDACTED_PATH] <REDACTED_PRIVATE_KEY>";
+        let spans = crate::transcript_paging::marker_spans(body);
         assert!(
-            scan("key: <REDACTED_PRIVATE_KEY> done").is_empty(),
-            "if this ever passes, marker_spans was widened and the shells now mark PEM keys"
+            !spans.is_empty(),
+            "the fixture must contain markers for this to prove anything"
+        );
+        let found = scan(body);
+        assert_eq!(
+            found.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(),
+            spans.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>()
         );
     }
 

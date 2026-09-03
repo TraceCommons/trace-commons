@@ -83,6 +83,58 @@ pub fn is_alarming(outcome: &Outcome) -> bool {
     matches!(outcome, Outcome::SomeRemain { .. })
 }
 
+/// How loudly to draw an outcome, in the three states the sheet has words
+/// for.
+///
+/// `Unknown` is deliberately its own state rather than falling in with the
+/// clean answers. `is_alarming` is one bit, and drawing that bit as
+/// clear-or-attention put the good-standing tone and its tick beside the
+/// sentence that says the check did not run -- so the one outcome meaning
+/// *no answer* rendered identically to the one meaning *nothing found*.
+/// That is the single direction this module says it must not fail in.
+///
+/// It is not alarming either. Nothing was found, and shouting about a call
+/// that did not come back would spend attention where nothing is known to
+/// be wrong. Neutral is the honest third thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emphasis {
+    /// A question that got a clean answer.
+    Clear,
+    /// Still in what would be sent.
+    Attention,
+    /// No answer yet, or no answer at all.
+    Unchecked,
+}
+
+pub fn emphasis(outcome: &Outcome) -> Emphasis {
+    match outcome {
+        Outcome::SomeRemain { .. } => Emphasis::Attention,
+        Outcome::Unknown => Emphasis::Unchecked,
+        Outcome::Absent | Outcome::AllRemoved(_) => Emphasis::Clear,
+    }
+}
+
+#[cfg(test)]
+mod emphasis_tests {
+    use super::*;
+
+    /// A failed or pending check must not draw as a clean answer.
+    #[test]
+    fn an_unchecked_original_is_neither_clear_nor_alarming() {
+        assert_eq!(emphasis(&Outcome::Unknown), Emphasis::Unchecked);
+        assert!(!is_alarming(&Outcome::Unknown));
+        assert_eq!(emphasis(&Outcome::Absent), Emphasis::Clear);
+        assert_eq!(emphasis(&Outcome::AllRemoved(3)), Emphasis::Clear);
+        assert_eq!(
+            emphasis(&Outcome::SomeRemain {
+                remaining: 2,
+                total: 5
+            }),
+            Emphasis::Attention
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

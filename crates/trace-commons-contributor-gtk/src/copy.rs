@@ -223,6 +223,14 @@ pub fn search_some_remain(remaining: u32, total: u32) -> String {
 /// The arm where the app does not know, and must not round that off to a
 /// clean answer. Saying "not in this session" because a call failed would be
 /// the most dangerous wrong sentence this tab can print.
+/// What the summary says between the local scan finding nothing and the
+/// daemon answering about the original.
+///
+/// Zero matches in the redacted body is not yet an answer to "was it ever
+/// here", so this sentence deliberately claims nothing. The reassuring one
+/// is `search_absent`, and only `apply_original_count` may print it.
+pub const SEARCH_CHECKING_ORIGINAL: &str = "0 matches here. Checking the original session…";
+
 pub fn search_unknown() -> String {
     "0 matches in what would be sent \u{2014} couldn't check the original".to_string()
 }
