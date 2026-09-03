@@ -54,6 +54,10 @@
  * or a receipt. Preview content fails outright, rather than being silently
  * edited, if it cannot be represented as a NUL-terminated C string.
  *
+ * One narrow addition: tc_search_original answers a yes/no-with-a-number
+ * question about PRE-redaction content. It returns a count and never a
+ * byte, for a needle the caller supplied, on an entry they already hold.
+ *
  * Opening a preview also stores the redacted envelope it built in the
  * contributor's own private state directory (0600, one file per previewed
  * entry, deleted when the entry resolves and on logout), so the upload can
@@ -663,6 +667,22 @@ const char* tc_preview_summary_json(const tc_preview*);  /* counts, sizes, openi
  * (if non-NULL) is set to NULL -- there is nothing to free.
  */
 int32_t     tc_preview_search(const tc_preview*, const char* needle, char** matches_json);
+
+/* Count occurrences of needle in an entry's PRE-redaction session text.
+ * Returns the match count, or -1 on error. Reports a COUNT ONLY: no
+ * offsets, no context, no bytes.
+ *
+ * This is the one call here that reads unredacted session bytes on behalf
+ * of a caller, and the count is the bound. It exists because
+ * tc_preview_search scans the REDACTED body, so a value redaction removed
+ * returns zero there, which is indistinguishable from a value that was
+ * never present.
+ *
+ * Takes a handle and an entry id, not a tc_preview*: a preview must not
+ * hold pre-redaction bytes for as long as a sheet is open. The daemon
+ * reads the file, counts, and drops it.
+ */
+int32_t     tc_search_original(tc_handle*, const char* entry_id, const char* needle);
 
 /* The turn index over a redacted preview body:
  *   {entry_id, body_digest, envelope_digest, turn_count,

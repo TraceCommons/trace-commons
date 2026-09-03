@@ -53,7 +53,7 @@ use chrono::{DateTime, Utc};
 use super::eligibility::{Eligibility, Observation, armed_settle_elapsed, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
-use super::policy::{ProjectMode, disambiguated_label, known_keys, project_key_for};
+use super::policy::{ProjectMode, disambiguated_label, known_keys, project_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
 use super::state::CwdCacheEntry;
 use crate::source::{SessionRef, TraceSource, all_sources};
@@ -479,7 +479,7 @@ fn visit_session(
     }
 
     let cwd = resolve_cwd(shared, source, session_ref, &obs);
-    let project_key = project_key_for(cwd.as_deref());
+    let (project_key, project_path) = project_for(cwd.as_deref());
     let mode = {
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
@@ -597,7 +597,11 @@ fn visit_session(
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
-        project_label: disambiguated_label(&project_key, &known),
+        // The unfolded spelling of the same directory, for rendering only.
+        project_path: project_path.clone(),
+        // The raw recorded cwd, which `project_key_for` normalized away.
+        session_cwd: cwd.clone(),
+        project_label: disambiguated_label(&project_key, project_path.as_deref(), &known),
         path: obs.path.clone(),
         size_bytes: obs.size_bytes,
         discovered_at: ctx.now,
@@ -840,9 +844,11 @@ fn resolve_cwd(
 
 #[cfg(test)]
 mod tests {
+    use super::super::policy::project_key_for;
     use super::*;
     use crate::config::ConfigStore;
     use crate::daemon::policy::ProjectMode;
+    use crate::daemon::test_paths::{abs, abs_json, json_escaped};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -922,16 +928,17 @@ mod tests {
                 .join(format!("-Users-testuser-code-{project}"));
             std::fs::create_dir_all(&project_dir).unwrap();
             let path = project_dir.join(format!("{name}.jsonl"));
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             let mut body = format!(
                 "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
-                 \"cwd\":\"/Users/testuser/code/{project}\",\
+                 \"cwd\":\"{cwd}\",\
                  \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                  \"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
             );
             for i in 0..extra_events {
                 body.push_str(&format!(
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"more {i}\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{name}\",\"uuid\":\"b{i}\"}}\n"
                 ));
@@ -946,6 +953,9 @@ mod tests {
         /// checkouts both named `api`), which `write_session` alone cannot
         /// produce since it always uses the same parent directory.
         fn write_session_with_cwd(&self, dir_name: &str, cwd: &str, name: &str) -> PathBuf {
+            // Escaped here rather than at each call site, so callers pass a
+            // real path and not a JSON fragment.
+            let cwd = json_escaped(cwd);
             let project_dir = self.claude_root.join(dir_name);
             std::fs::create_dir_all(&project_dir).unwrap();
             let path = project_dir.join(format!("{name}.jsonl"));
@@ -969,11 +979,12 @@ mod tests {
                 .join("subagents");
             std::fs::create_dir_all(&subagents).unwrap();
             let path = subagents.join(format!("{agent}.jsonl"));
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             std::fs::write(
                 &path,
                 format!(
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"delegated\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{session}\",\"uuid\":\"s1\"}}\n"
                 ),
@@ -988,28 +999,30 @@ mod tests {
             self.shared.settings.lock().unwrap().max_queue_entries = max;
         }
 
+        /// Set a mode for the project a `write_session` fixture records.
+        ///
+        /// Goes through `project_key_for` rather than using the recorded
+        /// cwd verbatim, because that is what the watcher does: the key is
+        /// the NORMALIZED directory, and a helper that set policy under the
+        /// raw spelling would be setting it for a project nothing ever
+        /// resolves to.
         fn set_mode(&self, project: &str, mode: ProjectMode) {
-            self.shared
-                .policy
-                .lock()
-                .unwrap()
-                .set_mode(
-                    &format!("/Users/testuser/code/{project}"),
-                    mode,
-                    at("2026-08-08T12:00:00Z"),
-                )
-                .unwrap();
+            self.set_mode_for_key(&abs(&format!("Users/testuser/code/{project}")), mode);
         }
 
-        /// Like `set_mode`, but for an explicit project key rather than one
-        /// derived from `/Users/testuser/code/{project}` -- needed for
+        /// Like `set_mode`, but for an explicit recorded cwd rather than
+        /// one derived from `/Users/testuser/code/{project}` -- needed for
         /// projects written via `write_session_with_cwd`.
         fn set_mode_for_key(&self, key: &str, mode: ProjectMode) {
             self.shared
                 .policy
                 .lock()
                 .unwrap()
-                .set_mode(key, mode, at("2026-08-08T12:00:00Z"))
+                .set_mode(
+                    &project_key_for(Some(key)),
+                    mode,
+                    at("2026-08-08T12:00:00Z"),
+                )
                 .unwrap();
         }
 
@@ -1023,7 +1036,7 @@ mod tests {
                 id: 1,
                 method: "set_project_mode".to_string(),
                 params: serde_json::json!({
-                    "project_key": format!("/Users/testuser/code/{project}"),
+                    "project_key": project_key_for(Some(&abs(&format!("Users/testuser/code/{project}")))),
                     "mode": mode,
                 }),
             };
@@ -1167,11 +1180,12 @@ mod tests {
         fn append_to_session(&self, path: &std::path::Path, project: &str, name: &str) {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             for i in 0..40 {
                 writeln!(
                     f,
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"later {i}\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{name}\",\"uuid\":\"c{i}\"}}"
                 )
@@ -1384,12 +1398,12 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1428,7 +1442,7 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1441,7 +1455,7 @@ mod tests {
         // A second, colliding project shows up in a later tick.
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:10:00Z")).await;
@@ -1451,12 +1465,16 @@ mod tests {
         let first = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/work/api").as_str()))
+            })
             .unwrap();
         let second = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/client/api")
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/client/api").as_str()))
+            })
             .unwrap();
         assert!(
             first.project_label.starts_with("api ("),
@@ -1483,12 +1501,12 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1496,8 +1514,14 @@ mod tests {
         // Configure both projects in policy too (with distinct modes so the
         // `list_projects` rows can be told apart, since that surface
         // deliberately never echoes the project key).
-        f.set_mode_for_key("/Users/testuser/work/api", ProjectMode::NotifyOnly);
-        f.set_mode_for_key("/Users/testuser/client/api", ProjectMode::Ignore);
+        f.set_mode_for_key(
+            abs("Users/testuser/work/api").as_str(),
+            ProjectMode::NotifyOnly,
+        );
+        f.set_mode_for_key(
+            abs("Users/testuser/client/api").as_str(),
+            ProjectMode::Ignore,
+        );
 
         let resp = crate::daemon::ipc::handle_request(
             &f.shared,
@@ -1520,7 +1544,9 @@ mod tests {
         let queue_entry = queue
             .all()
             .iter()
-            .find(|e| e.project_key == "/Users/testuser/work/api")
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/work/api").as_str()))
+            })
             .unwrap();
         assert_eq!(
             list_label, queue_entry.project_label,
@@ -1965,7 +1991,7 @@ mod tests {
         let event = serde_json::json!({
             "type": "user",
             "message": {"role": "user", "content": content},
-            "cwd": format!("/Users/testuser/code/{project}"),
+            "cwd": abs(&format!("Users/testuser/code/{project}")),
             "timestamp": "2026-08-08T10:00:00Z",
             "version": "2.0.1",
             "sessionId": name,

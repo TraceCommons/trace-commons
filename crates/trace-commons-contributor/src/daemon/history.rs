@@ -41,6 +41,25 @@ pub const STATUS_WITHDRAWN: &str = "withdrawn";
 pub struct HistoryRecord {
     pub submission_id: Uuid,
     pub submitted_at: DateTime<Utc>,
+    /// The opaque project handle, so a shell can group history by folder
+    /// the way it groups the queue.
+    ///
+    /// Grouping on `project_label` instead is not an option: a label is a
+    /// display name, is not unique across two projects, and grouping on it
+    /// would merge two different repositories into one row -- the same
+    /// mistake `QueueGroup`'s own doc comment exists to forbid.
+    ///
+    /// This is admissible in a history record where a path is not, and by
+    /// construction rather than by policy: `project_id_for` is a one-way
+    /// SHA-256 prefix that leaks no path component. It is an identifier a
+    /// client can hold, not a capability.
+    ///
+    /// `#[serde(default)]` -- empty on records cached before this field
+    /// existed. Those cannot be resolved to a folder and group under their
+    /// label alone, which is what they already did. Backfilling is not
+    /// possible: nothing retained the key they were minted from.
+    #[serde(default)]
+    pub project_id: String,
     pub project_label: String,
     pub source: String,
     pub session_hash: String,
@@ -106,6 +125,14 @@ fn scope_names(update: &TraceSubmissionStatusUpdate) -> Vec<String> {
         .collect()
 }
 
+/// How a submission is attributed to a project, per submission id.
+///
+/// Both halves, because a history row needs each for a different job: the
+/// opaque `project_id` is what a shell groups on, and `project_label` is
+/// what it draws. A path is neither of them and appears in no history row
+/// -- see `HistoryRecord::project_id`.
+pub type ProjectAttribution = BTreeMap<Uuid, (String, String)>;
+
 /// Join local receipts with whatever the server currently says about them.
 ///
 /// A receipt with no server update keeps its locally recorded status, so
@@ -113,7 +140,7 @@ fn scope_names(update: &TraceSubmissionStatusUpdate) -> Vec<String> {
 pub fn join(
     receipts: &[Receipt],
     updates: &[TraceSubmissionStatusUpdate],
-    labels: &BTreeMap<Uuid, String>,
+    labels: &ProjectAttribution,
     refreshed_at: DateTime<Utc>,
 ) -> Vec<HistoryRecord> {
     let by_id: BTreeMap<Uuid, &TraceSubmissionStatusUpdate> =
@@ -126,9 +153,13 @@ pub fn join(
             HistoryRecord {
                 submission_id: r.submission_id,
                 submitted_at: r.submitted_at,
+                project_id: labels
+                    .get(&r.submission_id)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default(),
                 project_label: labels
                     .get(&r.submission_id)
-                    .cloned()
+                    .map(|(_, label)| label.clone())
                     .unwrap_or_else(|| "-".to_string()),
                 source: r.source.clone(),
                 session_hash: r.session_hash.clone(),
@@ -197,7 +228,7 @@ pub fn join(
 pub fn merge_new_receipts(
     records: &mut Vec<HistoryRecord>,
     receipts: &[Receipt],
-    labels: &BTreeMap<Uuid, String>,
+    labels: &ProjectAttribution,
 ) -> bool {
     let known: std::collections::BTreeSet<Uuid> = records.iter().map(|r| r.submission_id).collect();
     let mut added = false;
@@ -208,9 +239,13 @@ pub fn merge_new_receipts(
         records.push(HistoryRecord {
             submission_id: r.submission_id,
             submitted_at: r.submitted_at,
+            project_id: labels
+                .get(&r.submission_id)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_default(),
             project_label: labels
                 .get(&r.submission_id)
-                .cloned()
+                .map(|(_, label)| label.clone())
                 .unwrap_or_else(|| "-".to_string()),
             source: r.source.clone(),
             session_hash: r.session_hash.clone(),
@@ -406,6 +441,7 @@ mod tests {
         HistoryRecord {
             submission_id: Uuid::new_v4(),
             submitted_at: at(when),
+            project_id: crate::daemon::policy::project_id_for("/w/proj"),
             project_label: "proj".into(),
             source: "claude-code".into(),
             session_hash: "sha256:aa".into(),
@@ -485,9 +521,15 @@ mod tests {
         assert!((out.credit_pending - 1.5).abs() < f32::EPSILON, "{:?}", out);
     }
 
-    fn labels(id: Uuid) -> BTreeMap<Uuid, String> {
+    fn labels(id: Uuid) -> ProjectAttribution {
         let mut m = BTreeMap::new();
-        m.insert(id, "proj".to_string());
+        m.insert(
+            id,
+            (
+                crate::daemon::policy::project_id_for("/w/proj"),
+                "proj".to_string(),
+            ),
+        );
         m
     }
 
@@ -784,5 +826,45 @@ mod tests {
         let mut recs = vec![record("accepted", "2026-08-08T10:00:00Z")];
         assert!(!mark_withdrawn(&mut recs, Uuid::new_v4(), Utc::now()));
         assert_eq!(recs[0].status, "accepted");
+    }
+
+    #[test]
+    fn a_history_record_carries_the_opaque_project_id_and_no_path() {
+        let key = "/tmp/somewhere/repo";
+        let record = HistoryRecord {
+            submission_id: Uuid::new_v4(),
+            submitted_at: Utc::now(),
+            project_id: crate::daemon::policy::project_id_for(key),
+            project_label: crate::daemon::policy::project_label_for(key),
+            source: "claude_code".to_string(),
+            session_hash: "sha256:abc".to_string(),
+            status: "accepted".to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("proj_"), "expected an opaque id: {json}");
+        assert!(!json.contains("/tmp"), "a path leaked: {json}");
+    }
+
+    #[test]
+    fn a_history_record_written_before_project_id_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.project_id, "");
     }
 }

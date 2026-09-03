@@ -266,6 +266,14 @@ pub struct PrivacyMetadata {
     pub redaction_pipeline_version: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub redaction_counts: BTreeMap<String, u32>,
+    /// Distinct values redacted, per label. See
+    /// `PlaceholderMap::distinct_count` for why this is not
+    /// `redaction_counts`.
+    ///
+    /// `#[serde(default)]` so an envelope written before this field existed
+    /// still parses.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub redaction_distinct_counts: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_filter_summary: Option<SafePrivacyFilterSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4324,6 +4332,23 @@ impl PlaceholderMap {
         self.by_label_and_value.insert(key, token.clone());
         token
     }
+
+    /// How many DISTINCT values this label has had a placeholder minted
+    /// for.
+    ///
+    /// Not the same number as `RedactionReport`'s count for that label,
+    /// which counts occurrences. One path referenced two hundred times is
+    /// two hundred occurrences and one distinct value, and the second
+    /// number is the one that says how much of a session's surface was
+    /// really touched.
+    fn distinct_count(&self, label: &str) -> u32 {
+        self.next_by_label.get(label).copied().unwrap_or(0)
+    }
+
+    /// Every label's distinct-value count.
+    pub(crate) fn distinct_counts(&self) -> BTreeMap<String, u32> {
+        self.next_by_label.clone().into_iter().collect()
+    }
 }
 
 #[async_trait]
@@ -4426,6 +4451,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
         let privacy = PrivacyMetadata {
             redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
             redaction_counts: report.counts,
+            redaction_distinct_counts: state.placeholders.distinct_counts(),
             privacy_filter_summary,
             pii_labels_present: report.pii_labels_present,
             residual_pii_risk,
@@ -9444,6 +9470,7 @@ mod tests {
             privacy: PrivacyMetadata {
                 redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
                 redaction_counts: BTreeMap::new(),
+                redaction_distinct_counts: BTreeMap::new(),
                 privacy_filter_summary: None,
                 pii_labels_present: Vec::new(),
                 residual_pii_risk: ResidualPiiRisk::Low,
@@ -10250,6 +10277,7 @@ mod tests {
             privacy: PrivacyMetadata {
                 redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
                 redaction_counts: BTreeMap::new(),
+                redaction_distinct_counts: BTreeMap::new(),
                 privacy_filter_summary: None,
                 pii_labels_present: Vec::new(),
                 residual_pii_risk: ResidualPiiRisk::Low,
@@ -11894,6 +11922,7 @@ mod tests {
             privacy: PrivacyMetadata {
                 redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
                 redaction_counts: BTreeMap::new(),
+                redaction_distinct_counts: BTreeMap::new(),
                 privacy_filter_summary: None,
                 pii_labels_present: Vec::new(),
                 residual_pii_risk: risk,
@@ -12063,6 +12092,7 @@ mod tests {
             privacy: PrivacyMetadata {
                 redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
                 redaction_counts: BTreeMap::new(),
+                redaction_distinct_counts: BTreeMap::new(),
                 privacy_filter_summary: None,
                 pii_labels_present: Vec::new(),
                 residual_pii_risk: ResidualPiiRisk::Low,
@@ -13948,5 +13978,18 @@ mod tests {
 
         // Content with no seam costs nothing and builds no view.
         assert!(LiteralJoinView::build("password = \"QvR7dTnLbXk2\"").is_none());
+    }
+
+    #[test]
+    fn one_value_gets_one_placeholder_however_often_it_appears() {
+        let mut map = crate::trace_contribution::PlaceholderMap::default();
+        let first = map.placeholder_for("local_path", "/Users/z/code/api");
+        let again = map.placeholder_for("local_path", "/Users/z/code/api");
+        let other = map.placeholder_for("local_path", "/Users/z/code/web");
+
+        assert_eq!(first, again, "one value must reuse its placeholder");
+        assert_ne!(first, other, "two values must not share one");
+        assert_eq!(map.distinct_count("local_path"), 2);
+        assert_eq!(map.distinct_count("secret"), 0);
     }
 }
