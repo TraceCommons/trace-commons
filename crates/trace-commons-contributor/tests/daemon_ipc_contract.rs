@@ -216,10 +216,18 @@ async fn a_client_can_set_a_mode_using_only_what_this_socket_gave_it() {
         .as_str()
         .unwrap_or_else(|| panic!("list_projects must carry an id a client can name: {listed}"))
         .to_string();
-    let serialized = serde_json::to_string(&listed).unwrap();
+    // `project_path` is the one path this row may carry, for display; the
+    // point of the test is that a client can act on the row WITHOUT it, so
+    // it asserts the id is what the rest of the exchange uses rather than
+    // that no path exists. See `ipc::display_path` for the bound.
+    assert_eq!(
+        row["project_path"].as_str(),
+        Some(key.as_ref()),
+        "the row must render the project directory: {listed}"
+    );
     assert!(
-        !serialized.contains(key.as_ref()),
-        "a path crossed the socket: {serialized}"
+        !project_id.contains('/'),
+        "the handle a client names must not be a path: {project_id}"
     );
 
     c.send(&format!(

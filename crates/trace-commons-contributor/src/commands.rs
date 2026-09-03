@@ -3582,7 +3582,15 @@ async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
         let mut m = std::collections::BTreeMap::new();
         for e in queue.all() {
             if let Some(id) = e.submission_id {
-                m.insert(id, e.project_label.clone());
+                // The opaque id beside the label: the key itself is a path
+                // and never reaches a history record.
+                m.insert(
+                    id,
+                    (
+                        crate::daemon::policy::project_id_for(&e.project_key),
+                        e.project_label.clone(),
+                    ),
+                );
             }
         }
         m
