@@ -232,6 +232,9 @@ public enum RoutingTone: Equatable, Sendable {
 public struct RoutingCalls: Sendable {
     public let tokenLine: @Sendable (String?) -> String?
     public let unreachableLine: @Sendable (UInt16?) -> String?
+    /// What discovery found, in one sentence. `nil` port is the machine
+    /// that published no pointer -- the ordinary machine, and not an error.
+    public let discoveryLine: @Sendable (UInt16?) -> String?
 
     /// Which of the four words a tool gets, from its source mode and
     /// `RoutingToolWiring.abiValue`.
@@ -259,6 +262,7 @@ public struct RoutingCalls: Sendable {
     public init(
         tokenLine: @escaping @Sendable (String?) -> String?,
         unreachableLine: @escaping @Sendable (UInt16?) -> String?,
+        discoveryLine: @escaping @Sendable (UInt16?) -> String?,
         toolWord: @escaping @Sendable (String, Int32) -> String?,
         toolTone: @escaping @Sendable (String, Int32) -> Int32,
         stateLine: @escaping @Sendable (String) -> String?,
@@ -266,10 +270,65 @@ public struct RoutingCalls: Sendable {
     ) {
         self.tokenLine = tokenLine
         self.unreachableLine = unreachableLine
+        self.discoveryLine = discoveryLine
         self.toolWord = toolWord
         self.toolTone = toolTone
         self.stateLine = stateLine
         self.stateTone = stateTone
+    }
+}
+
+/// What a running IronWire published about itself, as `discover_routing`
+/// answers.
+///
+/// # Nothing here is a failure
+///
+/// `discover_routing` answers `{"found": false}` for every reason there is
+/// nothing to read -- never installed, not running, a version that
+/// publishes no pointer, a pointer this reader will not act on -- and they
+/// are one state here for the same reason they are one boolean there: they
+/// are one fact to the contributor and one next step. A vocabulary of
+/// outcomes would invite a shell to match on one, and this screen has
+/// already been bitten once by a word that is a prefix of another.
+///
+/// # It carries no token
+///
+/// `tokenPath` is a path the daemon reported, for display beside the port.
+/// The credential at it is opened by the daemon, at call time. Nothing on
+/// this type has ever held one.
+public struct RoutingDiscovery: Equatable, Sendable {
+    /// The loopback port IronWire published, or nil for nothing found.
+    public let port: UInt16?
+    /// Where IronWire said it wrote its credential, when it said.
+    public let tokenPath: String?
+
+    public init(port: UInt16?, tokenPath: String?) {
+        self.port = port
+        self.tokenPath = tokenPath
+    }
+
+    /// The state of a machine that published nothing.
+    public static let none = RoutingDiscovery(port: nil, tokenPath: nil)
+
+    /// Whether there is anything to offer.
+    public var found: Bool { port != nil }
+
+    /// Read a `discover_routing` result.
+    ///
+    /// `found` without a usable port is nothing found: a port is the fact
+    /// the whole call exists to supply, and offering to connect to a port
+    /// this shell invented would be worse than asking.
+    public static func parse(_ result: [String: Any]) -> RoutingDiscovery {
+        guard result["found"] as? Bool == true else { return .none }
+        let port = (result["port"] as? NSNumber)
+            .map(\.intValue)
+            .flatMap { UInt16(exactly: $0) }
+            .flatMap { $0 > 0 ? $0 : nil }
+        guard let port else { return .none }
+        return RoutingDiscovery(
+            port: port,
+            tokenPath: (result["token_path"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        )
     }
 }
 
@@ -302,12 +361,28 @@ public struct RoutingForm: Equatable, Sendable {
     ///
     /// `mode` is `watch`, `off`, or nil for nothing declared. Only `watch`
     /// is on; the other two show the conventional port without declaring it.
+    /// `discoveredPort` is what `discover_routing` reported, and it is
+    /// third in line on purpose.
+    ///
+    /// **The contributor's declared port always wins.** A declared port is
+    /// a human instruction; the pointer is a file on disk that survives the
+    /// daemon that wrote it, and IronWire removes it only on a clean stop.
+    /// Letting a stale pointer overwrite a declaration is not one refused
+    /// connection -- it is a contributor who declared 8463, whose leftover
+    /// pointer says 9000, and whose card now shows a number they never
+    /// typed. `ironwire_ledger_for` refuses the same substitution on the
+    /// reading side; this is the same rule on the showing side.
+    ///
+    /// Discovery fills only where there is nothing declared, and the
+    /// conventional number is the last resort rather than the first.
+    /// Filling it in is a *display*: `settingsParams` still writes nothing
+    /// until the contributor acts.
     public static func fromDeclaration(
-        mode: String?, port: UInt16?, tokenDir: String?
+        mode: String?, port: UInt16?, tokenDir: String?, discoveredPort: UInt16? = nil
     ) -> RoutingForm {
         RoutingForm(
             on: mode == "watch",
-            port: port ?? conventionalPort,
+            port: port ?? discoveredPort ?? conventionalPort,
             tokenDir: tokenDir ?? ""
         )
     }
@@ -363,6 +438,44 @@ public enum RoutingSurface {
         case .unknown:
             return copy.checkUnavailable
         }
+    }
+
+    // MARK: What the machine already knows
+
+    /// The discovery sentence, or the claims-nothing line if the ABI would
+    /// not assemble one.
+    ///
+    /// Never a half-sentence and never wording this shell invented. A
+    /// machine that published nothing still gets a sentence, because it is
+    /// the ordinary machine and the screen has to say what to do on it.
+    public static func discoveryLine(
+        _ discovery: RoutingDiscovery, copy: RoutingCopy, calls: RoutingCalls
+    ) -> String {
+        calls.discoveryLine(discovery.port) ?? copy.checkUnavailable
+    }
+
+    /// Whether the port and folder are offered as a disclosure rather than
+    /// as two boxes to fill in.
+    ///
+    /// Only once discovery has supplied the port. On a machine that
+    /// published nothing they are the only way to answer, so they stay
+    /// where they were: this inverts the default, it does not hide the
+    /// manual path.
+    public static func overrideIsCollapsed(_ discovery: RoutingDiscovery) -> Bool {
+        discovery.found
+    }
+
+    /// The form the connect action writes: the one on screen, turned on.
+    ///
+    /// Deliberately built from `form` rather than from `discovery`. What is
+    /// on screen is what the contributor has been reading, discovered port
+    /// and any override they opened the disclosure to type both -- and a
+    /// press that wrote a different number from the one displayed would be
+    /// the displayed-default defect in its worst form.
+    public static func connecting(_ form: RoutingForm) -> RoutingForm {
+        var next = form
+        next.on = true
+        return next
     }
 
     // MARK: The status line

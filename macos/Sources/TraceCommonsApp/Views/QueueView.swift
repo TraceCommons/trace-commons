@@ -337,8 +337,21 @@ struct QueueRow: View {
     let onSubmit: () -> Void
     let onDismiss: () -> Void
 
+    /// How many values scrubbing actually REMOVED.
+    ///
+    /// Not the sum of `redactions`: that map also carries
+    /// `residual_secret_at:*`, which counts a secret the scan FOUND and did
+    /// not remove. Counting those here made a session with a surviving
+    /// secret look like one scrubbing had cleaned, and took it out of the
+    /// gold tone that asks somebody to look. See `RedactionLabels`.
     private var redactionCount: Int {
-        summary?.redactions.values.reduce(0, +) ?? 0
+        RedactionLabels.removedTotal(summary?.redactions ?? [:])
+    }
+
+    /// Secrets the scan found and left in what would be sent, if any.
+    private var survivorLine: String? {
+        guard let summary else { return nil }
+        return RedactionLabels.survivorLine(summary.redactions)
     }
 
     var body: some View {
@@ -444,6 +457,7 @@ struct QueueRow: View {
                         }
                     }
                     caption
+                    survivor
                 }
                 extent
             }
@@ -498,6 +512,28 @@ struct QueueRow: View {
         }
     }
 
+    /// A secret the scan FOUND and did not remove.
+    ///
+    /// Excluding survivors from the figures is only half the fix: filtering
+    /// one out and then saying nothing would trade a wrong statement for
+    /// silence about a secret still in the payload, which on a consent
+    /// surface is not an improvement. So it gets its own line, in the tone
+    /// the card already uses for things worth slowing down on.
+    @ViewBuilder
+    private var survivor: some View {
+        if let survivorLine {
+            HStack(spacing: TC.Space.xxs) {
+                QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
+                Text(survivorLine)
+                    .font(TC.Font_.footnote)
+                    .foregroundStyle(TC.goldText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(survivorLine)
+        }
+    }
+
     /// The gold chip that replaces the removed-by-pattern figure when nothing
     /// matched. It carries the warning triangle without its dot -- the same
     /// glyph the health banner uses, quieter, because this is a thing to weigh
@@ -536,7 +572,7 @@ struct QueueRow: View {
     /// never carries matched text. Ordered by count so the biggest number is
     /// first, which is what a person is scanning for.
     static func removedSummary(_ redactions: [String: Int]) -> String {
-        redactions
+        RedactionLabels.removals(redactions)
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
             .joined(separator: "  ·  ")

@@ -35,6 +35,9 @@ public enum ProjectArmingCopy {
         Every future session in this project will be scrubbed and contributed \
         without asking you. You won't review them first.
 
+        A session is sent a day after you last work on it, so there is time to \
+        change your mind.
+
         You can turn this off at any time.
         """
 

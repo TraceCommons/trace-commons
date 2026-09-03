@@ -268,6 +268,33 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 /// one that congratulates.
 pub const NOTHING_MATCHED: &str = "nothing matched";
 
+/// A secret scrubbing FOUND and did not remove.
+///
+/// `residual_secret_at:*` counts a detection that survived redaction --
+/// either a credential inside a correction the contributor wrote, which is
+/// preserved on purpose, or a field the typed traversal does not reach. It
+/// arrives in the same map as every genuine removal and used to render as
+/// one, which is the opposite of the truth on the screen where somebody
+/// decides whether to send the session.
+///
+/// The sites are schema-shaped identifiers (`events.3.correction`), never a
+/// filesystem path and never transcript text.
+///
+/// Says "found here" rather than naming a number of secrets: the count is of
+/// detection SITES, and one site can hold more than one value. Overstating
+/// the precision would be its own small lie.
+pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
+    let head = if count == 1 {
+        "1 secret found here is still in what would be sent".to_string()
+    } else {
+        format!("{count} secrets found here are still in what would be sent")
+    };
+    if sites.is_empty() {
+        return head;
+    }
+    format!("{head} ({})", sites.join(", "))
+}
+
 /// The eyebrow over the count of things that did go out this week.
 pub const CONTRIBUTED: &str = "Contributed";
 
@@ -1022,8 +1049,9 @@ pub fn arming_heading(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nYou can turn this off at any \
-     time.";
+     contributed without asking you. You won't review them first.\n\nA session is sent a day \
+     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
+     at any time.";
 pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
 
 // --- Quitting ----------------------------------------------------------
@@ -1820,10 +1848,11 @@ mod daily_cap_tests {
 // written to replace.
 pub use trace_commons_contributor::routing_copy::{
     IRONWIRE_APPLIES_AT_ONCE, IRONWIRE_APPLY, IRONWIRE_CHECK_UNAVAILABLE, IRONWIRE_CHECKING,
-    IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO, IRONWIRE_PORT_NOTE,
-    IRONWIRE_PORT_TITLE, IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING,
-    IRONWIRE_STATE_WAITING, IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT,
-    TOOL_GEMINI, TOOL_NOT_USED, TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring,
+    IRONWIRE_CONNECT, IRONWIRE_FOLDER_NOTE, IRONWIRE_FOLDER_TITLE, IRONWIRE_INTRO,
+    IRONWIRE_LOOK_AGAIN, IRONWIRE_OVERRIDE_TITLE, IRONWIRE_PORT_NOTE, IRONWIRE_PORT_TITLE,
+    IRONWIRE_PROBE_REACHABLE, IRONWIRE_STATE_OFF, IRONWIRE_STATE_READING, IRONWIRE_STATE_WAITING,
+    IRONWIRE_TOGGLE, StateTone, TOOL_CLAUDE, TOOL_CODEX, TOOL_DIRECT, TOOL_GEMINI, TOOL_NOT_USED,
+    TOOL_PRIVATE, TOOL_UNKNOWN, TOOLS_HEADING, ToolTone, ToolWiring, ironwire_discovery_line,
     ironwire_shows_last_checked, ironwire_state_line, ironwire_state_tone, ironwire_token_line,
     ironwire_unreachable_line, tool_tone, tool_word,
 };
@@ -2778,5 +2807,38 @@ mod tests {
         let lower = ARMING_OFFER_DECLINE.to_lowercase();
         assert!(!lower.contains("never"), "{ARMING_OFFER_DECLINE}");
         assert!(!lower.contains("don't ask"), "{ARMING_OFFER_DECLINE}");
+    }
+}
+
+#[cfg(test)]
+mod residual_copy_tests {
+    use super::*;
+
+    #[test]
+    fn one_survivor_reads_as_one() {
+        assert_eq!(
+            residual_secret_line(1, &[]),
+            "1 secret found here is still in what would be sent"
+        );
+    }
+
+    #[test]
+    fn several_survivors_inflect() {
+        assert!(residual_secret_line(3, &[]).starts_with("3 secrets found here are"));
+    }
+
+    /// The line must say STILL IN, never anything that reads as removal --
+    /// stating the opposite is the defect this whole change exists to fix.
+    #[test]
+    fn the_line_never_claims_the_secret_was_removed() {
+        let line = residual_secret_line(1, &["events.3.correction".to_string()]);
+        assert!(line.contains("still in what would be sent"), "{line}");
+        assert!(!line.to_lowercase().contains("removed"), "{line}");
+    }
+
+    #[test]
+    fn sites_are_listed_when_known() {
+        let line = residual_secret_line(2, &["events.1".to_string(), "events.9".to_string()]);
+        assert!(line.ends_with("(events.1, events.9)"), "{line}");
     }
 }
