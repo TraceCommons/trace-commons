@@ -274,11 +274,6 @@ public sealed class TranscriptMarkerTests
     }
 
     /// <summary>
-    /// The <c>&lt;REDACTED_</c> arm is general, mirroring <c>&lt;PRIVATE_</c>,
-    /// so a second angle-bracketed fixed token cannot reopen the same hole. It
-    /// still needs at least one word character and a closing bracket.
-    /// </summary>
-    /// <summary>
     /// The <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> arm is the LITERAL token, not a
     /// general one. Prose a contributor typed must never be claimed as a
     /// redaction: telling someone the pipeline removed something it never
@@ -308,6 +303,7 @@ public sealed class TranscriptMarkerTests
             "[REDACTED]",
             "[REDACTED:aws_secret_key]",
             "[REDACTED:person_name]",
+            "[REDACTED_PATH]",
             "<REDACTED_PRIVATE_KEY>",
         })
         {

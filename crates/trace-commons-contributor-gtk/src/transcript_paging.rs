@@ -317,6 +317,24 @@ fn push_off_marker(text: &str, cut: usize, start: usize) -> usize {
     cut
 }
 
+/// The end of an angle-bracketed marker whose prefix ends at `after_prefix`,
+/// or `None` if what follows is not one.
+///
+/// The `<PRIVATE_` arm's grammar: `[A-Za-z0-9_]+` -- at least one byte --
+/// then `>`. The `<REDACTED_PRIVATE_KEY>` arm is a fixed literal and does not
+/// use this.
+fn angle_marker_end(bytes: &[u8], after_prefix: usize) -> Option<usize> {
+    let mut j = after_prefix;
+    while j < bytes.len() && is_marker_word_byte(bytes[j]) {
+        j += 1;
+    }
+    if j > after_prefix && bytes.get(j) == Some(&b'>') {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
 /// Finds the redaction markers the scrubbing pipeline leaves behind, as byte
 /// ranges into `text`, in order.
 ///
@@ -354,24 +372,6 @@ fn push_off_marker(text: &str, cut: usize, start: usize) -> usize {
 /// The cost is that a NEW angle-bracketed fixed token would go unmarked
 /// exactly as this one did. `every_fixed_token_the_pipeline_emits_is_matched`
 /// is the guard: it enumerates them and fails if one is not matched here.
-/// The end of an angle-bracketed marker whose prefix ends at `after_prefix`,
-/// or `None` if what follows is not one.
-///
-/// The `<PRIVATE_` arm's grammar: `[A-Za-z0-9_]+` -- at least one byte --
-/// then `>`. The `<REDACTED_PRIVATE_KEY>` arm is a fixed literal and does not
-/// use this.
-fn angle_marker_end(bytes: &[u8], after_prefix: usize) -> Option<usize> {
-    let mut j = after_prefix;
-    while j < bytes.len() && is_marker_word_byte(bytes[j]) {
-        j += 1;
-    }
-    if j > after_prefix && bytes.get(j) == Some(&b'>') {
-        Some(j + 1)
-    } else {
-        None
-    }
-}
-
 pub fn marker_spans(text: &str) -> Vec<Range<usize>> {
     const PRIVATE: &[u8] = b"<PRIVATE_";
     const REDACTED_ANGLE: &[u8] = b"<REDACTED_PRIVATE_KEY>";
@@ -817,6 +817,7 @@ mod tests {
             "[REDACTED]",
             "[REDACTED:aws_secret_key]",
             "[REDACTED:person_name]",
+            "[REDACTED_PATH]",
             "<REDACTED_PRIVATE_KEY>",
         ] {
             let body = format!("before {token} after");

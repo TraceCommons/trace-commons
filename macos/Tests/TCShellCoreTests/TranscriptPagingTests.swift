@@ -262,6 +262,7 @@ final class TranscriptPagingTests: XCTestCase {
             "[REDACTED]",
             "[REDACTED:aws_secret_key]",
             "[REDACTED:person_name]",
+            "[REDACTED_PATH]",
             "<REDACTED_PRIVATE_KEY>",
         ] {
             let body = "before \(token) after"
