@@ -301,27 +301,81 @@
                                    TextWrapping="Wrap" />
 
                         <!--
-                            The port box shows the conventional number so
-                            nobody has to know it. Showing is not declaring:
-                            nothing is written until the switch above is on.
+                            What the machine already knows, before anything it
+                            is asked. IronWire writes a pointer when its daemon
+                            binds, so on a machine running it there is nothing
+                            here to look up; on a machine without it this
+                            sentence says so without saying anything is wrong,
+                            because nothing is.
                         -->
-                        <NumberBox Header="{x:Bind Settings.RoutingPortTitle, Mode=OneWay}"
-                                   Value="{x:Bind Settings.RoutingPort, Mode=TwoWay}"
-                                   Minimum="1"
-                                   Maximum="65535"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
-                        <TextBlock Text="{x:Bind Settings.RoutingPortNote, Mode=OneWay}"
+                        <TextBlock Text="{x:Bind Settings.RoutingDiscoveryText, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <!--
+                                Offered only where there is something to
+                                connect to and nothing is declared: this is
+                                the shortcut past the two boxes, not a
+                                second Apply.
+                            -->
+                            <Button Content="{x:Bind Settings.RoutingConnectText, Mode=OneWay}"
+                                    Visibility="{x:Bind Settings.RoutingConnectOffered, Mode=OneWay}"
+                                    IsEnabled="{x:Bind Settings.RoutingConnectOffered, Mode=OneWay}"
+                                    Click="OnRoutingConnect"
+                                    Style="{StaticResource TcSecondaryButtonStyle}" />
+                            <!--
+                                Offered rather than polled: this card does not
+                                go looking at a file on a timer.
+                            -->
+                            <Button Content="{x:Bind Settings.RoutingLookAgainText, Mode=OneWay}"
+                                    IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                    Click="OnRoutingLookAgain"
+                                    Style="{StaticResource TcSecondaryButtonStyle}" />
+                        </StackPanel>
 
-                        <TextBox Header="{x:Bind Settings.RoutingFolderTitle, Mode=OneWay}"
-                                 Text="{x:Bind Settings.RoutingTokenDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
-                        <TextBlock Text="{x:Bind Settings.RoutingFolderNote, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
+                        <!--
+                            The port box shows the conventional number so
+                            nobody has to know it, or the one discovery found
+                            where nothing is declared. Showing is not
+                            declaring: nothing is written until the switch
+                            above is on.
+
+                            Both boxes sit behind a disclosure once discovery
+                            has supplied the port, and stay open where it has
+                            not. There they are the only way to answer; this
+                            inverts the default; it removes nothing.
+                        -->
+                        <Expander Header="{x:Bind Settings.RoutingOverrideTitle, Mode=OneWay}"
+                                  IsExpanded="{x:Bind Settings.RoutingOverrideOpen, Mode=TwoWay}"
+                                  HorizontalAlignment="Stretch">
+                            <StackPanel Spacing="10">
+                                <NumberBox Header="{x:Bind Settings.RoutingPortTitle, Mode=OneWay}"
+                                           Value="{x:Bind Settings.RoutingPort, Mode=TwoWay}"
+                                           Minimum="1"
+                                           Maximum="65535"
+                                           SmallChange="1"
+                                           SpinButtonPlacementMode="Inline"
+                                           IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind Settings.RoutingPortNote, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+
+                                <!--
+                                    Still a text box here, deliberately. The
+                                    macOS folder control is a chooser because
+                                    on that platform a directory is readable
+                                    when the person pointed at it through the
+                                    system panel, not when the app was told a
+                                    string. No such rule holds on this one.
+                                -->
+                                <TextBox Header="{x:Bind Settings.RoutingFolderTitle, Mode=OneWay}"
+                                         Text="{x:Bind Settings.RoutingTokenDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind Settings.RoutingFolderNote, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Expander>
 
                         <Button Content="{x:Bind Settings.RoutingApplyText, Mode=OneWay}"
                                 IsEnabled="{x:Bind Settings.RoutingControlsEnabled, Mode=OneWay}"
