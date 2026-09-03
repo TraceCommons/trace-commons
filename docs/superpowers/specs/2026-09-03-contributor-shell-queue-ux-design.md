@@ -45,10 +45,10 @@ for one of them and do not:
 
 Queue entries and `list_projects` rows gain `project_path: String`,
 `~`-abbreviated for display. Both it and `project_label` are rendered from
-the normalized project key, which 1.2 case-folds on macOS and Windows -- see
-the note there for what that costs. `project_label` is otherwise unchanged:
-still the bare basename from `project_label_for`, still the only project
-string that crosses into any audit, notification, or history sink.
+the *unfolded* spelling of the project directory, which 1.2 carries beside
+the case-folded key -- not from the key itself. `project_label` is otherwise
+unchanged: still the bare basename from `project_label_for`, still the only
+project string that crosses into any audit, notification, or history sink.
 
 This is a deliberate widening of the rule stated in `policy.rs`'s
 `project_id_for` doc comment -- "the privacy rule is that a project key, a
@@ -106,29 +106,47 @@ Steps 1-3 are unconditional. Step 4 is worth stating as reversible: it is a
 single function, and if the merge turns out to be wrong for real users it
 comes out without touching anything else.
 
-**The key is the folded string, and every project string a shell draws is
-derived from it.** `normalize_project_key` returns
-`fold_case(path_to_key(rooted))`, so on macOS and Windows the key is
-lowercased. `project_label_for` and `display_path` both take that key, so on
-those two platforms the folder label and the folder path render folded: a
-session in `~/Code/IronWire` is keyed, labelled, and displayed as
-`~/code/ironwire` and `ironwire`.
+**The key is folded; what a person reads is not.** One normalization
+returns both spellings. `normalize_project_within` yields a
+`NormalizedProject` whose `key` is `fold_case(display_path)` and whose
+`display_path` is the canonicalized directory with the case the filesystem
+holds. Everything that *decides* something keys on the folded half -- policy
+lookup, grouping, `project_id_for`, and `disambiguated_label`'s collision
+test. Everything a person *reads* is rendered from the unfolded half.
 
-That is step 3's price and it belongs in this document rather than in a bug
-report. It does not defeat 1.1 -- a lowercased path still tells two projects
-called `api` apart, which is the job the hash suffix could not do -- but the
-app does spell a contributor's folder differently from the way they do, and
-1.1's "identifiable" is weaker for it. Recovering the recorded case means
-carrying the canonicalized, unfolded path beside the key, on every queue
-entry and in the policy file, and that second field is deliberately not in
-this design.
+Both halves are load-bearing and neither may be dropped. Dropping the fold
+would be a fail-open: on a case-insensitive volume `~/Code/Api` and
+`~/code/api` are one directory, so one project would mint two keys, and a
+project the contributor set to `Ignore` under one spelling would silently
+lapse under the other. Dropping the unfolded half puts `~/code/ironwire` and
+`ironwire` in front of a contributor whose disk holds `~/Code/IronWire` -- a
+spelling of their own directory that exists nowhere on their machine, which
+weakens exactly the "identifiable" 1.1 exists to provide.
+
+The unfolded half is carried rather than re-derived at each render:
+`QueueEntry::project_path: Option<String>` beside `project_key`, and
+`ProjectEntry::display_path: Option<String>` beside the map key, both
+`#[serde(default)]` so a queue or policy file written before the fields
+existed still loads. `None` -- an older file, or a key that no longer
+resolves -- falls back to the folded key, which names the right directory in
+the wrong case rather than naming nothing, so a row is never empty and
+never a panic. `project_id_for` still takes the folded key, so a change of
+case cannot move a project's id. `NormalizedProject` derives nothing --
+no `Debug`, no `Serialize` -- because a derived `Debug` is how a local path
+reaches a log line by accident; the display half is local-only exactly as
+`project_key` and `session_cwd` are, rendered over the socket and never
+logged, audited, notified, or written to a history record.
 
 `session_path` is unaffected. It renders `QueueEntry.session_cwd`, which is
-the raw cwd the watcher recorded and is never folded. `display_path` folds
-both sides only to *compare* against `$HOME`, and renders the tail from the
-string it was handed -- so a session path keeps its recorded case while a
-project path, having been folded before it ever reached the function,
-does not.
+the raw cwd the watcher recorded and is never folded. `display_path` still
+folds both sides only to *compare* against `$HOME`, and renders the tail
+from the string it was handed. That comparison is not a workaround for the
+key's folding: `$HOME` is whatever the environment supplied, and a shell
+exporting `HOME=/Users/Zaki` against a disk that spells it `/Users/zaki`
+names one directory on a case-insensitive volume, so folding the comparison
+is the filesystem's own rule. What had been wrong was that the *input* was
+folded too, leaving no case for the "cut the tail from the original" branch
+to preserve.
 
 Normalization changes `project_id_for`'s input, and ids are derived rather
 than stored, so **every existing project id changes on upgrade.** What that
