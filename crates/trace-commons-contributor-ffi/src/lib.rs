@@ -2039,7 +2039,7 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 
 /// The settings screen's session-source row for one tool, assembled.
 ///
-/// `tool` is `claude`, `codex` or `gemini`. `source_mode` is
+/// `tool` is `claude`, `codex`, `gemini` or `cline`. `source_mode` is
 /// `get_settings`'s `*_source_mode` -- `watch`, `off` or `unset`.
 ///
 /// THREE MODES, THREE SENTENCES. `*_root_configured` is `mode == "watch"`

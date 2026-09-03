@@ -42,7 +42,7 @@
 //! "Claude" and get a fourth spelling of the product's name. GTK links this
 //! crate; macOS and Windows call `tc_source_check_line`.
 
-use crate::routing_copy::{TOOL_CLAUDE, TOOL_CODEX, TOOL_GEMINI};
+use crate::routing_copy::{TOOL_CLAUDE, TOOL_CLINE, TOOL_CODEX, TOOL_GEMINI};
 
 /// The tools the settings screen has a session-source row for.
 ///
@@ -54,6 +54,7 @@ pub enum SourceTool {
     Claude,
     Codex,
     Gemini,
+    Cline,
 }
 
 impl SourceTool {
@@ -64,6 +65,7 @@ impl SourceTool {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
+            "cline" => Some(Self::Cline),
             _ => None,
         }
     }
@@ -75,6 +77,7 @@ impl SourceTool {
             Self::Claude => TOOL_CLAUDE,
             Self::Codex => TOOL_CODEX,
             Self::Gemini => TOOL_GEMINI,
+            Self::Cline => TOOL_CLINE,
         }
     }
 }
@@ -147,6 +150,18 @@ mod tests {
             source_check_line(SourceTool::Gemini, "unset"),
             "Gemini CLI sessions read from the usual place"
         );
+        assert_eq!(
+            source_check_line(SourceTool::Cline, "watch"),
+            "Cline sessions folder set"
+        );
+        assert_eq!(
+            source_check_line(SourceTool::Cline, "unset"),
+            "Cline sessions read from the usual place"
+        );
+        assert_eq!(
+            source_check_line(SourceTool::Cline, "off"),
+            "Cline marked not used, so nothing is opened for it"
+        );
     }
 
     /// `off` must not say what `unset` says, `unset` must not say what `off`
@@ -154,7 +169,12 @@ mod tests {
     /// relation is how a `contains` check comes to match the wrong branch.
     #[test]
     fn the_three_modes_never_share_a_sentence() {
-        for tool in [SourceTool::Claude, SourceTool::Codex, SourceTool::Gemini] {
+        for tool in [
+            SourceTool::Claude,
+            SourceTool::Codex,
+            SourceTool::Gemini,
+            SourceTool::Cline,
+        ] {
             let watch = source_check_line(tool, "watch");
             let unset = source_check_line(tool, "unset");
             let off = source_check_line(tool, "off");
@@ -205,6 +225,7 @@ mod tests {
         assert_eq!(SourceTool::Claude.name(), TOOL_CLAUDE);
         assert_eq!(SourceTool::Codex.name(), TOOL_CODEX);
         assert_eq!(SourceTool::Gemini.name(), TOOL_GEMINI);
+        assert_eq!(SourceTool::Cline.name(), TOOL_CLINE);
     }
 
     /// The keys are the ones `get_settings` uses, and anything else is
@@ -212,11 +233,12 @@ mod tests {
     /// this build does not have must get a refusal, not Claude Code's
     /// sentence under some other tool's heading.
     #[test]
-    fn only_the_three_wire_keys_name_a_tool() {
+    fn only_the_four_wire_keys_name_a_tool() {
         assert_eq!(SourceTool::from_key("claude"), Some(SourceTool::Claude));
         assert_eq!(SourceTool::from_key("codex"), Some(SourceTool::Codex));
         assert_eq!(SourceTool::from_key("gemini"), Some(SourceTool::Gemini));
-        for key in ["", "Claude", "claude-code", "gemini-cli", "near"] {
+        assert_eq!(SourceTool::from_key("cline"), Some(SourceTool::Cline));
+        for key in ["", "Claude", "claude-code", "gemini-cli", "Cline", "near"] {
             assert_eq!(SourceTool::from_key(key), None, "{key:?} named a tool");
         }
     }

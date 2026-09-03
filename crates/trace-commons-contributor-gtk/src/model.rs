@@ -170,6 +170,7 @@ impl QueueEntry {
             "claude-code" => "Claude Code",
             "codex" => "Codex",
             "gemini-cli" => "Gemini CLI",
+            "cline" => "Cline",
             "antigravity" => "Antigravity",
             "trajectory" => "Trajectory",
             _ => self.source.as_str(),

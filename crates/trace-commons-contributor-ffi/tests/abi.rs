@@ -1989,6 +1989,20 @@ fn each_source_mode_crosses_the_abi_as_its_own_sentence() {
 }
 
 #[test]
+fn a_cline_source_check_crosses_the_abi_as_the_rust_sentence() {
+    // Cline has a settings row the way Gemini CLI does, and its key crosses
+    // this boundary the same way. Against the shared function, not against
+    // words written here, for the reason the Claude case gives.
+    use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
+    let tool = cstr_str("cline");
+    for mode in ["watch", "unset", "off"] {
+        let line =
+            take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str(mode).as_ptr()) });
+        assert_eq!(line, source_check_line(SourceTool::Cline, mode));
+    }
+}
+
+#[test]
 fn a_source_check_for_a_tool_this_build_has_no_name_for_is_refused() {
     // Refused rather than answered with some other tool's sentence under
     // this tool's heading -- and refused by a fixed label, so a shell can

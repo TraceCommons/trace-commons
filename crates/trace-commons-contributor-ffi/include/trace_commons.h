@@ -275,10 +275,10 @@ char*       tc_discover_sources(void);
  *
  * Returns an owned JSON object; free it with tc_string_free. Its keys are
  * tools_heading, word_private, word_direct, word_unknown, word_not_used,
- * tool_claude, tool_codex, tool_gemini, intro, toggle, applies_at_once,
- * port_title, port_note, folder_title, folder_note, apply, checking,
- * check_unavailable, probe_reachable, state_off, state_waiting and
- * state_reading. Every value is a non-empty string.
+ * tool_claude, tool_codex, tool_gemini, tool_cline, intro, toggle,
+ * applies_at_once, port_title, port_note, folder_title, folder_note, apply,
+ * checking, check_unavailable, probe_reachable, state_off, state_waiting
+ * and state_reading. Every value is a non-empty string.
  *
  * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
  * question and returns a single list; this is a whole screen's wording and
@@ -449,7 +449,7 @@ char*       tc_routing_last_checked(const char* when);
 
 /* The settings screen's session-source row for one tool, assembled.
  *
- * tool is "claude", "codex" or "gemini". source_mode is get_settings's
+ * tool is "claude", "codex", "gemini" or "cline". source_mode is get_settings's
  * *_source_mode -- "watch", "off" or "unset".
  *
  * THREE MODES, THREE SENTENCES. *_root_configured is (mode == "watch") and is
