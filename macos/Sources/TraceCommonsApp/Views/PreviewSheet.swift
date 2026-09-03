@@ -926,39 +926,8 @@ struct WhatsInItTab: View {
                 .font(TC.Font_.caption)
                 .foregroundStyle(TC.inkSecondary)
 
-                TCSectionHeader(title: "What scrubbing removed")
+                removedPanel
                     .padding(.top, TC.Space.xs)
-                if summary.redactions.isEmpty {
-                    // The one card in this tab that is drawn to be found: a
-                    // session where no pattern fired is the session most
-                    // worth a second look, and it is the case a count of
-                    // removals cannot state.
-                    HStack(alignment: .top, spacing: TC.Space.m) {
-                        Image(systemName: TC.Tone.attention.symbol)
-                            .font(.system(size: 14))
-                            .foregroundStyle(TC.Tone.attention.color)
-                            .accessibilityHidden(true)
-                        Text("""
-                        Nothing matched. On a session that touched credentials, that is \
-                        itself worth a second look.
-                        """)
-                        .font(TC.Font_.body)
-                        .foregroundStyle(TC.inkPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, TC.Space.md)
-                    .padding(.vertical, TC.Space.m)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .tcCard(emphasised: true)
-                    .accessibilityElement(children: .combine)
-                } else {
-                    ForEach(summary.redactions.sorted(by: { $0.key < $1.key }), id: \.key) { kind, count in
-                        Text("\(count) × \(kind.replacingOccurrences(of: "_", with: " "))")
-                            .font(TC.Font_.body)
-                            .foregroundStyle(TC.inkPrimary)
-                    }
-                }
 
                 if !summary.piiLabelsPresent.isEmpty {
                     TCSectionHeader(title: "Personal-information categories seen")
@@ -985,6 +954,125 @@ struct WhatsInItTab: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Grouped by family, described in words, and split into what left and
+    /// what did not.
+    ///
+    /// This section used to print the daemon's count map one raw label per
+    /// line -- which put `residual_secret_at:events.3.correction` under the
+    /// heading "What scrubbing removed", stating the exact opposite of what
+    /// happened about a secret that is still in the payload. See
+    /// `RedactionSummary` and `RedactionLabels`.
+    private var rows: (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow]) {
+        RedactionSummary.rows(
+            occurrences: summary.redactions,
+            distinct: summary.redactionsDistinct
+        )
+    }
+
+    @ViewBuilder
+    private var removedPanel: some View {
+        let rows = self.rows
+        TCSectionHeader(title: "What scrubbing removed")
+        if rows.removed.isEmpty {
+            nothingMatchedCard
+        } else {
+            ForEach(rows.removed, id: \.family) { row in
+                summaryRow(row)
+            }
+        }
+
+        if !rows.stillPresent.isEmpty {
+            TCSectionHeader(title: "Found, and still in what would be sent")
+                .padding(.top, TC.Space.xs)
+            ForEach(rows.stillPresent, id: \.family) { row in
+                HStack(alignment: .top, spacing: TC.Space.s) {
+                    Image(systemName: TC.Tone.attention.symbol)
+                        .font(.system(size: 14))
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: TC.Space.micro) {
+                        Text(row.description)
+                            .font(TC.Font_.body)
+                            .foregroundStyle(TC.goldText)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // Schema paths, never transcript text: the redactor
+                        // guarantees the shape of these labels where it
+                        // mints them.
+                        if !row.detail.isEmpty {
+                            Text(row.detail.joined(separator: ", "))
+                                .font(TC.Font_.caption)
+                                .foregroundStyle(TC.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+
+        // A panel that enumerates categories makes the app look more
+        // thorough than it is, which is exactly when this sentence earns its
+        // place.
+        ScrubbingCaveatNote()
+            .padding(.top, TC.Space.xs)
+    }
+
+    private func summaryRow(_ row: RedactionSummaryRow) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.micro) {
+            Text(countLine(row))
+                .font(TC.Font_.body)
+                .foregroundStyle(TC.inkPrimary)
+            Text(row.description)
+                .font(TC.Font_.caption)
+                .foregroundStyle(TC.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !row.detail.isEmpty {
+                Text(row.detail.joined(separator: ", "))
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "185 local path (12 distinct)". The distinct figure only when it says
+    /// something the occurrence count did not -- the same rule the queue
+    /// card's one-line figure follows, for the same reason.
+    private func countLine(_ row: RedactionSummaryRow) -> String {
+        guard row.distinct > 0, row.distinct < row.occurrences else {
+            return "\(row.occurrences) \(row.display)"
+        }
+        return "\(row.occurrences) \(row.display) (\(row.distinct) distinct)"
+    }
+
+    /// The one card in this tab that is drawn to be found: a session where
+    /// no pattern fired is the session most worth a second look, and it is
+    /// the case a count of removals cannot state.
+    private var nothingMatchedCard: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            Image(systemName: TC.Tone.attention.symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(TC.Tone.attention.color)
+                .accessibilityHidden(true)
+            Text("""
+            Nothing matched. On a session that touched credentials, that is \
+            itself worth a second look.
+            """)
+            .font(TC.Font_.body)
+            .foregroundStyle(TC.inkPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, TC.Space.md)
+        .padding(.vertical, TC.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .combine)
     }
 }
 
