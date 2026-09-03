@@ -296,6 +296,26 @@ mod tests {
     fn total_sums_occurrences_not_distinct() {
         assert_eq!(total(&map(&[("a", 2), ("b", 3)])), 5);
     }
+
+    /// `residual_secret_at:*` counts a secret that was DETECTED AND NOT
+    /// REMOVED. It arrives in the same map as every genuine removal, and
+    /// this line renders under the heading "Removed by pattern" -- so
+    /// including it states the exact opposite of what happened, on the
+    /// screen where someone is deciding whether to send the thing.
+    #[test]
+    fn a_residual_survivor_is_not_counted_as_removed() {
+        let m = map(&[("local_path", 3), ("residual_secret_at:events.correction", 1)]);
+        assert_eq!(line(&m, &map(&[])), "3 local path");
+        assert_eq!(total(&m), 3);
+    }
+
+    /// A session whose only count is a survivor removed nothing.
+    #[test]
+    fn a_session_with_only_a_residual_matched_nothing() {
+        let m = map(&[("residual_secret_at:events.x", 1)]);
+        assert_eq!(line(&m, &map(&[])), crate::copy::NOTHING_MATCHED);
+        assert_eq!(total(&m), 0);
+    }
 }
 ```
 
@@ -328,9 +348,34 @@ At the top of `redaction_tally.rs`:
 
 use std::collections::BTreeMap;
 
-/// Total occurrences across every label.
+/// The prefix marking a secret that was DETECTED AND NOT REMOVED.
+///
+/// `note_residual_secret_location` increments this when a secret survives
+/// redaction -- a credential inside a human correction, kept by design, or a
+/// field the typed traversal never visits, which is a real gap. It rides in
+/// the same map as every genuine removal, and everything here renders under
+/// "Removed by pattern", so it is excluded from both figures.
+pub const RESIDUAL_PREFIX: &str = "residual_secret_at";
+
+/// The part of a label before its first `:`. The vocabulary is namespaced
+/// and open -- `secret:{pattern}`, `privacy_filter:{label}`,
+/// `tool_sensitive_field:{action}` are generated -- so a shell can only
+/// reason about families, never a closed set of labels.
+pub fn family(label: &str) -> &str {
+    label.split_once(':').map_or(label, |(head, _)| head)
+}
+
+pub fn is_removal(label: &str) -> bool {
+    family(label) != RESIDUAL_PREFIX
+}
+
+/// Total occurrences of things that were actually removed.
 pub fn total(occurrences: &BTreeMap<String, u32>) -> u32 {
-    occurrences.values().sum()
+    occurrences
+        .iter()
+        .filter(|(label, _)| is_removal(label))
+        .map(|(_, count)| count)
+        .sum()
 }
 
 /// "185 local path (12 distinct) · 3 secret"
@@ -342,10 +387,13 @@ pub fn line(
     occurrences: &BTreeMap<String, u32>,
     distinct: &BTreeMap<String, u32>,
 ) -> String {
-    if occurrences.is_empty() {
+    let mut parts: Vec<(&String, &u32)> = occurrences
+        .iter()
+        .filter(|(label, _)| is_removal(label))
+        .collect();
+    if parts.is_empty() {
         return crate::copy::NOTHING_MATCHED.to_string();
     }
-    let mut parts: Vec<(&String, &u32)> = occurrences.iter().collect();
     parts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     parts
         .into_iter()
@@ -1047,6 +1095,179 @@ git commit -m "Mark each redaction where it happened in the transcript"
 
 ---
 
+### Task 6b: The removed-summary panel
+
+Marking placeholders answers *where*. It does not answer "so I can right away
+see what doesn't go", because collecting the marks means scrolling the whole
+transcript. This is the panel that answers it -- and the surface where the
+`residual_secret_at` defect gets stated correctly rather than backwards.
+
+**Files:**
+- Create: `crates/trace-commons-contributor-gtk/src/redaction_summary.rs`
+- Modify: crate root (`mod redaction_summary;`), `src/copy.rs` (the descriptions), `src/ui/preview.rs` (the scrubbing page)
+- Test: `redaction_summary.rs`, inline
+
+**Interfaces:**
+- Consumes: `redaction_tally::{family, is_removal, RESIDUAL_PREFIX}` (Task 2).
+- Produces:
+  - `pub struct Row { pub family: String, pub display: String, pub description: &'static str, pub occurrences: u32, pub distinct: u32, pub detail: Vec<String> }`
+  - `pub fn rows(occurrences: &BTreeMap<String, u32>, distinct: &BTreeMap<String, u32>) -> (Vec<Row>, Vec<Row>)` -- `(removed, still_present)`
+
+The contract is the one in the spec's §3.1b, and it is identical in all three
+shells: group by family, keep an unrecognised family with a neutral
+description, never drop one, and put `residual_secret_at` in the second list
+rather than the first.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn an_empty_map_produces_no_rows() {
+        let (removed, still) = rows(&map(&[]), &map(&[]));
+        assert!(removed.is_empty());
+        assert!(still.is_empty());
+    }
+
+    #[test]
+    fn one_family_becomes_one_row() {
+        let (removed, _) = rows(&map(&[("local_path", 185)]), &map(&[("local_path", 12)]));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].family, "local_path");
+        assert_eq!(removed[0].display, "local path");
+        assert_eq!(removed[0].occurrences, 185);
+        assert_eq!(removed[0].distinct, 12);
+        assert!(!removed[0].description.is_empty());
+    }
+
+    /// Nine secret patterns are one `secret` row, not nine rows.
+    #[test]
+    fn sub_labels_collapse_into_their_family() {
+        let (removed, _) = rows(
+            &map(&[("secret:contextual_entropy", 3), ("secret:pem_private_key", 1), ("secret", 2)]),
+            &map(&[("secret:contextual_entropy", 2), ("secret:pem_private_key", 1), ("secret", 2)]),
+        );
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].occurrences, 6);
+        assert_eq!(removed[0].distinct, 5);
+        assert_eq!(removed[0].detail, ["contextual entropy", "pem private key"]);
+    }
+
+    /// A secret DETECTED AND NOT REMOVED. Putting it in `removed` would
+    /// state the exact opposite of what happened.
+    #[test]
+    fn a_residual_survivor_is_reported_as_still_present() {
+        let (removed, still) = rows(
+            &map(&[("local_path", 3), ("residual_secret_at:events.correction", 1)]),
+            &map(&[]),
+        );
+        assert_eq!(removed.iter().map(|r| r.family.as_str()).collect::<Vec<_>>(), ["local_path"]);
+        assert_eq!(still.iter().map(|r| r.family.as_str()).collect::<Vec<_>>(), ["residual_secret_at"]);
+        assert_eq!(still[0].detail, ["events.correction"]);
+    }
+
+    /// Hiding a category this build has no words for would understate what
+    /// happened, which is the one direction this panel must not fail in.
+    #[test]
+    fn an_unknown_family_is_kept_with_a_neutral_description() {
+        let (removed, _) = rows(&map(&[("future_category", 4)]), &map(&[]));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].description, crate::copy::REDACTION_CATEGORY_UNKNOWN);
+    }
+
+    #[test]
+    fn rows_are_ordered_by_occurrences_then_family() {
+        let (removed, _) = rows(
+            &map(&[("secret", 3), ("local_path", 185), ("email", 3)]),
+            &map(&[]),
+        );
+        assert_eq!(
+            removed.iter().map(|r| r.family.as_str()).collect::<Vec<_>>(),
+            ["local_path", "email", "secret"]
+        );
+    }
+
+    /// The panel names kinds, never values.
+    #[test]
+    fn a_row_carries_no_matched_text() {
+        let (removed, _) = rows(&map(&[("secret", 1)]), &map(&[]));
+        assert!(removed[0].detail.is_empty());
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml redaction_summary
+```
+
+- [ ] **Step 3: Add the descriptions to `copy.rs`**
+
+```rust
+/// What each redaction family IS, in words -- the panel's actual value to a
+/// reader who has never seen these labels.
+///
+/// Deliberately not exhaustive. The vocabulary is generated and open, which
+/// is why `describe` falls back rather than panicking.
+pub const REDACTION_CATEGORY_LOCAL_PATH: &str = "File paths from this machine.";
+pub const REDACTION_CATEGORY_SECRET: &str =
+    "API keys, tokens, private keys, and high-entropy strings found next to credential words.";
+pub const REDACTION_CATEGORY_PRIVACY_FILTER: &str =
+    "Names, emails, and other personal details found in prose.";
+pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
+    "Fields whose name marks them sensitive, like password or authorization.";
+pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
+    "Tool-call arguments whose name marks them sensitive.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str =
+    "Found, and still in what would be sent. Either a credential inside a correction \
+     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
+
+/// The neutral description for a family this build has no words for. It must
+/// still appear: dropping an unrecognised category would understate what
+/// happened.
+pub const REDACTION_CATEGORY_UNKNOWN: &str =
+    "Removed by a pattern this version has no description for.";
+```
+
+- [ ] **Step 4: Write `redaction_summary.rs`**
+
+Group by `redaction_tally::family`, summing occurrences and distinct counts
+and collecting humanised sub-labels; sort by occurrences descending with ties
+on family; split on `redaction_tally::is_removal`. Sub-labels are safe to
+render -- they are schema-shaped identifiers by construction, which is the
+same property `log_residual_secret_locations` relies on.
+
+- [ ] **Step 5: Draw the panel**
+
+On the preview sheet's scrubbing page, above the transcript marks: a
+"Removed" section of rows (display name and counts in `tc-card-title`,
+description in `tc-meta`, detail in `tc-meta` dimmed), and -- only when
+non-empty -- a "Found, and still in what would be sent" section in the
+attention tone with the warning glyph, listing the schema paths.
+
+Keep the scrubbing caveat below both. A panel that enumerates categories makes
+the app look more thorough than it is, which is when that sentence earns its
+place.
+
+- [ ] **Step 6: Run the tests and commit**
+
+```bash
+cargo test --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+cargo fmt --manifest-path crates/trace-commons-contributor-gtk/Cargo.toml
+git add crates/trace-commons-contributor-gtk/src/
+git commit -m "Summarise what scrubbing removed, and what it left in"
+```
+
+---
+
 ### Task 7: Tell "never there" apart from "removed", and give the chip a job
 
 **Files:**
@@ -1399,11 +1620,14 @@ Confirm by hand, and report in the PR body:
    folder -- this is what the flat-index test in Task 3 is guarding, and it
    is the thing most likely to be silently wrong.
 6. Clicking a card body opens the preview; footer buttons still work.
-7. Redactions are marked in the transcript, and no transcript text renders
-   as broken markup.
+7. Redactions are marked in the transcript, no transcript text renders as
+   broken markup, and the scrubbing page lists what was removed with a
+   description per category.
 8. Searching a value you know was redacted says it was removed.
 9. The nothing-matched chip opens the search tab.
 10. History is grouped by folder.
+11. On a session with a `residual_secret_at` count, the panel reports it
+    under "still in what would be sent" and NOT as removed.
 
 - [ ] **Step 4: Open the PR**
 
@@ -1432,6 +1656,8 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.3 `Submit all` at n = 1 | Task 4 Step 4 |
 | §2.4 card click | Task 5 |
 | §3.1 placeholders marked | Task 6 |
+| §3.1b removed-summary panel | Task 6b |
+| §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts | Task 2 |
 | §3.2 original search | Task 7 |
 | §3.3 recent-search prefixes | **No work** -- already correct here, see "What this shell already gets right" |

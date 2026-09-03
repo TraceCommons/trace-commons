@@ -256,6 +256,15 @@ git commit -m "Decode the project path, session path, distinct counts, and histo
   - `public static string Line(IReadOnlyDictionary<string, int> occurrences, IReadOnlyDictionary<string, int> distinct)`
   - `public static int Total(IReadOnlyDictionary<string, int> occurrences)`
   - `public const string NothingMatched = "nothing matched";`
+  - `public const string ResidualPrefix = "residual_secret_at";`
+  - `public static string Family(string label)` -- the part before the first `:`
+  - `public static bool IsRemoval(string label)`
+
+`Family` and `IsRemoval` exist because the count vocabulary is namespaced and
+open: `secret:{pattern}`, `privacy_filter:{label}` and
+`tool_sensitive_field:{action}` are all generated, so a shell can only reason
+about families. `Line` and `Total` both filter on `IsRemoval` -- see the
+residual tests below.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -325,6 +334,30 @@ public class RedactionTallyTests
     [Fact]
     public void TotalSumsOccurrencesNotDistinct()
         => Assert.Equal(5, RedactionTally.Total(Map(("a", 2), ("b", 3))));
+
+    /// <summary>
+    /// <c>residual_secret_at:*</c> counts a secret that was DETECTED AND NOT
+    /// REMOVED. It arrives in the same map as every genuine removal, and this
+    /// line renders under the heading "Removed by pattern" -- so including it
+    /// states the exact opposite of what happened, on the screen where
+    /// someone is deciding whether to send the thing.
+    /// </summary>
+    [Fact]
+    public void AResidualSurvivorIsNotCountedAsRemoved()
+    {
+        var m = Map(("local_path", 3), ("residual_secret_at:events.correction", 1));
+        Assert.Equal("3 local path", RedactionTally.Line(m, Map()));
+        Assert.Equal(3, RedactionTally.Total(m));
+    }
+
+    /// <summary>A session whose only count is a survivor removed nothing.</summary>
+    [Fact]
+    public void ASessionWithOnlyAResidualMatchedNothing()
+    {
+        var m = Map(("residual_secret_at:events.x", 1));
+        Assert.Equal(RedactionTally.NothingMatched, RedactionTally.Line(m, Map()));
+        Assert.Equal(0, RedactionTally.Total(m));
+    }
 }
 ```
 
@@ -807,6 +840,101 @@ git commit -m "Mark each redaction where it happened in the transcript"
 
 ---
 
+### Task 6b: The removed-summary panel
+
+Marking placeholders answers *where*. It does not answer "so I can right away
+see what doesn't go", because collecting the marks means scrolling the whole
+transcript. This is the panel that answers it -- and the surface where the
+`residual_secret_at` defect gets stated correctly rather than backwards.
+
+**Files:**
+- Create: `windows/src/TraceCommons.Interop/RedactionSummary.cs`
+- Modify: `windows/src/TraceCommons.App/ViewModels/PreviewSheetViewModel.cs`, `Controls/PreviewSheet.xaml`
+- Test: `windows/tests/TraceCommons.Interop.Tests/RedactionSummaryTests.cs` (create)
+
+**Interfaces:**
+- Consumes: `RedactionTally.{Family, IsRemoval, ResidualPrefix}` (Task 2).
+- Produces:
+  - `public sealed record RedactionSummaryRow(string Family, string Display, string Description, int Occurrences, int Distinct, IReadOnlyList<string> Detail)`
+  - `public static (IReadOnlyList<RedactionSummaryRow> Removed, IReadOnlyList<RedactionSummaryRow> StillPresent) Rows(IReadOnlyDictionary<string, int> occurrences, IReadOnlyDictionary<string, int> distinct)`
+
+The contract is the spec's §3.1b and is identical in all three shells: group
+by family, keep an unrecognised family with a neutral description, never drop
+one, and put `residual_secret_at` in the second list rather than the first.
+
+- [ ] **Step 1: Write the failing tests**
+
+Seven cases, mirroring the macOS and GTK suites exactly:
+
+1. `AnEmptyMapProducesNoRows`.
+2. `OneFamilyBecomesOneRow` -- `local_path` 185 / distinct 12, with a
+   non-empty `Description`.
+3. `SubLabelsCollapseIntoTheirFamily` -- `secret:contextual_entropy`,
+   `secret:pem_private_key` and bare `secret` become one row summing to 6
+   occurrences and 5 distinct, with
+   `Detail == ["contextual entropy", "pem private key"]`.
+4. `AResidualSurvivorIsReportedAsStillPresent`:
+
+```csharp
+    /// <summary>
+    /// A secret DETECTED AND NOT REMOVED. Putting it in Removed would state
+    /// the exact opposite of what happened.
+    /// </summary>
+    [Fact]
+    public void AResidualSurvivorIsReportedAsStillPresent()
+    {
+        var (removed, still) = RedactionSummary.Rows(
+            Map(("local_path", 3), ("residual_secret_at:events.correction", 1)),
+            Map());
+        Assert.Equal(new[] { "local_path" }, removed.Select(r => r.Family));
+        Assert.Equal(new[] { "residual_secret_at" }, still.Select(r => r.Family));
+        Assert.Equal(new[] { "events.correction" }, still[0].Detail);
+    }
+```
+
+5. `AnUnknownFamilyIsKeptWithANeutralDescription` -- asserting the row is
+   present and its description is `RedactionSummary.UnknownDescription`.
+   Hiding a category this build has no words for would understate what
+   happened, which is the one direction this panel must not fail in.
+6. `RowsAreOrderedByOccurrencesThenFamily` -- `local_path`, `email`, `secret`.
+7. `ARowCarriesNoMatchedText` -- a bare family's `Detail` is empty.
+
+- [ ] **Step 2: Run to verify they fail, then implement**
+
+```bash
+cd windows && dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --filter RedactionSummaryTests
+```
+
+Write `RedactionSummary.cs` with the family descriptions as constants and a
+`Describe` that falls back to `UnknownDescription` rather than throwing --
+the vocabulary is generated and open, so a missing entry is expected, not a
+bug. Document that sub-labels are safe to render because they are
+schema-shaped identifiers by construction, never contributor strings.
+
+- [ ] **Step 3: Draw the panel**
+
+On the preview sheet's scrubbing section, above the transcript: a **Removed**
+list binding each row's display name and counts, description beneath in the
+secondary style and detail in the tertiary style; and -- collapsed when empty
+-- a **"Found, and still in what would be sent"** list in the attention tone
+with the warning glyph, showing the schema paths.
+
+Keep the scrubbing caveat below both. A panel that enumerates categories makes
+the app look more thorough than it is, which is when that sentence earns its
+place.
+
+- [ ] **Step 4: Run the tests and commit**
+
+```bash
+cd windows && dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj
+git add windows/src/TraceCommons.Interop/RedactionSummary.cs \
+        windows/tests/TraceCommons.Interop.Tests/RedactionSummaryTests.cs \
+        windows/src/TraceCommons.App/
+git commit -m "Summarise what scrubbing removed, and what it left in"
+```
+
+---
+
 ### Task 7: Recent searches stop recording prefixes
 
 This shell has the same defect as macOS. `OnNeedleChanged`
@@ -1177,11 +1305,14 @@ Via `win-exec.sh`. Confirm, and report in the PR body:
 3. `Submit all` on a one-session folder works without opening it.
 4. Approving a folder's last session returns you to the folder list.
 5. Clicking a card body opens the preview; footer buttons still work.
-6. Redactions are marked in the transcript.
+6. Redactions are marked in the transcript, and the scrubbing section
+   lists what was removed with a description per category.
 7. Typing `xyz` in search leaves one recent entry, not three.
 8. Searching a value you know was redacted says it was removed.
 9. The nothing-matched chip opens search.
 10. History is grouped by folder.
+11. On a session with a `residual_secret_at` count, the panel reports it
+    under "still in what would be sent" and NOT as removed.
 
 - [ ] **Step 4: Open the PR**
 
@@ -1210,6 +1341,8 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.3 `Submit all` at n = 1 | Task 3 (`ShowSubmitAll`) |
 | §2.4 card click | Task 5 |
 | §3.1 placeholders marked | Task 6 |
+| §3.1b removed-summary panel | Task 6b |
+| §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts | Task 2 |
 | §3.2 original search | Task 8 |
 | §3.3 recent-search prefixes | Task 7 |

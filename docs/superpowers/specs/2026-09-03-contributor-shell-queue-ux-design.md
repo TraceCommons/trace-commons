@@ -210,6 +210,78 @@ more thorough than it is, and that is precisely the moment the caveat earns
 its place -- it stays, next to the highlights, not at the bottom of the
 screen.
 
+### 3.1b The removed-summary panel
+
+Marking placeholders in place answers *where*. It does not answer the thing
+the reporter actually asked for -- "so I can right away see what doesn't go"
+-- because collecting the marks means scrolling the whole transcript, which
+is the opposite of right away. The card's one-line figure is the only
+at-a-glance part, and it is a count, not a list.
+
+So the preview's scrubbing tab gains a summary panel: one row per category,
+with what that category is, how many times it fired, and how many distinct
+values that covered. No matched text, ever -- the value is gone by
+construction and the row says what KIND of thing left, not what it was.
+
+**Labels are an open, namespaced vocabulary, and the panel must be built for
+that.** The redactor emits `local_path` and `secret`, but also
+`secret:{pattern_name}`, `privacy_filter:{label}`,
+`tool_sensitive_field:{action}`, and `residual_secret_at:{schema_path}` --
+the last three generated, so the set is not closed and a shell cannot hold a
+complete table of it. Three rules follow:
+
+1. **Group by family**, the part before the first `:`. A session that
+   tripped nine different secret patterns is one `secret` row summing them,
+   with the sub-labels on a detail line, not nine rows.
+2. **An unrecognized family gets a neutral description**, never a guessed
+   one, and is **never dropped**. Hiding a category because this build has no
+   words for it would understate what happened, which is the one direction
+   this panel must not fail in.
+3. Sub-labels are safe to render. They are schema-shaped identifiers by
+   construction -- `log_residual_secret_locations` depends on that same
+   property -- never contributor strings.
+
+The descriptions, which are the panel's actual value to a reader who has
+never seen these words:
+
+| Family | What it is |
+|---|---|
+| `local_path` | File paths from this machine. |
+| `secret` | API keys, tokens, private keys, and high-entropy strings found next to credential words. |
+| `privacy_filter` | Names, emails, and other personal details the privacy model found in prose. |
+| `sensitive_field` | Fields whose name marks them sensitive, like `password` or `authorization`. |
+| `tool_sensitive_field` | Tool-call arguments whose name marks them sensitive. |
+| anything else | Removed by a pattern this version has no description for. |
+
+#### `residual_secret_at` is not a removal, and the card currently says it is
+
+`DeterministicTraceRedactor` sets `redaction_counts: report.counts` -- the
+whole report. That report includes `residual_secret_at:{path}`, which
+`note_residual_secret_location` increments when a secret was **detected and
+NOT removed**: a credential inside a human correction, which is preserved by
+design, or a field the typed traversal never visits, which is a real gap.
+
+Both reach the shells in the same map as every genuine removal, and all three
+render that map under the heading **"Removed by pattern"**. A session with a
+surviving secret therefore reports it today as a thing that was taken out.
+That is a pre-existing defect, it is exactly backwards, and it lands on the
+one screen where a contributor is deciding whether to send something.
+
+The panel is where it gets fixed, because the panel is the first surface with
+room to say two different things:
+
+- **Removed** -- every family except `residual_secret_at`.
+- **Found, and still in what would be sent** -- `residual_secret_at`, in the
+  attention tone, with its schema paths listed so the contributor can go and
+  look.
+
+The card's one-line figure gets the narrower half of the same fix: it excludes
+`residual_secret_at` from the "removed by pattern" total rather than trying to
+explain it in a strip that has no room. A session whose only count is a
+residual therefore reads `nothing matched` on the card and carries the
+attention state -- which is true, and is what the gold chip already exists to
+say.
+
 ### 3.2 Search answers "was it removed?" (item 3, second half)
 
 `tc_preview_search` scans the redacted body, by an absolute stated rule.

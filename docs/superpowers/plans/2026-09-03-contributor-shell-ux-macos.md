@@ -373,6 +373,36 @@ final class RedactionTallyTests: XCTestCase {
         XCTAssertEqual(RedactionTally.total(["a": 2, "b": 3]), 5)
     }
 
+    /// `residual_secret_at:*` counts a secret that was DETECTED AND NOT
+    /// REMOVED. It arrives in the same map as every genuine removal, and
+    /// this line renders under the heading "Removed by pattern" -- so
+    /// including it states the exact opposite of what happened, on the
+    /// screen where someone is deciding whether to send the thing.
+    func testAResidualSurvivorIsNotCountedAsRemoved() {
+        XCTAssertEqual(
+            RedactionTally.line(
+                occurrences: ["local_path": 3, "residual_secret_at:events.correction": 1],
+                distinct: [:]
+            ),
+            "3 local path"
+        )
+        XCTAssertEqual(
+            RedactionTally.total(["local_path": 3, "residual_secret_at:events.correction": 1]),
+            3
+        )
+    }
+
+    /// A session whose ONLY count is a survivor removed nothing. Saying
+    /// "nothing matched" is true, and it is what puts the card in the tone
+    /// that asks someone to look.
+    func testASessionWithOnlyAResidualMatchedNothing() {
+        XCTAssertEqual(
+            RedactionTally.line(occurrences: ["residual_secret_at:events.x": 1], distinct: [:]),
+            "nothing matched"
+        )
+        XCTAssertEqual(RedactionTally.total(["residual_secret_at:events.x": 1]), 0)
+    }
+
     func testADistinctCountAboveItsOccurrenceCountIsIgnored() {
         // Cannot happen from a correct daemon; if it ever does, saying
         // "3 secret (9 distinct)" would be worse than saying nothing.
@@ -417,9 +447,31 @@ public enum RedactionTally {
     /// the sentence that says what that does and does not prove.
     public static let nothingMatched = "nothing matched"
 
-    /// Total occurrences across every label.
+    /// The prefix marking a secret that was DETECTED AND NOT REMOVED.
+    ///
+    /// `note_residual_secret_location` increments this when a secret
+    /// survives redaction -- a credential inside a human correction, which
+    /// is preserved by design, or a field the typed traversal never visits,
+    /// which is a real gap. It rides in the same map as every genuine
+    /// removal, and everything here renders under the heading "Removed by
+    /// pattern", so it must be excluded from both figures.
+    public static let residualPrefix = "residual_secret_at"
+
+    static func isRemoval(_ label: String) -> Bool {
+        family(label) != residualPrefix
+    }
+
+    /// The part of a label before its first `:`. The count vocabulary is
+    /// namespaced and open -- `secret:{pattern}`, `privacy_filter:{label}`,
+    /// `tool_sensitive_field:{action}` are all generated -- so a shell can
+    /// only reason about families, never about a closed set of labels.
+    public static func family(_ label: String) -> String {
+        label.split(separator: ":", maxSplits: 1).first.map(String.init) ?? label
+    }
+
+    /// Total occurrences of things that were actually removed.
     public static func total(_ occurrences: [String: Int]) -> Int {
-        occurrences.values.reduce(0, +)
+        occurrences.filter { isRemoval($0.key) }.values.reduce(0, +)
     }
 
     /// "185 local path (12 distinct)  ·  3 secret"
@@ -428,6 +480,7 @@ public enum RedactionTally {
     /// person scanning a column of cards is looking for; ties break on the
     /// label so the order is stable between two redraws.
     public static func line(occurrences: [String: Int], distinct: [String: Int]) -> String {
+        let occurrences = occurrences.filter { isRemoval($0.key) }
         if occurrences.isEmpty { return nothingMatched }
         return occurrences
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
@@ -1194,6 +1247,284 @@ git add macos/Sources/TCShellCore/RedactionPlaceholders.swift \
         macos/Tests/TCShellCoreTests/RedactionPlaceholdersTests.swift \
         macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift
 git commit -m "Mark each redaction where it happened in the transcript"
+```
+
+---
+
+### Task 6b: The removed-summary panel
+
+Marking placeholders answers *where*. It does not answer "so I can right away
+see what doesn't go", because collecting the marks means scrolling the whole
+transcript. This is the panel that answers it -- and the surface where the
+`residual_secret_at` defect gets stated correctly rather than backwards.
+
+**Files:**
+- Create: `macos/Sources/TCShellCore/RedactionSummary.swift`
+- Modify: `macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift` (scrubbing tab)
+- Test: `macos/Tests/TCShellCoreTests/RedactionSummaryTests.swift` (create)
+
+**Interfaces:**
+- Consumes: `RedactionTally.family`, `.residualPrefix`, `.isRemoval` (Task 2);
+  `PreviewSummary.redactions`, `.redactionsDistinct` (Task 1).
+- Produces:
+  - `public struct RedactionSummaryRow: Equatable { public let family: String; public let display: String; public let description: String; public let occurrences: Int; public let distinct: Int; public let detail: [String] }`
+  - `public static func rows(occurrences: [String: Int], distinct: [String: Int]) -> (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow])`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `macos/Tests/TCShellCoreTests/RedactionSummaryTests.swift`:
+
+```swift
+import XCTest
+
+@testable import TCShellCore
+
+/// The scrubbing tab's "what left, and what didn't" panel.
+///
+/// The label vocabulary is open and namespaced -- `secret:{pattern}`,
+/// `privacy_filter:{label}`, `tool_sensitive_field:{action}` are all
+/// generated -- so this type can only reason about families, and it must
+/// never claim to know what an unfamiliar one means.
+final class RedactionSummaryTests: XCTestCase {
+    func testAnEmptyMapProducesNoRows() {
+        let out = RedactionSummary.rows(occurrences: [:], distinct: [:])
+        XCTAssertTrue(out.removed.isEmpty)
+        XCTAssertTrue(out.stillPresent.isEmpty)
+    }
+
+    func testOneFamilyBecomesOneRow() {
+        let out = RedactionSummary.rows(
+            occurrences: ["local_path": 185],
+            distinct: ["local_path": 12]
+        )
+        XCTAssertEqual(out.removed.count, 1)
+        XCTAssertEqual(out.removed[0].family, "local_path")
+        XCTAssertEqual(out.removed[0].display, "local path")
+        XCTAssertEqual(out.removed[0].occurrences, 185)
+        XCTAssertEqual(out.removed[0].distinct, 12)
+        XCTAssertFalse(out.removed[0].description.isEmpty)
+    }
+
+    /// Nine secret patterns are one `secret` row, not nine rows. The
+    /// sub-labels go on a detail line.
+    func testSubLabelsCollapseIntoTheirFamily() {
+        let out = RedactionSummary.rows(
+            occurrences: ["secret:contextual_entropy": 3, "secret:pem_private_key": 1, "secret": 2],
+            distinct: ["secret:contextual_entropy": 2, "secret:pem_private_key": 1, "secret": 2]
+        )
+        XCTAssertEqual(out.removed.count, 1)
+        XCTAssertEqual(out.removed[0].family, "secret")
+        XCTAssertEqual(out.removed[0].occurrences, 6)
+        XCTAssertEqual(out.removed[0].distinct, 5)
+        XCTAssertEqual(
+            out.removed[0].detail,
+            ["contextual entropy", "pem private key"]
+        )
+    }
+
+    /// A secret that was DETECTED AND NOT REMOVED. Putting it in `removed`
+    /// would state the exact opposite of what happened.
+    func testAResidualSurvivorIsReportedAsStillPresent() {
+        let out = RedactionSummary.rows(
+            occurrences: ["local_path": 3, "residual_secret_at:events.correction": 1],
+            distinct: [:]
+        )
+        XCTAssertEqual(out.removed.map(\.family), ["local_path"])
+        XCTAssertEqual(out.stillPresent.map(\.family), ["residual_secret_at"])
+        XCTAssertEqual(out.stillPresent[0].detail, ["events.correction"])
+    }
+
+    /// An unfamiliar family gets a neutral description and is NEVER dropped.
+    /// Hiding a category because this build has no words for it would
+    /// understate what happened, which is the one direction this panel must
+    /// not fail in.
+    func testAnUnknownFamilyIsKeptWithANeutralDescription() {
+        let out = RedactionSummary.rows(occurrences: ["future_category": 4], distinct: [:])
+        XCTAssertEqual(out.removed.count, 1)
+        XCTAssertEqual(out.removed[0].family, "future_category")
+        XCTAssertFalse(out.removed[0].description.isEmpty)
+        XCTAssertFalse(
+            out.removed[0].description.contains("future"),
+            "a neutral description must not pretend to know the category"
+        )
+    }
+
+    func testRowsAreOrderedByOccurrencesThenFamily() {
+        let out = RedactionSummary.rows(
+            occurrences: ["secret": 3, "local_path": 185, "email": 3],
+            distinct: [:]
+        )
+        XCTAssertEqual(out.removed.map(\.family), ["local_path", "email", "secret"])
+    }
+
+    /// The panel names kinds, never values. There is no value left to name.
+    func testARowCarriesNoMatchedText() {
+        let out = RedactionSummary.rows(occurrences: ["secret": 1], distinct: [:])
+        XCTAssertEqual(out.removed[0].detail, [])
+    }
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+```bash
+cd macos && swift test --filter RedactionSummaryTests
+```
+
+Expected: `cannot find 'RedactionSummary' in scope`.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `macos/Sources/TCShellCore/RedactionSummary.swift`:
+
+```swift
+import Foundation
+
+/// One category's line in the scrubbing panel.
+public struct RedactionSummaryRow: Equatable {
+    /// The label family -- the part before the first `:`.
+    public let family: String
+    /// The family as a person reads it.
+    public let display: String
+    /// What this category IS. The panel's actual value to a reader who has
+    /// never seen these words.
+    public let description: String
+    public let occurrences: Int
+    public let distinct: Int
+    /// The specific sub-labels this family covered, humanised. Safe to
+    /// render: sub-labels are schema-shaped identifiers by construction --
+    /// `log_residual_secret_locations` depends on the same property -- never
+    /// contributor strings. Empty when the family had no sub-labels.
+    public let detail: [String]
+}
+
+/// What scrubbing took out of this session, and what it found and left in.
+///
+/// Marking placeholders in the transcript answers *where*. This answers
+/// *what*, without scrolling, which is the half the card's one-line figure
+/// could only gesture at.
+///
+/// It names KINDS, never values. The value is gone by construction, and a
+/// panel listing the actual strings would make the preview window the single
+/// best thing on the machine to photograph.
+public enum RedactionSummary {
+    /// What each family is, in words. Deliberately not exhaustive -- the
+    /// vocabulary is generated and open -- which is why `describe` has a
+    /// neutral fallback rather than a `fatalError`.
+    static let descriptions: [String: String] = [
+        "local_path": "File paths from this machine.",
+        "secret": """
+        API keys, tokens, private keys, and high-entropy strings found next to \
+        credential words.
+        """,
+        "privacy_filter": "Names, emails, and other personal details found in prose.",
+        "sensitive_field": "Fields whose name marks them sensitive, like password or authorization.",
+        "tool_sensitive_field": "Tool-call arguments whose name marks them sensitive.",
+        RedactionTally.residualPrefix: """
+        Found, and still in what would be sent. Either a credential inside a \
+        correction you wrote, which is kept on purpose, or a field scrubbing \
+        does not reach.
+        """,
+    ]
+
+    /// The neutral description for a family this build has no words for.
+    ///
+    /// It must still appear. Dropping an unrecognised category would
+    /// understate what happened, and this panel may only ever err toward
+    /// saying more than it can explain.
+    static let unknownDescription = "Removed by a pattern this version has no description for."
+
+    static func describe(_ family: String) -> String {
+        descriptions[family] ?? unknownDescription
+    }
+
+    static func humanise(_ text: String) -> String {
+        text.replacingOccurrences(of: "_", with: " ")
+    }
+
+    public static func rows(
+        occurrences: [String: Int],
+        distinct: [String: Int]
+    ) -> (removed: [RedactionSummaryRow], stillPresent: [RedactionSummaryRow]) {
+        var byFamily: [String: (occurrences: Int, distinct: Int, detail: [String])] = [:]
+        for (label, count) in occurrences {
+            let family = RedactionTally.family(label)
+            var bucket = byFamily[family] ?? (0, 0, [])
+            bucket.occurrences += count
+            bucket.distinct += distinct[label] ?? 0
+            if label != family {
+                bucket.detail.append(humanise(String(label.dropFirst(family.count + 1))))
+            }
+            byFamily[family] = bucket
+        }
+
+        let all = byFamily
+            .map { family, bucket in
+                RedactionSummaryRow(
+                    family: family,
+                    display: humanise(family),
+                    description: describe(family),
+                    occurrences: bucket.occurrences,
+                    distinct: bucket.distinct,
+                    detail: bucket.detail.sorted()
+                )
+            }
+            .sorted {
+                $0.occurrences == $1.occurrences
+                    ? $0.family < $1.family
+                    : $0.occurrences > $1.occurrences
+            }
+
+        return (
+            removed: all.filter { RedactionTally.isRemoval($0.family) },
+            stillPresent: all.filter { !RedactionTally.isRemoval($0.family) }
+        )
+    }
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+```bash
+cd macos && swift test --filter RedactionSummaryTests
+```
+
+Expected: 7 tests pass.
+
+- [ ] **Step 5: Draw the panel**
+
+On the preview sheet's scrubbing tab, above the transcript marks, render the
+two sections:
+
+- **"Removed"** -- each row as its display name and count
+  (`185 local path`, plus `(12 distinct)` when that differs), the description
+  in secondary ink beneath, and the detail line in tertiary ink when
+  non-empty. `TC.inkPrimary` / `TC.inkSecondary` / `TC.inkTertiary`, no new
+  tokens.
+- **"Found, and still in what would be sent"** -- only when `stillPresent` is
+  non-empty, in `TC.goldText` with the same warning glyph the
+  nothing-matched chip uses, listing the schema paths from `detail`.
+
+Keep `ScrubbingCaveat`'s sentence below both: a panel that enumerates
+categories makes the app look more thorough than it is, which is exactly when
+that sentence earns its place.
+
+- [ ] **Step 6: Run the whole suite**
+
+```bash
+cargo build -p trace-commons-contributor-ffi
+cd macos && swift build && swift test
+```
+
+Expected: all pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add macos/Sources/TCShellCore/RedactionSummary.swift \
+        macos/Tests/TCShellCoreTests/RedactionSummaryTests.swift \
+        macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift
+git commit -m "Summarise what scrubbing removed, and what it left in"
 ```
 
 ---
@@ -2055,11 +2386,14 @@ Launch the app against a daemon with a populated queue and confirm, by hand:
    than leaving an empty detail view.
 5. Clicking a card body opens the preview; the three footer buttons still do
    their own jobs.
-6. Redactions are marked in the transcript.
+6. Redactions are marked in the transcript, and the scrubbing tab lists
+   what was removed with a description per category.
 7. Typing `xyz` in search leaves one recent entry, not three.
 8. Searching for a value you know was redacted says it was removed.
 9. The nothing-matched chip opens search.
 10. History is grouped by folder.
+11. On a session with a `residual_secret_at` count, the panel reports it
+    under "still in what would be sent" and NOT as removed.
 
 Record the results in the PR body. `swift test` sees none of this.
 
@@ -2089,6 +2423,8 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 | §2.3 `Submit all` at n = 1 | Task 4 (`QueueFolderRow`) |
 | §2.4 card click | Task 5 |
 | §3.1 placeholders marked in place | Task 6 |
+| §3.1b removed-summary panel | Task 6b |
+| §3.1b `residual_secret_at` excluded from the card figure | Task 2 |
 | §3.1 distinct counts on the card | Task 2 |
 | §3.2 original search | Task 8 |
 | §3.3 recent-search prefixes | Task 7 |
