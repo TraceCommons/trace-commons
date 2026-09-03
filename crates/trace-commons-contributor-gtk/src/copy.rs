@@ -16,7 +16,13 @@
 //! * **Always state the data consequence.** "Nothing was sent unscanned",
 //!   "your queue is safe", "nothing has been lost".
 
-pub const APP_NAME: &str = "Trace Commons";
+/// The app's name, re-exported from its one definition.
+///
+/// This used to be a literal here, and `routing_copy` had its own, and the
+/// Swift views had more. Pointing at `trace_commons_contributor::brand`
+/// makes this crate a reader of the name rather than a second author of
+/// it -- there is nothing left here to edit out of step.
+pub use trace_commons_contributor::brand::APP_NAME;
 
 // --- Queue -------------------------------------------------------------
 
