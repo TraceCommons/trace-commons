@@ -189,9 +189,21 @@ shells render them as ordinary transcript text and the contributor scrolls
 past them.
 
 So the whole of item 3's first half needs no protocol change, no FFI change,
-and no new data crossing any boundary. The shells scan the body for
-`<PRIVATE_([A-Z0-9_]+)_(\d+)>` and style each hit as a labelled chip in the
-transcript. The reporter's "show list of things that got removed" is
+and no new data crossing any boundary. The shells scan the body and style
+each hit as a labelled chip in the transcript.
+
+**Two token shapes, not one, and the difference matters.** Only
+`apply_placeholder_regex` mints the numbered `<PRIVATE_([A-Z0-9_]+)_(\d+)>`
+form, and it is called for exactly two labels: `local_path` and
+`private_email`. Everything else is replaced with a FIXED token --
+`<REDACTED_PRIVATE_KEY>` for a PEM block, `[REDACTED]` from the JSON
+key-name redactor -- carrying no label and no ordinal.
+
+That includes secrets, which is the category a contributor most wants to
+see. A shell scanning only for the numbered form would mark every path and
+no secret, while the summary panel beside it reports those secrets as
+removed. The scan must recognise both shapes, and the ordinal must be
+optional in the type rather than faked with a zero. The reporter's "show list of things that got removed" is
 answered by the transcript itself, in place, which is better than a list
 because it also answers *where*.
 
@@ -200,6 +212,13 @@ same token -- which the summary line should also use. `185 local path` is an
 occurrence count; `185 local path (12 distinct)` is the number a person is
 actually trying to estimate risk from, and it comes free from the highest
 index per label.
+
+Distinct counts come from the placeholder map, so they exist for exactly the
+two labels that mint placeholders. `3 secret` will never carry a distinct
+suffix. That is correct rather than a gap -- there is no second number to
+report -- but it means no test may assert a distinct count for a secret
+fixture, and the rendering must omit the suffix rather than print
+`(0 distinct)`.
 
 **A caveat the UI must carry, not bury.** Placeholders appear where
 redaction *rewrote* a typed field. The detector scans every leaf; the
