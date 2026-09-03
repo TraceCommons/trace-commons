@@ -238,15 +238,38 @@ final class TranscriptPagingTests: XCTestCase {
         )
     }
 
-    /// The `<REDACTED_` arm is general, mirroring `<PRIVATE_`, so a second
-    /// angle-bracketed fixed token cannot reopen the same hole. It still needs
-    /// at least one word byte and a closing bracket.
-    func testTheAngleBracketedArmNeedsAWordByteAndACloser() {
-        XCTAssertEqual(
-            TranscriptMarkerScan.spans(in: "<REDACTED_ANYTHING_ELSE>").count, 1)
+    /// The `<REDACTED_PRIVATE_KEY>` arm is the LITERAL token, not a general
+    /// `<REDACTED_...>`. Prose a contributor typed themselves must never be
+    /// claimed as a redaction: telling someone the pipeline removed something
+    /// it never touched is the same class of false statement as reporting a
+    /// surviving secret as removed.
+    func testProseResemblingTheTokenIsNotClaimedAsARedaction() {
+        XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_ANYTHING_ELSE>").isEmpty)
+        XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_PUBLIC_KEY>").isEmpty)
         XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_>").isEmpty)
         XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED>").isEmpty)
         XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_UNCLOSED").isEmpty)
+    }
+
+    /// Every FIXED token the redaction pipeline emits must be matched.
+    ///
+    /// The literal arm keeps a contributor's prose from being claimed as a
+    /// redaction; its price is that a NEW fixed token would go unmarked
+    /// exactly as `<REDACTED_PRIVATE_KEY>` did. This is the guard on that
+    /// price. Sourced from `trace_contribution.rs` and `redaction.rs`.
+    func testEveryFixedTokenThePipelineEmitsIsMatched() {
+        for token in [
+            "[REDACTED]",
+            "[REDACTED:aws_secret_key]",
+            "[REDACTED:person_name]",
+            "<REDACTED_PRIVATE_KEY>",
+        ] {
+            let body = "before \(token) after"
+            let found = TranscriptMarkerScan.spans(in: body).map { String(body[$0]) }
+            XCTAssertEqual(
+                found, [token],
+                "the pipeline emits \(token) and the scanner does not know it")
+        }
     }
 
     /// Chipping per chunk finds exactly the markers chipping the whole body

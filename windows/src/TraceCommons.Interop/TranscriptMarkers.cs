@@ -39,9 +39,12 @@ public static class TranscriptMarkers
     /// was removed from the payload and left unmarked in the transcript, and
     /// because this same pattern is what stops the chunker cutting through a
     /// marker, it was also the one marker that could be split across a chunk
-    /// boundary. Written as a general arm mirroring
-    /// <c>&lt;PRIVATE_</c> so a second angle-bracketed fixed token cannot
-    /// reopen the hole.
+    /// boundary. Deliberately the LITERAL token, not a general
+    /// <c>&lt;REDACTED_[A-Za-z0-9_]+&gt;</c> arm: a general arm would mark any
+    /// <c>&lt;REDACTED_ANYTHING&gt;</c> a contributor typed themselves,
+    /// telling them the pipeline removed something it never touched. The cost
+    /// is that a NEW fixed token would go unmarked exactly as this one did,
+    /// which the fixed-token coverage test guards against.
     ///
     /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
     /// Without that, one unclosed bracket anywhere in a body would let a
@@ -50,7 +53,7 @@ public static class TranscriptMarkers
     /// refuse to cut anywhere inside it.
     /// </summary>
     private const string Pattern =
-        @"<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
+        @"<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_PRIVATE_KEY>|\[REDACTED[^\]\n]*\]";
 
     /// <summary>
     /// A bound on how long the scan may run.

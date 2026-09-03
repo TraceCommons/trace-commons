@@ -278,13 +278,41 @@ public sealed class TranscriptMarkerTests
     /// so a second angle-bracketed fixed token cannot reopen the same hole. It
     /// still needs at least one word character and a closing bracket.
     /// </summary>
+    /// <summary>
+    /// The <c>&lt;REDACTED_PRIVATE_KEY&gt;</c> arm is the LITERAL token, not a
+    /// general one. Prose a contributor typed must never be claimed as a
+    /// redaction: telling someone the pipeline removed something it never
+    /// touched is the same class of false statement as reporting a surviving
+    /// secret as removed.
+    /// </summary>
     [Fact]
-    public void TheAngleBracketedArmNeedsAWordCharacterAndACloser()
+    public void ProseResemblingTheTokenIsNotClaimedAsARedaction()
     {
-        Assert.Equal(1, MarkerCount("<REDACTED_ANYTHING_ELSE>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_ANYTHING_ELSE>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_PUBLIC_KEY>"));
         Assert.Equal(0, MarkerCount("<REDACTED_>"));
         Assert.Equal(0, MarkerCount("<REDACTED>"));
         Assert.Equal(0, MarkerCount("<REDACTED_UNCLOSED"));
+    }
+
+    /// <summary>
+    /// Every FIXED token the pipeline emits must be matched. The literal arm's
+    /// price is that a NEW token would go unmarked exactly as this one did;
+    /// this is the guard on that price.
+    /// </summary>
+    [Fact]
+    public void EveryFixedTokenThePipelineEmitsIsMatched()
+    {
+        foreach (string token in new[]
+        {
+            "[REDACTED]",
+            "[REDACTED:aws_secret_key]",
+            "[REDACTED:person_name]",
+            "<REDACTED_PRIVATE_KEY>",
+        })
+        {
+            Assert.Equal(1, MarkerCount("before " + token + " after"));
+        }
     }
 
     private static int MarkerCount(string text)

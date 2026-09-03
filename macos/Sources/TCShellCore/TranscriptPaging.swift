@@ -289,11 +289,19 @@ public enum TranscriptMarkerScan {
     /// stops the chunker cutting through a marker, it was also the one marker
     /// that could be split across a chunk boundary.
     ///
-    /// Written as a general `<REDACTED_[A-Za-z0-9_]+>` rather than the single
-    /// literal, mirroring the `<PRIVATE_` arm, so a second angle-bracketed
-    /// fixed token cannot reopen the same hole.
+    /// Deliberately the LITERAL token, not a general `<REDACTED_[A-Za-z0-9_]+>`
+    /// arm. A general arm would mark any `<REDACTED_ANYTHING>` a contributor
+    /// typed themselves, telling them the pipeline removed something it never
+    /// touched -- the same class of false statement as reporting a surviving
+    /// secret as removed, and on the same consent surface. Overstating what
+    /// scrubbing did is not a safer failure than understating it.
+    ///
+    /// The cost of the literal is that a NEW angle-bracketed fixed token would
+    /// go unmarked exactly as this one did. `allFixedTokensAreMatched` in the
+    /// tests is the guard: it enumerates every fixed token the pipeline emits
+    /// and fails if one is not matched here.
     public static let pattern =
-        "<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_[A-Za-z0-9_]+>|\\[REDACTED[^\\]\\n]*\\]"
+        "<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_PRIVATE_KEY>|\\[REDACTED[^\\]\\n]*\\]"
 
     private static let regex = try? NSRegularExpression(pattern: pattern)
 
