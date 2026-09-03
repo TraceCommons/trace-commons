@@ -20,8 +20,6 @@
 7. [Vector index model](#7-vector-index-model)
 8. [System invariants](#8-system-invariants)
 
-
-
 ## 1. Motivation: current problems
 
 The current schema grew through additive changes around specific classifiers.
@@ -29,8 +27,9 @@ It now mixes domain results, policy choices, workflow state, and external effect
 
 ### No complete classifier identity
 
-A score depends on a projection, model, configuration, calibration, and decision rule.
-No single identifier binds all these parts.
+A score depends on a projection, model, configuration, and calibration.
+A classification decision also depends on a policy.
+No single identifier binds the deployed classifiers and policies.
 
 ### Schema and classifier coupling
 
@@ -55,7 +54,7 @@ and deployment selection.
 
 ### Effects occur inside classifiers
 
-The current novelty path can insert vectors before the decision is durable.
+The current novelty path can insert vectors before the index decision is durable.
 A database error can leave unrecorded external state.
 
 ### Several vector planes
@@ -66,12 +65,10 @@ Their roles and consistency rules are not explicit.
 ### No controlled reprocessing unit
 
 A successful driver decision removes a trace from automatic work.
-No run binds a trace revision to a complete bundle set.
+No run binds a trace revision to a complete gate bundle.
 
 > **Root problem:** The system cannot always identify the complete classifier
 > and policy that produced a result. It also cannot always reproduce the result.
-
-
 
 ## 2. High-level solution
 
@@ -80,12 +77,12 @@ It persists only the boundaries needed for audit, recovery, and external effects
 
 ### Complete version identity
 
-Each processing job pins a bundle set and a deployment assignment.
+Each processing job pins a gate bundle and a deployment assignment.
 Each result identifies its producer.
 
 ### Immutable evaluation
 
-One evaluation records evidence, observations, facts, and a decision.
+One evaluation records evidence, observations, facts, and typed decisions.
 Reprocessing creates a new evaluation.
 
 ### Typed JSON documents
@@ -105,7 +102,7 @@ An idempotency key makes retries safe.
 
 ### Explicit active selection
 
-Deployment assignments select active and shadow bundle sets.
+Deployment assignments select active and shadow gate bundles.
 Timestamp order does not select production behavior.
 
 ### Durability principle
@@ -114,8 +111,6 @@ Timestamp order does not select production behavior.
 > Recompute transient pure processing.
 > Send execution detail to logs, traces, and metrics.
 
-
-
 ### Non-requirements
 
 - A database event for each internal workflow step.
@@ -123,8 +118,6 @@ Timestamp order does not select production behavior.
 - One physical vector backend for all vector roles.
 - Raw trace bodies, vector arrays, or model log probabilities in PostgreSQL.
 - Classifier-specific SQL columns for each new observation field.
-
-
 
 ## 3. New domain model
 
@@ -135,37 +128,34 @@ Operational records coordinate the chain and apply its result.
   index epoch, and other input used for measurement.
 2. **Observations** are raw outputs from classifier roles.
   Observations do not contain accept or reject policy.
-3. **Facts** are normalized policy inputs assembled from observations by a
-  versioned fact assembler.
-4. **Decision** contains the desired dispositions produced by a pure,
-  versioned policy from one fact set.
+3. **Facts** are typed policy inputs that reference their source observations
+  or earlier decisions.
+4. **Decisions** are typed results produced by pure, versioned policies.
+  Each decision references the exact facts and policy that produced it.
 5. **Effect** records a requested state change and the result of applying it.
   A decision does not perform the effect.
 
-
-
 ### Supporting concepts
-
-
 
 #### Trace revision
 
 An immutable reference to one stored form of a trace.
 A remediation or content change creates a new revision.
 
-#### Classifier bundle
+#### Classifier
 
 A content-addressed unit that identifies behavior, projection, model,
 configuration, calibration, and output schemas.
 
-#### Bundle set
+#### Gate bundle
 
-A compatible set of role bundles, a fact assembler, and a policy.
-Compatibility is validated before deployment.
+An immutable, operator-selected manifest of classifiers and policies.
+The ingest server runs the configured bundle without deciding whether its
+models are suitable for production.
 
 #### Deployment assignment
 
-A durable rule that selects a bundle set for a tenant, mode, and time range.
+A durable rule that selects a gate bundle for a tenant, mode, and time range.
 The processing job stores the resolved assignment.
 
 #### Processing job
@@ -176,12 +166,12 @@ The job coordinates work but does not provide the audit history.
 #### Evaluation
 
 The immutable aggregate that contains the complete reasoning chain for one
-trace revision and one bundle set.
+trace revision and one gate bundle.
 
 #### Effect intent
 
-A durable request to register a trace, insert a vector, issue credit,
-schedule review, or apply another disposition.
+A durable request to register or quarantine a trace, insert a vector, issue
+credit, or perform another effect requested by an action decision.
 
 #### Effect receipt
 
@@ -194,13 +184,13 @@ It references external identifiers and contains a result hash.
 flowchart LR
     TR[TraceRevision<br/>immutable stored input]
     DA[DeploymentAssignment<br/>active or shadow selection]
-    BS[BundleSet<br/>roles + assembler + policy]
+    GB[GateBundle<br/>classifiers + policies]
     PJ[ProcessingJob<br/>lease, retry, current status]
     EV[Evaluation<br/>immutable reasoning aggregate]
     ED[Evidence<br/>inputs and immutable references]
-    OB[Observations<br/>role outputs with producer bundles]
-    FA[Facts<br/>normalized policy inputs]
-    DE[Decision<br/>policy dispositions and reasons]
+    OB[Observations<br/>classifier outputs]
+    FA[Facts<br/>typed policy inputs]
+    DE[Decisions<br/>typed policy results]
     EI[EffectIntent<br/>durable idempotent request]
     ER[EffectReceipt<br/>immutable applied result]
     IX[IndexEpoch<br/>or watermark]
@@ -208,7 +198,7 @@ flowchart LR
 
     TR --> PJ
     DA --> PJ
-    BS --> PJ
+    GB --> PJ
     PJ --> EV
     EV --> ED
     EV --> OB
@@ -217,6 +207,7 @@ flowchart LR
     ED --> OB
     OB --> FA
     FA --> DE
+    DE -->|prior decision refs| FA
     DE --> EI
     EI --> ER
     IX --> ED
@@ -235,18 +226,16 @@ The model explains why an effect occurred through one directed chain:
 ```text
 EffectReceipt
   → EffectIntent
-  → Decision
-  → Facts
+  → ActionDecision
+  → ActionFacts
+  → PriorDecisions
+  → ClassifierFacts
   → Observations
   → Evidence
-  → TraceRevision + BundleSet + IndexEpoch
+  → TraceRevision + GateBundle + IndexEpoch
 ```
 
-
-
 ## 4. Rust pseudocode
-
-
 
 ### Common identifiers
 
@@ -254,12 +243,17 @@ EffectReceipt
 struct ClassifierId(String);
 struct ProjectionId(String);
 struct EvidenceId(String);
+struct ObservationId(Uuid);
 struct PolicyId(String);
 struct BundleId(String);
+struct DecisionId(Uuid);
 struct ContentHash(String);
+
+struct SchemaRef {
+    schema_id: String,
+    version: u32,
+}
 ```
-
-
 
 ### Classifier
 
@@ -294,6 +288,10 @@ trait NoveltyClassifier: Send + Sync {
 
 Example:
 
+Remark
+
+- It isn't clear to that we need output sceheme here
+
 ```rust
 let classifier = BgeNoveltyClassifier {
     descriptor: ClassifierDescriptor {
@@ -305,8 +303,6 @@ let classifier = BgeNoveltyClassifier {
     },
 };
 ```
-
-
 
 ### Projection
 
@@ -358,8 +354,6 @@ impl TraceProjection for RenderedEventsV2 {
 }
 ```
 
-
-
 ### Evidence
 
 Evidence is external state that a Classifier needs for one measurement.
@@ -403,8 +397,6 @@ let evidence = FrozenNoveltyIndex {
     index,
 };
 ```
-
-
 
 ### Observation
 
@@ -460,6 +452,22 @@ enum Fact<T> {
     },
 }
 
+struct ObservationRecord<T> {
+    observation_id: ObservationId,
+    observation: T,
+    observation_hash: ContentHash,
+}
+
+struct ObservationRef {
+    observation_id: ObservationId,
+    observation_hash: ContentHash,
+}
+
+struct ObservedFact<T> {
+    source: Option<ObservationRef>,
+    value: Fact<T>,
+}
+
 enum MissingFactReason {
     ClassifierUnavailable,
     EvidenceUnavailable,
@@ -469,98 +477,156 @@ enum MissingFactReason {
 }
 ```
 
+Persistence wraps each classifier output in `ObservationRecord`.
+An available `ObservedFact` references that observation.
+An unavailable fact has no observation reference and retains its missing-data
+reason and evidence hash.
+
 Example:
 
 ```rust
-let novelty_fact = Fact::Available(observation);
+let novelty_fact = ObservedFact::available(&observation);
 
-let substance_fact = Fact::Unavailable {
-    reason: MissingFactReason::ClassifierUnavailable,
-    evidence_hash: Some(sha256("model-endpoint-error")),
-};
+let substance_fact = ObservedFact::unavailable(
+    MissingFactReason::ClassifierUnavailable,
+    Some(sha256("model-endpoint-error")),
+);
 ```
-
-
 
 ### Policy
 
-A Policy converts Facts into a Decision.
+A policy is a pure function from one typed fact set to one typed decision.
+Novelty and substance policies classify their respective observations.
+Registration, credit, and index policies consume prior decisions and
+action-specific facts.
 
 ```rust
-struct ProductionPolicyV3 {
-    id: PolicyId,
-
-    novelty_floor_micros: u64,
-    substance_floor_micros: u64,
-    tenant_duplicate_limit_micros: u64,
-
-    require_novelty: bool,
-    require_substance: bool,
-}
-
-trait DecisionPolicy {
+trait DecisionPolicy<F, D> {
     fn id(&self) -> &PolicyId;
 
-    fn decide(
-        &self,
-        facts: &DecisionFacts,
-    ) -> Result<Decision, PolicyError>;
+    fn decide(&self, facts: &F) -> Result<D, PolicyError>;
 }
 ```
 
-The combined facts are typed:
+Each policy receives only the facts that it needs:
 
 ```rust
-struct DecisionFacts {
-    tenant_duplication: Fact<TenantDuplicationObservation>,
-    global_duplication: Fact<GlobalDuplicationObservation>,
-    novelty: Fact<NoveltyObservation>,
-    substance: Fact<SubstanceObservation>,
+struct NoveltyFacts {
+    tenant_duplication: ObservedFact<TenantDuplicationObservation>,
+    global_duplication: ObservedFact<GlobalDuplicationObservation>,
+    novelty: ObservedFact<NoveltyObservation>,
+}
+
+struct SubstanceFacts {
+    observation: ObservedFact<SubstanceObservation>,
+}
+
+struct PrivacyReviewFact {
+    review_id: Uuid,
+    review_hash: ContentHash,
+    outcome: PrivacyReviewOutcome,
+}
+
+struct RegistrationFacts {
+    envelope_valid: bool,
+    privacy_review: PrivacyReviewFact,
+    novelty_decision: DecisionFact<NoveltyDisposition>,
+    substance_decision: DecisionFact<SubstanceDisposition>,
+}
+
+struct CreditFacts {
+    registration_decision: DecisionFact<RegistrationDisposition>,
+    consent_allows_credit: bool,
+    issuer_authorized: bool,
     governance: GovernanceFacts,
 }
-```
 
-Example policy logic:
-
-```rust
-fn decide(&self, facts: &DecisionFacts) -> Result<Decision, PolicyError> {
-    let novelty = facts.novelty.require_available()?;
-    let substance = facts.substance.require_available()?;
-
-    let novelty_passed =
-        novelty.representative_novelty_micros >= self.novelty_floor_micros;
-
-    let substance_passed =
-        substance.perplexity_micros >= self.substance_floor_micros;
-
-    if !novelty_passed {
-        return Ok(Decision::review("novelty_below_floor"));
-    }
-
-    if !substance_passed {
-        return Ok(Decision::review("substance_below_floor"));
-    }
-
-    Ok(Decision::accept())
+struct IndexFacts {
+    registration_decision: DecisionFact<RegistrationDisposition>,
+    novelty_decision: DecisionFact<NoveltyDisposition>,
+    embedding_evidence_hash: ContentHash,
+    target_index: IndexReference,
 }
 ```
 
+The review workflow supplies a persisted privacy-review fact.
+The evaluation copies its review identifier, hash, and outcome.
+The registration policy remains part of the gate bundle because it decides
+whether the server registers the trace.
 
+### Decisions
 
-### Decision
-
-A Decision records what production must do.
+The model has two classifier decisions and three action decisions.
+Each decision records its policy and exact fact set.
+Classifier decisions do not request effects.
+Each action policy controls one disposition.
+Registration, credit, and index decisions can each produce an effect intent
+in their owning workflow.
 
 ```rust
-struct Decision {
+struct DecisionRef {
+    decision_id: DecisionId,
+    decision_hash: ContentHash,
+}
+
+struct DecisionFact<D> {
+    source: DecisionRef,
+    disposition: D,
+}
+
+struct ActionDecisions {
+    registration: DecisionRecord<RegistrationDecision>,
+    credit: DecisionRecord<CreditDecision>,
+    index: DecisionRecord<IndexDecision>,
+}
+
+struct DecisionRecord<D> {
+    decision: D,
+    decision_hash: ContentHash,
+}
+
+struct DecisionProvenance {
+    decision_id: DecisionId,
     policy_id: PolicyId,
     facts_hash: ContentHash,
-
-    registration: RegistrationDisposition,
-    credit: CreditDisposition,
-    index: IndexDisposition,
-
     reason_codes: Vec<String>,
+}
+
+struct NoveltyDecision {
+    provenance: DecisionProvenance,
+    disposition: NoveltyDisposition,
+}
+
+enum NoveltyDisposition {
+    Novel,
+    Duplicate,
+    Review,
+}
+
+struct SubstanceDecision {
+    provenance: DecisionProvenance,
+    disposition: SubstanceDisposition,
+}
+
+enum SubstanceDisposition {
+    Substantive,
+    Insufficient,
+    Review,
+}
+
+struct RegistrationDecision {
+    provenance: DecisionProvenance,
+    disposition: RegistrationDisposition,
+}
+
+struct CreditDecision {
+    provenance: DecisionProvenance,
+    disposition: CreditDisposition,
+}
+
+struct IndexDecision {
+    provenance: DecisionProvenance,
+    disposition: IndexDisposition,
 }
 
 enum RegistrationDisposition {
@@ -570,7 +636,7 @@ enum RegistrationDisposition {
 }
 
 enum CreditDisposition {
-    Eligible,
+    Issue,
     Withhold,
 }
 
@@ -580,37 +646,30 @@ enum IndexDisposition {
 }
 ```
 
-Example:
+Persistence computes the hash over the canonical typed decision and stores the
+result in `DecisionRecord`.
+
+An accepted registration decision requests `RegisterTrace`.
+A quarantined registration decision requests `QuarantineTrace`.
+An issue-credit decision requests `IssueCredit`.
+An add-to-index decision requests `InsertVector`.
+The other dispositions request no effect.
+
+### Gate bundle
+
+A gate bundle is the complete classifier-gate configuration selected by the
+operator. It contains independently versioned classifiers and policies.
 
 ```rust
-let decision = Decision {
-    policy_id: PolicyId("production-policy-v3".into()),
-    facts_hash: sha256(&facts),
-
-    registration: RegistrationDisposition::Accept,
-    credit: CreditDisposition::Eligible,
-    index: IndexDisposition::AddToFutureSnapshot,
-
-    reason_codes: vec!["all_required_classifiers_passed".into()],
-};
-```
-
-
-
-### Bundle
-
-A Bundle identifies the complete classifier and policy configuration.
-
-```rust
-struct ClassifierBundle {
+struct GateBundle {
     id: BundleId,
 
-    tenant_duplication: ClassifierRef,
-    global_duplication: ClassifierRef,
-    novelty: ClassifierRef,
-    substance: ClassifierRef,
-
-    policy_id: PolicyId,
+    classifiers: BTreeMap<ClassifierRole, ClassifierRef>,
+    novelty_policy: PolicyRef,
+    substance_policy: PolicyRef,
+    registration_policy: PolicyRef,
+    credit_policy: PolicyRef,
+    index_policy: PolicyRef,
 }
 
 struct ClassifierRef {
@@ -619,48 +678,120 @@ struct ClassifierRef {
     calibration_id: String,
     artifact_hash: ContentHash,
 }
+
+struct PolicyRef {
+    policy_id: PolicyId,
+    artifact_hash: ContentHash,
+    facts_schema: SchemaRef,
+    decision_schema: SchemaRef,
+}
 ```
 
 Example:
 
 ```rust
-let bundle = ClassifierBundle {
+let bundle = GateBundle {
     id: BundleId("sha256:production-bundle-42".into()),
-
-    tenant_duplication: classifier_ref("tenant-dup-v2"),
-    global_duplication: classifier_ref("global-simhash-v1"),
-    novelty: classifier_ref("novelty-bge-large-v1"),
-    substance: classifier_ref("substance-qwen-v3"),
-
-    policy_id: PolicyId("production-policy-v3".into()),
+    classifiers: classifiers(
+        tenant_duplicate_v2,
+        global_simhash_v1,
+        novelty_bge_large_v1,
+        substance_qwen_v3,
+    ),
+    novelty_policy: policy_ref("novelty-policy-v2"),
+    substance_policy: policy_ref("substance-policy-v3"),
+    registration_policy: policy_ref("registration-policy-v3"),
+    credit_policy: policy_ref("credit-policy-v4"),
+    index_policy: policy_ref("index-policy-v2"),
 };
 ```
 
-The Bundle does not contain mutable index contents. Each Observation records the exact Evidence snapshot it used.
+The bundle does not contain mutable index contents.
+Each observation records the exact evidence snapshot that it used.
+The privacy-review process remains separate and supplies facts to the
+registration policy.
 
 ### Complete example
 
 ```rust
 let projected = projection.project(&stored_trace)?;
 
-let observation = novelty_classifier.observe(
-    &projected,
-    &novelty_evidence,
+let tenant_duplication_observation = ObservationRecord::new(
+    tenant_duplication_classifier.observe(&projected, &tenant_index)?,
+)?;
+let global_duplication_observation = ObservationRecord::new(
+    global_duplication_classifier.observe(&projected, &global_index)?,
+)?;
+let novelty_observation = ObservationRecord::new(
+    novelty_classifier.observe(&projected, &novelty_evidence)?,
+)?;
+let substance_observation = ObservationRecord::new(
+    substance_classifier.observe(&projected, &substance_evidence)?,
 )?;
 
-let facts = DecisionFacts {
-    tenant_duplication: Fact::Available(tenant_duplication),
-    global_duplication: Fact::Available(global_duplication),
-    novelty: Fact::Available(observation),
-    substance: Fact::Available(substance),
-    governance,
+let novelty_facts = NoveltyFacts {
+    tenant_duplication: ObservedFact::available(&tenant_duplication_observation),
+    global_duplication: ObservedFact::available(&global_duplication_observation),
+    novelty: ObservedFact::available(&novelty_observation),
+};
+let substance_facts = SubstanceFacts {
+    observation: ObservedFact::available(&substance_observation),
 };
 
-let decision = active_policy.decide(&facts)?;
+let novelty_decision =
+    DecisionRecord::new(novelty_policy.decide(&novelty_facts)?)?;
+let substance_decision =
+    DecisionRecord::new(substance_policy.decide(&substance_facts)?)?;
 
-server.persist_facts(&facts)?;
-server.persist_decision(&decision)?;
-server.apply_decision(&decision)?;
+let registration_facts = RegistrationFacts::from(
+    &envelope_validation,
+    &privacy_review,
+    &novelty_decision,
+    &substance_decision,
+);
+let registration_decision =
+    DecisionRecord::new(registration_policy.decide(&registration_facts)?)?;
+
+let credit_facts = CreditFacts::from(
+    &registration_decision,
+    &consent,
+    &issuer_authorization,
+    &governance,
+);
+let index_facts = IndexFacts::from(
+    &registration_decision,
+    &novelty_decision,
+    &novelty_observation,
+    &target_index,
+);
+
+let credit_decision =
+    DecisionRecord::new(credit_policy.decide(&credit_facts)?)?;
+let index_decision =
+    DecisionRecord::new(index_policy.decide(&index_facts)?)?;
+let action_decisions = ActionDecisions {
+    registration: registration_decision,
+    credit: credit_decision,
+    index: index_decision,
+};
+let effect_intents = EffectIntent::from_action_decisions(&action_decisions);
+
+let evaluation = EvaluationBuilder::new(bundle.id, trace_revision.id)
+    .record_classifier_stage(tenant_index, tenant_duplication_observation)
+    .record_classifier_stage(global_index, global_duplication_observation)
+    .record_classifier_stage(novelty_evidence, novelty_observation)
+    .record_classifier_stage(substance_evidence, substance_observation)
+    .record_facts(novelty_facts)
+    .record_facts(substance_facts)
+    .record_decision(novelty_decision)
+    .record_decision(substance_decision)
+    .record_facts(registration_facts)
+    .record_facts(credit_facts)
+    .record_facts(index_facts)
+    .record_action_decisions(action_decisions)
+    .build()?;
+
+server.commit_evaluation(&evaluation, &effect_intents)?;
 ```
 
 The responsibility chain is:
@@ -671,33 +802,32 @@ Evidence supplies comparison state.
 Classifier produces an Observation.
 Fact records availability.
 Policy evaluates Facts.
-Decision specifies production effects.
-Bundle fixes the complete configuration.
+Policy produces one typed Decision.
+Action Decision requests an Effect.
+GateBundle fixes the classifier-gate configuration.
 ```
-
-
 
 ## 5. New workflow model
 
 The workflow persists two recovery boundaries.
 Pure classifier work occurs between these boundaries and can restart after an error.
 
-1. **Accept and queue.** Store the trace revision.
-  Resolve the deployment.
+1. **Receive and queue.** Store the trace revision.
+   Resolve the deployment.
    Create one processing job in the same database transaction.
 2. **Compute in memory.** Load evidence.
-  Produce observations.
+   Produce observations.
    Assemble facts.
-   Evaluate the policy.
+   Evaluate the novelty and substance policies.
+   Evaluate the registration policy when its classifier decisions exist.
+   Evaluate the credit and index policies when the registration decision exists.
    Do not apply external effects.
-3. **Commit the decision.** Insert one immutable evaluation.
-  Insert effect intents.
-   Mark the job as decision committed.
+3. **Commit the decisions.** Insert one immutable evaluation.
+   Insert effect intents.
+   Mark the job as decisions committed.
 4. **Apply effects.** Claim each effect.
-  Apply it with its idempotency key.
+   Apply it with its idempotency key.
    Insert a receipt and mark the effect complete.
-
-
 
 ### Processing job states
 
@@ -708,9 +838,9 @@ stateDiagram-v2
     Leased --> Pending: lease expiry
     Leased --> Retry: retryable error
     Retry --> Leased: claim
-    Leased --> DecisionCommitted: evaluation committed
+    Leased --> DecisionsCommitted: evaluation committed
     Leased --> TerminalFailure: non-retryable error
-    DecisionCommitted --> Complete: required effects have receipts
+    DecisionsCommitted --> Complete: required effects have receipts
 ```
 
 
@@ -727,9 +857,9 @@ job_id
 tenant_id
 trace_revision_id
 deployment_id
-bundle_set_id
+gate_bundle_id
 mode                    active | shadow | reprocess
-state                   pending | leased | retry | decision_committed |
+state                   pending | leased | retry | decisions_committed |
                         complete | terminal_failure
 lease_owner
 lease_expires_at
@@ -748,10 +878,8 @@ Workers claim jobs with a lease. If a process crashes, the lease expires and ano
 A unique key such as this prevents duplicate logical work:
 
 ```text
-tenant + trace revision + deployment + bundle set + mode
+tenant + trace revision + deployment + gate bundle + mode
 ```
-
-
 
 ### `evaluations`
 
@@ -762,47 +890,60 @@ evaluation_id
 job_id
 trace_revision_id
 deployment_id
+gate_bundle_id
 mode
 
 evidence_schema
 evidence JSONB
-evidence_hash
 
 observations_schema
 observations JSONB
-observations_hash
 
 facts_schema
 facts JSONB
-facts_hash
 
-policy_bundle_id
-decision_schema
-decision JSONB
-decision_hash
+decisions_schema
+decisions JSONB
 
+evaluation_hash
 created_at
 ```
 
-Each observation inside the document identifies its classifier bundle:
+Each observation inside the document identifies its classifier:
 
 ```json
 {
+  "observation_id": "6a70a714-2c89-4b87-b09d-1da136df9fc1",
   "role": "novelty",
-  "classifier_bundle_id": "novelty-v4",
+  "classifier_id": "novelty-v4",
   "evidence_hash": "sha256:...",
   "schema": "trace-commons.novelty-observation.v2",
   "payload": {
     "novelty_micros": 640000,
     "index_epoch_id": "epoch-42"
-  }
+  },
+  "observation_hash": "sha256:..."
+}
+```
+
+Each decision identifies one policy and fact set:
+
+```json
+{
+  "decision_id": "5ad8eec8-6e8f-4b43-a23f-5de8f708afe2",
+  "kind": "index",
+  "policy_id": "index-policy-v2",
+  "facts_hash": "sha256:...",
+  "disposition": "add_to_future_snapshot",
+  "reason_codes": ["registration_accepted", "novelty_confirmed"],
+  "decision_hash": "sha256:..."
 }
 ```
 
 This preserves the conceptual chain:
 
 ```text
-Evidence → Observations → Facts → Decision
+Evidence → Observations → Facts → Decisions
 ```
 
 without requiring one transaction per arrow.
@@ -815,7 +956,7 @@ When evaluation succeeds, one transaction should:
 
 1. Insert the immutable evaluation.
 2. Create required effect outbox records.
-3. Mark the processing job `decision_committed`.
+3. Mark the processing job `decisions_committed`.
 4. Update any current-state projection that can be changed atomically.
 
 This gives all-or-nothing decision persistence.
@@ -835,13 +976,12 @@ effect_outbox
 effect_receipts
 ```
 
-
-
 #### `effect_outbox`
 
 ```text
 effect_id
 evaluation_id
+decision_id
 decision_hash
 effect_kind
 payload JSONB
@@ -876,11 +1016,13 @@ The resulting explanation chain is:
 ```text
 effect receipt
   → effect intent
-  → evaluation decision
-  → facts
+  → action decision
+  → action facts
+  → prior decisions
+  → classifier facts
   → observations
   → evidence
-  → trace revision and bundles
+  → trace revision and gate bundle
 ```
 
 This is enough to answer why a credit or vector insertion happened.
@@ -894,8 +1036,6 @@ This is enough to answer why a credit or vector insertion happened.
 | After evaluation commit   | The evaluation and effect intents exist.     | The classifier does not run again. Effect workers continue the work.     |
 | During an external effect | The effect intent and idempotency key exist. | The effect worker retries or queries the external system by key.         |
 | After an effect succeeds  | The receipt identifies the external result.  | No recovery is necessary. A compensation uses a new decision and effect. |
-
-
 
 
 ### Selective checkpoints
@@ -912,16 +1052,12 @@ The cache key binds the bundle and exact evidence.
 - Use a checkpoint when several policies reuse the same observation.
 - Do not use a checkpoint for inexpensive deterministic calculations.
 
-
-
 ### Active, shadow, and reprocess modes
 
-- **Active:** The evaluation creates effect intents after the policy decision.
+- **Active:** The evaluation creates effect intents from its action decisions.
 - **Shadow:** The evaluation is durable, but it creates no production effects.
 - **Reprocess:** A new job and evaluation reference an earlier evaluation.
 Old records remain immutable.
-
-
 
 ### Workflow telemetry
 
@@ -940,16 +1076,10 @@ Evolving classifier content uses validated JSONB documents.
 
 ### Core tables
 
+#### `gate_bundles`
 
-
-#### `classifier_bundles`
-
-Immutable registry of classifier, assembler, and policy artifacts.
-The bundle digest closes over behavior and dependencies.
-
-#### `bundle_sets`
-
-Immutable compatibility manifest for all roles used in one evaluation.
+Immutable operator-selected manifests of classifier and policy artifacts.
+The bundle digest closes over classifier and policy behavior.
 
 #### `deployment_assignments`
 
@@ -963,7 +1093,7 @@ This table is the work queue.
 
 #### `evaluations`
 
-Immutable JSONB aggregate for evidence, observations, facts, and the decision.
+Immutable JSONB aggregate for evidence, observations, facts, and typed decisions.
 
 #### `effect_outbox`
 
@@ -989,7 +1119,7 @@ CREATE TABLE processing_jobs (
     job_id                 uuid        NOT NULL,
     trace_revision_id      uuid        NOT NULL,
     deployment_id          uuid        NOT NULL,
-    bundle_set_id          text        NOT NULL,
+    gate_bundle_id         text        NOT NULL,
     mode                    text        NOT NULL,
     state                   text        NOT NULL,
     lease_owner_hash        text,
@@ -1006,7 +1136,7 @@ CREATE TABLE processing_jobs (
         tenant_id,
         trace_revision_id,
         deployment_id,
-        bundle_set_id,
+        gate_bundle_id,
         mode
     )
 );
@@ -1017,7 +1147,7 @@ CREATE TABLE evaluations (
     job_id                 uuid        NOT NULL,
     trace_revision_id      uuid        NOT NULL,
     deployment_id          uuid        NOT NULL,
-    bundle_set_id          text        NOT NULL,
+    gate_bundle_id         text        NOT NULL,
     mode                    text        NOT NULL,
 
     evidence_schema        text        NOT NULL,
@@ -1026,9 +1156,8 @@ CREATE TABLE evaluations (
     observations           jsonb       NOT NULL,
     facts_schema           text        NOT NULL,
     facts                  jsonb       NOT NULL,
-    policy_bundle_id       text        NOT NULL,
-    decision_schema        text        NOT NULL,
-    decision               jsonb       NOT NULL,
+    decisions_schema       text        NOT NULL,
+    decisions              jsonb       NOT NULL,
 
     evaluation_hash        text        NOT NULL,
     created_at              timestamptz NOT NULL,
@@ -1041,6 +1170,8 @@ CREATE TABLE effect_outbox (
     tenant_id              text        NOT NULL,
     effect_id              uuid        NOT NULL,
     evaluation_id          uuid        NOT NULL,
+    decision_id            uuid        NOT NULL,
+    decision_hash          text        NOT NULL,
     effect_kind            text        NOT NULL,
     effect_schema          text        NOT NULL,
     payload                 jsonb       NOT NULL,
@@ -1074,8 +1205,6 @@ CREATE TABLE effect_receipts (
 );
 ```
 
-
-
 ### Job claim
 
 ```sql
@@ -1100,8 +1229,6 @@ WHERE job.tenant_id = candidate.tenant_id
 RETURNING job.*;
 ```
 
-
-
 ### Evaluation commit
 
 ```sql
@@ -1113,7 +1240,7 @@ INSERT INTO evaluations (...);
 INSERT INTO effect_outbox (...);
 
 UPDATE processing_jobs
-SET state = 'decision_committed',
+SET state = 'decisions_committed',
     evaluation_id = $evaluation_id,
     lease_owner_hash = NULL,
     lease_expires_at = NULL,
@@ -1125,12 +1252,10 @@ WHERE tenant_id = $tenant_id
 COMMIT;
 ```
 
-
-
 ### Read models
 
 Mutable views and projections support common queries.
-These projections are not the decision audit source.
+These projections are not the decisions audit source.
 
 - The current processing state for each trace revision.
 - The active evaluation under the current deployment assignment.
@@ -1138,8 +1263,6 @@ These projections are not the decision audit source.
 - Pending and retryable effects.
 - Active and shadow decision differences.
 - The full provenance chain for an effect receipt.
-
-
 
 ### JSONB rules
 
@@ -1151,15 +1274,14 @@ These projections are not the decision audit source.
 - Large or sensitive evidence stays in encrypted object storage.
 - The database stores references, hashes, and bounded safe metadata.
 
-
-
 ### Hash policy
 
 The evaluation uses canonical JSON before hash calculation.
-One final evaluation hash is sufficient for the minimal design.
-
-A component receives its own hash only when another system reuses, signs,
-caches, compares, or independently attests that component.
+The complete aggregate receives an evaluation hash.
+Each observation, fact set, and decision also receives a hash because later
+stages reference them independently.
+Evidence receives a separate hash at reuse, signature, cache, comparison, or
+independent-attestation boundaries.
 
 ### Tenant isolation
 
@@ -1218,30 +1340,30 @@ VectorIndexMembership
 ```
 
 > **Classifier restriction:** A classifier can query an index, but it cannot
-> insert into that index. A policy decision requests insertion through an
+> insert into that index. An index decision requests insertion through an
 > effect intent.
-
-
 
 ## 8. System invariants
 
-1. Each processing job pins one trace revision and one resolved bundle set.
+1. Each processing job pins one trace revision and one resolved gate bundle.
 2. Each evaluation is immutable.
 3. Reprocessing creates a new job and evaluation.
 4. Each document has a schema identifier.
-5. Each observation identifies its classifier bundle.
-6. Each fact set identifies its assembler bundle.
-7. Each decision identifies its policy bundle and exact fact set.
-8. Only active evaluations create production effect intents.
-9. The database stores each external effect intent before application.
-10. Each effect has a stable idempotency key.
-11. Each successful effect has an immutable receipt.
-12. Each novelty observation identifies an index epoch or state watermark.
-13. Missing required evidence causes a closed decision or processing error.
-14. Current state is a projection. It is not an overwritten audit record.
-15. Classifier-specific fields remain inside validated JSONB documents.
-
-
+5. Each observation identifies its classifier.
+6. Each fact set identifies its schema and source observations, review records,
+   or decisions.
+7. Each decision identifies one policy and its exact fact set.
+8. Each action policy controls one disposition.
+9. Classifier decisions do not create effects.
+10. Each effect intent references the action decision that requested it.
+11. Only active evaluations create production effect intents.
+12. The database stores each external effect intent before application.
+13. Each effect has a stable idempotency key.
+14. Each successful effect has an immutable receipt.
+15. Each novelty observation identifies an index epoch or state watermark.
+16. Missing required evidence causes a closed decision or processing error.
+17. Current state is a projection. It is not an overwritten audit record.
+18. Classifier-specific fields remain inside validated JSONB documents.
 
 ### Result
 
