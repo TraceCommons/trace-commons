@@ -861,7 +861,7 @@ pub fn display_path(project_key: &str) -> String {
         return project_key.to_string();
     };
     match project_key.strip_prefix(&home) {
-        Some(rest) if rest.is_empty() => "~".to_string(),
+        Some("") => "~".to_string(),
         Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!("~{rest}"),
         _ => project_key.to_string(),
     }
