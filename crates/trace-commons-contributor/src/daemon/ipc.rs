@@ -265,6 +265,7 @@ pub const METHODS: &[&str] = &[
     "quiesce",
     "refresh_history",
     "resume",
+    "search_original",
     "set_consent_scopes",
     "set_project_mode",
     "set_public_profile",
@@ -1641,6 +1642,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "preview_body" => handle_preview_body(shared, req).await,
         "quiesce" => handle_quiesce(shared, req).await,
         "preview_turns" => handle_preview_turns(shared, req).await,
+        "search_original" => handle_search_original(shared, req).await,
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
@@ -2468,6 +2470,56 @@ async fn build_and_pin_preview(
 /// systemd-hosted daemon with the window as a socket client, is never the
 /// window. Errors are fixed labels, matching every other surface at this
 /// boundary -- no path, no entry content.
+/// Count occurrences of `needle` in an entry's PRE-redaction session text.
+///
+/// This is the only call in this crate that reads unredacted session bytes on
+/// behalf of a socket client, and the bound is what makes it acceptable: it
+/// returns a COUNT. No offsets, no context, no bytes, nothing that can be
+/// reassembled into content. A caller learns only the answer to a question
+/// they already knew how to ask, about a needle they typed themselves.
+///
+/// It exists because `preview_search` scans the REDACTED body, so a value that
+/// redaction removed returns zero matches -- which is indistinguishable from a
+/// value that was never in the session at all. Those are precisely the two
+/// answers a contributor checking for a client name needs to tell apart, and
+/// without this the search tab cannot tell them apart either.
+///
+/// The file is read, counted, and dropped inside this function. Nothing
+/// retains it. That is why this takes an entry id rather than hanging off an
+/// open preview: a preview lives as long as a sheet is on screen, and an
+/// unredacted transcript must not.
+///
+/// Errors are fixed labels, never a path or a fragment of content.
+pub async fn search_original(
+    shared: &DaemonShared,
+    entry_id: Uuid,
+    needle: &str,
+) -> Result<u32, &'static str> {
+    if needle.is_empty() {
+        return Ok(0);
+    }
+    let path = {
+        let queue = shared.queue.lock().expect("queue lock");
+        queue
+            .get(entry_id)
+            .map(|e| e.path.clone())
+            .ok_or(ERR_UNKNOWN_ENTRY_ID)?
+    };
+    let body = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|_| "session-unreadable")?;
+    let mut count: u32 = 0;
+    let mut start = 0usize;
+    while let Some(pos) = body[start..].find(needle) {
+        count = count.saturating_add(1);
+        start = start + pos + needle.len();
+        if start > body.len() {
+            break;
+        }
+    }
+    Ok(count)
+}
+
 pub async fn open_preview(
     shared: &DaemonShared,
     entry_id: Uuid,
@@ -2545,6 +2597,26 @@ pub async fn open_preview(
 ///
 /// Trace content, under the preview exemption in this module's doc: only for
 /// an entry the caller already holds, post-redaction only, and never onward.
+async fn handle_search_original(shared: &DaemonShared, req: &Request) -> Response {
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
+    };
+    let needle = match req.params.get("needle") {
+        Some(v) => match v.as_str() {
+            Some(n) => n,
+            None => return Response::err(req.id, ERR_BAD_PARAMS, "needle-invalid"),
+        },
+        None => return Response::err(req.id, ERR_BAD_PARAMS, "needle-required"),
+    };
+    match search_original(shared, id, needle).await {
+        // A count and nothing else. See `search_original` for why that is the
+        // whole bound of this method.
+        Ok(matches) => Response::ok(req.id, serde_json::json!({ "matches": matches })),
+        Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+    }
+}
+
 async fn handle_preview_body(shared: &DaemonShared, req: &Request) -> Response {
     let id = match parse_entry_id(&req.params) {
         Ok(id) => id,
@@ -3528,6 +3600,127 @@ mod tests {
         // borrows its path.
         std::mem::forget(_d);
         DaemonShared::load(store).unwrap()
+    }
+
+    /// A queue entry whose session file holds `body`, so
+    /// `search_original` has something real to read.
+    fn shared_with_session(body: &str) -> (DaemonShared, Uuid, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+
+        let s = shared();
+        let entry_id = Uuid::new_v4();
+        let entry = crate::daemon::queue::QueueEntry {
+            entry_id,
+            session_hash: "sha256:test".into(),
+            source: "claude-code".into(),
+            declared_source: None,
+            project_key: "/tmp/search-original".into(),
+            session_cwd: None,
+            project_label: "search-original".into(),
+            path,
+            size_bytes: body.len() as u64,
+            discovered_at: chrono::Utc::now(),
+            state: crate::daemon::queue::QueueState::Pending,
+            reason_label: None,
+            attempts: 0,
+            retry_after: None,
+            submission_id: None,
+            approved_scopes: None,
+            approved_verdict: None,
+            approved_correction: None,
+            approved_inputs: None,
+            previewed_envelope_digest: None,
+            approved_at: None,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            observed_modified_at: None,
+        };
+        s.queue
+            .lock()
+            .expect("queue lock")
+            .upsert(entry, 500)
+            .unwrap();
+        (s, entry_id, dir)
+    }
+
+    /// The reason this call exists. `preview_search` scans the REDACTED
+    /// body, so a value redaction removed returns zero there -- which is
+    /// indistinguishable from a value that was never in the session. This
+    /// reads the original, so it can tell those apart.
+    #[tokio::test]
+    async fn search_original_counts_a_value_that_redaction_would_remove() {
+        let (s, id, _dir) = shared_with_session(
+            "{\"secret\":\"planted-secret-value\"}\n{\"note\":\"planted-secret-value again\"}\n",
+        );
+        assert_eq!(
+            search_original(&s, id, "planted-secret-value")
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn search_original_reports_zero_for_a_value_that_was_never_there() {
+        let (s, id, _dir) = shared_with_session("{\"note\":\"nothing to see\"}\n");
+        assert_eq!(
+            search_original(&s, id, "never-appeared-anywhere")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// An empty needle matches nothing rather than every position.
+    #[tokio::test]
+    async fn search_original_treats_an_empty_needle_as_no_matches() {
+        let (s, id, _dir) = shared_with_session("anything at all");
+        assert_eq!(search_original(&s, id, "").await.unwrap(), 0);
+    }
+
+    /// Overlapping occurrences are counted the way a person reading the
+    /// transcript would count them: left to right, non-overlapping.
+    #[tokio::test]
+    async fn search_original_counts_non_overlapping_matches() {
+        let (s, id, _dir) = shared_with_session("aaaa");
+        assert_eq!(search_original(&s, id, "aa").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_original_refuses_an_unknown_entry() {
+        let (s, _id, _dir) = shared_with_session("body");
+        assert_eq!(
+            search_original(&s, Uuid::new_v4(), "anything").await,
+            Err(ERR_UNKNOWN_ENTRY_ID)
+        );
+    }
+
+    /// The whole bound of this call: it answers with a COUNT and never with
+    /// bytes. Asserted on the wire shape, because the wire is what a shell
+    /// can actually reach.
+    #[tokio::test]
+    async fn search_original_puts_no_content_on_the_wire() {
+        let (s, id, _dir) = shared_with_session("{\"secret\":\"planted-secret-value\"}");
+        let req = Request {
+            id: 1,
+            method: "search_original".to_string(),
+            params: serde_json::json!({
+                "entry_id": id.to_string(),
+                "needle": "planted-secret-value",
+            }),
+        };
+        let response = handle_search_original(&s, &req).await;
+        let body = serde_json::to_string(&response).unwrap();
+        assert!(
+            body.contains("\"matches\":1"),
+            "expected a count, got {body}"
+        );
+        assert!(
+            !body.contains("planted-secret-value"),
+            "the needle must never be echoed back: {body}"
+        );
     }
 
     /// A daemon whose settings never declared a proxy builds no ledger and
