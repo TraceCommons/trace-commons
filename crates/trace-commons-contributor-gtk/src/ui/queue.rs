@@ -1171,18 +1171,15 @@ fn submit_and_toast(
     });
 }
 
-/// The "Removed by pattern" figure: the receipt's own categories, in the
-/// receipt's own order, separated as the design writes them.
+/// The "Removed by pattern" figure.
 ///
-/// Built from `PreviewSummary::scrubbed_line` rather than from the raw map
-/// so the queue and the preview sheet cannot disagree about how a category
-/// is worded, pluralised, or ranked.
+/// One call into [`crate::redaction_labels::line`], which is where the rules
+/// live and where they are tested. It used to reformat
+/// `PreviewSummary::scrubbed_line` by stripping a prefix and swapping
+/// separators, which left no room for the distinct counts and did
+/// string-surgery on a sentence assembled somewhere else.
 fn removed_by_pattern(preview: &PreviewSummary) -> String {
-    preview
-        .scrubbed_line()
-        .strip_prefix("scrubbed: ")
-        .unwrap_or("nothing")
-        .replace(", ", " \u{00b7} ")
+    crate::redaction_labels::line(&preview.redactions, &preview.redactions_distinct)
 }
 
 /// The manifest strip as the preview sheet draws it: four fields rather than
@@ -1200,7 +1197,11 @@ pub fn manifest_for(preview: Option<&PreviewSummary>) -> gtk::Box {
             ("Personal info", "-".into(), Tone::Neutral),
         ]);
     };
-    let total: u32 = p.redactions.values().sum();
+    // Removals only: `redactions` also carries `residual_secret_at:*`, which
+    // counts a secret that was found and LEFT IN, and a strip headed
+    // "Removed by pattern" must not tip out of its attention tone because a
+    // survivor made the figure non-zero.
+    let total = crate::redaction_labels::removed_total(&p.redactions);
     style::manifest(&[
         ("Turns", format!("{}", p.event_count), Tone::Neutral),
         (
