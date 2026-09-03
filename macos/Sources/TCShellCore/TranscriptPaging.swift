@@ -269,14 +269,31 @@ public struct TranscriptDocument: Sendable {
 /// protected a different set of markers than the view highlights would split
 /// exactly the ones the view cares about.
 public enum TranscriptMarkerScan {
-    /// Both marker families the pipeline emits, including the
-    /// `[REDACTED:aws_secret_key]` form that carries a category label.
+    /// All three marker families the pipeline emits: the numbered
+    /// `<PRIVATE_LABEL_N>` form, the angle-bracketed fixed
+    /// `<REDACTED_PRIVATE_KEY>`, and the square-bracketed `[REDACTED]` /
+    /// `[REDACTED:aws_secret_key]` forms.
     ///
     /// The `[REDACTED...]` arm excludes newlines as well as `]`. Without
     /// that, an unclosed bracket anywhere in the body would let a "marker"
     /// run to the end of the file, and the chunker would then refuse to cut
     /// there.
-    public static let pattern = "<PRIVATE_[A-Za-z0-9_]+>|\\[REDACTED[^\\]\\n]*\\]"
+    ///
+    /// The `<REDACTED_...>` arm was missing for a long time, and its absence
+    /// was a real defect rather than a cosmetic one. `<REDACTED_PRIVATE_KEY>`
+    /// begins `<REDACTED_`, not `<PRIVATE_`, and is not square-bracketed, so
+    /// it matched neither of the two original arms: a PEM private key was
+    /// removed from the payload and left completely unmarked in the
+    /// transcript -- the highest-stakes redaction there is, and the one a
+    /// contributor could not see had happened. Because this same scan is what
+    /// stops the chunker cutting through a marker, it was also the one marker
+    /// that could be split across a chunk boundary.
+    ///
+    /// Written as a general `<REDACTED_[A-Za-z0-9_]+>` rather than the single
+    /// literal, mirroring the `<PRIVATE_` arm, so a second angle-bracketed
+    /// fixed token cannot reopen the same hole.
+    public static let pattern =
+        "<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_[A-Za-z0-9_]+>|\\[REDACTED[^\\]\\n]*\\]"
 
     private static let regex = try? NSRegularExpression(pattern: pattern)
 

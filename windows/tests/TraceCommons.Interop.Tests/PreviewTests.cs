@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -224,6 +225,79 @@ public sealed class TranscriptMarkerTests
         Assert.Equal(5, runs.Count);
         Assert.Equal(new[] { false, true, false, true, false }, Selected(runs));
         Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>
+    /// The angle-bracketed FIXED token the PEM path emits.
+    /// </summary>
+    /// <remarks>
+    /// Not a variation on the others. It begins <c>&lt;REDACTED_</c>, not
+    /// <c>&lt;PRIVATE_</c>, and is not square-bracketed, so for a long time it
+    /// matched neither arm of the shared pattern: a private key was removed
+    /// from the payload and left completely unmarked in the transcript. The
+    /// same pattern is what stops the chunker cutting through a marker, so it
+    /// was also the one marker that could be split across a boundary.
+    /// </remarks>
+    [Fact]
+    public void APrivateKeyMarkerIsSplitOutLikeAnyOther()
+    {
+        const string text = "before <REDACTED_PRIVATE_KEY> after";
+
+        IReadOnlyList<TranscriptRun> runs = TranscriptMarkers.Split(text);
+
+        Assert.Equal(3, runs.Count);
+        Assert.Equal(new[] { false, true, false }, Selected(runs));
+        Assert.Equal(text, Rebuild(text, runs));
+    }
+
+    /// <summary>All three marker families in one body, in document order.</summary>
+    [Fact]
+    public void AllThreeMarkerFamiliesAreFound()
+    {
+        const string text =
+            "<PRIVATE_LOCAL_PATH_1> [REDACTED:person_name] <REDACTED_PRIVATE_KEY> [REDACTED]";
+
+        string[] markers = TranscriptMarkers.Split(text)
+            .Where(run => run.IsMarker)
+            .Select(run => text.Substring(run.Start, run.Length))
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                "<PRIVATE_LOCAL_PATH_1>",
+                "[REDACTED:person_name]",
+                "<REDACTED_PRIVATE_KEY>",
+                "[REDACTED]",
+            },
+            markers);
+    }
+
+    /// <summary>
+    /// The <c>&lt;REDACTED_</c> arm is general, mirroring <c>&lt;PRIVATE_</c>,
+    /// so a second angle-bracketed fixed token cannot reopen the same hole. It
+    /// still needs at least one word character and a closing bracket.
+    /// </summary>
+    [Fact]
+    public void TheAngleBracketedArmNeedsAWordCharacterAndACloser()
+    {
+        Assert.Equal(1, MarkerCount("<REDACTED_ANYTHING_ELSE>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_>"));
+        Assert.Equal(0, MarkerCount("<REDACTED>"));
+        Assert.Equal(0, MarkerCount("<REDACTED_UNCLOSED"));
+    }
+
+    private static int MarkerCount(string text)
+    {
+        int count = 0;
+        foreach (TranscriptRun run in TranscriptMarkers.Split(text))
+        {
+            if (run.IsMarker)
+            {
+                count++;
+            }
+        }
+        return count;
     }
 
     [Fact]

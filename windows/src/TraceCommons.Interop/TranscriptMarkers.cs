@@ -24,11 +24,24 @@ public readonly record struct TranscriptRun(int Start, int Length, bool IsMarker
 public static class TranscriptMarkers
 {
     /// <summary>
-    /// Both marker families the pipeline emits, including the
-    /// <c>[REDACTED:aws_secret_key]</c> form that carries a category label.
+    /// All three marker families the pipeline emits: the numbered
+    /// <c>&lt;PRIVATE_LABEL_N&gt;</c> form, the angle-bracketed fixed
+    /// <c>&lt;REDACTED_PRIVATE_KEY&gt;</c>, and the square-bracketed
+    /// <c>[REDACTED]</c> / <c>[REDACTED:aws_secret_key]</c> forms.
     /// Kept identical to the macOS sheet's pattern -- three shells disagreeing
     /// about what a redaction looks like is three different pictures of the
     /// same bytes.
+    ///
+    /// The <c>&lt;REDACTED_...&gt;</c> arm was missing for a long time, and
+    /// its absence was a real defect. That token begins
+    /// <c>&lt;REDACTED_</c>, not <c>&lt;PRIVATE_</c>, and is not
+    /// square-bracketed, so it matched neither original arm: a PEM private key
+    /// was removed from the payload and left unmarked in the transcript, and
+    /// because this same pattern is what stops the chunker cutting through a
+    /// marker, it was also the one marker that could be split across a chunk
+    /// boundary. Written as a general arm mirroring
+    /// <c>&lt;PRIVATE_</c> so a second angle-bracketed fixed token cannot
+    /// reopen the hole.
     ///
     /// The <c>[REDACTED...]</c> arm excludes newlines as well as <c>]</c>.
     /// Without that, one unclosed bracket anywhere in a body would let a
@@ -36,7 +49,8 @@ public static class TranscriptMarkers
     /// this same pattern to avoid cutting through a marker -- would then
     /// refuse to cut anywhere inside it.
     /// </summary>
-    private const string Pattern = @"<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
+    private const string Pattern =
+        @"<PRIVATE_[A-Za-z0-9_]+>|<REDACTED_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]";
 
     /// <summary>
     /// A bound on how long the scan may run.

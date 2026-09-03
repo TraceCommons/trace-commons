@@ -198,6 +198,57 @@ final class TranscriptPagingTests: XCTestCase {
         }
     }
 
+    /// The angle-bracketed FIXED token the PEM path emits.
+    ///
+    /// This one is not a variation on the others. It begins `<REDACTED_`, not
+    /// `<PRIVATE_`, and is not square-bracketed, so for a long time it matched
+    /// neither arm of the shared pattern: a private key was removed from the
+    /// payload and left completely unmarked in the transcript, and -- because
+    /// this scan is also what stops the chunker cutting through a marker --
+    /// it was the one marker that could be split in half across a boundary.
+    func testPrivateKeyMarkerStraddlingABoundaryIsNotSplit() {
+        let target = TranscriptPaging.targetChunkBytes
+        let marker = "<REDACTED_PRIVATE_KEY>"
+        for offsetIntoMarker in 1..<marker.utf8.count {
+            let text =
+                String(repeating: "x", count: target - offsetIntoMarker) + marker
+                + String(repeating: "y", count: 4096)
+            let document = TranscriptDocument(text)
+            let carriers = (0..<document.chunkCount).filter {
+                document.text(of: $0).contains(marker)
+            }
+            XCTAssertEqual(carriers.count, 1, "marker split at offset \(offsetIntoMarker)")
+        }
+    }
+
+    /// The grammar, family by family. The three shells share this pattern and
+    /// have to agree on it or they protect different things.
+    func testTheScannerFindsAllThreeMarkerFamilies() {
+        let text =
+            "<PRIVATE_LOCAL_PATH_1> [REDACTED:person_name] <REDACTED_PRIVATE_KEY> [REDACTED]"
+        let found = TranscriptMarkerScan.spans(in: text).map { String(text[$0]) }
+        XCTAssertEqual(
+            found,
+            [
+                "<PRIVATE_LOCAL_PATH_1>",
+                "[REDACTED:person_name]",
+                "<REDACTED_PRIVATE_KEY>",
+                "[REDACTED]",
+            ]
+        )
+    }
+
+    /// The `<REDACTED_` arm is general, mirroring `<PRIVATE_`, so a second
+    /// angle-bracketed fixed token cannot reopen the same hole. It still needs
+    /// at least one word byte and a closing bracket.
+    func testTheAngleBracketedArmNeedsAWordByteAndACloser() {
+        XCTAssertEqual(
+            TranscriptMarkerScan.spans(in: "<REDACTED_ANYTHING_ELSE>").count, 1)
+        XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_>").isEmpty)
+        XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED>").isEmpty)
+        XCTAssertTrue(TranscriptMarkerScan.spans(in: "<REDACTED_UNCLOSED").isEmpty)
+    }
+
     /// Chipping per chunk finds exactly the markers chipping the whole body
     /// would find -- same count, same text, same order. This is the
     /// property the view depends on now that it never scans the whole body.
