@@ -280,6 +280,13 @@ char*       tc_discover_sources(void);
  * check_unavailable, probe_reachable, state_off, state_waiting and
  * state_reading. Every value is a non-empty string.
  *
+ * All but one are fixed wording. folder_note names the folder this machine
+ * reads when the folder field is left empty, because every failure sentence
+ * on that surface ends by sending a contributor to that field, and a field
+ * that will not say which folder it means is an instruction with no answer.
+ * It is therefore the one value here that differs between machines, and the
+ * one that can carry a filesystem path.
+ *
  * ONE CALL, NOT ONE PER STRING. tc_scrub_detector_names answers a single
  * question and returns a single list; this is a whole screen's wording and
  * must arrive as a set. Exporting the words one at a time would let a shell

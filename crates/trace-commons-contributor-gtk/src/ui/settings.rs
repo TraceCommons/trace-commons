@@ -248,8 +248,11 @@ impl SettingsView {
             copy::IRONWIRE_FOLDER_TITLE,
         )]);
         routing_card.append(&routing_token_dir);
+        // Assembled rather than fixed: it names the folder this machine
+        // would read when the field is left empty, which is the folder every
+        // failure sentence on this card sends a contributor here to name.
         let routing_folder_note = gtk::Label::builder()
-            .label(copy::IRONWIRE_FOLDER_NOTE)
+            .label(copy::ironwire_folder_note_here())
             .xalign(0.0)
             .wrap(true)
             .build();

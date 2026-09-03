@@ -144,8 +144,52 @@ pub const IRONWIRE_PORT_NOTE: &str =
     "Already set to the usual number. Change it only if the record is kept on a different one.";
 
 pub const IRONWIRE_FOLDER_TITLE: &str = "Folder";
+/// The note when nothing on this machine can say where the usual place is.
+///
+/// Kept as a constant because the payload's shape requires one, and used as
+/// the fallback [`ironwire_folder_note`] returns when no folder resolved. A
+/// build with no home directory to read has no better sentence available.
 pub const IRONWIRE_FOLDER_NOTE: &str =
     "Leave this empty unless the record is kept somewhere other than the usual place.";
+
+/// The folder note, naming the folder it is talking about.
+///
+/// Every failure sentence on this surface ends by sending a contributor to
+/// this one field -- "Name the folder below", "Point the folder below at
+/// where the record is kept" -- and the field then declined to say which
+/// folder it meant or what it would read if left empty. "Somewhere other
+/// than the usual place" resolved to nothing anywhere on the screen, so the
+/// instruction had no answer for the person following it.
+///
+/// The path arrives as an argument rather than as wording, for the same
+/// reason [`ironwire_token_line`]'s does: it is the one place a vendor name
+/// can still reach this screen, and somebody being sent to look at a folder
+/// has to be told the folder that is really there.
+#[must_use]
+pub fn ironwire_folder_note(default_dir: Option<&str>) -> String {
+    match default_dir {
+        Some(dir) => {
+            format!("Leave this empty unless the record is kept somewhere other than {dir}.")
+        }
+        None => IRONWIRE_FOLDER_NOTE.to_string(),
+    }
+}
+
+/// [`ironwire_folder_note`] over the folder this machine would really read.
+///
+/// The resolution is
+/// [`crate::daemon::settings::ironwire_default_token_dir`], the last step of
+/// the token search order, so this sentence cannot name one folder while the
+/// daemon reads another. Assembled here and not in each shell: GTK calls it,
+/// and the other two receive its answer inside [`routing_copy`].
+#[must_use]
+pub fn ironwire_folder_note_here() -> String {
+    ironwire_folder_note(
+        crate::daemon::settings::ironwire_default_token_dir()
+            .as_deref()
+            .and_then(std::path::Path::to_str),
+    )
+}
 
 pub const IRONWIRE_APPLY: &str = "Apply and check";
 pub const IRONWIRE_CHECKING: &str = "Checking...";
@@ -399,7 +443,10 @@ pub struct RoutingCopy {
     pub port_title: &'static str,
     pub port_note: &'static str,
     pub folder_title: &'static str,
-    pub folder_note: &'static str,
+    /// The only field that is not a fixed string: it names the folder this
+    /// machine would read, which is a path and therefore not wording. See
+    /// [`ironwire_folder_note`].
+    pub folder_note: String,
     pub apply: &'static str,
     pub checking: &'static str,
     pub check_unavailable: &'static str,
@@ -409,7 +456,10 @@ pub struct RoutingCopy {
     pub state_reading: &'static str,
 }
 
-/// The payload, built from the constants above and nothing else.
+/// The payload, built from the constants above -- and, for the folder note
+/// alone, from the folder this machine resolves. That one sentence cannot be
+/// finished without a path, and unlike the others it has no shell to pass it
+/// one: all three read it from here.
 #[must_use]
 pub fn routing_copy() -> RoutingCopy {
     RoutingCopy {
@@ -427,7 +477,7 @@ pub fn routing_copy() -> RoutingCopy {
         port_title: IRONWIRE_PORT_TITLE,
         port_note: IRONWIRE_PORT_NOTE,
         folder_title: IRONWIRE_FOLDER_TITLE,
-        folder_note: IRONWIRE_FOLDER_NOTE,
+        folder_note: ironwire_folder_note_here(),
         apply: IRONWIRE_APPLY,
         checking: IRONWIRE_CHECKING,
         check_unavailable: IRONWIRE_CHECK_UNAVAILABLE,
@@ -799,11 +849,22 @@ mod tests {
         // across a join that neither fragment contains. These are the
         // finished strings.
         let payload = serde_json::to_value(routing_copy()).expect("the payload serialises");
-        for value in payload.as_object().expect("a JSON object").values() {
+        for (field, value) in payload.as_object().expect("a JSON object") {
+            // `folder_note` carries a filesystem path this machine resolved,
+            // and a path may spell a vendor's name -- the same exemption
+            // `ironwire_token_line`'s argument has, and for the same reason:
+            // a folder somebody is being sent to look at has to be the
+            // folder that is really there. Its wording is swept below, with
+            // a path chosen the way that function's is.
+            if field == "folder_note" {
+                continue;
+            }
             strings.push(value.as_str().expect("every field is a string").to_string());
         }
         // The sentences the region's functions assemble, which exist only
         // once something has been formatted into them.
+        strings.push(ironwire_folder_note(Some("/home/x/.config")));
+        strings.push(ironwire_folder_note(None));
         strings.push(ironwire_token_line(Some("/home/x/.config/control.token")));
         strings.push(ironwire_token_line(None));
         strings.push(ironwire_unreachable_line(Some(8463)));
@@ -858,6 +919,29 @@ mod tests {
         assert!(ironwire_token_line(None).contains(name));
     }
 
+    /// The field every failure sentence sends a contributor to says which
+    /// folder it is talking about.
+    ///
+    /// "Point the folder below at where the record is kept" and "Name the
+    /// folder below" are instructions with an answer only if this note
+    /// carries one. It used to say "somewhere other than the usual place",
+    /// and nothing on the screen resolved that phrase.
+    #[test]
+    fn the_folder_note_names_the_folder_the_failure_lines_send_people_to() {
+        let note = ironwire_folder_note(Some("/home/x/.config"));
+        assert!(note.contains("/home/x/.config"), "{note}");
+        assert!(!note.contains("the usual place"), "{note}");
+
+        // The payload all three shells read carries the assembled sentence
+        // and not the pathless constant, so this is not a GTK-only fix.
+        assert_eq!(routing_copy().folder_note, ironwire_folder_note_here());
+
+        // A machine that resolves no folder still gets a sentence rather
+        // than an empty caption under the field.
+        assert_eq!(ironwire_folder_note(None), IRONWIRE_FOLDER_NOTE);
+        assert!(!ironwire_folder_note_here().is_empty());
+    }
+
     /// The payload the shells read carries every constant on this surface.
     ///
     /// Counted, not listed. A constant added to the region and left out of
@@ -907,7 +991,7 @@ mod tests {
         assert_eq!(copy.port_title, IRONWIRE_PORT_TITLE);
         assert_eq!(copy.port_note, IRONWIRE_PORT_NOTE);
         assert_eq!(copy.folder_title, IRONWIRE_FOLDER_TITLE);
-        assert_eq!(copy.folder_note, IRONWIRE_FOLDER_NOTE);
+        assert_eq!(copy.folder_note, ironwire_folder_note_here());
         assert_eq!(copy.apply, IRONWIRE_APPLY);
         assert_eq!(copy.checking, IRONWIRE_CHECKING);
         assert_eq!(copy.check_unavailable, IRONWIRE_CHECK_UNAVAILABLE);

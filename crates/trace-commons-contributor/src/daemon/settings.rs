@@ -325,10 +325,25 @@ pub(crate) fn ironwire_token_path_with(
     {
         return Some(from_pointer.clone());
     }
-    let home = std::env::var_os("IRONWIRE_HOME")
+    Some(ironwire_default_token_dir()?.join(IRONWIRE_TOKEN_FILE))
+}
+
+/// The folder the token is read from when nothing has been declared.
+///
+/// `$IRONWIRE_HOME`, else `~/.ironwire`: the last step of
+/// [`ironwire_token_path_with`]'s order, and the only step that is a fixed
+/// convention rather than something a contributor or a running daemon said.
+///
+/// Exported because it is also what the settings screen's folder field means
+/// by "the usual place". That sentence used to name nothing, and a
+/// contributor sent to the field by a failure line had no way to learn which
+/// folder it was about. Resolved here rather than in the copy so the
+/// sentence cannot name one folder while this function reads another.
+#[must_use]
+pub fn ironwire_default_token_dir() -> Option<PathBuf> {
+    std::env::var_os("IRONWIRE_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".ironwire")))?;
-    Some(home.join(IRONWIRE_TOKEN_FILE))
+        .or_else(|| dirs::home_dir().map(|h| h.join(super::ironwire_pointer::POINTER_DIR)))
 }
 
 /// Build a routing ledger for a declaration, or nothing.
