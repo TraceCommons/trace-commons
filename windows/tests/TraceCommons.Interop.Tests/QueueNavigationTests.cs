@@ -84,4 +84,23 @@ public class QueueNavigationTests
             new QueueLocation.Project(""),
             QueueNavigation.Resolve(new QueueLocation.Project(""), groups));
     }
+
+    /// <summary>
+    /// History drills in over the same function, so the two screens cannot
+    /// come to disagree about what happens when a folder goes.
+    /// </summary>
+    [Fact]
+    public void BareFolderKeysResolveTheSameWay()
+    {
+        Assert.Equal(
+            new QueueLocation.Project("label:api"),
+            QueueNavigation.Resolve(
+                new QueueLocation.Project("label:api"),
+                new[] { "proj_a", "label:api" }));
+        Assert.Equal(
+            QueueLocation.Root,
+            QueueNavigation.Resolve(
+                new QueueLocation.Project("label:api"),
+                new[] { "proj_a" }));
+    }
 }

@@ -84,6 +84,17 @@ public sealed class HistoryRecordViewModel
     /// <summary>The id <c>withdraw</c> takes, and the key the attempt is filed under.</summary>
     public string SubmissionId => _record.SubmissionId;
 
+    /// <summary>
+    /// Which history folder this record belongs to.
+    /// </summary>
+    /// <remarks>
+    /// Derived through <see cref="HistoryFolders.KeyOf"/> rather than restated
+    /// here, so a row and the folder it sits under cannot come to disagree
+    /// about which project it is: the id, falling back to a label-derived key
+    /// for a record written before ids reached history.
+    /// </remarks>
+    public string FolderKey => HistoryFolders.KeyOf(_record);
+
     public string ProjectLabel =>
         string.IsNullOrWhiteSpace(_record.ProjectLabel) ? "Unknown project" : _record.ProjectLabel;
 

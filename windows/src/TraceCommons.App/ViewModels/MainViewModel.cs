@@ -225,6 +225,62 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// The rail's shield state for the queue.
+    /// </summary>
+    /// <remarks>
+    /// <b>Beside the numeric count, never instead of it.</b> The request was
+    /// to swap the count for an icon; at 149 waiting sessions the count is the
+    /// signal a contributor actually reads, and an icon meaning "some" is a
+    /// downgrade exactly at the scale that produced the feedback. The decision
+    /// itself is <see cref="QueueShield.For"/>'s, in TraceCommons.Interop,
+    /// where it is tested.
+    /// </remarks>
+    public QueueShieldState ShieldState => QueueShield.For(
+        Pending.Count,
+        Pending.Count(row => row.MatchedNothing),
+        Pending.Count(row => row.WasTrimmed));
+
+    /// <summary>Nothing waiting.</summary>
+    public bool ShieldIsClear => ShieldState == QueueShieldState.Clear;
+
+    /// <summary>Decisions owed, and nothing about them wants a second look.</summary>
+    public bool ShieldIsWaiting => ShieldState == QueueShieldState.Waiting;
+
+    /// <summary>Something waiting matched nothing, or was trimmed to fit.</summary>
+    public bool ShieldIsAttention => ShieldState == QueueShieldState.Attention;
+
+    /// <summary>
+    /// The rail's numeric badge: how many decisions are owed.
+    /// </summary>
+    /// <remarks>
+    /// Empty on an empty queue, so a rail with nothing waiting carries no
+    /// zero. This is the figure the shield is added to, and it is the one a
+    /// contributor at scale is reading.
+    /// </remarks>
+    public string QueueCountText =>
+        Pending.Count == 0
+            ? string.Empty
+            : Pending.Count.ToString(CultureInfo.CurrentCulture);
+
+    /// <summary>Whether there is a badge to draw at all.</summary>
+    public bool HasQueueCount => Pending.Count > 0;
+
+    /// <summary>
+    /// Re-reads every rail signal. Called when the queue changes and when a
+    /// preview lands, because a preview is what tells the shield that a
+    /// session matched nothing.
+    /// </summary>
+    private void RaiseShield()
+    {
+        Raise(nameof(ShieldState));
+        Raise(nameof(ShieldIsClear));
+        Raise(nameof(ShieldIsWaiting));
+        Raise(nameof(ShieldIsAttention));
+        Raise(nameof(QueueCountText));
+        Raise(nameof(HasQueueCount));
+    }
+
+    /// <summary>
     /// Which of the rail's destinations is showing.
     /// </summary>
     /// <remarks>
@@ -1288,6 +1344,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SetQueueLocation(_queueLocation);
 
         Raise(nameof(IsEmpty));
+        RaiseShield();
 
         // Every row above is drawn already, with no preview yet -- Preview
         // is null on a freshly built QueueEntryViewModel, which reads as
@@ -1339,6 +1396,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (PreviewCardOutcome.Parse(result) is { } outcome && outcome.EntryId == row.EntryId)
         {
             row.Preview = outcome;
+            RaiseShield();
         }
     }
 
@@ -1355,6 +1413,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (_rowsByEntryId.TryGetValue(outcome.EntryId, out QueueEntryViewModel? row))
         {
             row.Preview = outcome;
+            RaiseShield();
         }
     }
 

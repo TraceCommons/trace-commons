@@ -65,16 +65,34 @@ public static class QueueNavigation
         QueueLocation location,
         IReadOnlyList<ProjectQueueGroup> groups)
     {
-        ArgumentNullException.ThrowIfNull(location);
         ArgumentNullException.ThrowIfNull(groups);
+        return Resolve(location, groups.Select(group => group.ProjectId).ToList());
+    }
+
+    /// <summary>
+    /// The same decision over bare folder keys, for a screen whose folders are
+    /// not queue groups.
+    /// </summary>
+    /// <remarks>
+    /// History drills in the same way over <see cref="HistoryFolders"/>, and
+    /// the two screens must navigate identically. Sharing the function rather
+    /// than the type is what makes that true without history having to
+    /// manufacture a <see cref="ProjectQueueGroup"/> it has no entries for.
+    /// </remarks>
+    public static QueueLocation Resolve(
+        QueueLocation location,
+        IReadOnlyList<string> folderKeys)
+    {
+        ArgumentNullException.ThrowIfNull(location);
+        ArgumentNullException.ThrowIfNull(folderKeys);
 
         if (location is not QueueLocation.Project project)
         {
             return QueueLocation.Root;
         }
 
-        return groups.Any(group =>
-            string.Equals(group.ProjectId, project.ProjectId, StringComparison.Ordinal))
+        return folderKeys.Any(key =>
+            string.Equals(key, project.ProjectId, StringComparison.Ordinal))
             ? location
             : QueueLocation.Root;
     }

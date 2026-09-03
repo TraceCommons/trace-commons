@@ -140,6 +140,47 @@
                                 <TextBlock Text="Waiting"
                                            Style="{StaticResource TcNavLabelTextStyle}"
                                            VerticalAlignment="Center" />
+
+                                <!--
+                                    The shield, in three states, and the count
+                                    BESIDE it rather than replaced by it. The
+                                    ask was to swap the count for an icon; at
+                                    149 waiting sessions the count is the
+                                    signal a contributor is actually reading,
+                                    and an icon meaning "some" is a downgrade
+                                    exactly at the scale that produced the
+                                    feedback. The shield adds the state the
+                                    count could never carry: something waiting
+                                    matched nothing, or was trimmed to fit.
+
+                                    Three elements each bound to the condition
+                                    under which it belongs on screen, rather
+                                    than one with a converted foreground, which
+                                    is how every other either/or on this window
+                                    is drawn. QueueShield.For decides which,
+                                    in TraceCommons.Interop, where it is
+                                    tested.
+                                -->
+                                <FontIcon Glyph="&#xE72E;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsClear, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                          VerticalAlignment="Center" />
+                                <FontIcon Glyph="&#xE72E;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsWaiting, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcGreenTextBrush}"
+                                          VerticalAlignment="Center" />
+                                <FontIcon Glyph="&#xE7BA;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsAttention, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcGoldTextBrush}"
+                                          VerticalAlignment="Center" />
+
+                                <TextBlock Text="{x:Bind ViewModel.QueueCountText, Mode=OneWay}"
+                                           Visibility="{x:Bind ViewModel.HasQueueCount, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}"
+                                           VerticalAlignment="Center" />
                             </StackPanel>
 
                             <!-- The selection bar: 3px, inset 8px top and bottom. -->
