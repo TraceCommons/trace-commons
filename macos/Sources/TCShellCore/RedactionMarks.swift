@@ -94,26 +94,56 @@ public enum RedactionMarks {
 
     /// What one token says about itself.
     ///
-    /// Four forms, and only the first two name anything:
+    /// Five forms, sourced from `trace-commons-protocol`'s
+    /// `trace_contribution.rs` -- `apply_placeholder_regex`,
+    /// `apply_redaction_ranges`, `apply_pem_block_redaction`,
+    /// `redacted_marker` -- and `redaction.rs`'s `REDACTED`. They are the
+    /// same five `TranscriptMarkerScan`'s `allFixedTokensAreMatched` guard
+    /// enumerates, and the two lists have to stay the same list:
     ///
     /// * `<PRIVATE_{LABEL}_{n}>` -- minted by `apply_placeholder_regex` for
     ///   exactly two labels, `local_path` and `private_email`. The only form
     ///   with an ordinal.
     /// * `[REDACTED:{label}]` -- `tool_sensitive_field{:action}` and every
     ///   `privacy_filter:{label}`. Names its category, carries no index.
-    /// * `<REDACTED_PRIVATE_KEY>` -- PEM keys. Named here for completeness;
-    ///   `TranscriptMarkerScan` does not match it, so no shell chips it.
+    /// * `[REDACTED_PATH]` -- a URL's path component, not a path on this
+    ///   machine. Calling it a local path would point a reader at the wrong
+    ///   thing entirely.
+    /// * `<REDACTED_PRIVATE_KEY>` -- PEM keys.
     /// * `[REDACTED]` -- plain secrets and `sensitive_field`. Says that
     ///   something left and not what, which is the limit on how well this
     ///   one can ever be labelled.
+    ///
+    /// The parsing is prefix/suffix work rather than a regex on purpose.
+    /// A regex here would be a second marker grammar living beside
+    /// `TranscriptMarkerScan.pattern`, free to disagree with it about what
+    /// is a marker at all -- which is the disagreement the chunker cannot
+    /// survive, since it splits chunks on that same scan.
     public static func classify(_ token: String) -> (category: String?, ordinal: Int?) {
-        if let placeholder = RedactionPlaceholders.scan(token).first,
-           String(token[placeholder.range]) == token
-        {
-            return (placeholder.display, placeholder.ordinal)
+        let numbered = "<PRIVATE_"
+        if token.hasPrefix(numbered), token.hasSuffix(">") {
+            let inner = token.dropFirst(numbered.count).dropLast()
+            guard let split = inner.lastIndex(of: "_") else { return (nil, nil) }
+            let label = inner[inner.startIndex..<split]
+            let digits = inner[inner.index(after: split)...]
+            // Strict about the shape: an uppercase label of letters, digits
+            // and underscores that does not end on an underscore, then the
+            // ordinal. A transcript can hold prose that looks approximately
+            // like a token, and marking a contributor's own sentence as a
+            // redaction would be a lie about what the scrubber did.
+            let named =
+                !label.isEmpty && label.last != "_"
+                && label.allSatisfy { $0.isASCII && ($0.isUppercase || $0.isNumber || $0 == "_") }
+            if named, !digits.isEmpty, let ordinal = Int(digits) {
+                return (label.lowercased().replacingOccurrences(of: "_", with: " "), ordinal)
+            }
+            return (nil, nil)
         }
         if token == "<REDACTED_PRIVATE_KEY>" {
             return ("private key", nil)
+        }
+        if token == "[REDACTED_PATH]" {
+            return ("URL path", nil)
         }
         let labelled = "[REDACTED:"
         if token.hasPrefix(labelled), token.hasSuffix("]") {

@@ -59,4 +59,22 @@ final class OriginalSearchOutcomeTests: XCTestCase {
             "0 matches in what would be sent. Couldn't check the original."
         )
     }
+
+    /// A failed check must not draw as a clean answer.
+    ///
+    /// `unknown` used to share `isAlarming == false` with `absent` and
+    /// `allRemoved`, and the sheet drew that single bit as clear-or-
+    /// attention. The result was the app's all-clear glyph beside the
+    /// sentence "Couldn't check the original." -- the one outcome meaning
+    /// *no answer* rendered identically to the one meaning *nothing found*.
+    func testAnUncheckedOriginalIsNeitherClearNorAlarming() {
+        XCTAssertEqual(OriginalSearchOutcome.unknown.emphasis, .unchecked)
+        XCTAssertFalse(OriginalSearchOutcome.unknown.isAlarming)
+        XCTAssertEqual(OriginalSearchOutcome.absent.emphasis, .clear)
+        XCTAssertEqual(OriginalSearchOutcome.allRemoved(3).emphasis, .clear)
+        XCTAssertEqual(
+            OriginalSearchOutcome.someRemain(remaining: 2, total: 5).emphasis,
+            .attention
+        )
+    }
 }

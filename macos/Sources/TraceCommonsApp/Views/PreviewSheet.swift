@@ -870,14 +870,14 @@ struct SearchTab: View {
             // what would be sent is the one to slow down on, and a term that
             // was removed reads as clear even though the redacted body and
             // the original disagree about it.
-            Label(
-                outcome.sentence,
-                systemImage: outcome.isAlarming ? TC.Tone.attention.symbol : TC.Tone.clear.symbol
-            )
-            .font(TC.Font_.headingAlert)
-            .foregroundStyle(
-                outcome.isAlarming ? TC.Tone.attention.textColor : TC.Tone.clear.textColor
-            )
+            //
+            // Three tones, not two. `.unknown` is a missing answer, and it
+            // used to draw in the clear tone -- the app's all-clear glyph
+            // beside the sentence that says the check did not run. See
+            // `OriginalSearchOutcome.Emphasis`.
+            Label(outcome.sentence, systemImage: tone(for: outcome).symbol)
+                .font(TC.Font_.headingAlert)
+                .foregroundStyle(tone(for: outcome).textColor)
         } else if offsets!.isEmpty {
             // No outcome: the preloaded screenshot path, which sets offsets
             // without running a search.
@@ -891,35 +891,59 @@ struct SearchTab: View {
         }
     }
 
+    /// The tone for an outcome. Three of them, because "could not check"
+    /// is neither a clean answer nor an alarming one.
+    private func tone(for outcome: OriginalSearchOutcome) -> TC.Tone {
+        switch outcome.emphasis {
+        case .attention: return .attention
+        case .clear: return .clear
+        case .unchecked: return .neutral
+        }
+    }
+
+    /// The keystroke path. A local in-memory pass over the already-open
+    /// redacted preview and nothing else.
+    ///
     /// Runs on the main actor deliberately: the scan is a local in-memory
     /// pass, and keeping every touch of the `tc_preview*` on one thread is
     /// what the header's ownership rules ask for -- its pointer check narrows
     /// accidental misuse to an error, it does not make concurrent use safe.
+    ///
+    /// It deliberately does NOT ask about the original. `searchOriginal`
+    /// bottoms out in `tc_search_original`, which spawns a thread, builds a
+    /// runtime, and reads the whole raw unredacted session file off disk;
+    /// on `.onChange(of: needle)` that ran once per character typed, on this
+    /// actor. The outcome is cleared rather than left standing, so a verdict
+    /// from the previous term is never shown against the new one.
     private func run() {
         searched = true
+        outcome = nil
         guard !needle.isEmpty, let preview else {
             offsets = []
-            outcome = nil
             return
         }
         offsets = preview.search(needle)
+    }
+
+    /// Runs the search, asks about the original, AND records the term.
+    ///
+    /// Separate from `run` for two reasons, and both are about the
+    /// difference between passing through a prefix and asking a question.
+    ///
+    /// Remembering here because doing it in `run` filled the six-slot strip
+    /// with the prefixes of one word: typing "xyz" recorded "x", "xy", and
+    /// "xyz". Checking the original here because that check is the expensive
+    /// one -- see `run` -- and a contributor asks it by pressing Return or
+    /// the button.
+    private func commit() {
+        run()
+        guard !needle.isEmpty, offsets != nil else { return }
         // The redacted-body count alone cannot tell "we took it out" from
         // "it was never here". See `OriginalSearchOutcome`.
         outcome = OriginalSearchOutcome.classify(
             remaining: offsets?.count ?? 0,
             original: searchOriginal(needle)
         )
-    }
-
-    /// Runs the search AND records the term.
-    ///
-    /// Separate from `run` because `run` fires on every keystroke, and
-    /// remembering there filled the six-slot strip with the prefixes of one
-    /// word: typing "xyz" recorded "x", "xy", and "xyz". A recent search is
-    /// a question the contributor asked, and they ask it by pressing Return
-    /// or the button -- not by passing through a prefix on the way.
-    private func commit() {
-        run()
         if let offsets, !offsets.isEmpty {
             recents = RecentSearches.remember(needle)
         }

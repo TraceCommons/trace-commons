@@ -53,4 +53,34 @@ public enum OriginalSearchOutcome: Equatable {
         if case .someRemain = self { return true }
         return false
     }
+
+    /// How loudly to draw this outcome, in the three states the sheet has
+    /// words for.
+    ///
+    /// `unknown` is deliberately its own state rather than falling in with
+    /// the clean answers. It used to render in the clear tone, which put the
+    /// app's all-clear glyph -- a green checkmark -- next to the sentence
+    /// "Couldn't check the original.", so the one outcome that means *no
+    /// answer* looked exactly like the one that means *nothing was found*.
+    /// That is the single direction this tab must never fail in.
+    ///
+    /// It is not alarming either: nothing was found, and shouting about a
+    /// call that did not come back would spend attention where nothing is
+    /// known to be wrong. Neutral is the honest third thing.
+    public enum Emphasis: Equatable {
+        /// A question that got a clean answer.
+        case clear
+        /// Still in what would be sent.
+        case attention
+        /// No answer. Neither reassuring nor alarming.
+        case unchecked
+    }
+
+    public var emphasis: Emphasis {
+        switch self {
+        case .someRemain: return .attention
+        case .unknown: return .unchecked
+        case .absent, .allRemoved: return .clear
+        }
+    }
 }
