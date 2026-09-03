@@ -246,223 +246,482 @@ EffectReceipt
 
 ## 4. Rust pseudocode
 
-The persistence payloads use JSONB.
-Runtime code decodes each payload into a typed Rust structure before use.
 
-### Identity and version types
 
-```rust
-struct SchemaRef {
-    schema_id: String,
-    version: u32,
-}
+## Common identifiers
 
+```
+struct ClassifierId(String);
+struct ProjectionId(String);
+struct EvidenceId(String);
+struct PolicyId(String);
 struct BundleId(String);
-struct BundleSetId(String);
-struct DeploymentId(Uuid);
-struct TraceRevisionId(Uuid);
-struct EvaluationId(Uuid);
+struct CertificationId(String);
 struct ContentHash(String);
+```
 
-enum ProcessingMode {
-    Active,
-    Shadow,
-    Reprocess,
+
+
+## 1. Classifier
+
+A Classifier measures one property. It produces an Observation, not a production Decision.
+
+```
+struct ClassifierDescriptor {
+    id: ClassifierId,
+    role: ClassifierRole,
+    projection_id: ProjectionId,
+    implementation_hash: ContentHash,
+    output_schema: String,
 }
 
 enum ClassifierRole {
-    TenantDeduplication,
-    GlobalDeduplication,
+    TenantDuplication,
+    GlobalDuplication,
     Novelty,
     Substance,
 }
-```
 
+trait NoveltyClassifier: Send + Sync {
+    fn descriptor(&self) -> &ClassifierDescriptor;
 
-
-### Classifier bundles and deployment
-
-I feel like we've lost the plot here. The class structure here made more sense
-
-```rust
-struct ClassifierBundle {
-    bundle_id: BundleId,
-    role: ClassifierRole,
-    artifact_digest: ContentHash,
-
-    projection: ComponentRef,
-    model: ComponentRef,
-    configuration: VersionedDocument,
-    calibration: Option<ArtifactRef>,
-    certification: CertificationRef,
-
-    evidence_schema: SchemaRef,
-    observation_schema: SchemaRef,
-}
-
-struct BundleSet {
-    bundle_set_id: BundleSetId,
-    classifiers: BTreeMap<ClassifierRole, BundleId>,
-    fact_assembler_bundle_id: BundleId,
-    policy_bundle_id: BundleId,
-    compatibility_manifest: VersionedDocument,
-}
-
-/*
-Slow down, this implies that different bundles will be applied to different tenants. do we need that variance? Also the Deployment Assignment is mutable, so we cna't hash it, so it doesn't provide provanance
-*/
-struct DeploymentAssignment {
-    deployment_id: DeploymentId,
-    tenant_scope: TenantScope, // do we need tenant specific bundles? probably too complex
-    mode: ProcessingMode,
-    bundle_set_id: BundleSetId,
-    effective_from: DateTime<Utc>,
-    effective_until: Option<DateTime<Utc>>,
-}
-```
-
-The deployment assignment records an operator choice.
-The processing job also pins the resolved bundle set.
-This prevents configuration drift during a run.
-
-### Versioned domain documents
-
-Remark: wtf is this. this feel very different than what we were workig with before
-
-TODO: Review the initial workflow conversation
-
-```rust
-struct VersionedDocument {
-    schema: SchemaRef,
-    payload: serde_json::Value, // didn't we want to explciitely avoid serde_json::Value?
-}
-
-struct ProducerRef {
-    bundle_id: BundleId,
-    artifact_digest: ContentHash, 
-}
-
-struct Evidence {
-    document: VersionedDocument,
-    trace_revision_id: TraceRevisionId,
-    projection_bundle_id: BundleId,
-    reference_index: Option<IndexReference>,
-}
-
-struct Observation {
-    role: ClassifierRole,
-    producer: ProducerRef,
-    evidence_index: usize,
-    document: VersionedDocument,
-}
-
-struct FactSet {
-    producer: ProducerRef,
-    document: VersionedDocument,
-}
-
-struct PolicyDecision {
-    producer: ProducerRef,
-    document: VersionedDocument,
-}
-```
-
-
-
-### Evaluation aggregate
-
-XXX: This is directionally correct but missing precision due to context rot
-
-```rust
-struct Evaluation {
-    evaluation_id: EvaluationId,
-    job_id: Uuid,
-    tenant_id: String,
-    trace_revision_id: TraceRevisionId,
-    deployment_id: DeploymentId,
-    bundle_set_id: BundleSetId,
-    mode: ProcessingMode,
-
-    evidence: Vec<Evidence>,
-    observations: Vec<Observation>,
-    facts: FactSet,
-    decision: PolicyDecision,
-
-    evaluation_hash: ContentHash,
-    created_at: DateTime<Utc>,
-}
-```
-
-> **Hash policy:** The minimal design stores one hash over the canonical
-> evaluation. Component hashes are optional at independent trust, reuse,
-> signature, or cache boundaries.
-
-
-
-### Typed policy interface
-
-```rust
-trait ObservationDecoder {
-    type Output;
-
-    fn decode(
+    fn observe(
         &self,
-        document: &VersionedDocument,
-    ) -> Result<Self::Output, SchemaError>;
+        input: &ProjectedTrace,
+        evidence: &dyn NoveltyEvidenceView,
+    ) -> Result<NoveltyObservation, ClassifierError>;
 }
+```
 
-trait FactAssembler: Send + Sync {
-    fn assemble(
+Example:
+
+```
+let classifier = BgeNoveltyClassifier {
+    descriptor: ClassifierDescriptor {
+        id: ClassifierId("novelty-bge-large-v1".into()),
+        role: ClassifierRole::Novelty,
+        projection_id: ProjectionId("rendered-events-v2".into()),
+        implementation_hash: sha256("bge-large-code-and-weights"),
+        output_schema: "novelty-observation-v1".into(),
+    },
+};
+```
+
+
+
+## 2. Projection
+
+A Projection converts a stored trace into the exact classifier input.
+
+```{rust}
+trait TraceProjection: Send + Sync {
+    fn id(&self) -> &ProjectionId;
+
+    fn project(
         &self,
-        evidence: &[Evidence],
-        observations: &[Observation],
-    ) -> Result<FactSet, FactError>;
+        trace: &StoredTrace,
+    ) -> Result<ProjectedTrace, ProjectionError>;
 }
 
-trait DecisionPolicy: Send + Sync {
+struct ProjectedTrace {
+    projection_id: ProjectionId,
+    content_hash: ContentHash,
+    chunks: Vec<ProjectedChunk>,
+}
+
+struct ProjectedChunk {
+    index: u32,
+    text: String,
+}
+```
+
+Example projection:
+
+```
+struct RenderedEventsV2;
+
+impl TraceProjection for RenderedEventsV2 {
+    fn id(&self) -> &ProjectionId {
+        &ProjectionId("rendered-events-v2".into())
+    }
+
+    fn project(&self, trace: &StoredTrace) -> Result<ProjectedTrace, ProjectionError> {
+        let chunks = trace.events
+            .map(render_event)
+            .pack_into_chunks(2_048);
+
+        Ok(ProjectedTrace {
+            projection_id: self.id().clone(),
+            content_hash: sha256(&chunks),
+            chunks,
+        })
+    }
+}
+```
+
+
+
+## 3. Evidence
+
+Evidence is external state that a Classifier needs for one measurement.
+
+Use typed evidence names in the real API. A generic `Evidence` type can hide important differences.
+
+```{rust}
+struct NoveltyEvidenceDescriptor {
+    id: EvidenceId,
+    reference_corpus_hash: ContentHash,
+    index_snapshot_hash: ContentHash,
+    member_count: u64,
+}
+
+trait NoveltyEvidenceView: Send + Sync {
+    fn descriptor(&self) -> &NoveltyEvidenceDescriptor;
+
+    fn nearest_neighbors(
+        &self,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Neighbor>, EvidenceError>;
+}
+
+struct Neighbor {
+    member_hash: ContentHash,
+    cosine_similarity_micros: i64,
+}
+```
+
+Example:
+
+```{rust}
+let evidence = FrozenNoveltyIndex {
+    descriptor: NoveltyEvidenceDescriptor {
+        id: EvidenceId("novelty-index-2026-09-01".into()),
+        reference_corpus_hash: sha256("approved-reference-corpus"),
+        index_snapshot_hash: sha256("index-build"),
+        member_count: 82_451,
+    },
+    index,
+};
+```
+
+
+
+## 4. Observation
+
+An Observation is the raw output from one Classifier operation.
+
+It includes provenance, measurements, and evidence identity.
+
+```{rust}
+struct NoveltyObservation {
+    classifier_id: ClassifierId,
+    projection_id: ProjectionId,
+    evidence_id: EvidenceId,
+    input_hash: ContentHash,
+
+    representative_novelty_micros: u64,
+    peak_novelty_micros: u64,
+    nearest_similarity_micros: i64,
+    neighbor_evidence_hash: ContentHash,
+}
+```
+
+Example:
+
+```{rust}
+let observation = NoveltyObservation {
+    classifier_id: ClassifierId("novelty-bge-large-v1".into()),
+    projection_id: ProjectionId("rendered-events-v2".into()),
+    evidence_id: EvidenceId("novelty-index-2026-09-01".into()),
+    input_hash: sha256("projected-trace"),
+
+    representative_novelty_micros: 720_000,
+    peak_novelty_micros: 910_000,
+    nearest_similarity_micros: 280_000,
+    neighbor_evidence_hash: sha256("nearest-neighbors"),
+};
+```
+
+The Observation does not contain `passed: true`. A Policy makes that judgment.
+
+## 5. Fact
+
+A Fact states whether a required Observation is available.
+
+It prevents the system from converting missing data into a favorable zero.
+
+```{rust}
+enum Fact<T> {
+    Available(T),
+
+    Unavailable {
+        reason: MissingFactReason,
+        evidence_hash: Option<ContentHash>,
+    },
+}
+
+enum MissingFactReason {
+    ClassifierUnavailable,
+    EvidenceUnavailable,
+    ProjectionMismatch,
+    Timeout,
+    InsufficientSamples,
+}
+```
+
+Example:
+
+```
+let novelty_fact = Fact::Available(observation);
+
+let substance_fact = Fact::Unavailable {
+    reason: MissingFactReason::ClassifierUnavailable,
+    evidence_hash: Some(sha256("model-endpoint-error")),
+};
+```
+
+
+
+## 6. Policy
+
+A Policy converts Facts into a Decision.
+
+```{rust}
+struct ProductionPolicyV3 {
+    id: PolicyId,
+
+    novelty_floor_micros: u64,
+    substance_floor_micros: u64,
+    tenant_duplicate_limit_micros: u64,
+
+    require_novelty: bool,
+    require_substance: bool,
+}
+
+trait DecisionPolicy {
+    fn id(&self) -> &PolicyId;
+
     fn decide(
         &self,
-        facts: &FactSet,
-    ) -> Result<PolicyDecision, PolicyError>;
+        facts: &DecisionFacts,
+    ) -> Result<Decision, PolicyError>;
 }
 ```
 
-A policy never reads arbitrary JSON directly.
-Its adapter validates the schema and returns a typed facts structure.
+The combined facts are typed:
 
-### Effects
+```{rust}
+struct DecisionFacts {
+    tenant_duplication: Fact<TenantDuplicationObservation>,
+    global_duplication: Fact<GlobalDuplicationObservation>,
+    novelty: Fact<NoveltyObservation>,
+    substance: Fact<SubstanceObservation>,
+    governance: GovernanceFacts,
+}
+```
 
-```rust
-enum EffectKind {
-    RegisterTrace,
-    QuarantineTrace,
-    InsertVector,
-    InvalidateVector,
-    IssueCredit,
-    WithholdCredit,
-    ScheduleReview,
+Example policy logic:
+
+```{rust}
+fn decide(&self, facts: &DecisionFacts) -> Result<Decision, PolicyError> {
+    let novelty = facts.novelty.require_available()?;
+    let substance = facts.substance.require_available()?;
+
+    let novelty_passed =
+        novelty.representative_novelty_micros >= self.novelty_floor_micros;
+
+    let substance_passed =
+        substance.perplexity_micros >= self.substance_floor_micros;
+
+    if !novelty_passed {
+        return Ok(Decision::review("novelty_below_floor"));
+    }
+
+    if !substance_passed {
+        return Ok(Decision::review("substance_below_floor"));
+    }
+
+    Ok(Decision::accept())
+}
+```
+
+
+
+## 7. Decision
+
+A Decision records what production must do.
+
+```{rust}
+struct Decision {
+    policy_id: PolicyId,
+    facts_hash: ContentHash,
+
+    registration: RegistrationDisposition,
+    credit: CreditDisposition,
+    index: IndexDisposition,
+
+    reason_codes: Vec<String>,
 }
 
-struct EffectIntent {
-    effect_id: Uuid,
-    evaluation_id: EvaluationId,
-    decision_hash: ContentHash,
-    kind: EffectKind,
-    payload: VersionedDocument,
-    idempotency_key: String,
-    required: bool,
-    created_at: DateTime<Utc>,
+enum RegistrationDisposition {
+    Accept,
+    Quarantine,
+    Reject,
 }
 
-struct EffectReceipt {
-    receipt_id: Uuid,
-    effect_id: Uuid,
-    executor_bundle_id: BundleId,
-    external_resource_id: Option<String>,
-    result: VersionedDocument,
-    result_hash: ContentHash,
-    applied_at: DateTime<Utc>,
+enum CreditDisposition {
+    Eligible,
+    Withhold,
 }
+
+enum IndexDisposition {
+    AddToFutureSnapshot,
+    DoNotAdd,
+}
+```
+
+Example:
+
+```{rust}
+let decision = Decision {
+    policy_id: PolicyId("production-policy-v3".into()),
+    facts_hash: sha256(&facts),
+
+    registration: RegistrationDisposition::Accept,
+    credit: CreditDisposition::Eligible,
+    index: IndexDisposition::AddToFutureSnapshot,
+
+    reason_codes: vec!["all_required_classifiers_passed".into()],
+};
+```
+
+
+
+## 8. Bundle
+
+A Bundle identifies the complete classifier and policy configuration.
+
+```{rust}
+struct ClassifierBundle {
+    id: BundleId,
+
+    tenant_duplication: ClassifierRef,
+    global_duplication: ClassifierRef,
+    novelty: ClassifierRef,
+    substance: ClassifierRef,
+
+    policy_id: PolicyId,
+}
+
+struct ClassifierRef {
+    classifier_id: ClassifierId,
+    projection_id: ProjectionId,
+    calibration_id: String,
+    artifact_hash: ContentHash,
+}
+```
+
+Example:
+
+```{rust}
+let bundle = ClassifierBundle {
+    id: BundleId("sha256:production-bundle-42".into()),
+
+    tenant_duplication: classifier_ref("tenant-dup-v2"),
+    global_duplication: classifier_ref("global-simhash-v1"),
+    novelty: classifier_ref("novelty-bge-large-v1"),
+    substance: classifier_ref("substance-qwen-v3"),
+
+    policy_id: PolicyId("production-policy-v3".into()),
+};
+```
+
+The Bundle does not contain mutable index contents. Each Observation records the exact Evidence snapshot it used.
+
+## 9. Certification
+
+A Certification states that a Bundle passed a defined offline evaluation.
+
+TODO: I think we can remove this 
+
+```
+struct BundleCertification {
+    id: CertificationId,
+    bundle_id: BundleId,
+
+    evaluation_suite_id: String,
+    dataset_snapshot_hash: ContentHash,
+    evaluation_report_hash: ContentHash,
+
+    result: CertificationResult,
+    certified_by: String,
+    signature: Vec<u8>,
+}
+
+enum CertificationResult {
+    Passed,
+    Failed {
+        reason_codes: Vec<String>,
+    },
+}
+```
+
+Example:
+
+```
+let certification = BundleCertification {
+    id: CertificationId("certification-2026-09-01".into()),
+    bundle_id: bundle.id.clone(),
+
+    evaluation_suite_id: "classifier-suite-v4".into(),
+    dataset_snapshot_hash: sha256("test-snapshot-17"),
+    evaluation_report_hash: sha256("evaluation-report"),
+
+    result: CertificationResult::Passed,
+    certified_by: "trace-commons-model-factory".into(),
+    signature: sign("certification manifest"),
+};
+```
+
+A Bundle can have multiple Certifications. New evaluation evidence does not change the Bundle identity.
+
+## Complete example
+
+```
+let projected = projection.project(&stored_trace)?;
+
+let observation = novelty_classifier.observe(
+    &projected,
+    &novelty_evidence,
+)?;
+
+let facts = DecisionFacts {
+    tenant_duplication: Fact::Available(tenant_duplication),
+    global_duplication: Fact::Available(global_duplication),
+    novelty: Fact::Available(observation),
+    substance: Fact::Available(substance),
+    governance,
+};
+
+let decision = active_policy.decide(&facts)?;
+
+server.persist_facts(&facts)?;
+server.persist_decision(&decision)?;
+server.apply_decision(&decision)?;
+```
+
+The responsibility chain is:
+
+```
+Projection prepares input.
+Evidence supplies comparison state.
+Classifier produces an Observation.
+Fact records availability.
+Policy evaluates Facts.
+Decision specifies production effects.
+Bundle fixes the complete configuration.
+Certification approves the Bundle for deployment.
 ```
 
 
@@ -508,7 +767,174 @@ stateDiagram-v2
 The state machine remains explicit in code.
 The database does not store a separate event for each transition.
 
-### Crash and retry behavior
+### `rocessing_jobs`
+
+One mutable row coordinates execution:
+
+```
+job_id
+tenant_id
+trace_revision_id
+deployment_id
+bundle_set_id
+mode                    active | shadow | reprocess
+state                   pending | leased | retry | decision_committed |
+                        complete | terminal_failure
+lease_owner
+lease_expires_at
+attempt_count
+next_attempt_at
+last_error_code
+evaluation_id
+created_at
+updated_at
+```
+
+This row is an operational projection, not an audit record.
+
+Workers claim jobs with a lease. If a process crashes, the lease expires and another worker recomputes the evaluation.
+
+A unique key such as this prevents duplicate logical work:
+
+```
+tenant + trace revision + deployment + bundle set + mode
+```
+
+
+
+### `evaluations`
+
+On successful computation, write one immutable aggregate containing the complete reasoning chain:
+
+```
+evaluation_id
+job_id
+trace_revision_id
+deployment_id
+mode
+
+evidence_schema
+evidence JSONB
+evidence_hash
+
+observations_schema
+observations JSONB
+observations_hash
+
+facts_schema
+facts JSONB
+facts_hash
+
+policy_bundle_id
+decision_schema
+decision JSONB
+decision_hash
+
+created_at
+```
+
+Each observation inside the document identifies its classifier bundle:
+
+```
+{
+  "role": "novelty",
+  "classifier_bundle_id": "novelty-v4",
+  "evidence_hash": "sha256:...",
+  "schema": "trace-commons.novelty-observation.v2",
+  "payload": {
+    "novelty_micros": 640000,
+    "index_epoch_id": "epoch-42"
+  }
+}
+```
+
+This preserves the conceptual chain:
+
+```
+Evidence → Observations → Facts → Decision
+```
+
+without requiring one transaction per arrow.
+
+The worker can compute all four stages in memory and insert the evaluation in one transaction.
+
+## Completion transaction
+
+When evaluation succeeds, one transaction should:
+
+1. Insert the immutable evaluation.
+2. Create required effect outbox records.
+3. Mark the processing job `decision_committed`.
+4. Update any current-state projection that can be changed atomically.
+
+This gives all-or-nothing decision persistence.
+
+For a shadow run, the transaction inserts the evaluation but creates no effects.
+
+## Effects still require separate durability
+
+Effects are different because they cross a failure boundary.
+
+Suppose the server inserts a vector and crashes before recording that insertion. Retrying could insert it twice. The same problem applies to credit issuance.
+
+Use:
+
+```
+effect_outbox
+effect_receipts
+```
+
+
+
+### `effect_outbox`
+
+```
+effect_id
+evaluation_id
+decision_hash
+effect_kind
+payload JSONB
+payload_hash
+idempotency_key
+status
+attempt_count
+next_attempt_at
+last_error_code
+created_at
+updated_at
+```
+
+The requested payload is immutable. Retry fields are mutable operational state.
+
+### `effect_receipts`
+
+Write an immutable receipt when the effect succeeds:
+
+```
+receipt_id
+effect_id
+executor_bundle_id
+external_resource_id
+result JSONB
+result_hash
+applied_at
+```
+
+The resulting explanation chain is:
+
+```
+effect receipt
+  → effect intent
+  → evaluation decision
+  → facts
+  → observations
+  → evidence
+  → trace revision and bundles
+```
+
+This is enough to answer why a credit or vector insertion happened.  
+
+Crash and retry behavior
 
 
 | Failure point             | Durable state                                | Recovery                                                                 |
