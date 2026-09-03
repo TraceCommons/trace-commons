@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 pub mod claude_code;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
@@ -50,6 +51,7 @@ pub const SOURCE_CLAUDE_CODE: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
 pub const SOURCE_TRAJECTORY: &str = "trajectory";
 pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
+pub const SOURCE_CLINE: &str = "cline";
 
 #[derive(Debug, Clone)]
 pub struct SessionRef {
