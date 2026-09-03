@@ -88,8 +88,8 @@ public struct RoutingToolRow: Equatable, Sendable {
 public struct RoutingEvidence: Equatable, Sendable {
     public let outcome: RoutingProbeOutcome
     /// One entry per tool IronWire listed, keyed by its own stable id. A
-    /// tool absent from the list -- Gemini CLI on every machine today -- is
-    /// not in this map and gets no verdict.
+    /// tool absent from the list -- Gemini CLI and Cline on every machine
+    /// today -- is not in this map and gets no verdict.
     public let tools: [String: RoutingToolRow]
 
     public init(outcome: RoutingProbeOutcome, tools: [String: RoutingToolRow]) {
@@ -167,16 +167,20 @@ public struct RoutingSourceModes: Equatable, Sendable {
     public let claude: String
     public let codex: String
     public let gemini: String
+    public let cline: String
 
-    public init(claude: String, codex: String, gemini: String) {
+    public init(claude: String, codex: String, gemini: String, cline: String) {
         self.claude = claude
         self.codex = codex
         self.gemini = gemini
+        self.cline = cline
     }
 
     /// A daemon that answered nothing about a source is watching the
     /// conventional location, which is a tool in use.
-    public static let unset = RoutingSourceModes(claude: "unset", codex: "unset", gemini: "unset")
+    public static let unset = RoutingSourceModes(
+        claude: "unset", codex: "unset", gemini: "unset", cline: "unset"
+    )
 }
 
 /// One rendered row: the tool's name, its one word, and how that word is
@@ -316,16 +320,18 @@ public struct RoutingForm: Equatable, Sendable {
 // MARK: - The surface
 
 public enum RoutingSurface {
-    /// IronWire's own stable ids for the three tools this card names.
+    /// IronWire's own stable ids for the four tools this card names.
     ///
     /// `ironwire connect <id>` takes these and its settings response is
-    /// keyed by them. Gemini CLI has no row upstream at all today -- neither
-    /// built-in nor in the catalogue -- which is why it is named here and
-    /// expected to be missing rather than left out and quietly defaulted.
+    /// keyed by them. Gemini CLI and Cline have no row upstream at all today
+    /// -- neither built-in nor in the catalogue -- which is why they are
+    /// named here and expected to be missing rather than left out and
+    /// quietly defaulted.
     enum ToolID {
         static let claude = "claude"
         static let codex = "codex"
         static let gemini = "gemini"
+        static let cline = "cline"
     }
 
     /// The daemon's three routing states, from `daemon::ipc`'s `ROUTING_*`.
@@ -441,6 +447,7 @@ public enum RoutingSurface {
             (copy.toolClaude, sourceModes.claude, ToolID.claude),
             (copy.toolCodex, sourceModes.codex, ToolID.codex),
             (copy.toolGemini, sourceModes.gemini, ToolID.gemini),
+            (copy.toolCline, sourceModes.cline, ToolID.cline),
         ].map { name, mode, id in
             let wiring = evidence?.wiring(forToolID: id) ?? .unknown
             return RoutingToolWord(

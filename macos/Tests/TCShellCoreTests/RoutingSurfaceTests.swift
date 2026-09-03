@@ -23,6 +23,7 @@ final class RoutingSurfaceTests: XCTestCase {
       "tool_claude": "T-CLAUDE",
       "tool_codex": "T-CODEX",
       "tool_gemini": "T-GEMINI",
+      "tool_cline": "T-CLINE",
       "intro": "S-INTRO",
       "toggle": "S-TOGGLE",
       "applies_at_once": "S-APPLIES",
@@ -286,10 +287,11 @@ final class RoutingSurfaceTests: XCTestCase {
         claude: String = "watch",
         codex: String = "watch",
         gemini: String = "watch",
+        cline: String = "watch",
         evidence: RoutingEvidence?
     ) -> [RoutingToolWord] {
         RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini),
+            sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini, cline: cline),
             evidence: evidence,
             copy: copy(),
             calls: calls()
@@ -304,6 +306,7 @@ final class RoutingSurfaceTests: XCTestCase {
             claude: "watch",
             codex: "unset",
             gemini: "off",
+            cline: "unset",
             evidence: evidence(tools: [
                 "claude": RoutingToolRow(installed: true, wired: true),
                 "codex": RoutingToolRow(installed: true, wired: false),
@@ -314,6 +317,8 @@ final class RoutingSurfaceTests: XCTestCase {
         // Gemini has no row upstream at all, so it asks with the unknown
         // state rather than with a guess.
         XCTAssertEqual(rendered[2].word, "W:off:\(RoutingToolWiring.unknown.abiValue)")
+        // Cline likewise: no upstream row, so unknown rather than a guess.
+        XCTAssertEqual(rendered[3].word, "W:unset:\(RoutingToolWiring.unknown.abiValue)")
     }
 
     /// The declaration switch is not among those two inputs. Declaring
@@ -321,7 +326,7 @@ final class RoutingSurfaceTests: XCTestCase {
     /// send through it, and a shell that rendered one switch as three
     /// verdicts would be inventing two of them.
     func testTheDeclarationIsNotAnInputToAnyToolWord() {
-        for row in rows(claude: "watch", codex: "unset", gemini: "watch", evidence: evidence()) {
+        for row in rows(claude: "watch", codex: "unset", gemini: "watch", cline: "watch", evidence: evidence()) {
             XCTAssertTrue(
                 row.word.hasSuffix(":\(RoutingToolWiring.unknown.abiValue)"),
                 "\(row.name) asked with \(row.word)"
@@ -376,7 +381,7 @@ final class RoutingSurfaceTests: XCTestCase {
     /// nothing -- never to a blank, and never to a word chosen here.
     func testAWordTheAbiRefusedFallsBackToTheWordThatClaimsNothing() {
         let rendered = RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch"),
+            sourceModes: RoutingSourceModes(claude: "watch", codex: "watch", gemini: "watch", cline: "watch"),
             evidence: evidence(tools: ["claude": RoutingToolRow(installed: true, wired: true)]),
             copy: copy(),
             calls: silentCalls()
@@ -387,12 +392,12 @@ final class RoutingSurfaceTests: XCTestCase {
         }
     }
 
-    /// The three rows are always all three, in one order, so a missing
+    /// The four rows are always all four, in one order, so a missing
     /// answer is a word rather than a vanished row.
-    func testTheSurfaceAlwaysNamesAllThreeToolsInOneOrder() {
+    func testTheSurfaceAlwaysNamesAllFourToolsInOneOrder() {
         XCTAssertEqual(
-            rows(claude: "off", codex: "off", gemini: "off", evidence: nil).map(\.name),
-            [copy().toolClaude, copy().toolCodex, copy().toolGemini]
+            rows(claude: "off", codex: "off", gemini: "off", cline: "off", evidence: nil).map(\.name),
+            [copy().toolClaude, copy().toolCodex, copy().toolGemini, copy().toolCline]
         )
     }
 
@@ -474,6 +479,7 @@ final class RoutingSurfaceTests: XCTestCase {
         XCTAssertEqual(evidence.tools["claude"], RoutingToolRow(installed: true, wired: true))
         XCTAssertEqual(evidence.tools["codex"], RoutingToolRow(installed: true, wired: false))
         XCTAssertNil(evidence.tools["gemini"])
+        XCTAssertNil(evidence.tools["cline"])
     }
 
     /// A missing `wired` is not a claim that a tool is wired, and a row

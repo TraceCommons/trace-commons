@@ -42,6 +42,15 @@ final class OnboardingRootsRowsTests: XCTestCase {
         )
     }
 
+    func testOffersClineSpecifically() {
+        XCTAssertTrue(
+            OnboardingRootsView.offeredKinds.contains(.cline),
+            "Cline has a row in the source registry, a settings key "
+                + "(cline_source) and a field on SessionRoots; the screen "
+                + "must offer it the way it offers Gemini CLI"
+        )
+    }
+
     /// Order is part of the contract: discovery appends Gemini last
     /// deliberately, because a shell written before the source existed
     /// indexes the first two candidates by position.

@@ -169,6 +169,7 @@ final class RoutingCallTests: XCTestCase {
         "max_uploads_per_day":100,"near_ai_configured":false,
         "claude_root_configured":true,"codex_root_configured":true,
         "claude_source_mode":"watch","codex_source_mode":"off","gemini_source_mode":"unset",
+        "cline_source_mode":"off",
         "ironwire":{"mode":"watch","port":9001,"token_dir":"/Users/x/ironwire"}}}
         """
         let view = try client.settings()
@@ -178,6 +179,7 @@ final class RoutingCallTests: XCTestCase {
         XCTAssertEqual(view.routingSourceModes.claude, "watch")
         XCTAssertEqual(view.routingSourceModes.codex, "off")
         XCTAssertEqual(view.routingSourceModes.gemini, "unset")
+        XCTAssertEqual(view.routingSourceModes.cline, "off")
     }
 
     /// A daemon that declared nothing answers no `ironwire` at all, and a

@@ -103,6 +103,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
         case "claude-code", "claude_code": return "Claude Code"
         case "codex": return "Codex"
         case "gemini-cli", "gemini_cli": return "Gemini CLI"
+        case "cline": return "Cline"
         case "antigravity": return "Antigravity"
         case "trajectory", "letta_trajectory": return "Letta trajectory"
         default:
@@ -481,20 +482,22 @@ struct DaemonSettingsView: Decodable, Equatable {
     let claudeSourceMode: String?
     let codexSourceMode: String?
     let geminiSourceMode: String?
+    let clineSourceMode: String?
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
     /// never mentioned.
     let ironwire: IronWireDeclarationView?
 
-    /// The three source modes as the routing surface takes them. Absent
+    /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
     /// therefore a tool in use -- never "not used".
     var routingSourceModes: RoutingSourceModes {
         RoutingSourceModes(
             claude: claudeSourceMode ?? "unset",
             codex: codexSourceMode ?? "unset",
-            gemini: geminiSourceMode ?? "unset"
+            gemini: geminiSourceMode ?? "unset",
+            cline: clineSourceMode ?? "unset"
         )
     }
 
@@ -511,6 +514,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case claudeSourceMode = "claude_source_mode"
         case codexSourceMode = "codex_source_mode"
         case geminiSourceMode = "gemini_source_mode"
+        case clineSourceMode = "cline_source_mode"
         case ironwire
     }
 }

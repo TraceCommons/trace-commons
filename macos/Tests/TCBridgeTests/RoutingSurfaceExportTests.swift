@@ -40,11 +40,12 @@ final class RoutingSurfaceExportTests: XCTestCase {
         claude: String = "watch",
         codex: String = "watch",
         gemini: String = "watch",
+        cline: String = "watch",
         evidence: RoutingEvidence?,
         copy: RoutingCopy
     ) -> [RoutingToolWord] {
         RoutingSurface.toolRows(
-            sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini),
+            sourceModes: RoutingSourceModes(claude: claude, codex: codex, gemini: gemini, cline: cline),
             evidence: evidence,
             copy: copy,
             calls: calls
@@ -205,7 +206,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
         guard let copy = copy() else { return }
         XCTAssertEqual(
             rows(evidence: nil, copy: copy).map(\.name),
-            ["Claude Code", "Codex", "Gemini CLI"]
+            ["Claude Code", "Codex", "Gemini CLI", "Cline"]
         )
     }
 
@@ -227,6 +228,24 @@ final class RoutingSurfaceExportTests: XCTestCase {
         )
         XCTAssertEqual(rendered[2].name, "Gemini CLI")
         XCTAssertEqual(rendered[2].word, "Not known")
+    }
+
+    /// Cline has no upstream row either, so the same sentence holds for it:
+    /// not known, never a verdict, on a machine where it is in daily use.
+    func testClineReadsNotKnownOnAMachineWhereItIsInUse() {
+        guard let copy = copy() else { return }
+        let rendered = rows(
+            evidence: RoutingEvidence(
+                outcome: .reachable,
+                tools: [
+                    "claude": RoutingToolRow(installed: true, wired: true),
+                    "codex": RoutingToolRow(installed: true, wired: true),
+                ]
+            ),
+            copy: copy
+        )
+        XCTAssertEqual(rendered[3].name, "Cline")
+        XCTAssertEqual(rendered[3].word, "Not known")
     }
 
     /// The three status states, rendered through the real payload.

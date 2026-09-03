@@ -231,4 +231,70 @@ final class SessionRootsTests: XCTestCase {
         XCTAssertEqual(roots.claude, .undecided, "answering Gemini must not answer for the others")
         XCTAssertEqual(roots.codex, .undecided)
     }
+
+    // MARK: - Cline
+
+    // Cline is optional exactly as Gemini is: absent means "never asked",
+    // an answer is carried, and an unanswered row cannot gate the start.
+
+    func testAnUndecidedClineIsOmittedRatherThanSentAsOff() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off,
+            gemini: .off
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(Set(decoded.keys), ["claude_source", "codex_source", "gemini_source"])
+    }
+
+    func testAnAnsweredClineIsCarried() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off,
+            cline: .watch(path: "/Users/someone/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks")
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(
+            try declaration(decoded, "cline_source"),
+            [
+                "mode": "watch",
+                "path": "/Users/someone/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+            ]
+        )
+    }
+
+    func testDecliningClineSaysOff() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off,
+            cline: .off
+        )
+        let decoded = try decode(try XCTUnwrap(roots.settingsJSON()))
+
+        XCTAssertEqual(try declaration(decoded, "cline_source"), ["mode": "off"])
+    }
+
+    func testClineCannotBlockContinue() {
+        // Same two-conjunct `roots_declared` as Gemini: Claude and Codex
+        // gate the start, nothing else does.
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .off
+        )
+        XCTAssertTrue(roots.isComplete, "an unanswered Cline row must not gate the daemon start")
+        XCTAssertNotNil(roots.settingsJSON())
+    }
+
+    func testClineIsAddressableByItsKind() {
+        var roots = SessionRoots()
+        roots[.cline] = .watch(path: "/Users/someone/cline-tasks")
+
+        XCTAssertEqual(roots.cline, .watch(path: "/Users/someone/cline-tasks"))
+        XCTAssertEqual(roots[.cline], .watch(path: "/Users/someone/cline-tasks"))
+        XCTAssertEqual(roots.claude, .undecided, "answering Cline must not answer for the others")
+        XCTAssertEqual(roots.codex, .undecided)
+        XCTAssertEqual(roots.gemini, .undecided)
+    }
 }
