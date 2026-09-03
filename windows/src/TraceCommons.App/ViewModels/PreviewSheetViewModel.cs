@@ -273,9 +273,31 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     public bool HasPiiLabels => PiiLabelsText.Length > 0;
 
     /// <summary>
-    /// One row per category scrubbing removed, for "What's in it".
+    /// One row per category scrubbing REMOVED, for "What's in it".
     /// </summary>
-    public ObservableCollection<string> RedactionRows { get; } = new();
+    /// <remarks>
+    /// Grouped by family, described, and counted by
+    /// <see cref="RedactionSummary.Rows"/> in the interop assembly, which is
+    /// where it can be tested. This collection only carries that decision to
+    /// the markup.
+    /// </remarks>
+    public ObservableCollection<RedactionSummaryRow> RemovedCategories { get; } = new();
+
+    /// <summary>
+    /// One row per category the scan FOUND AND DID NOT REMOVE.
+    /// </summary>
+    /// <remarks>
+    /// A separate list rather than a flag on the rows above, because these are
+    /// the opposite fact and they render under the opposite heading. The
+    /// daemon sends both in one map, and every shell used to draw the whole
+    /// map under "Removed by pattern" -- so a session with a surviving secret
+    /// reported it as a thing that had been taken out, on the one screen where
+    /// somebody is deciding whether to send it.
+    /// </remarks>
+    public ObservableCollection<RedactionSummaryRow> StillPresentCategories { get; } = new();
+
+    /// <summary>Whether anything was found and left in what would be sent.</summary>
+    public bool HasStillPresentCategories => StillPresentCategories.Count > 0;
 
     /// <summary>
     /// The scopes this upload asks for, restated at the moment of consent
@@ -731,15 +753,19 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
     private void FillManifest(PreviewSummary summary)
     {
-        RedactionRows.Clear();
-        foreach (KeyValuePair<string, int> pair in summary.Redactions)
+        RemovedCategories.Clear();
+        StillPresentCategories.Clear();
+        (IReadOnlyList<RedactionSummaryRow> removed,
+         IReadOnlyList<RedactionSummaryRow> stillPresent) =
+            RedactionSummary.Rows(summary.Redactions, summary.RedactionsDistinct);
+        foreach (RedactionSummaryRow row in removed)
         {
-            RedactionRows.Add(
-                string.Format(
-                    CultureInfo.CurrentCulture,
-                    "{0} × {1}",
-                    pair.Value,
-                    pair.Key.Replace('_', ' ')));
+            RemovedCategories.Add(row);
+        }
+
+        foreach (RedactionSummaryRow row in stillPresent)
+        {
+            StillPresentCategories.Add(row);
         }
 
         Permissions.Clear();
@@ -758,6 +784,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         Raise(nameof(ResidualRiskText));
         Raise(nameof(PiiLabelsText));
         Raise(nameof(HasPiiLabels));
+        Raise(nameof(HasStillPresentCategories));
         Raise(nameof(RedactionBadge));
         Raise(nameof(HasRedactionBadge));
         Raise(nameof(PermissionsBadge));

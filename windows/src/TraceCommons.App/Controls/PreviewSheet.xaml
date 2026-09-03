@@ -34,6 +34,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
@@ -285,13 +286,112 @@
                                    Style="{StaticResource TcBodyTextStyle}"
                                    TextWrapping="Wrap" />
                     </Border>
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.RedactionRows, Mode=OneWay}">
+                    <!--
+                        One row per category, with what that category IS. The
+                        card's one line figure is the only at a glance part
+                        otherwise, and it is a count, not a list. No matched
+                        text ever appears here: the value is gone by
+                        construction and the row says what KIND of thing left,
+                        not what it was.
+
+                        The rows, their descriptions and their order are
+                        RedactionSummary.Rows', in TraceCommons.Interop, where
+                        they are tested. An unrecognised family keeps a neutral
+                        description and is never dropped, because hiding a
+                        category this build has no words for would understate
+                        what happened.
+                    -->
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RemovedCategories, Mode=OneWay}">
                         <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="x:String">
-                                <TextBlock Text="{x:Bind}" Style="{StaticResource TcBodyTextStyle}" />
+                            <DataTemplate x:DataType="interop:RedactionSummaryRow">
+                                <StackPanel Spacing="2" Margin="0,0,0,8">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{x:Bind Display}"
+                                                   Style="{StaticResource TcBodyTextStyle}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{x:Bind CountText}"
+                                                   Style="{StaticResource TcMonoFigureTextStyle}"
+                                                   VerticalAlignment="Center" />
+                                    </Grid>
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind DetailText}"
+                                               Visibility="{x:Bind HasDetail}"
+                                               Style="{StaticResource TcCaptionSmallTextStyle}"
+                                               Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+
+                    <!--
+                        The other half, and the reason this panel is worth
+                        building. residual_secret_at counts a secret the scan
+                        DETECTED AND DID NOT REMOVE, it arrives in the same map
+                        as every genuine removal, and every shell used to draw
+                        that whole map under a heading saying "removed". A
+                        session with a surviving secret therefore reported it as
+                        a thing that had been taken out.
+
+                        Collapsed entirely when there are none, so a clean
+                        session carries no alarm.
+                    -->
+                    <StackPanel Spacing="6"
+                                Margin="0,10,0,0"
+                                Visibility="{x:Bind ViewModel.HasStillPresentCategories, Mode=OneWay}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE7BA;"
+                                      FontSize="14"
+                                      Foreground="{ThemeResource TcGoldTextBrush}"
+                                      VerticalAlignment="Center" />
+                            <TextBlock Text="Found, and still in what would be sent"
+                                       Style="{StaticResource TcTitleCardTextStyle}"
+                                       Foreground="{ThemeResource TcGoldTextBrush}"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                        <ItemsControl ItemsSource="{x:Bind ViewModel.StillPresentCategories, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:RedactionSummaryRow">
+                                    <StackPanel Spacing="2" Margin="0,0,0,8">
+                                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{x:Bind Description}"
+                                                       Style="{StaticResource TcBodyTextStyle}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{x:Bind CountText}"
+                                                       Style="{StaticResource TcMonoFigureTextStyle}"
+                                                       VerticalAlignment="Center" />
+                                        </Grid>
+                                        <!-- The schema paths, so a contributor
+                                             can go and look. Schema shaped
+                                             identifiers by construction, never
+                                             transcript text. -->
+                                        <TextBlock Text="{x:Bind DetailText}"
+                                                   Visibility="{x:Bind HasDetail}"
+                                                   Style="{StaticResource TcMonoCodeTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+
+                    <!-- A panel that enumerates categories makes the app look
+                         more thorough than it is, which is exactly when this
+                         sentence earns its place. Word for word what the
+                         footer and the queue print, so a person who read it
+                         there recognises it here. -->
+                    <TextBlock Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,6,0,0" />
 
                     <StackPanel Spacing="4"
                                 Margin="0,10,0,0"
