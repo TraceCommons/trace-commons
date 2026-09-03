@@ -1067,7 +1067,7 @@ struct WhatsInItTab: View {
 
     private func summaryRow(_ row: RedactionSummaryRow) -> some View {
         VStack(alignment: .leading, spacing: TC.Space.micro) {
-            Text(countLine(row))
+            Text(row.countLine)
                 .font(TC.Font_.body)
                 .foregroundStyle(TC.inkPrimary)
             Text(row.description)
@@ -1083,16 +1083,6 @@ struct WhatsInItTab: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
-    }
-
-    /// "185 local path (12 distinct)". The distinct figure only when it says
-    /// something the occurrence count did not -- the same rule the queue
-    /// card's one-line figure follows, for the same reason.
-    private func countLine(_ row: RedactionSummaryRow) -> String {
-        guard row.distinct > 0, row.distinct < row.occurrences else {
-            return "\(row.occurrences) \(row.display)"
-        }
-        return "\(row.occurrences) \(row.display) (\(row.distinct) distinct)"
     }
 
     /// The one card in this tab that is drawn to be found: a session where

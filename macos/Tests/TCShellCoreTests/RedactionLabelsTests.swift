@@ -120,10 +120,13 @@ final class RedactionLabelsTests: XCTestCase {
     }
 
     func testDistinctIsOmittedWhenEveryOccurrenceIsItsOwnValue() {
-        // "3 secret (3 distinct)" is noise: it says the same thing twice.
+        // "3 local path (3 distinct)" is noise: it says the same thing twice.
+        //
+        // Keyed on `local_path` because that is a label distinct counts can
+        // actually exist for -- see `testASecretsOnlySessionHasNoDistinctCounts`.
         XCTAssertEqual(
-            RedactionLabels.line(occurrences: ["secret": 3], distinct: ["secret": 3]),
-            "3 secret"
+            RedactionLabels.line(occurrences: ["local_path": 3], distinct: ["local_path": 3]),
+            "3 local path"
         )
     }
 
@@ -132,6 +135,30 @@ final class RedactionLabelsTests: XCTestCase {
             RedactionLabels.line(occurrences: ["secret": 3], distinct: [:]),
             "3 secret"
         )
+    }
+
+    /// The rule the other distinct cases are the edges of, on the input that
+    /// actually arrives most often.
+    ///
+    /// `redactions_distinct` is derived from the placeholder map, and
+    /// `apply_placeholder_regex` mints a numbered placeholder for exactly two
+    /// labels: `local_path` and `private_email`. Secrets are replaced with
+    /// fixed tokens and mint none. So a secrets-only session carries an EMPTY
+    /// distinct map -- and because `PreviewSummary.redactionsDistinct` has no
+    /// `skip_serializing_if`, a shell reading a preview always sees the key,
+    /// as `{}`.
+    ///
+    /// A missing entry therefore means "no distinct count is available for
+    /// this label", never "the count is zero". Rendering `(0 distinct)`
+    /// beside a non-zero occurrence count would read as "nothing was
+    /// removed", which is the one direction this line must not fail in.
+    func testASecretsOnlySessionHasNoDistinctCounts() {
+        let line = RedactionLabels.line(
+            occurrences: ["secret": 1, "secret:openai_api_key": 1],
+            distinct: [:]
+        )
+        XCTAssertEqual(line, "1 secret  ·  1 secret:openai api key")
+        XCTAssertFalse(line.contains("distinct"), "no suffix at all, and never (0 distinct)")
     }
 
     func testBiggestCountLeadsAndTiesBreakOnLabel() {
@@ -144,10 +171,10 @@ final class RedactionLabelsTests: XCTestCase {
 
     func testADistinctCountAboveItsOccurrenceCountIsIgnored() {
         // Cannot happen from a correct daemon; if it ever does, saying
-        // "3 secret (9 distinct)" would be worse than saying nothing.
+        // "3 local path (9 distinct)" would be worse than saying nothing.
         XCTAssertEqual(
-            RedactionLabels.line(occurrences: ["secret": 3], distinct: ["secret": 9]),
-            "3 secret"
+            RedactionLabels.line(occurrences: ["local_path": 3], distinct: ["local_path": 9]),
+            "3 local path"
         )
     }
 

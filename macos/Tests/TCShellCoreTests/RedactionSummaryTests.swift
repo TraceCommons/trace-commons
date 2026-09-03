@@ -30,19 +30,67 @@ final class RedactionSummaryTests: XCTestCase {
 
     /// Nine secret patterns are one `secret` row, not nine rows. The
     /// sub-labels go on a detail line.
+    ///
+    /// The distinct map is empty here because it always is for secrets, and
+    /// the assertion is `0` for the same reason -- see
+    /// `testASecretsOnlySessionCarriesNoDistinctCountAndRendersNoSuffix`.
+    /// There is no family this case could be re-pointed at to exercise a
+    /// non-zero distinct count with sub-labels: the two labels that mint
+    /// placeholders, `local_path` and `private_email`, are bare labels and
+    /// have no sub-labels at all.
     func testSubLabelsCollapseIntoTheirFamily() {
         let out = RedactionSummary.rows(
             occurrences: ["secret:contextual_entropy": 3, "secret:pem_private_key": 1, "secret": 2],
-            distinct: ["secret:contextual_entropy": 2, "secret:pem_private_key": 1, "secret": 2]
+            distinct: [:]
         )
         XCTAssertEqual(out.removed.count, 1)
         XCTAssertEqual(out.removed[0].family, "secret")
         XCTAssertEqual(out.removed[0].occurrences, 6)
-        XCTAssertEqual(out.removed[0].distinct, 5)
+        XCTAssertEqual(out.removed[0].distinct, 0)
         XCTAssertEqual(
             out.removed[0].detail,
             ["contextual entropy", "pem private key"]
         )
+    }
+
+    /// The count line a row renders, and the rule it must not break.
+    ///
+    /// `redactions_distinct` comes from the placeholder map, which only
+    /// `local_path` and `private_email` write to. A secrets-only session
+    /// therefore carries an empty distinct map -- always present on the wire
+    /// as `{}`, never absent -- so every secret row has `distinct == 0`.
+    ///
+    /// `(0 distinct)` beside a non-zero occurrence count reads as "nothing
+    /// was removed", which is the exact opposite of what happened. The
+    /// suffix is omitted instead.
+    func testASecretsOnlySessionCarriesNoDistinctCountAndRendersNoSuffix() {
+        let out = RedactionSummary.rows(
+            occurrences: ["secret": 1, "secret:openai_api_key": 1],
+            distinct: [:]
+        )
+        XCTAssertEqual(out.removed.count, 1)
+        XCTAssertEqual(out.removed[0].distinct, 0)
+        XCTAssertEqual(out.removed[0].countLine, "2 secret")
+        XCTAssertFalse(out.removed[0].countLine.contains("distinct"))
+    }
+
+    /// The suffix does appear where a distinct count can exist, and says
+    /// something the occurrence count did not.
+    func testACountLineCarriesTheDistinctFigureWhenItAddsSomething() {
+        let out = RedactionSummary.rows(
+            occurrences: ["local_path": 185],
+            distinct: ["local_path": 12]
+        )
+        XCTAssertEqual(out.removed[0].countLine, "185 local path (12 distinct)")
+    }
+
+    /// Equal counts say the same thing twice.
+    func testACountLineOmitsADistinctFigureThatMatchesItsOccurrences() {
+        let out = RedactionSummary.rows(
+            occurrences: ["local_path": 3],
+            distinct: ["local_path": 3]
+        )
+        XCTAssertEqual(out.removed[0].countLine, "3 local path")
     }
 
     /// A secret that was DETECTED AND NOT REMOVED. Putting it in `removed`

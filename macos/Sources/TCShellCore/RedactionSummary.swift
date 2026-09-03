@@ -16,6 +16,26 @@ public struct RedactionSummaryRow: Equatable {
     /// `log_residual_secret_locations` depends on the same property -- never
     /// contributor strings. Empty when the family had no sub-labels.
     public let detail: [String]
+
+    /// "185 local path (12 distinct)", or "2 secret".
+    ///
+    /// The suffix appears only when it says something the occurrence count
+    /// did not. `distinct` comes from the placeholder map, which only
+    /// `local_path` and `private_email` ever write to, so it is zero for
+    /// every other family -- and a zero there means "no distinct count is
+    /// available", never "no distinct values". Printing `(0 distinct)` beside
+    /// a non-zero occurrence count would read as "nothing was removed",
+    /// which is the one direction this panel must not fail in.
+    ///
+    /// Here rather than in the view for the same reason
+    /// `RedactionLabels.line` is: it is the part of that row with a right
+    /// and a wrong answer, and `swift test` cannot reach a SwiftUI body.
+    public var countLine: String {
+        guard distinct > 0, distinct < occurrences else {
+            return "\(occurrences) \(display)"
+        }
+        return "\(occurrences) \(display) (\(distinct) distinct)"
+    }
 }
 
 /// What scrubbing took out of this session, and what it found and left in.
