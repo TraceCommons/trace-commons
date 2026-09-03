@@ -211,6 +211,16 @@ pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
     }
 }
 
+/// What a redaction mark in the transcript is, named on hover.
+///
+/// The spec asks for a LABELLED chip. A `GtkTextTag` colours a run and can
+/// carry no label of its own, so the name arrives as the tooltip over the
+/// mark -- which is the same fact in the mechanism this shell has, rather
+/// than a chip drawn as a widget and a transcript that stops being text.
+pub fn redaction_mark_tooltip(kind: &str) -> String {
+    format!("Removed: {kind}")
+}
+
 /// The back control at the head of a folder's sessions.
 pub const ALL_FOLDERS: &str = "All folders";
 
@@ -1883,6 +1893,11 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_redaction_mark_names_what_left() {
+        assert_eq!(redaction_mark_tooltip("local path"), "Removed: local path");
+    }
 
     #[test]
     fn a_folder_summary_inflects_its_session_count() {

@@ -1586,7 +1586,62 @@ fn chunk_view(text: &str) -> gtk::TextView {
     let buffer = view.buffer();
     buffer.set_text(text);
     highlight_redactions(&buffer, text);
+    label_placeholders(&view, text);
     view
+}
+
+/// Name each redaction mark, on hover.
+///
+/// `highlight_redactions` makes a mark legible; this says WHAT was taken out
+/// there. The two are separate because they mark different sets: the wash
+/// covers `[REDACTED...]` too, while only a `<PRIVATE_LABEL_n>` token
+/// carries a label to report -- see `crate::placeholders`.
+///
+/// The ranges are scanned once and converted to CHARACTER offsets here,
+/// because that is the unit a `GtkTextIter` counts in while
+/// `placeholders::scan` reports bytes. Doing it per motion event would
+/// re-walk the chunk on every pixel of a hover.
+fn label_placeholders(view: &gtk::TextView, text: &str) {
+    let mut marks: Vec<(i32, i32, String)> = Vec::new();
+    let mut byte = 0usize;
+    let mut chars = 0i32;
+    for found in crate::placeholders::scan(text) {
+        chars += text[byte..found.start].chars().count() as i32;
+        let width = text[found.start..found.end].chars().count() as i32;
+        marks.push((
+            chars,
+            chars + width,
+            copy::redaction_mark_tooltip(&crate::placeholders::display(&found.label)),
+        ));
+        chars += width;
+        byte = found.end;
+    }
+    if marks.is_empty() {
+        return;
+    }
+    view.set_has_tooltip(true);
+    view.connect_query_tooltip(move |view, x, y, keyboard, tooltip| {
+        // A keyboard tooltip has no pointer position to resolve, and this
+        // mark is a property of a place rather than of the widget.
+        if keyboard {
+            return false;
+        }
+        let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
+        let Some(iter) = view.iter_at_location(bx, by) else {
+            return false;
+        };
+        let offset = iter.offset();
+        match marks
+            .iter()
+            .find(|(start, end, _)| offset >= *start && offset < *end)
+        {
+            Some((_, _, name)) => {
+                tooltip.set_text(Some(name));
+                true
+            }
+            None => false,
+        }
+    });
 }
 
 /// A readable window around a search hit, and where inside it the hit is.
