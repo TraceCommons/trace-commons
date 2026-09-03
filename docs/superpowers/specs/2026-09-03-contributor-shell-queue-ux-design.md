@@ -220,11 +220,21 @@ those are the two answers a worried contributor most needs to tell apart.
 Add one FFI entry point:
 
 ```c
-/* Count occurrences of needle in the PRE-redaction session text.
- * Returns the match count, or -1 on error. Reports a COUNT ONLY:
+/* Count occurrences of needle in the PRE-redaction session text of an
+ * entry. Returns the match count, or -1 on error. Reports a COUNT ONLY:
  * no offsets, no context, no bytes. */
-int32_t tc_preview_search_original(const tc_preview*, const char* needle);
+int32_t tc_search_original(tc_handle*, const char* entry_id, const char* needle);
 ```
+
+It takes the handle and an entry id rather than a `tc_preview*`, which is
+not a detail. `tc_preview` holds exactly `body` and `summary_json`, both
+post-redaction; it has no pre-redaction bytes and must not acquire any.
+Hanging the raw session off the preview would keep an unredacted transcript
+resident in the shell's address space for as long as the sheet stays open,
+which is a worse property than the one this call exists to provide. Taking
+the handle instead lets the daemon re-read the session file, count, and drop
+it -- so the raw bytes live for the duration of one call, on the side of the
+boundary that already reads them.
 
 The result renders as:
 
