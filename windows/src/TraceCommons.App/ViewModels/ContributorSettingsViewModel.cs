@@ -51,6 +51,25 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private RoutingModes _routingModes = new();
 
     /// <summary>
+    /// What a running IronWire published about itself, as far as this app has
+    /// asked.
+    /// </summary>
+    /// <remarks>
+    /// Starts at nothing found rather than null, because that is the state of
+    /// a machine nobody has asked about yet AND of a machine without
+    /// IronWire, and this card says the same thing about both: here are the
+    /// fields, say which port.
+    /// </remarks>
+    private RoutingDiscovery _routingDiscovery = RoutingDiscovery.Nothing;
+
+    /// <summary>
+    /// Whether the contributor has opened or closed the port-and-folder
+    /// disclosure. Null is "they have not said", and then it follows what
+    /// discovery found.
+    /// </summary>
+    private bool? _routingOverrideOpen;
+
+    /// <summary>
     /// Whether a daemon event may re-ask IronWire, and whether an answer
     /// still describes the declaration this machine holds now. The rules and
     /// their reasons live in <see cref="RoutingRefreshGate"/>, where they are
@@ -122,6 +141,56 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public string RoutingApplyText => _routingCopy?.Apply ?? string.Empty;
 
+    public string RoutingConnectText => _routingCopy?.Connect ?? string.Empty;
+
+    public string RoutingLookAgainText => _routingCopy?.LookAgain ?? string.Empty;
+
+    public string RoutingOverrideTitle => _routingCopy?.OverrideTitle ?? string.Empty;
+
+    /// <summary>
+    /// What the machine already knows, in the shared sentence -- for both
+    /// states, because a machine without IronWire is the ordinary machine and
+    /// gets a sentence rather than an error.
+    /// </summary>
+    public string RoutingDiscoveryText => _routingCopy is null
+        ? string.Empty
+        : TraceCommons.Interop.RoutingTools.DiscoveryLine(_routingCopy, _routingDiscovery);
+
+    /// <summary>
+    /// Whether to offer the one-press connect.
+    /// </summary>
+    /// <remarks>
+    /// Only where there is something to connect to and nothing is declared.
+    /// Where something is declared the switch is already on and this would be
+    /// a second Apply.
+    /// </remarks>
+    public bool RoutingConnectOffered => _routingDiscovery.Found && !_routingDeclared && !_isBusy;
+
+    /// <summary>
+    /// Whether the port and folder are shown open.
+    /// </summary>
+    /// <remarks>
+    /// Follows what discovery found until the contributor says otherwise.
+    /// Where nothing was discovered they are the only way to answer, so they
+    /// are open: this inverts the default, it does not remove the manual
+    /// path.
+    /// </remarks>
+    public bool RoutingOverrideOpen
+    {
+        get => _routingOverrideOpen
+            ?? !TraceCommons.Interop.RoutingTools.OverrideIsCollapsed(_routingDiscovery);
+        set
+        {
+            if (_routingOverrideOpen == value)
+            {
+                return;
+            }
+
+            _routingOverrideOpen = value;
+            Raise(nameof(RoutingOverrideOpen));
+        }
+    }
+
     /// <summary>
     /// Whether IronWire is declared on this machine.
     /// </summary>
@@ -139,6 +208,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             if (Set(ref _routingDeclared, value))
             {
                 Raise(nameof(RoutingControlsEnabled));
+                Raise(nameof(RoutingConnectOffered));
             }
         }
     }
@@ -277,6 +347,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             {
                 Raise(nameof(IsNotBusy));
                 Raise(nameof(RoutingControlsEnabled));
+                Raise(nameof(RoutingConnectOffered));
             }
         }
     }
@@ -394,6 +465,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
             FillSettings(snapshot);
+            // Asked before the port box is filled, so a discovered port can
+            // reach it. It reads a file, opens no connection and declares
+            // nothing.
+            await DiscoverRoutingAsync().ConfigureAwait(true);
             FillRouting(snapshot, status);
 
             DaemonResponse optionsResponse = await _host
@@ -765,6 +840,79 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         await WriteRoutingAsync(true).ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// Asks what the machine already knows, and shows it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Writes nothing and reads nothing of the contributor's.</b> It reads
+    /// one file IronWire left, learns a port from it, and puts that port in a
+    /// box. Declaring is still the switch and the two buttons; a discovery
+    /// that declared on its own would be this window announcing a local
+    /// service nobody mentioned, which is what the declaration exists to
+    /// stop.
+    /// </para>
+    /// <para>
+    /// A call that did not run degrades to nothing found, which is also what
+    /// a machine without IronWire answers. Both mean there is nothing to
+    /// offer, and neither is a fault.
+    /// </para>
+    /// </remarks>
+    public async Task DiscoverRoutingAsync()
+    {
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.DiscoverRouting)
+            .ConfigureAwait(true);
+        _routingDiscovery = response.IsError || response.Result is null
+            ? RoutingDiscovery.Nothing
+            : RoutingDiscovery.Parse(response.Result.Value.GetRawText());
+        Raise(nameof(RoutingDiscoveryText));
+        Raise(nameof(RoutingConnectOffered));
+        Raise(nameof(RoutingOverrideOpen));
+    }
+
+    /// <summary>
+    /// Asks again, then repaints the port box if nothing is declared.
+    /// </summary>
+    /// <remarks>
+    /// For the contributor who started IronWire after opening this window.
+    /// Offered rather than polled: this card does not go looking at a file on
+    /// a timer.
+    /// </remarks>
+    public async Task LookAgainAsync()
+    {
+        if (!IsLoaded || IsBusy)
+        {
+            return;
+        }
+
+        await DiscoverRoutingAsync().ConfigureAwait(true);
+        if (!RoutingDeclared)
+        {
+            RoutingPort = TraceCommons.Interop.RoutingTools.ShownPort(
+                null,
+                _routingDiscovery.Port);
+        }
+    }
+
+    /// <summary>
+    /// The shortcut past the two boxes: turn it on and check, in one press.
+    /// </summary>
+    /// <remarks>
+    /// It writes the port that is ON SCREEN -- the discovered one, or
+    /// whatever was typed over it -- so a press cannot declare a number
+    /// different from the one displayed.
+    /// </remarks>
+    public async Task ConnectRoutingAsync()
+    {
+        if (!IsLoaded || IsBusy || RoutingDeclared)
+        {
+            return;
+        }
+
+        await WriteRoutingAsync(true).ConfigureAwait(true);
+    }
+
     private async Task WriteRoutingAsync(bool on)
     {
         _routingEvidence = null;
@@ -1017,7 +1165,13 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         RoutingDeclared = declared;
         if (fillDeclarationFields)
         {
-            RoutingPort = settings?.Routing?.Port ?? TraceCommons.Interop.RoutingTools.DefaultPort;
+            // The precedence is the rule the whole feature turns on: a
+            // declared port always wins, a discovered one fills in only where
+            // there is none, and the conventional number is what is left. See
+            // RoutingTools.ShownPort.
+            RoutingPort = TraceCommons.Interop.RoutingTools.ShownPort(
+                settings?.Routing?.Port,
+                _routingDiscovery.Port);
             RoutingTokenDir = settings?.Routing?.TokenDir ?? string.Empty;
         }
 

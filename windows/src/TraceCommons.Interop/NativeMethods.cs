@@ -248,6 +248,15 @@ internal static class NativeMethods
     internal static extern IntPtr tc_routing_unreachable_line(int port);
 
     /// <summary>
+    /// The routing surface's discovery sentence, already assembled.
+    /// <paramref name="port"/> is what <c>discover_routing</c> reported, or 0
+    /// for a machine that published no pointer -- which is the ordinary
+    /// machine and NOT an error. A port outside 1..65535 is that same case.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_routing_discovery_line(int port);
+
+    /// <summary>
     /// The routing surface's "Last checked ..." sentence, assembled around
     /// this shell's own humanised time. NULL, with an error recorded, for a
     /// NULL or non-UTF-8 argument: "Last checked " with nothing after it is

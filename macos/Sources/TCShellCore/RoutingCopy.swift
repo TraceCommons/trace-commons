@@ -27,9 +27,17 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
     public let intro: String
     public let toggle: String
     public let appliesAtOnce: String
+    /// The one action offered when discovery already answered the question.
+    public let connect: String
+    /// The disclosure the port and folder sit behind once it has.
+    public let overrideTitle: String
+    public let lookAgain: String
     public let portTitle: String
     public let portNote: String
     public let folderTitle: String
+    /// The folder control's own action on this shell, which is a chooser
+    /// rather than a box to type a path into.
+    public let chooseFolder: String
     public let folderNote: String
     public let apply: String
     public let checking: String
@@ -52,9 +60,13 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
         case intro
         case toggle
         case appliesAtOnce = "applies_at_once"
+        case connect
+        case overrideTitle = "override_title"
+        case lookAgain = "look_again"
         case portTitle = "port_title"
         case portNote = "port_note"
         case folderTitle = "folder_title"
+        case chooseFolder = "choose_folder"
         case folderNote = "folder_note"
         case apply
         case checking

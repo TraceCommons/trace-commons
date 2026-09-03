@@ -41,6 +41,7 @@ private final class RecordingDaemon: DaemonCalling {
 private let routingCalls = RoutingCalls(
     tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
     unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    discoveryLine: { TCRoutingCopy.discoveryLine(port: $0) },
     toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
     toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
     stateLine: { TCRoutingCopy.stateLine(state: $0) },
