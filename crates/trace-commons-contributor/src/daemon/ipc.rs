@@ -44,8 +44,11 @@
 //!
 //! No path, token, invite code, claim, device key, or trace content
 //! appears in any response, error string, or pushed event. `error.message`
-//! is a fixed label. Queue entries carry `project_label`, never
-//! `project_key` or `path`. Project labels are derived by the daemon from
+//! is a fixed label. Queue entries carry `project_label` and, for display
+//! only, `project_path` -- never `project_key` or `path`. The path is on
+//! this socket and nowhere else: see `display_path` for the bound, and
+//! `no_sink_carries_a_project_path` for what enforces it. Project labels
+//! are derived by the daemon from
 //! the key and are never a string a caller supplied.
 //!
 //! **The preview exemption.** `"preview"`'s `opening_prompt`,
@@ -828,6 +831,41 @@ fn regroup_subagent_entries(queue: &mut Queue) -> bool {
     true
 }
 
+/// A project key rendered for display: `~`-abbreviated, never modified
+/// otherwise.
+///
+/// This is the ONE place in this crate that deliberately puts a local
+/// filesystem path on the socket, and the bound is stated where the
+/// function is rather than in a comment somewhere else:
+///
+/// > A path may be rendered. It may not be logged, audited, notified, or
+/// > persisted to history.
+///
+/// `project_label` remains the basename and remains the only project string
+/// that reaches `daemon-audit.jsonl`, notification text, or a
+/// `HistoryRecord` -- see `an_audit_entry_never_carries_a_path` and
+/// `no_sink_carries_a_project_path`. The relaxation exists because
+/// `disambiguated_label` can keep two projects DISTINCT (`api` and
+/// `api (3f9c)`) but can never make them IDENTIFIABLE, and a contributor
+/// deciding what to upload from which repository needs the second.
+pub fn display_path(project_key: &str) -> String {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return UNKNOWN_PROJECT_KEY.to_string();
+    }
+    let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| h.to_string_lossy().to_string())
+        .filter(|h| !h.is_empty())
+    else {
+        return project_key.to_string();
+    };
+    match project_key.strip_prefix(&home) {
+        Some(rest) if rest.is_empty() => "~".to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!("~{rest}"),
+        _ => project_key.to_string(),
+    }
+}
+
 pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
     serde_json::json!({
         "entry_id": e.entry_id,
@@ -839,6 +877,19 @@ pub fn entry_value(e: &super::queue::QueueEntry) -> serde_json::Value {
         "declared_source": e.declared_source,
         "project_id": project_id_for(&e.project_key),
         "project_label": e.project_label,
+        // Rendered, never logged -- see `display_path`.
+        "project_path": display_path(&e.project_key),
+        // Only when the session ran somewhere other than the project root,
+        // which is the fact normalization discards and the folder detail
+        // view puts back. Null rather than a repeat of `project_path`, so a
+        // shell can render the line only when it says something.
+        "session_path": e
+            .session_cwd
+            .as_deref()
+            .map(display_path)
+            .filter(|p| p != &display_path(&e.project_key))
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
         "size_bytes": e.size_bytes,
         "discovered_at": e.discovered_at,
         "state": e.state,
@@ -929,6 +980,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     serde_json::json!({
                         "project_id": project_id_for(key),
                         "project_label": disambiguated_label(key, &known),
+                        "project_path": display_path(key),
                         "mode": policy.resolve(key),
                         "added_at": entry.added_at,
                         "configured": true,
@@ -939,6 +991,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     serde_json::json!({
                         "project_id": project_id_for(key),
                         "project_label": disambiguated_label(key, &known),
+                        "project_path": display_path(key),
                         "mode": policy.resolve(key),
                         "added_at": serde_json::Value::Null,
                         "configured": false,
@@ -5286,8 +5339,16 @@ mod tests {
         assert_eq!(result["codex_root_configured"], true);
     }
 
+    /// The session file's path never crosses the socket, and the only path
+    /// that does is the rendered project directory.
+    ///
+    /// This asserted "no path at all" until `project_path` was added.
+    /// Relaxing it to "no path but that one" is the whole of the
+    /// relaxation, and it is stated as an equality rather than a substring
+    /// check so that a second path appearing on this shape fails here --
+    /// `display_path`'s doc comment carries the reasoning.
     #[test]
-    fn a_queue_entry_on_the_wire_carries_no_local_path() {
+    fn a_queue_entry_on_the_wire_carries_no_session_file_path() {
         use crate::daemon::queue::{QueueEntry, entry_id_for};
         let e = QueueEntry {
             entry_id: entry_id_for("sha256:aa"),
@@ -5315,10 +5376,19 @@ mod tests {
             subagents_dropped: 0,
             observed_modified_at: None,
         };
-        let body = serde_json::to_string(&entry_value(&e)).unwrap();
+        let v = entry_value(&e);
+        let body = serde_json::to_string(&v).unwrap();
         assert!(
-            !body.contains("/Users/z"),
-            "path leaked to the wire: {body}"
+            !body.contains(".claude"),
+            "the session file's path leaked to the wire: {body}"
+        );
+        assert_eq!(
+            v["project_path"], "/Users/z/code/secret-client-project",
+            "the project directory is the one path this shape may carry"
+        );
+        assert!(
+            body.matches("/Users/z").count() == 1,
+            "exactly one path, and it is project_path: {body}"
         );
         assert!(body.contains("secret-client-project"));
     }
@@ -5470,6 +5540,74 @@ mod tests {
             "the adapter that loads it must stay reportable"
         );
         assert_eq!(v["declared_source"], "antigravity");
+    }
+
+    #[test]
+    fn a_queue_entry_carries_a_displayable_project_path() {
+        let mut e = card_entry();
+        e.project_key = "/tmp/somewhere/repo".to_string();
+        e.session_cwd = Some("/tmp/somewhere/repo/crates/inner".to_string());
+
+        let v = entry_value(&e);
+        assert_eq!(v["project_path"], "/tmp/somewhere/repo");
+        assert_eq!(v["session_path"], "/tmp/somewhere/repo/crates/inner");
+    }
+
+    #[test]
+    fn a_home_relative_project_path_is_abbreviated() {
+        let home = std::env::var("HOME").expect("HOME is set in the test environment");
+        assert_eq!(display_path(&format!("{home}/code/api")), "~/code/api");
+        assert_eq!(display_path("/opt/elsewhere"), "/opt/elsewhere");
+    }
+
+    #[test]
+    fn the_unknown_bucket_has_no_path_to_show() {
+        assert_eq!(display_path(UNKNOWN_PROJECT_KEY), UNKNOWN_PROJECT_KEY);
+    }
+
+    #[test]
+    fn session_path_is_absent_when_it_matches_the_project() {
+        let mut e = card_entry();
+        e.project_key = "/tmp/somewhere/repo".to_string();
+        e.session_cwd = Some("/tmp/somewhere/repo".to_string());
+        assert!(entry_value(&e)["session_path"].is_null());
+    }
+
+    /// The path is on the socket and nowhere else.
+    ///
+    /// Deliberately asserts over the SINKS rather than over `display_path`:
+    /// the risk is not that this function is wrong, it is that some later
+    /// change pipes its output into an audit row or a notification. The
+    /// audit sink has its own long-standing guard
+    /// (`an_audit_entry_never_carries_a_path`); this covers the history
+    /// record, which gained a project field in the same change.
+    #[test]
+    fn no_sink_carries_a_project_path() {
+        let key = "/tmp/somewhere/secret-client-name";
+        let record = crate::daemon::history::HistoryRecord {
+            submission_id: uuid::Uuid::new_v4(),
+            submitted_at: chrono::Utc::now(),
+            project_id: crate::daemon::policy::project_id_for(key),
+            project_label: crate::daemon::policy::project_label_for(key),
+            source: "claude_code".to_string(),
+            session_hash: "sha256:abc".to_string(),
+            status: "accepted".to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !json.contains("/tmp/somewhere"),
+            "a history record must never carry a path: {json}"
+        );
+        assert!(
+            !json.contains(&crate::daemon::ipc::display_path(key)),
+            "not even an abbreviated one: {json}"
+        );
     }
 
     /// A native session declares nothing and must not grow an empty label.
