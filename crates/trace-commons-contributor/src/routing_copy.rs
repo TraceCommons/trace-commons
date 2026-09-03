@@ -106,17 +106,34 @@ pub const TOOL_GEMINI: &str = "Gemini CLI";
 
 /// The one paragraph that has to be true.
 ///
-/// The sentence it replaced promised that IronWire "keeps what your tools
+/// The sentence it replaced promised that the proxy "keeps what your tools
 /// send to a model private" and that this page "can tell you which of your
 /// tools are covered". The first is a claim about a destination this app
 /// cannot see; the second was not per-tool at all. What is left is what the
-/// evidence supports: IronWire is asked, per tool, and the answer is about
-/// the first hop on this machine.
-pub const IRONWIRE_INTRO: &str = "IronWire runs on this machine. Trace Commons asks it which of your tools are set to \
-     send through it, and says so below, one tool at a time. That is a fact about this machine \
-     alone: it says where a request goes first, not what happens to it afterwards.";
+/// evidence supports: a record on this machine is read, per tool, and the
+/// answer is about the first hop.
+///
+/// # Why the proxy is not a character here
+///
+/// It used to be. The vendor ran, answered, kept files and had a name, and
+/// a contributor had to learn all of that before they could read a single
+/// word about their own tools. This surface now has exactly two actors --
+/// this app, and the contributor's tools -- and the proxy appears only as
+/// what it is to us: a record kept on this machine that we can read or
+/// cannot. Nothing below names a vendor, and
+/// [`the_tools_surface_says_nothing_it_should_not`] holds that.
+///
+/// The cost is real and worth stating: the failure sentences no longer say
+/// what to go start. What they have left is the port and the folder, which
+/// are the two things a contributor can actually act on from this window.
+pub const IRONWIRE_INTRO: &str = concat!(
+    crate::app_name!(),
+    " can read a record kept on this machine of where your tools send their requests first, \
+     and says so below, one tool at a time. That is a fact about this machine alone: it says \
+     where a request goes first, not what happens to it afterwards."
+);
 
-pub const IRONWIRE_TOGGLE: &str = "Use IronWire on this machine";
+pub const IRONWIRE_TOGGLE: &str = "Read the local record on this machine";
 
 /// Said out loud because the obvious worry is that it is not true.
 /// Nothing here waits on the app being started again.
@@ -147,10 +164,10 @@ pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set the port and folder yourself";
 pub const IRONWIRE_LOOK_AGAIN: &str = "Look again";
 
 pub const IRONWIRE_PORT_TITLE: &str = "Port";
-pub const IRONWIRE_PORT_NOTE: &str = "Already set to the number IronWire normally uses. Change it only if you changed \
-     IronWire's own.";
+pub const IRONWIRE_PORT_NOTE: &str =
+    "Already set to the usual number. Change it only if the record is kept on a different one.";
 
-pub const IRONWIRE_FOLDER_TITLE: &str = "IronWire folder";
+pub const IRONWIRE_FOLDER_TITLE: &str = "Folder";
 
 /// The macOS folder control's own action.
 ///
@@ -161,8 +178,53 @@ pub const IRONWIRE_FOLDER_TITLE: &str = "IronWire folder";
 /// being sandboxed later. The other two shells keep a text box and do not
 /// render this word.
 pub const IRONWIRE_CHOOSE_FOLDER: &str = "Choose the folder";
+
+/// The note when nothing on this machine can say where the usual place is.
+///
+/// Kept as a constant because the payload's shape requires one, and used as
+/// the fallback [`ironwire_folder_note`] returns when no folder resolved. A
+/// build with no home directory to read has no better sentence available.
 pub const IRONWIRE_FOLDER_NOTE: &str =
-    "Leave this empty unless IronWire keeps its files somewhere other than ~/.ironwire.";
+    "Leave this empty unless the record is kept somewhere other than the usual place.";
+
+/// The folder note, naming the folder it is talking about.
+///
+/// Every failure sentence on this surface ends by sending a contributor to
+/// this one field -- "Name the folder below", "Point the folder below at
+/// where the record is kept" -- and the field then declined to say which
+/// folder it meant or what it would read if left empty. "Somewhere other
+/// than the usual place" resolved to nothing anywhere on the screen, so the
+/// instruction had no answer for the person following it.
+///
+/// The path arrives as an argument rather than as wording, for the same
+/// reason [`ironwire_token_line`]'s does: it is the one place a vendor name
+/// can still reach this screen, and somebody being sent to look at a folder
+/// has to be told the folder that is really there.
+#[must_use]
+pub fn ironwire_folder_note(default_dir: Option<&str>) -> String {
+    match default_dir {
+        Some(dir) => {
+            format!("Leave this empty unless the record is kept somewhere other than {dir}.")
+        }
+        None => IRONWIRE_FOLDER_NOTE.to_string(),
+    }
+}
+
+/// [`ironwire_folder_note`] over the folder this machine would really read.
+///
+/// The resolution is
+/// [`crate::daemon::settings::ironwire_default_token_dir`], the last step of
+/// the token search order, so this sentence cannot name one folder while the
+/// daemon reads another. Assembled here and not in each shell: GTK calls it,
+/// and the other two receive its answer inside [`routing_copy`].
+#[must_use]
+pub fn ironwire_folder_note_here() -> String {
+    ironwire_folder_note(
+        crate::daemon::settings::ironwire_default_token_dir()
+            .as_deref()
+            .and_then(std::path::Path::to_str),
+    )
+}
 
 pub const IRONWIRE_APPLY: &str = "Apply and check";
 pub const IRONWIRE_CHECKING: &str = "Checking...";
@@ -173,15 +235,23 @@ pub const IRONWIRE_CHECK_UNAVAILABLE: &str =
     "That check couldn't be run just now. Nothing changed.";
 
 pub const IRONWIRE_PROBE_REACHABLE: &str =
-    "IronWire answered, and Trace Commons can read its local record.";
+    concat!(crate::app_name!(), " can read the local record.");
 
-pub const IRONWIRE_STATE_OFF: &str = "Off. Trace Commons is reading nothing from IronWire.";
+pub const IRONWIRE_STATE_OFF: &str = concat!(
+    "Off. ",
+    crate::app_name!(),
+    " is not reading the local record."
+);
 /// Not a fault, and the copy has to say so. A record read from a
 /// freshly-built reader starts empty by construction, so a contributor who
 /// just turned this on -- or just changed the port -- sees this state.
 pub const IRONWIRE_STATE_WAITING: &str = "On. Nothing recorded yet, which is normal just after you turn this on or change something \
      here.";
-pub const IRONWIRE_STATE_READING: &str = "On, and Trace Commons is reading what IronWire records.";
+pub const IRONWIRE_STATE_READING: &str = concat!(
+    "On, and ",
+    crate::app_name!(),
+    " is reading the local record."
+);
 
 /// What IronWire answered about one tool, as far as this page may use it.
 ///
@@ -257,24 +327,34 @@ pub fn tool_tone(source_mode: &str, wiring: ToolWiring) -> ToolTone {
     }
 }
 
-/// The file could not be used: either it is not there, or IronWire would
-/// not accept what was in it.
+/// The file could not be used: either it is not there, or what was in it
+/// is no longer accepted.
 ///
 /// Names the file, because that is the one fact that makes this fixable,
 /// and it is the failure a real contributor hits: a GUI never sees
 /// `IRONWIRE_HOME`, so it reads `~/.ironwire` whatever a shell profile
 /// says. The path is absent, not empty, when nothing resolved at all.
+///
+/// That path is also the one place a vendor name can still reach the
+/// screen, and it may. It arrives as this function's argument, not as
+/// wording -- the sentence around it names nobody -- and a path a person is
+/// being sent to look at has to be the path that is really there.
 #[must_use]
 pub fn ironwire_token_line(token_path: Option<&str>) -> String {
     match token_path {
         Some(path) => format!(
-            "Trace Commons could not use the file at {path}. Either it is not there, or \
-             IronWire no longer accepts it. Point the folder below at where IronWire keeps its \
-             files."
+            concat!(
+                crate::app_name!(),
+                " could not use the file at {path}. Either it is not there, or it is no longer \
+                 valid. Point the folder below at where the record is kept."
+            ),
+            path = path
         ),
-        None => "Trace Commons could not work out where IronWire keeps its files. Name the \
-                 folder below."
-            .to_string(),
+        None => concat!(
+            crate::app_name!(),
+            " could not work out where the record is kept. Name the folder below."
+        )
+        .to_string(),
     }
 }
 
@@ -283,10 +363,10 @@ pub fn ironwire_token_line(token_path: Option<&str>) -> String {
 pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
     match port {
         Some(port) => format!(
-            "Nothing answered on port {port}. Check that IronWire is running and that this is \
-             the number it uses."
+            "Nothing answered on port {port}. Check that this is the right number, or name the \
+             folder below."
         ),
-        None => "Nothing answered. Check that IronWire is running.".to_string(),
+        None => "Nothing answered on this machine.".to_string(),
     }
 }
 
@@ -300,25 +380,25 @@ pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
 ///
 /// # Neither sentence is a failure
 ///
-/// A machine without IronWire is the ordinary machine, so the `None`
-/// sentence says what a machine without it looks like before it says what
-/// to do. It is the state most readers of this screen are in, and a screen
-/// that greets them with a fault is describing their machine wrongly.
+/// A machine keeping no such record is the ordinary machine, so the `None`
+/// sentence says what that looks like before it says what to do. It is the
+/// state most readers of this screen are in, and a screen that greets them
+/// with a fault is describing their machine wrongly.
 ///
 /// # The found sentence promises that nothing has happened yet
 ///
 /// Discovery reads a file. It opens no connection, writes no declaration
-/// and starts no reading, and the sentence says so, because "we found
-/// IronWire" with nothing after it reads like something already began.
+/// and starts no reading, and the sentence says so, because "we found it"
+/// with nothing after it reads like something already began.
 #[must_use]
 pub fn ironwire_discovery_line(port: Option<u16>) -> String {
     match port {
         Some(port) => format!(
-            "IronWire is running on this machine, on port {port}. Nothing is read from it until \
-             you turn this on."
+            "A local record is being kept on this machine, on port {port}. Nothing is read from \
+             it until you turn this on."
         ),
-        None => "IronWire has left no details on this machine, which is what a machine without it \
-                 looks like. If it is running, say which port below."
+        None => "Nothing on this machine has left details of a local record, which is what an \
+                 ordinary machine looks like. If one is being kept, say which port below."
             .to_string(),
     }
 }
@@ -435,7 +515,10 @@ pub struct RoutingCopy {
     pub port_note: &'static str,
     pub folder_title: &'static str,
     pub choose_folder: &'static str,
-    pub folder_note: &'static str,
+    /// The only field that is not a fixed string: it names the folder this
+    /// machine would read, which is a path and therefore not wording. See
+    /// [`ironwire_folder_note`].
+    pub folder_note: String,
     pub apply: &'static str,
     pub checking: &'static str,
     pub check_unavailable: &'static str,
@@ -445,7 +528,10 @@ pub struct RoutingCopy {
     pub state_reading: &'static str,
 }
 
-/// The payload, built from the constants above and nothing else.
+/// The payload, built from the constants above -- and, for the folder note
+/// alone, from the folder this machine resolves. That one sentence cannot be
+/// finished without a path, and unlike the others it has no shell to pass it
+/// one: all three read it from here.
 #[must_use]
 pub fn routing_copy() -> RoutingCopy {
     RoutingCopy {
@@ -467,7 +553,7 @@ pub fn routing_copy() -> RoutingCopy {
         port_note: IRONWIRE_PORT_NOTE,
         folder_title: IRONWIRE_FOLDER_TITLE,
         choose_folder: IRONWIRE_CHOOSE_FOLDER,
-        folder_note: IRONWIRE_FOLDER_NOTE,
+        folder_note: ironwire_folder_note_here(),
         apply: IRONWIRE_APPLY,
         checking: IRONWIRE_CHECKING,
         check_unavailable: IRONWIRE_CHECK_UNAVAILABLE,
@@ -889,14 +975,43 @@ mod tests {
     /// advertised is worse than no door. Nor may any of it name a restart,
     /// which Task 3 removed the need for.
     ///
+    /// `"ironwire"` is on the list, and the probe path below is deliberately
+    /// **not** an `~/.ironwire` one. The path in that sentence is the
+    /// caller's argument, not our wording: a real one names the vendor and
+    /// is allowed to, because the path is the single fact that makes a
+    /// broken token file fixable. Sweeping the vendor's own path here would
+    /// make the rule unstateable. Probing with a neutral path means the only
+    /// way the word can reach this assertion is out of a string this module
+    /// wrote, which is exactly what must never happen.
+    ///
     /// The input is [`tools_surface_literals`], so this covers every string
     /// in the region and not a list somebody maintains beside it.
     #[test]
     fn the_tools_surface_says_nothing_it_should_not() {
         let mut strings = tools_surface_literals();
+        // The constants as the shells actually receive them. The scanner
+        // above reads source literals, and a `concat!` constant is several
+        // of those -- so a forbidden word could in principle be assembled
+        // across a join that neither fragment contains. These are the
+        // finished strings.
+        let payload = serde_json::to_value(routing_copy()).expect("the payload serialises");
+        for (field, value) in payload.as_object().expect("a JSON object") {
+            // `folder_note` carries a filesystem path this machine resolved,
+            // and a path may spell a vendor's name -- the same exemption
+            // `ironwire_token_line`'s argument has, and for the same reason:
+            // a folder somebody is being sent to look at has to be the
+            // folder that is really there. Its wording is swept below, with
+            // a path chosen the way that function's is.
+            if field == "folder_note" {
+                continue;
+            }
+            strings.push(value.as_str().expect("every field is a string").to_string());
+        }
         // The sentences the region's functions assemble, which exist only
         // once something has been formatted into them.
-        strings.push(ironwire_token_line(Some("/home/x/.ironwire/control.token")));
+        strings.push(ironwire_folder_note(Some("/home/x/.config")));
+        strings.push(ironwire_folder_note(None));
+        strings.push(ironwire_token_line(Some("/home/x/.config/control.token")));
         strings.push(ironwire_token_line(None));
         strings.push(ironwire_unreachable_line(Some(8463)));
         strings.push(ironwire_unreachable_line(None));
@@ -907,8 +1022,18 @@ mod tests {
             strings.push(ironwire_state_line(state).to_string());
         }
         for word in [
-            "restart", "spent", "cost", "route", "backend", "proxy", "corpus", "share", "earn",
+            "restart",
+            "spent",
+            "cost",
+            "route",
+            "backend",
+            "proxy",
+            "corpus",
+            "share",
+            "earn",
             "credit",
+            "ironwire",
+            "iron wire",
         ] {
             for text in &strings {
                 assert!(
@@ -917,6 +1042,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sentences that name us take the name from the one definition.
+    ///
+    /// The forbidden-word sweep is a rule about what must not be said; this
+    /// is the other half, and without it the surface could satisfy that
+    /// rule by naming nobody at all. Asserted against
+    /// [`crate::brand::APP_NAME`] rather than against the literal, so
+    /// renaming the app in `brand.rs` moves these sentences with it and a
+    /// hand-typed name here would fail.
+    #[test]
+    fn the_sentences_that_name_this_app_take_the_name_from_one_place() {
+        let name = crate::brand::APP_NAME;
+        for text in [
+            IRONWIRE_INTRO,
+            IRONWIRE_PROBE_REACHABLE,
+            IRONWIRE_STATE_OFF,
+            IRONWIRE_STATE_READING,
+        ] {
+            assert!(text.contains(name), "{name:?} is not in: {text}");
+        }
+        assert!(ironwire_token_line(Some("/home/x/.config/t")).contains(name));
+        assert!(ironwire_token_line(None).contains(name));
+    }
+
+    /// The field every failure sentence sends a contributor to says which
+    /// folder it is talking about.
+    ///
+    /// "Point the folder below at where the record is kept" and "Name the
+    /// folder below" are instructions with an answer only if this note
+    /// carries one. It used to say "somewhere other than the usual place",
+    /// and nothing on the screen resolved that phrase.
+    #[test]
+    fn the_folder_note_names_the_folder_the_failure_lines_send_people_to() {
+        let note = ironwire_folder_note(Some("/home/x/.config"));
+        assert!(note.contains("/home/x/.config"), "{note}");
+        assert!(!note.contains("the usual place"), "{note}");
+
+        // The payload all three shells read carries the assembled sentence
+        // and not the pathless constant, so this is not a GTK-only fix.
+        assert_eq!(routing_copy().folder_note, ironwire_folder_note_here());
+
+        // A machine that resolves no folder still gets a sentence rather
+        // than an empty caption under the field.
+        assert_eq!(ironwire_folder_note(None), IRONWIRE_FOLDER_NOTE);
+        assert!(!ironwire_folder_note_here().is_empty());
     }
 
     /// The payload the shells read carries every constant on this surface.
@@ -972,7 +1143,7 @@ mod tests {
         assert_eq!(copy.port_note, IRONWIRE_PORT_NOTE);
         assert_eq!(copy.folder_title, IRONWIRE_FOLDER_TITLE);
         assert_eq!(copy.choose_folder, IRONWIRE_CHOOSE_FOLDER);
-        assert_eq!(copy.folder_note, IRONWIRE_FOLDER_NOTE);
+        assert_eq!(copy.folder_note, ironwire_folder_note_here());
         assert_eq!(copy.apply, IRONWIRE_APPLY);
         assert_eq!(copy.checking, IRONWIRE_CHECKING);
         assert_eq!(copy.check_unavailable, IRONWIRE_CHECK_UNAVAILABLE);
