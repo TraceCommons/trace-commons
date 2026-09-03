@@ -61,7 +61,9 @@ pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<St
     // legitimately report a cwd that is already gone, and dropping such a
     // session's key would put it in the unknown bucket rather than with its
     // siblings.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| lexically_clean(path));
+    let resolved = std::fs::canonicalize(path)
+        .map(strip_verbatim)
+        .unwrap_or_else(|_| lexically_clean(path));
     if resolved.file_name().is_none_or(|n| n.is_empty()) {
         return None;
     }
@@ -70,7 +72,11 @@ pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<St
     // different spellings of one directory and never fires. On macOS the
     // start path resolves through `/var -> /private/var` and a `$HOME` that
     // did not would sit on the other side of that symlink.
-    let home = home.map(|h| std::fs::canonicalize(h).unwrap_or_else(|_| lexically_clean(h)));
+    let home = home.map(|h| {
+        std::fs::canonicalize(h)
+            .map(strip_verbatim)
+            .unwrap_or_else(|_| lexically_clean(h))
+    });
 
     let rooted = repo_root_of(&resolved, home.as_deref()).unwrap_or(resolved);
     Some(fold_case(&path_to_key(&rooted)))
@@ -111,6 +117,35 @@ fn lexically_clean(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Remove Windows' verbatim (`\\?\`) prefix from a canonicalized path.
+///
+/// `std::fs::canonicalize` returns a verbatim path on Windows. Left in, an
+/// existing directory keys as `\\?\c:\users\z\repo` while one that has
+/// since been deleted takes the [`lexically_clean`] fallback and keys as
+/// `c:\users\z\repo` -- one project under two keys, exactly the collision
+/// this module exists to prevent. It also defeats the UI's
+/// `strip_prefix(home)`, which would render `\\?\c:\users\z\repo` rather
+/// than `~\repo`.
+///
+/// `\\?\UNC\server\share` is restored to `\\server\share`; every other
+/// verbatim path loses the prefix outright. A path with no such prefix is
+/// returned untouched, so this is a no-op off Windows.
+#[cfg(windows)]
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let stripped = {
+        let text = path.to_string_lossy();
+        text.strip_prefix(r"\\?\UNC\")
+            .map(|rest| PathBuf::from(format!(r"\\{rest}")))
+            .or_else(|| text.strip_prefix(r"\\?\").map(PathBuf::from))
+    };
+    stripped.unwrap_or(path)
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    path
 }
 
 fn path_to_key(path: &Path) -> String {
@@ -172,6 +207,27 @@ mod tests {
         assert_eq!(
             normalize_project_key(link.to_str().unwrap()),
             normalize_project_key(real.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_resolved_key_never_carries_a_verbatim_prefix() {
+        // Asserted against literals rather than against another
+        // `normalize_project_key` call: every other test here compares one
+        // normalization to another, so both sides would carry Windows'
+        // `\\?\` prefix and agree while the key was still wrong.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo");
+        std::fs::create_dir(&path).unwrap();
+
+        let key = normalize_project_key(path.to_str().unwrap()).unwrap();
+        assert!(
+            !key.starts_with(r"\\?\"),
+            "a verbatim prefix leaked into the key: {key}"
+        );
+        assert!(
+            key.ends_with("repo"),
+            "expected a plain path ending in the directory name, got {key}"
         );
     }
 
