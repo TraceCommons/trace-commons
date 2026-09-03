@@ -360,6 +360,18 @@ struct QueueRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard(emphasised: summary != nil && redactionCount == 0)
+        // A second route to `Look inside`, never a replacement for it. The
+        // button keeps its emphasis: one-click submit added AVAILABILITY,
+        // and primary styling is a RECOMMENDATION -- see `actions`. What
+        // this adds is that the obvious gesture on a card does the obvious
+        // thing.
+        //
+        // The three footer buttons are `Button`s inside the card and consume
+        // their own taps, so `Not this one`, `Submit` and `Look inside` keep
+        // doing their own jobs.
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onLookInside)
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: - Identity
