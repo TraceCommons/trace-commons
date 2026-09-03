@@ -116,7 +116,7 @@ Timestamp order does not select production behavior.
 
 
 
-### None Requirements
+### Non-requirements
 
 - A database event for each internal workflow step.
 - A separate database row for each temporary calculation.
@@ -248,9 +248,9 @@ EffectReceipt
 
 
 
-## Common identifiers
+### Common identifiers
 
-```
+```rust
 struct ClassifierId(String);
 struct ProjectionId(String);
 struct EvidenceId(String);
@@ -262,11 +262,11 @@ struct ContentHash(String);
 
 
 
-## 1. Classifier
+### Classifier
 
 A Classifier measures one property. It produces an Observation, not a production Decision.
 
-```
+```rust
 struct ClassifierDescriptor {
     id: ClassifierId,
     role: ClassifierRole,
@@ -295,7 +295,7 @@ trait NoveltyClassifier: Send + Sync {
 
 Example:
 
-```
+```rust
 let classifier = BgeNoveltyClassifier {
     descriptor: ClassifierDescriptor {
         id: ClassifierId("novelty-bge-large-v1".into()),
@@ -309,11 +309,11 @@ let classifier = BgeNoveltyClassifier {
 
 
 
-## 2. Projection
+### Projection
 
 A Projection converts a stored trace into the exact classifier input.
 
-```{rust}
+```rust
 trait TraceProjection: Send + Sync {
     fn id(&self) -> &ProjectionId;
 
@@ -337,7 +337,7 @@ struct ProjectedChunk {
 
 Example projection:
 
-```
+```rust
 struct RenderedEventsV2;
 
 impl TraceProjection for RenderedEventsV2 {
@@ -361,13 +361,13 @@ impl TraceProjection for RenderedEventsV2 {
 
 
 
-## 3. Evidence
+### Evidence
 
 Evidence is external state that a Classifier needs for one measurement.
 
-Use typed evidence names in the real API. A generic `Evidence` type can hide important differences.
+Use typed evidence names in the real API. A generic `Evidence` type can hide important differences.
 
-```{rust}
+```rust
 struct NoveltyEvidenceDescriptor {
     id: EvidenceId,
     reference_corpus_hash: ContentHash,
@@ -393,7 +393,7 @@ struct Neighbor {
 
 Example:
 
-```{rust}
+```rust
 let evidence = FrozenNoveltyIndex {
     descriptor: NoveltyEvidenceDescriptor {
         id: EvidenceId("novelty-index-2026-09-01".into()),
@@ -407,13 +407,13 @@ let evidence = FrozenNoveltyIndex {
 
 
 
-## 4. Observation
+### Observation
 
 An Observation is the raw output from one Classifier operation.
 
 It includes provenance, measurements, and evidence identity.
 
-```{rust}
+```rust
 struct NoveltyObservation {
     classifier_id: ClassifierId,
     projection_id: ProjectionId,
@@ -429,7 +429,7 @@ struct NoveltyObservation {
 
 Example:
 
-```{rust}
+```rust
 let observation = NoveltyObservation {
     classifier_id: ClassifierId("novelty-bge-large-v1".into()),
     projection_id: ProjectionId("rendered-events-v2".into()),
@@ -443,15 +443,15 @@ let observation = NoveltyObservation {
 };
 ```
 
-The Observation does not contain `passed: true`. A Policy makes that judgment.
+The Observation does not contain `passed: true`. A Policy makes that judgment.
 
-## 5. Fact
+### Fact
 
 A Fact states whether a required Observation is available.
 
 It prevents the system from converting missing data into a favorable zero.
 
-```{rust}
+```rust
 enum Fact<T> {
     Available(T),
 
@@ -472,7 +472,7 @@ enum MissingFactReason {
 
 Example:
 
-```
+```rust
 let novelty_fact = Fact::Available(observation);
 
 let substance_fact = Fact::Unavailable {
@@ -483,11 +483,11 @@ let substance_fact = Fact::Unavailable {
 
 
 
-## 6. Policy
+### Policy
 
 A Policy converts Facts into a Decision.
 
-```{rust}
+```rust
 struct ProductionPolicyV3 {
     id: PolicyId,
 
@@ -511,7 +511,7 @@ trait DecisionPolicy {
 
 The combined facts are typed:
 
-```{rust}
+```rust
 struct DecisionFacts {
     tenant_duplication: Fact<TenantDuplicationObservation>,
     global_duplication: Fact<GlobalDuplicationObservation>,
@@ -523,7 +523,7 @@ struct DecisionFacts {
 
 Example policy logic:
 
-```{rust}
+```rust
 fn decide(&self, facts: &DecisionFacts) -> Result<Decision, PolicyError> {
     let novelty = facts.novelty.require_available()?;
     let substance = facts.substance.require_available()?;
@@ -548,11 +548,11 @@ fn decide(&self, facts: &DecisionFacts) -> Result<Decision, PolicyError> {
 
 
 
-## 7. Decision
+### Decision
 
 A Decision records what production must do.
 
-```{rust}
+```rust
 struct Decision {
     policy_id: PolicyId,
     facts_hash: ContentHash,
@@ -583,7 +583,7 @@ enum IndexDisposition {
 
 Example:
 
-```{rust}
+```rust
 let decision = Decision {
     policy_id: PolicyId("production-policy-v3".into()),
     facts_hash: sha256(&facts),
@@ -598,11 +598,11 @@ let decision = Decision {
 
 
 
-## 8. Bundle
+### Bundle
 
 A Bundle identifies the complete classifier and policy configuration.
 
-```{rust}
+```rust
 struct ClassifierBundle {
     id: BundleId,
 
@@ -624,7 +624,7 @@ struct ClassifierRef {
 
 Example:
 
-```{rust}
+```rust
 let bundle = ClassifierBundle {
     id: BundleId("sha256:production-bundle-42".into()),
 
@@ -639,13 +639,13 @@ let bundle = ClassifierBundle {
 
 The Bundle does not contain mutable index contents. Each Observation records the exact Evidence snapshot it used.
 
-## 9. Certification
+### Certification
 
 A Certification states that a Bundle passed a defined offline evaluation.
 
-TODO: I think we can remove this 
+TODO: These feels like superficial validation but it isn't clear that a certification proves that bundle is ready for produciton
 
-```
+```rust
 struct BundleCertification {
     id: CertificationId,
     bundle_id: BundleId,
@@ -669,7 +669,7 @@ enum CertificationResult {
 
 Example:
 
-```
+```rust
 let certification = BundleCertification {
     id: CertificationId("certification-2026-09-01".into()),
     bundle_id: bundle.id.clone(),
@@ -686,9 +686,9 @@ let certification = BundleCertification {
 
 A Bundle can have multiple Certifications. New evaluation evidence does not change the Bundle identity.
 
-## Complete example
+### Complete example
 
-```
+```rust
 let projected = projection.project(&stored_trace)?;
 
 let observation = novelty_classifier.observe(
@@ -713,7 +713,7 @@ server.apply_decision(&decision)?;
 
 The responsibility chain is:
 
-```
+```text
 Projection prepares input.
 Evidence supplies comparison state.
 Classifier produces an Observation.
@@ -767,11 +767,11 @@ stateDiagram-v2
 The state machine remains explicit in code.
 The database does not store a separate event for each transition.
 
-### `rocessing_jobs`
+### `processing_jobs`
 
 One mutable row coordinates execution:
 
-```
+```text
 job_id
 tenant_id
 trace_revision_id
@@ -796,7 +796,7 @@ Workers claim jobs with a lease. If a process crashes, the lease expires and ano
 
 A unique key such as this prevents duplicate logical work:
 
-```
+```text
 tenant + trace revision + deployment + bundle set + mode
 ```
 
@@ -806,7 +806,7 @@ tenant + trace revision + deployment + bundle set + mode
 
 On successful computation, write one immutable aggregate containing the complete reasoning chain:
 
-```
+```text
 evaluation_id
 job_id
 trace_revision_id
@@ -835,7 +835,7 @@ created_at
 
 Each observation inside the document identifies its classifier bundle:
 
-```
+```json
 {
   "role": "novelty",
   "classifier_bundle_id": "novelty-v4",
@@ -850,7 +850,7 @@ Each observation inside the document identifies its classifier bundle:
 
 This preserves the conceptual chain:
 
-```
+```text
 Evidence → Observations → Facts → Decision
 ```
 
@@ -858,20 +858,20 @@ without requiring one transaction per arrow.
 
 The worker can compute all four stages in memory and insert the evaluation in one transaction.
 
-## Completion transaction
+### Completion transaction
 
 When evaluation succeeds, one transaction should:
 
 1. Insert the immutable evaluation.
 2. Create required effect outbox records.
-3. Mark the processing job `decision_committed`.
+3. Mark the processing job `decision_committed`.
 4. Update any current-state projection that can be changed atomically.
 
 This gives all-or-nothing decision persistence.
 
 For a shadow run, the transaction inserts the evaluation but creates no effects.
 
-## Effects still require separate durability
+### Effects require separate durability
 
 Effects are different because they cross a failure boundary.
 
@@ -879,16 +879,16 @@ Suppose the server inserts a vector and crashes before recording that insertion.
 
 Use:
 
-```
+```text
 effect_outbox
 effect_receipts
 ```
 
 
 
-### `effect_outbox`
+#### `effect_outbox`
 
-```
+```text
 effect_id
 evaluation_id
 decision_hash
@@ -906,11 +906,11 @@ updated_at
 
 The requested payload is immutable. Retry fields are mutable operational state.
 
-### `effect_receipts`
+#### `effect_receipts`
 
 Write an immutable receipt when the effect succeeds:
 
-```
+```text
 receipt_id
 effect_id
 executor_bundle_id
@@ -922,7 +922,7 @@ applied_at
 
 The resulting explanation chain is:
 
-```
+```text
 effect receipt
   → effect intent
   → evaluation decision
@@ -932,9 +932,9 @@ effect receipt
   → trace revision and bundles
 ```
 
-This is enough to answer why a credit or vector insertion happened.  
+This is enough to answer why a credit or vector insertion happened.
 
-Crash and retry behavior
+### Crash and retry behavior
 
 
 | Failure point             | Durable state                                | Recovery                                                                 |
