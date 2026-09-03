@@ -193,7 +193,13 @@ impl Harness {
             .lock()
             .unwrap()
             .set_mode(
-                &format!("/Users/testuser/code/{project}"),
+                // Through `project_key_for`, because that is what the
+                // watcher derives: the key is the NORMALIZED directory, and
+                // opting in under the raw spelling would opt in a project
+                // nothing ever resolves to.
+                &trace_commons_contributor::daemon::policy::project_key_for(Some(&format!(
+                    "/Users/testuser/code/{project}"
+                ))),
                 ProjectMode::AutoUpload,
                 Utc::now(),
             )
@@ -465,7 +471,9 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
         .lock()
         .unwrap()
         .set_mode(
-            "/Users/testuser/code/myproj",
+            &trace_commons_contributor::daemon::policy::project_key_for(Some(
+                "/Users/testuser/code/myproj",
+            )),
             ProjectMode::AutoUpload,
             Utc::now(),
         )

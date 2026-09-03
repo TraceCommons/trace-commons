@@ -327,6 +327,9 @@ pub struct PreviewSummary {
     pub event_count: usize,
     pub opening_prompt: String,
     pub redactions: std::collections::BTreeMap<String, u32>,
+    /// Distinct values removed per label, beside the occurrence counts in
+    /// `redactions`. A shell renders "185 local path (12 distinct)".
+    pub redactions_distinct: std::collections::BTreeMap<String, u32>,
     pub pii_labels_present: Vec<String>,
     /// The consent scopes this device **requests**, taken from the local
     /// config, which is what `build_raw_contribution` stamps onto the
@@ -409,6 +412,9 @@ pub struct PreviewCardSummary {
     pub event_count: usize,
     pub opening_prompt: String,
     pub redactions: std::collections::BTreeMap<String, u32>,
+    /// Distinct values removed per label, beside the occurrence counts in
+    /// `redactions`. A shell renders "185 local path (12 distinct)".
+    pub redactions_distinct: std::collections::BTreeMap<String, u32>,
     pub pii_labels_present: Vec<String>,
     pub consent_scopes: Vec<String>,
     pub residual_risk: String,
@@ -429,6 +435,7 @@ impl PreviewCardSummary {
             event_count: self.event_count,
             opening_prompt: self.opening_prompt,
             redactions: self.redactions,
+            redactions_distinct: self.redactions_distinct,
             pii_labels_present: self.pii_labels_present,
             consent_scopes: self.consent_scopes,
             residual_risk: self.residual_risk,
@@ -647,6 +654,7 @@ async fn build_preview_core(
     for (label, count) in residual_secret_labels_fail_closed(&redactor, &envelope) {
         *redactions.entry(label).or_insert(0) += count;
     }
+    let redactions_distinct = envelope.privacy.redaction_distinct_counts.clone();
     let pii_labels_present = envelope.privacy.pii_labels_present.clone();
     let consent_scopes = envelope.consent.scopes.iter().map(wire_name).collect();
     let residual_risk = serde_json::to_value(envelope.privacy.residual_pii_risk)
@@ -661,6 +669,7 @@ async fn build_preview_core(
             event_count,
             opening_prompt,
             redactions,
+            redactions_distinct,
             pii_labels_present,
             consent_scopes,
             residual_risk,
@@ -1226,6 +1235,66 @@ mod tests {
             total > 0,
             "planted secret should appear in the counts: {:?}",
             summary.redactions
+        );
+    }
+
+    /// A session naming its own working directory, which the redactor
+    /// knows as a path prefix and therefore replaces with a NUMBERED
+    /// placeholder.
+    ///
+    /// `fixture_session` plants a secret instead, and a secret is replaced
+    /// with a fixed token rather than a numbered one -- so it produces
+    /// occurrence counts and no distinct count at all. The distinct count
+    /// comes from the placeholder index, which only the placeholder-minting
+    /// labels populate, so a fixture that mints none cannot show this
+    /// field working.
+    fn fixture_session_naming_its_own_path() -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+             \"content\":\"open /Users/testuser/code/myproj/a.rs then \
+             /Users/testuser/code/myproj/b.rs\"},\
+             \"cwd\":\"/Users/testuser/code/myproj\",\
+             \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\
+             \"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    /// The distinct-value counts reach the summary a shell reads.
+    ///
+    /// The distinct-per-value property itself is proved where it lives, in
+    /// `trace_contribution`'s `one_value_gets_one_placeholder_however_often_it_appears`.
+    /// What this covers is the plumbing between that map and
+    /// `PreviewSummary`, which is the part a shell can actually reach, and
+    /// the invariant that must hold on every session.
+    #[tokio::test]
+    async fn preview_reports_distinct_values_beside_occurrences() {
+        let (_d, src, r) = fixture_session_naming_its_own_path();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        let occurrences: u32 = summary.redactions.values().sum();
+        let distinct: u32 = summary.redactions_distinct.values().sum();
+        assert!(occurrences > 0, "the fixture must have something to redact");
+        assert!(distinct > 0, "distinct counts must be reported too");
+        assert!(
+            distinct <= occurrences,
+            "distinct ({distinct}) can never exceed occurrences ({occurrences})"
+        );
+        assert_eq!(
+            summary.redactions_distinct, envelope.privacy.redaction_distinct_counts,
+            "the summary must report what the envelope recorded, unchanged"
         );
     }
 
