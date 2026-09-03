@@ -45,14 +45,28 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
-use trace_commons_protocol::trace_contribution::{ConsentMetadata, ResidualPiiRisk};
+use trace_commons_protocol::trace_contribution::{
+    ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
+};
 
-use super::WitnessError;
-use super::surface::{AttestationError, ContributorNonce, NonceMalformed, WitnessService};
+use crate::redaction_witness::certificate::WitnessCertificate;
+
+use super::surface::{
+    AttestationError, ContributionPathUnavailable, ContributorNonce, NonceMalformed, WitnessService,
+};
+use super::{
+    GrantedConsent, WitnessContributionRequest, WitnessContributionResponse, WitnessError,
+};
+
+/// The header the certificate travels in, on this route and on
+/// `POST /v1/traces`. One spelling, so a client forwards what it received.
+pub const WITNESS_CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
+/// The header the signature travels in. Same rule.
+pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
 /// The two routes, and nothing else.
 ///
@@ -77,16 +91,104 @@ pub fn witness_router(service: Arc<WitnessService>) -> Router {
         .with_state(service)
 }
 
-/// The wire form of a witness request.
+/// The wire form of a witness request: two shapes in one struct.
 ///
 /// `deny_unknown_fields` because a field this witness does not understand may
 /// be one a contributor believed was being witnessed. Refusing is the honest
 /// answer to that.
+///
+/// # Why one struct with options rather than an untagged enum
+///
+/// `#[serde(untagged)]` picks the first variant that deserialises and
+/// discards the errors from the others, so a `raw_contribution` with one
+/// malformed event would silently fall through to "neither shape matched" --
+/// and, worse, `deny_unknown_fields` does not apply to an untagged enum's
+/// variants at all, so the guard above would quietly stop holding. Optional
+/// fields plus an explicit disambiguation in [`shape_of`] keeps both, and
+/// makes "both shapes at once" a case that is *named* rather than resolved
+/// by declaration order.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WitnessRequestBody {
-    raw_transcript: String,
-    consent: ConsentMetadata,
+    #[serde(default)]
+    raw_transcript: Option<String>,
+    #[serde(default)]
+    consent: Option<ConsentMetadata>,
+    /// Boxed because `RawTraceContribution` is by far the largest variant
+    /// here and clippy's `large_enum_variant`/`result_large_err` reasoning
+    /// applies to a struct that is only ever one of two shapes.
+    #[serde(default)]
+    raw_contribution: Option<Box<RawTraceContribution>>,
+    #[serde(default)]
+    granted_scopes: Option<Vec<ConsentScope>>,
+    #[serde(default)]
+    granted_uses: Option<Vec<TraceAllowedUse>>,
+}
+
+/// Which of the two request shapes a body carries, once disambiguated.
+///
+/// The structured variant is boxed: a `RawTraceContribution` is an order of
+/// magnitude larger than a transcript request, and an unboxed enum would make
+/// every value of this type that size.
+enum RequestShape {
+    Transcript(super::WitnessRequest),
+    Contribution(Box<WitnessContributionRequest>),
+}
+
+/// Decide which shape a body is, or refuse.
+///
+/// A body carrying both shapes is refused rather than resolved. A caller who
+/// sent both does not know which one this witness will certify, and guessing
+/// on their behalf means certifying something they may not have meant to
+/// send -- on a path whose entire subject is raw session content.
+///
+/// A `raw_contribution` with no grants is refused too, and this is the
+/// interesting one: an empty grant list is a *legal* value that would
+/// certify an envelope granting nothing, which the contributor would then
+/// have to fix by stamping the real grants after certification -- the byte
+/// change this whole path exists to make unnecessary. Absent and empty are
+/// therefore both refusals, and neither is a default.
+fn shape_of(body: WitnessRequestBody) -> Result<RequestShape, Refusal> {
+    let malformed = || Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed");
+    match (body.raw_transcript, body.raw_contribution) {
+        (Some(_), Some(_)) => Err(malformed()),
+        (None, None) => Err(malformed()),
+        (Some(raw_transcript), None) => {
+            if body.granted_scopes.is_some() || body.granted_uses.is_some() {
+                // Grants belong to the structured shape. Accepting them here
+                // and ignoring them would tell a contributor their grants
+                // were witnessed when nothing read them.
+                return Err(malformed());
+            }
+            let consent = body.consent.ok_or_else(malformed)?;
+            Ok(RequestShape::Transcript(super::WitnessRequest {
+                raw_transcript,
+                consent,
+            }))
+        }
+        (None, Some(raw_contribution)) => {
+            if body.consent.is_some() {
+                // The structured shape carries its consent flags inside the
+                // contribution. A second copy beside it is two sources of
+                // truth for the declaration `residual_risk_basis` floors on.
+                return Err(malformed());
+            }
+            let scopes = body
+                .granted_scopes
+                .filter(|s| !s.is_empty())
+                .ok_or_else(malformed)?;
+            let uses = body
+                .granted_uses
+                .filter(|u| !u.is_empty())
+                .ok_or_else(malformed)?;
+            Ok(RequestShape::Contribution(Box::new(
+                WitnessContributionRequest {
+                    raw_contribution: *raw_contribution,
+                    granted: GrantedConsent { scopes, uses },
+                },
+            )))
+        }
+    }
 }
 
 /// The nonce query parameter, and only that.
@@ -172,27 +274,102 @@ async fn witness_handler(
     let parsed: WitnessRequestBody = serde_json::from_slice(&body)
         .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
 
-    let response = service
-        .witness(super::WitnessRequest {
-            raw_transcript: parsed.raw_transcript,
-            consent: parsed.consent,
-        })
-        .await
-        .map_err(refusal_for)?;
+    match shape_of(parsed)? {
+        RequestShape::Transcript(request) => {
+            let response = service.witness(request).await.map_err(refusal_for)?;
+            let certificate = &response.certificate;
+            Ok(axum::Json(serde_json::json!({
+                "redacted_artifact": response.redacted_artifact,
+                "certificate": certificate_json(
+                    certificate,
+                    response.residual_risk_verdict(),
+                ),
+                "signature_hex": response.signature_hex,
+            }))
+            .into_response())
+        }
+        RequestShape::Contribution(request) => {
+            let response = service
+                .witness_contribution(*request)
+                .await
+                .map_err(|ContributionPathUnavailable| {
+                    Refusal::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "witness_contribution_path_unavailable",
+                    )
+                })?
+                .map_err(refusal_for)?;
+            Ok(contribution_response(response))
+        }
+    }
+}
 
-    let certificate = &response.certificate;
-    Ok(axum::Json(serde_json::json!({
-        "redacted_artifact": response.redacted_artifact,
-        "certificate": {
-            "redacted_sha256": certificate.claimed_redacted_sha256(),
-            "residual_risk_verdict": verdict_label(response.residual_risk_verdict()),
-            "redaction_policy_version": certificate.claimed_redaction_policy_version(),
-            "witness_measurement": certificate.claimed_witness_measurement(),
-            "timestamp": certificate.claimed_timestamp(),
-        },
-        "signature_hex": response.signature_hex,
-    }))
-    .into_response())
+/// The structured response: the envelope **as the body**, the certificate in
+/// headers.
+///
+/// Not a JSON object with the envelope nested inside it, and the difference
+/// is the whole point of the structured path. The certificate binds these
+/// exact bytes, so the client has to be able to take them off the wire and
+/// submit them without touching them. Nesting would make the client extract a
+/// value out of a parsed document and re-encode it, which is a serde round
+/// trip in the one place this design cannot have one -- and it would be a
+/// round trip whose failure is invisible, because the re-encoded bytes still
+/// parse as the same envelope.
+///
+/// The header names are the ones Task 7 puts on `POST /v1/traces`, so the
+/// client forwards what it received rather than re-rendering it. Headers are
+/// ASCII by construction here: the certificate is compact JSON over a hex
+/// digest, a closed verdict label, a policy alias and two integers, and the
+/// signature is `0x`-prefixed hex.
+fn contribution_response(response: WitnessContributionResponse) -> Response {
+    let certificate = serde_json::to_string(&certificate_json(
+        &response.certificate,
+        response.residual_risk_verdict(),
+    ))
+    .unwrap_or_default();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    // A header value that will not build is a bug in `certificate_json`, not
+    // contributor input, and serving the envelope without its certificate
+    // would be serving an uncertified artifact under a certified route. So
+    // both are `?`-free but fail closed through `ok_or`.
+    for (name, value) in [
+        (WITNESS_CERTIFICATE_HEADER, certificate),
+        (WITNESS_SIGNATURE_HEADER, response.signature_hex),
+    ] {
+        let Ok(value) = HeaderValue::from_str(&value) else {
+            return Refusal::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "witness_certificate_unrenderable",
+            )
+            .into_response();
+        };
+        headers.insert(name, value);
+    }
+
+    (headers, response.envelope_bytes).into_response()
+}
+
+/// The certificate's fields, as both routes render them.
+///
+/// One function so the two routes cannot drift into two spellings of the same
+/// certificate, which is the kind of difference a client only discovers in
+/// production.
+fn certificate_json(
+    certificate: &WitnessCertificate,
+    verdict: ResidualPiiRisk,
+) -> serde_json::Value {
+    serde_json::json!({
+        "redacted_sha256": certificate.claimed_redacted_sha256(),
+        "residual_risk_verdict": verdict_label(verdict),
+        "redaction_policy_version": certificate.claimed_redaction_policy_version(),
+        "witness_measurement": certificate.claimed_witness_measurement(),
+        "timestamp": certificate.claimed_timestamp(),
+    })
 }
 
 /// The wire spelling of a verdict.
@@ -842,5 +1019,213 @@ mod tests {
         let (status, body) = send(service, post_witness(body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error_code(&body), "witness_request_malformed");
+    }
+
+    // ---------------------------------------------------------------
+    // The structured request shape.
+    // ---------------------------------------------------------------
+
+    /// A healthy service with the structured seam attached.
+    fn structured_service() -> Arc<WitnessService> {
+        Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(Arc::new(
+                super::super::PipelineContributionRedaction::deterministic_only(Vec::new()),
+            )),
+        )
+    }
+
+    fn raw_contribution_json(text: &str) -> serde_json::Value {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceCaptureTurn, RawTraceContribution, RecordedTraceContributionOptions,
+        };
+        let started = chrono::Utc::now();
+        let raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: text.to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        serde_json::to_value(&raw).expect("a raw contribution serialises")
+    }
+
+    fn contribution_body(text: &str) -> String {
+        serde_json::json!({
+            "raw_contribution": raw_contribution_json(text),
+            "granted_scopes": ["debugging_evaluation"],
+            "granted_uses": ["debugging"],
+        })
+        .to_string()
+    }
+
+    /// Send and keep the headers, which the structured response puts the
+    /// certificate in.
+    async fn send_full(
+        service: Arc<WitnessService>,
+        request: HttpRequest<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let response = witness_router(service)
+            .oneshot(request)
+            .await
+            .expect("the router is infallible");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .expect("the test bodies are small");
+        (status, headers, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_structured_route_returns_the_envelope_bytes_as_the_body() {
+        let (status, headers, body) = send_full(
+            structured_service(),
+            post_witness(contribution_body("ran the build")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The body IS the envelope, not a document with the envelope inside
+        // it. A client that had to reach into a wrapper would be parsing and
+        // re-encoding the bytes the certificate covers.
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&body).expect("the body is the envelope");
+        assert!(
+            envelope.get("schema_version").is_some() && envelope.get("privacy").is_some(),
+            "the body is not an envelope at its top level"
+        );
+        assert!(
+            envelope.get("redacted_artifact").is_none()
+                && envelope.get("certificate").is_none()
+                && envelope.get("envelope").is_none(),
+            "the envelope is nested inside a wrapper"
+        );
+
+        // And the certificate the headers carry is over exactly those bytes.
+        let certificate: serde_json::Value = serde_json::from_str(
+            headers[WITNESS_CERTIFICATE_HEADER]
+                .to_str()
+                .expect("the certificate header is ASCII"),
+        )
+        .expect("the certificate header is JSON");
+        assert_eq!(
+            certificate["redacted_sha256"].as_str().unwrap(),
+            hex::encode(sha2::Sha256::digest(&body)),
+        );
+        assert!(
+            headers[WITNESS_SIGNATURE_HEADER]
+                .to_str()
+                .unwrap()
+                .starts_with("0x"),
+            "the signature is not 0x-prefixed hex"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_structured_route_applies_the_granted_scopes_inside_the_certified_bytes() {
+        let (_, _, body) = send_full(
+            structured_service(),
+            post_witness(contribution_body("ran the build")),
+        )
+        .await;
+        let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            envelope["trace_card"]["allowed_uses"],
+            serde_json::json!(["debugging"]),
+            "the grants were not applied before serialisation, so a client must stamp them after"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_carrying_both_request_shapes_is_refused_by_name() {
+        let both = serde_json::json!({
+            "raw_transcript": "ran the build",
+            "consent": consent_json(),
+            "raw_contribution": raw_contribution_json("ran the build"),
+            "granted_scopes": ["debugging_evaluation"],
+            "granted_uses": ["debugging"],
+        })
+        .to_string();
+        let (status, body) = send(structured_service(), post_witness(both)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_code(&body), "witness_request_malformed");
+    }
+
+    #[tokio::test]
+    async fn a_structured_body_with_no_grants_is_refused_rather_than_certified_empty() {
+        // Absent and empty are both refusals: certifying an envelope that
+        // grants nothing forces the contributor into the post-certification
+        // stamp this path exists to remove.
+        for grants in [
+            serde_json::json!({}),
+            serde_json::json!({ "granted_scopes": [], "granted_uses": [] }),
+            serde_json::json!({ "granted_scopes": ["debugging_evaluation"] }),
+        ] {
+            let mut body = serde_json::json!({
+                "raw_contribution": raw_contribution_json("ran the build"),
+            });
+            for (key, value) in grants.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            let (status, response) =
+                send(structured_service(), post_witness(body.to_string())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "accepted: {grants}");
+            assert_eq!(error_code(&response), "witness_request_malformed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_witness_without_a_structured_seam_refuses_the_route_by_name() {
+        // Never a 200 from the text redactor, and never a redaction-failure
+        // label: this is a configuration gap, and an operator reading
+        // `witness_redaction_failed` would go looking at the classifier.
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let (status, body) = send(service, post_witness(contribution_body("ran the build"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(&body), "witness_contribution_path_unavailable");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_field_is_still_refused_on_the_structured_shape() {
+        // `deny_unknown_fields` survived the second shape. An untagged enum
+        // would have silently dropped it.
+        let mut body: serde_json::Value =
+            serde_json::from_str(&contribution_body("ran the build")).unwrap();
+        body["witnessed_spans"] = serde_json::json!([]);
+        let (status, response) = send(structured_service(), post_witness(body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_code(&response), "witness_request_malformed");
+    }
+
+    #[tokio::test]
+    async fn the_structured_route_echoes_no_raw_content() {
+        let secret = format!("deploy key {SECRET} and {SURVIVOR}");
+        let (_, headers, body) = send_full(
+            structured_service(),
+            post_witness(contribution_body(&secret)),
+        )
+        .await;
+        let rendered = String::from_utf8_lossy(&body);
+        assert!(!rendered.contains(SECRET));
+        assert!(
+            rendered.contains(SURVIVOR),
+            "the survivor was removed too, so the assertion above proves nothing"
+        );
+        for (_, value) in headers.iter() {
+            assert!(!value.to_str().unwrap_or_default().contains(SECRET));
+        }
     }
 }

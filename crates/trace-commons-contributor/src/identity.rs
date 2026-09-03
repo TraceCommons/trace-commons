@@ -337,6 +337,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         let signed = build_signed_claim_request(&cfg, &device, chrono::Utc::now()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&signed.body).unwrap();

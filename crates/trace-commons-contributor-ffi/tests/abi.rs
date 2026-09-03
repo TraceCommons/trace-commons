@@ -14,7 +14,7 @@ use trace_commons_contributor_ffi::{
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
     tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone,
     tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_scrub_detector_names, tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -1944,6 +1944,67 @@ fn the_routing_vocabulary_crossing_the_abi_is_the_one_in_the_rust() {
             .unwrap_or_else(|| panic!("{field} is not a string"));
         assert!(!text.is_empty(), "{field} crossed the boundary empty");
     }
+}
+
+#[test]
+fn each_source_mode_crosses_the_abi_as_its_own_sentence() {
+    // The defect: `*_root_configured` is `mode == "watch"`, so it is false
+    // for `off` as well as for `unset`, and two shells printed one sentence
+    // on that false branch -- telling a contributor who declared a tool off
+    // that its sessions were being read from the usual place. Three modes,
+    // three sentences, and this is the boundary the other two shells get
+    // them over.
+    let tool = cstr_str("claude");
+    let watch =
+        take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str("watch").as_ptr()) });
+    let unset =
+        take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str("unset").as_ptr()) });
+    let off = take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str("off").as_ptr()) });
+
+    // Against the shared function, not against words written here: pinning
+    // the literals in this test would be the transcription bug one layer
+    // down. The three shells' own suites pin them, which is where a reword
+    // is meant to be noticed.
+    use trace_commons_contributor::source_copy::{SourceTool, source_check_line};
+    assert_eq!(watch, source_check_line(SourceTool::Claude, "watch"));
+    assert_eq!(unset, source_check_line(SourceTool::Claude, "unset"));
+    assert_eq!(off, source_check_line(SourceTool::Claude, "off"));
+
+    for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
+        assert_ne!(a, b, "two modes crossed as the same sentence");
+        assert!(
+            !a.contains(b.as_str()) && !b.contains(a.as_str()),
+            "one mode's sentence contains another's: {a:?} / {b:?}"
+        );
+    }
+
+    // An unknown mode reads as `unset`, never as `off`: an older daemon
+    // sends no mode at all, and claiming nothing is read from a folder that
+    // is being scanned is the worse of the two errors.
+    for mode in ["", "OFF", "watching"] {
+        let line =
+            take_owned(unsafe { tc_source_check_line(tool.as_ptr(), cstr_str(mode).as_ptr()) });
+        assert_eq!(line, unset, "mode {mode:?} did not read as unset");
+    }
+}
+
+#[test]
+fn a_source_check_for_a_tool_this_build_has_no_name_for_is_refused() {
+    // Refused rather than answered with some other tool's sentence under
+    // this tool's heading -- and refused by a fixed label, so a shell can
+    // tell it from a panic.
+    let mode = cstr_str("watch");
+    let out = unsafe { tc_source_check_line(cstr_str("claude-code").as_ptr(), mode.as_ptr()) };
+    assert!(out.is_null(), "an unknown tool key produced a sentence");
+    assert_eq!(last_error().as_deref(), Some("unknown-source-tool"));
+
+    let out = unsafe { tc_source_check_line(std::ptr::null(), mode.as_ptr()) };
+    assert!(out.is_null(), "a NULL tool produced a sentence");
+    assert_eq!(last_error().as_deref(), Some("null-pointer"));
+
+    let out = unsafe { tc_source_check_line(cstr_str("claude").as_ptr(), std::ptr::null()) };
+    assert!(out.is_null(), "a NULL mode produced a sentence");
+    assert_eq!(last_error().as_deref(), Some("null-pointer"));
 }
 
 #[test]

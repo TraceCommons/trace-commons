@@ -117,6 +117,80 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
+        self.send_and_read(request, url).await
+    }
+
+    /// Issue a request whose body is sent **byte for byte** and return the
+    /// raw response body.
+    ///
+    /// [`Self::call_json`] and [`Self::call_raw`] both end in
+    /// `request.json(body)`, which serialises the caller's value afresh. That
+    /// is right for every existing caller and wrong for exactly one: a
+    /// redaction-witness certificate binds a SHA-256 over the envelope bytes
+    /// the witness emitted, so anything that deserialises and re-serialises
+    /// them between the witness and `POST /v1/traces` breaks the digest --
+    /// and breaks it invisibly, because the re-encoded bytes still parse as
+    /// the same envelope and the failure only appears at the server's
+    /// verification.
+    ///
+    /// So this method takes `&[u8]` rather than a `Serialize`. There is no
+    /// generic parameter it could be handed instead: the whole point is that
+    /// no serializer runs.
+    ///
+    /// `Content-Type: application/json` is set here rather than left to the
+    /// caller -- the bytes are an envelope on every call site this exists
+    /// for, and a caller that forgot would get a body the server refuses for
+    /// a reason unrelated to anything it did wrong.
+    ///
+    /// The host allowlist and the bearer token are applied exactly as
+    /// [`Self::call_raw`] applies them. `headers` are additional request
+    /// headers, for material that must travel beside the body rather than
+    /// inside it.
+    pub async fn call_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<String> {
+        let url = self.compose_url(path, query)?;
+        self.host_allowlist.check(&url)?;
+
+        let mut request = self
+            .inner
+            .request(method, url.clone())
+            .bearer_auth(&self.bearer_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            // `.body`, never `.json`: these bytes are covered by a signature
+            // taken over them exactly as they are.
+            .body(body.to_vec());
+        for (name, value) in headers {
+            // Validated before the request is built rather than left to
+            // reqwest, which would fold a malformed header into a transport
+            // error carrying the value in its message.
+            let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+                Error::HeaderMalformed {
+                    name: (*name).to_string(),
+                }
+            })?;
+            request = request.header(*name, header_value);
+        }
+
+        self.send_and_read(request, url).await
+    }
+
+    /// Send a prepared request and turn its status and body into this crate's
+    /// error shape.
+    ///
+    /// Shared by [`Self::call_raw`] and [`Self::call_bytes`] so the two cannot
+    /// drift into two spellings of the same error mapping -- which is the kind
+    /// of difference an operator only meets during an incident.
+    async fn send_and_read(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: url::Url,
+    ) -> Result<String> {
         let response = request.send().await.map_err(|source| Error::Transport {
             url: url.to_string(),
             source,
@@ -470,5 +544,168 @@ mod tests {
             .await
             .expect("raw body");
         assert_eq!(body, r#"{"a":1}"#);
+    }
+
+    // -----------------------------------------------------------------
+    // call_bytes: the body reaches the wire byte for byte.
+    // -----------------------------------------------------------------
+
+    /// Bytes whose compact re-serialisation is a DIFFERENT string.
+    ///
+    /// Key order that is not sorted, one space after a colon, and a float
+    /// spelled `1.50`. Every one of those moves under a serde round trip, so
+    /// a `call_bytes` that quietly re-serialised would be caught here rather
+    /// than passing because the fixture happened to be canonical already.
+    const UNCANONICAL_BODY: &str = r#"{"zeta":1,"alpha": "two","gamma":1.50}"#;
+
+    #[tokio::test]
+    async fn call_bytes_sends_the_body_byte_for_byte() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .and(header("content-type", "application/json"))
+            .and(header("authorization", "Bearer secret"))
+            // The assertion. `body_string` compares the raw request body, not
+            // a parsed value -- a parsed comparison would pass over exactly
+            // the bug this method exists to prevent.
+            .and(wiremock::matchers::body_string(UNCANONICAL_BODY))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let env = unique_bearer_env();
+        let _g = EnvGuard::set(env.clone(), "secret");
+        let client = Client::builder(server.uri(), env)
+            .build()
+            .expect("client builds");
+        client
+            .call_bytes(
+                Method::POST,
+                "/v1/traces",
+                &[],
+                UNCANONICAL_BODY.as_bytes(),
+                &[],
+            )
+            .await
+            .expect("the server accepted the request");
+    }
+
+    /// The positive control for the test above: `call_json` on the same value
+    /// does NOT put these bytes on the wire. Without this, a `call_bytes` that
+    /// was secretly `call_json` could still pass if `serde_json` happened to
+    /// reproduce the fixture.
+    #[tokio::test]
+    async fn call_json_does_not_send_the_same_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .and(wiremock::matchers::body_string(UNCANONICAL_BODY))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            // Zero: call_json must NOT match this body.
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        let env = unique_bearer_env();
+        let _g = EnvGuard::set(env.clone(), "secret");
+        let client = Client::builder(server.uri(), env)
+            .build()
+            .expect("client builds");
+        let value: serde_json::Value = serde_json::from_str(UNCANONICAL_BODY).unwrap();
+        client
+            .call_raw(Method::POST, "/v1/traces", &[], Some(&value))
+            .await
+            .expect("the server accepted the request");
+        // Dropping the server verifies the `expect(0)`.
+    }
+
+    #[tokio::test]
+    async fn call_bytes_carries_extra_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .and(header("x-trace-witness-signature", "0xabc"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let env = unique_bearer_env();
+        let _g = EnvGuard::set(env.clone(), "secret");
+        let client = Client::builder(server.uri(), env)
+            .build()
+            .expect("client builds");
+        client
+            .call_bytes(
+                Method::POST,
+                "/v1/traces",
+                &[],
+                b"{}",
+                &[("x-trace-witness-signature", "0xabc")],
+            )
+            .await
+            .expect("the server accepted the request");
+    }
+
+    /// A header value that cannot be rendered refuses by name, before the
+    /// request is sent -- and the error carries the header NAME, never the
+    /// value, which on this path is certificate material.
+    #[tokio::test]
+    async fn call_bytes_refuses_a_malformed_header_without_echoing_its_value() {
+        const MARKER: &str = "zzq-header-marker-zzq";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            // Nothing may be sent.
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let env = unique_bearer_env();
+        let _g = EnvGuard::set(env.clone(), "secret");
+        let client = Client::builder(server.uri(), env)
+            .build()
+            .expect("client builds");
+        let err = client
+            .call_bytes(
+                Method::POST,
+                "/v1/traces",
+                &[],
+                b"{}",
+                &[("x-trace-witness-certificate", &format!("{MARKER}\n"))],
+            )
+            .await
+            .expect_err("a newline is not a legal header value");
+        assert_eq!(err.kind(), "header-malformed");
+        for rendering in [format!("{err}"), format!("{err:?}"), err.user_diagnostic()] {
+            assert!(!rendering.contains(MARKER), "the error echoed the value");
+        }
+    }
+
+    /// `call_bytes` is not an escape hatch around the host gate.
+    ///
+    /// Measured rather than asserted from the code: the refusal for a
+    /// disallowed host lands at `build`, before any client exists to call
+    /// `call_bytes` on. So the property is that no client for a disallowed
+    /// host can be constructed at all, and `call_bytes` inherits it the same
+    /// way `call_raw` does. The redundant `host_allowlist.check` inside
+    /// `call_bytes` is kept because `compose_url` sets the path from a
+    /// caller-supplied string and a future change there is exactly the kind
+    /// that would move the host.
+    #[tokio::test]
+    async fn no_client_exists_for_a_disallowed_host_to_call_bytes_on() {
+        let env = unique_bearer_env();
+        let _g = EnvGuard::set(env.clone(), "secret");
+        let err = Client::builder("https://not-allowed.example", env)
+            .host_allowlist(HostAllowlist::from_csv("allowed.example"))
+            .build()
+            .expect_err("a host outside the allowlist is refused at construction");
+        assert_eq!(err.kind(), "host-not-allowed");
     }
 }

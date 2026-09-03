@@ -81,6 +81,7 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     }
 }
 
@@ -110,6 +111,7 @@ fn unenrolled_preview_config() -> trace_commons_contributor::config::Contributor
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     }
 }
 

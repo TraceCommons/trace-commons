@@ -35,8 +35,9 @@ use std::sync::Arc;
 
 use super::enclave::WITNESS_NONCE_LEN;
 use super::{
-    Enclave, SeamUnavailable, Signer, TranscriptRedactor, WitnessError, WitnessRequest,
-    WitnessResponse, witness,
+    ContributionRedactor, Enclave, SeamUnavailable, Signer, TranscriptRedactor,
+    WitnessContributionRequest, WitnessContributionResponse, WitnessError, WitnessRequest,
+    WitnessResponse, witness, witness_contribution,
 };
 
 /// A contributor's attestation nonce: exactly [`WITNESS_NONCE_LEN`] bytes,
@@ -128,9 +129,29 @@ pub struct AttestationEvidence {
     pub signing_address: String,
 }
 
+/// This deployment serves no structured redaction seam.
+///
+/// A configuration statement, not a refusal of the input. See
+/// [`WitnessService::witness_contribution`] for why it is not a
+/// [`WitnessError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("this witness is not configured for the structured contribution path")]
+pub struct ContributionPathUnavailable;
+
 /// The witness, as the HTTP surface is allowed to see it.
 pub struct WitnessService {
     redactor: Arc<dyn TranscriptRedactor>,
+    /// The structured seam, or `None` on a deployment wired only for the text
+    /// route.
+    ///
+    /// `Option` rather than a required constructor parameter so that adding
+    /// the structured path did not change [`Self::new`]'s signature, and so a
+    /// deployment that has not been reconfigured refuses the new route by
+    /// name instead of serving it from a redactor somebody defaulted in. A
+    /// default here would be a redaction policy chosen by omission, which is
+    /// exactly what the two `new`-style constructors on the seams refuse to
+    /// let the environment do.
+    contribution_redactor: Option<Arc<dyn ContributionRedactor>>,
     signer: Arc<dyn Signer>,
     enclave: Arc<dyn Enclave>,
     max_request_bytes: usize,
@@ -153,10 +174,22 @@ impl WitnessService {
     ) -> Self {
         Self {
             redactor,
+            contribution_redactor: None,
             signer,
             enclave,
             max_request_bytes,
         }
+    }
+
+    /// Attach the structured seam, enabling the `raw_contribution` request
+    /// shape.
+    ///
+    /// Additive on purpose: a witness built without it serves the text route
+    /// exactly as before and refuses the structured one, rather than the two
+    /// shapes sharing a redactor that was configured for only one of them.
+    pub fn with_contribution_redactor(mut self, redactor: Arc<dyn ContributionRedactor>) -> Self {
+        self.contribution_redactor = Some(redactor);
+        self
     }
 
     /// The largest request body this witness will read, in bytes.
@@ -173,6 +206,32 @@ impl WitnessService {
             self.enclave.as_ref(),
         )
         .await
+    }
+
+    /// Redact a raw contribution, judge it, serialise it once and certify
+    /// those bytes. Thin over [`super::witness_contribution`].
+    ///
+    /// `Err(ContributionPathUnavailable)` when no structured seam was
+    /// attached. Deliberately not a [`WitnessError`] variant: every one of
+    /// those means a certificate was refused *by* a witness that tried, and
+    /// this one means the route is not configured on this deployment at all.
+    /// Folding them would let an unconfigured witness report a
+    /// configuration gap under a name that reads as a redaction failure.
+    pub async fn witness_contribution(
+        &self,
+        request: WitnessContributionRequest,
+    ) -> Result<Result<WitnessContributionResponse, WitnessError>, ContributionPathUnavailable>
+    {
+        let Some(redactor) = self.contribution_redactor.as_ref() else {
+            return Err(ContributionPathUnavailable);
+        };
+        Ok(witness_contribution(
+            request,
+            redactor.as_ref(),
+            self.signer.as_ref(),
+            self.enclave.as_ref(),
+        )
+        .await)
     }
 
     /// A quote bound to `nonce` and to this witness's signing address.

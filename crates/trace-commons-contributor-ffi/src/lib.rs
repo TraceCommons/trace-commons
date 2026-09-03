@@ -2037,6 +2037,57 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
     })
 }
 
+/// The settings screen's session-source row for one tool, assembled.
+///
+/// `tool` is `claude`, `codex` or `gemini`. `source_mode` is
+/// `get_settings`'s `*_source_mode` -- `watch`, `off` or `unset`.
+///
+/// THREE MODES, THREE SENTENCES. `*_root_configured` is `mode == "watch"`
+/// and is therefore false for both `off` and `unset`; a shell that branches
+/// on it tells a contributor who declared a tool OFF that their sessions are
+/// being read from the usual place, which is false in the fail-open
+/// direction on the one screen they would check. A shell must call this with
+/// the mode word and render what comes back, not derive a second branch from
+/// the boolean.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`]. Do not
+/// reassemble it from parts, and do not build the `off` line as the `unset`
+/// line with a "not" in front: no word on this surface may deny a privacy
+/// claim another word makes.
+///
+/// A mode this build does not know reads as `unset`, deliberately -- see
+/// `source_copy::source_check_line`. A `tool` this build does not know is an
+/// error, because there is no safe sentence for a tool with no name.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL with
+/// `unknown-source-tool`, `null-pointer`, `invalid-utf8` or `panic` on
+/// [`tc_last_error`].
+///
+/// Uses [`guard_forwarding`], which the rule on that function permits here:
+/// every error label is fixed and none embeds caller content.
+///
+/// # Safety
+/// `tool` and `source_mode` must point to valid, NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_source_check_line(
+    tool: *const c_char,
+    source_mode: *const c_char,
+) -> *mut c_char {
+    guard_forwarding(|| {
+        let tool = unsafe { borrow_str(tool) }?;
+        let source_mode = unsafe { borrow_str(source_mode) }?;
+        let tool = trace_commons_contributor::source_copy::SourceTool::from_key(tool)
+            .ok_or_else(|| anyhow::anyhow!("unknown-source-tool"))?;
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::source_copy::source_check_line(tool, source_mode),
+        ))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
+    })
+}
+
 /// The names of the secret detectors the scrubber runs, so a shell can tell
 /// a contributor what is removed without transcribing the list.
 ///

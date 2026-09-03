@@ -602,6 +602,21 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// One session-source row. The satisfied tone tracks the same mode word
+    /// the sentence does, so the tick and the words cannot disagree.
+    /// </summary>
+    private void AddSourceRow(string tool, string sourceMode)
+    {
+        string? line = SourceChecks.CheckLine(tool, sourceMode);
+        if (line is null)
+        {
+            return;
+        }
+
+        ConnectionRows.Add(new ConnectionStatusViewModel(line, sourceMode == "watch"));
+    }
+
     private void FillSettings(DaemonSettingsSnapshot? settings)
     {
         ConnectionRows.Clear();
@@ -610,16 +625,15 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             return;
         }
 
-        ConnectionRows.Add(new ConnectionStatusViewModel(
-            settings.ClaudeRootConfigured
-                ? "Claude Code sessions folder set"
-                : "Claude Code sessions read from the usual place",
-            settings.ClaudeRootConfigured));
-        ConnectionRows.Add(new ConnectionStatusViewModel(
-            settings.CodexRootConfigured
-                ? "Codex sessions folder set"
-                : "Codex sessions read from the usual place",
-            settings.CodexRootConfigured));
+        // The row's words come from the Rust, chosen by the MODE. This shell
+        // branched on ClaudeRootConfigured, which is (mode == "watch") and
+        // therefore false for "off" as well as for "unset" -- so a
+        // contributor who declared Claude Code off was told its sessions
+        // were being read from the usual place. Nothing is read from an off
+        // source. A null line means the call failed; the row is left out
+        // rather than filled with a sentence written here.
+        AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
+        AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
         ConnectionRows.Add(new ConnectionStatusViewModel(
             settings.NearAiConfigured
                 ? "Extra privacy scan configured"

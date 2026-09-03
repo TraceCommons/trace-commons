@@ -322,6 +322,27 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The settings screen's session-source row for one tool, already
+    /// assembled. <paramref name="tool"/> is "claude", "codex" or "gemini";
+    /// <paramref name="sourceMode"/> is get_settings's *_source_mode --
+    /// "watch", "off" or "unset".
+    ///
+    /// THREE MODES, THREE SENTENCES. ClaudeRootConfigured is (mode ==
+    /// "watch") and so is false for "off" as well as for "unset". Branching
+    /// on it told a contributor who declared a tool off that its sessions
+    /// were being read from the usual place -- false, on the one screen they
+    /// would check. Pass the mode and render what comes back; do not add a
+    /// branch of your own here.
+    ///
+    /// NULL with "unknown-source-tool", "null-pointer", "invalid-utf8" or
+    /// "panic" recorded for tc_last_error.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_source_check_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? tool,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode);
+
+    /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.
     /// </summary>

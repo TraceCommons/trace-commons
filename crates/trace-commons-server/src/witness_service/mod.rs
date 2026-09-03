@@ -73,9 +73,11 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, DETERMINISTIC_REDACTION_PIPELINE_VERSION, DeterministicTraceRedactor,
-    PrivacyFilterAdapter, PrivacyFilterBackendTag, RedactionReport, ResidualPiiRisk,
-    ResidualRiskCondition, redaction_pipeline_version, residual_risk_basis,
+    ConsentMetadata, ConsentScope, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
+    DeterministicTraceRedactor, PrivacyFilterAdapter, PrivacyFilterBackendTag,
+    RawTraceContribution, RedactionReport, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
+    TraceContributionEnvelope, TraceRedactor, apply_granted_scopes, redaction_pipeline_version,
+    residual_risk_basis,
 };
 
 use crate::redaction_witness::certificate::{CertificateDetails, WitnessCertificate};
@@ -526,10 +528,304 @@ pub async fn witness(
     })
 }
 
+/// The consent grant a claim actually carried, as the witness must apply it.
+///
+/// This is in the *request* rather than stamped onto the returned envelope
+/// afterwards, and that placement is the whole reason the type exists. The
+/// certificate binds the serialised envelope bytes; `apply_granted_scopes`
+/// run by the client after certification is a byte change the certificate
+/// does not cover, so the digest would no longer match what is submitted.
+/// The grants therefore have to be inside the bytes the witness digests.
+///
+/// Attribution only in the sense that the witness does not check them: they
+/// come from a claim the issuer minted, and a contributor who lies here has
+/// lied to their own issuer, not to the witness.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GrantedConsent {
+    /// The scopes the claim granted.
+    pub scopes: Vec<ConsentScope>,
+    /// The uses the claim granted.
+    pub uses: Vec<TraceAllowedUse>,
+}
+
+/// The structured request: a raw contribution and the grants to apply to it.
+///
+/// The second request shape, alongside [`WitnessRequest`]. The text shape is
+/// kept -- the deployment README's smoke tests drive it, and it is the only
+/// one that needs no envelope schema -- but it cannot serve the client this
+/// design is for: the server holds a serialised
+/// [`TraceContributionEnvelope`], never a redacted transcript, so a
+/// certificate over a transcript names bytes nothing on the server can check.
+#[derive(Clone)]
+pub struct WitnessContributionRequest {
+    /// The unredacted contribution. Never logged, never echoed, never
+    /// persisted.
+    pub raw_contribution: RawTraceContribution,
+    /// What the contributor's claim granted.
+    pub granted: GrantedConsent,
+}
+
+impl std::fmt::Debug for WitnessContributionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-written and withholding, for the same reason
+        // `WitnessRequest`'s is: a derived `Debug` on a struct holding an
+        // unredacted session is one `?request` away from a log line carrying
+        // the whole thing. The grants are withheld too -- they describe a
+        // contributor's consent decisions, which is not content but is
+        // theirs.
+        formatter
+            .debug_struct("WitnessContributionRequest")
+            .field("raw_contribution", &"<withheld>")
+            .field("granted", &"<withheld>")
+            .finish()
+    }
+}
+
+/// What the structured path returns: the envelope **as bytes**, and a
+/// certificate over exactly those bytes.
+///
+/// `envelope_bytes` rather than a `TraceContributionEnvelope` is the point of
+/// the type. A parsed envelope would have to be serialised again by whoever
+/// submits it, and the certificate binds the serialisation this witness
+/// performed -- so handing back a parsed value would put a serde round trip
+/// between the digest and the submission, which is the failure this whole
+/// path exists to remove. Nothing between here and `POST /v1/traces` may
+/// deserialise, re-serialise, re-order, pretty-print or append to them.
+#[derive(Clone)]
+pub struct WitnessContributionResponse {
+    /// The serialised envelope, byte for byte as the certificate's digest was
+    /// taken over it.
+    pub envelope_bytes: Vec<u8>,
+    /// The certificate. Its digest is over `envelope_bytes`.
+    pub certificate: WitnessCertificate,
+    /// EIP-191 signature over `certificate.signing_bytes()`, as 65 bytes of
+    /// `0x`-prefixed hex.
+    pub signature_hex: String,
+}
+
+impl WitnessContributionResponse {
+    /// The verdict the certificate binds.
+    ///
+    /// Read off the certificate, never stored beside it -- the same rule
+    /// [`WitnessResponse::residual_risk_verdict`] follows, and for the same
+    /// reason: two copies of the field this design turns on eventually
+    /// disagree.
+    pub fn residual_risk_verdict(&self) -> ResidualPiiRisk {
+        self.certificate.residual_risk_verdict()
+    }
+}
+
+impl std::fmt::Debug for WitnessContributionResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WitnessContributionResponse")
+            .field("envelope_bytes", &"<withheld>")
+            .field("certificate", &self.certificate)
+            .field("signature_hex", &"<withheld>")
+            .finish()
+    }
+}
+
+/// What a structured redaction pass produced.
+///
+/// The envelope rather than text plus a report, because
+/// `TraceRedactor::redact_trace` has already derived
+/// `privacy.residual_pii_risk` from its own report using `residual_risk` --
+/// the same function ingest runs. Returning the report as well and having
+/// [`witness_contribution`] re-derive a verdict from it would create a second
+/// source of truth for the one field the design turns on, and the two would
+/// eventually disagree. The verdict is read off the envelope.
+pub struct RedactedContribution {
+    /// The redacted envelope, before the grants are applied.
+    pub envelope: TraceContributionEnvelope,
+    /// The policy alias this pass reports. **An alias, never an authority**
+    /// -- see [`CertificateDetails::redaction_policy_version`].
+    pub policy_version: String,
+}
+
+/// The structured redaction seam.
+///
+/// Separate from [`TranscriptRedactor`] rather than a second method on it:
+/// the two shapes have different inputs, different outputs and different
+/// failure modes, and a deployment that can serve one is not thereby able to
+/// serve the other.
+///
+/// Fallible for the same reasons [`TranscriptRedactor`] is, plus one more the
+/// text path does not have: `redact_trace` **refuses** a credential-shaped
+/// `outcome.human_correction` rather than masking it (the S5 rule), and that
+/// refusal must reach [`witness_contribution`] as
+/// [`WitnessError::RedactionFailed`] rather than as a certificate over a
+/// masked correction.
+#[async_trait]
+pub trait ContributionRedactor: Send + Sync {
+    /// Redact `raw`. `Err` means the pass did not complete; there is no
+    /// partial success.
+    async fn redact(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<RedactedContribution, SeamUnavailable>;
+}
+
+/// The structured pipeline, over a [`DeterministicTraceRedactor`].
+///
+/// One type for both backends rather than a `Deterministic`/`FullPipeline`
+/// pair, because unlike the text seam there is nothing to choose between:
+/// `redact_trace` is the same call either way and the difference is entirely
+/// in how the redactor was built. The constructors mirror
+/// [`DeterministicRedaction::new`] and [`FullPipelineRedaction::new`], and
+/// read no environment for the same reason those do not -- a witness must not
+/// have its redaction policy decided by the environment it happens to boot
+/// into.
+pub struct PipelineContributionRedaction {
+    redactor: DeterministicTraceRedactor,
+    policy_version: String,
+}
+
+impl PipelineContributionRedaction {
+    /// The deterministic secret path, and only that. No network dependency,
+    /// so this is what a test uses and what a deployment with no classifier
+    /// reachable from inside the enclave can honestly run. Its certificate
+    /// says so through `redaction_policy_version`.
+    pub fn deterministic_only(known_path_prefixes: Vec<String>) -> Self {
+        Self {
+            redactor: DeterministicTraceRedactor::deterministic_only(known_path_prefixes),
+            policy_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+        }
+    }
+
+    /// Both stages: the deterministic pass, then the prose-PII classifier,
+    /// per event. A backend failure surfaces as [`SeamUnavailable`] and
+    /// becomes a refusal; it is never downgraded to the deterministic result,
+    /// which would be a certificate claiming coverage the pass did not have.
+    pub fn with_privacy_filter(
+        known_path_prefixes: Vec<String>,
+        adapter: Arc<dyn PrivacyFilterAdapter>,
+        backend: PrivacyFilterBackendTag,
+    ) -> Self {
+        Self {
+            redactor: DeterministicTraceRedactor::deterministic_only(known_path_prefixes)
+                .with_privacy_filter(adapter, backend),
+            policy_version: redaction_pipeline_version(backend),
+        }
+    }
+}
+
+#[async_trait]
+impl ContributionRedactor for PipelineContributionRedaction {
+    async fn redact(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<RedactedContribution, SeamUnavailable> {
+        let envelope = self
+            .redactor
+            .redact_trace(raw)
+            .await
+            .map_err(|_| SeamUnavailable)?;
+        Ok(RedactedContribution {
+            envelope,
+            policy_version: self.policy_version.clone(),
+        })
+    }
+}
+
+/// Redact a contribution, judge it, serialise it **once**, and certify those
+/// bytes.
+///
+/// The structured counterpart of [`witness`], and the one a real client uses.
+/// The order of operations is the design, and step 3 is the reason this
+/// function exists rather than a parameter swap on the text path:
+///
+/// 1. **Redact.** `redact_trace` walks the events, applies the tool-payload
+///    profiles by tool name, canonicalizes payloads, computes
+///    `redaction_hash`, builds the trace card, and refuses a credential-shaped
+///    correction rather than masking it. A text pass over a serialised
+///    contribution would do none of that and would scrub the correction the
+///    S5 rule preserves.
+/// 2. **Grant.** `apply_granted_scopes` before serialisation, never after.
+/// 3. **Serialise once.** The bytes returned to the caller and the bytes
+///    digested are the *same* `Vec`. There is deliberately no second
+///    `to_vec` anywhere on this path: a digest taken over a re-serialisation
+///    would be a digest of bytes nobody will ever send.
+/// 4. **Bind.** [`check_correspondence`] over those bytes is the only way to
+///    obtain the [`CorrespondenceProof`] [`WitnessCertificate::from_proof`]
+///    requires.
+/// 5. **Certify.** Name the enclave, stamp the time, sign.
+///
+/// The verdict comes off `envelope.privacy.residual_pii_risk`, which
+/// `redact_trace` derived with `residual_risk` -- the same function ingest
+/// runs. Not re-derived here: the certificate and the envelope must not be
+/// able to disagree about the field a server would act on.
+///
+/// [`CorrespondenceProof`]: crate::redaction_witness::correspondence::CorrespondenceProof
+pub async fn witness_contribution(
+    request: WitnessContributionRequest,
+    redactor: &dyn ContributionRedactor,
+    signer: &dyn Signer,
+    enclave: &dyn Enclave,
+) -> Result<WitnessContributionResponse, WitnessError> {
+    let RedactedContribution {
+        mut envelope,
+        policy_version,
+    } = redactor
+        .redact(request.raw_contribution)
+        .await
+        .map_err(|SeamUnavailable| WitnessError::RedactionFailed)?;
+
+    // Inside the certified bytes. A client that had to stamp these after
+    // certification would be making a byte change the certificate does not
+    // cover, and its submission would fail verification on the server for a
+    // reason that looks exactly like tampering.
+    apply_granted_scopes(
+        &mut envelope,
+        &request.granted.scopes,
+        &request.granted.uses,
+    );
+
+    let residual_risk_verdict = envelope.privacy.residual_pii_risk;
+
+    // The single serialisation on this path. `serde_json::to_string` rather
+    // than `to_vec` so the same allocation can be handed to
+    // `check_correspondence`, which takes `&str`, and then returned as bytes
+    // -- `String::into_bytes` moves the buffer and cannot re-encode it.
+    let serialised =
+        serde_json::to_string(&envelope).map_err(|_| WitnessError::ArtifactBindingFailed)?;
+
+    // Binds the digest to the bytes returned below and nothing else. The
+    // empty span list is not a shortcut around a check -- the witness
+    // produced this redaction, so there is no client claim to check.
+    let proof = check_correspondence(&serialised, &serialised, &[])
+        .map_err(|_| WitnessError::ArtifactBindingFailed)?;
+
+    let certificate = WitnessCertificate::from_proof(
+        proof,
+        CertificateDetails {
+            residual_risk_verdict,
+            redaction_policy_version: policy_version,
+            witness_measurement: enclave
+                .measurement()
+                .await
+                .map_err(|SeamUnavailable| WitnessError::MeasurementUnavailable)?,
+            timestamp: chrono::Utc::now().timestamp(),
+        },
+    );
+
+    let signature_hex = signer
+        .sign_eip191(&certificate.signing_bytes())
+        .map_err(|SeamUnavailable| WitnessError::SigningUnavailable)?;
+
+    Ok(WitnessContributionResponse {
+        envelope_bytes: serialised.into_bytes(),
+        certificate,
+        signature_hex,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redaction_witness::verification::{WitnessPin, verify_witness_certificate};
+    use crate::redaction_witness::verification::{
+        WitnessPin, WitnessVerificationError, verify_witness_certificate,
+    };
     use k256::ecdsa::SigningKey;
     use sha2::{Digest, Sha256};
     use sha3::Keccak256;
@@ -1074,5 +1370,356 @@ mod tests {
         .await
         .expect_err("an unsigned certificate is not a certificate");
         assert_eq!(error, WitnessError::SigningUnavailable);
+    }
+
+    // ---------------------------------------------------------------
+    // The structured path: a certificate over the envelope bytes.
+    // ---------------------------------------------------------------
+
+    /// The structured redaction seam, deterministic-only, with no known path
+    /// prefixes -- so `local_path`, present in 93% of real sessions and
+    /// deliberately non-severity-bearing, cannot be what a verdict assertion
+    /// is actually observing.
+    fn contribution_redactor() -> PipelineContributionRedaction {
+        PipelineContributionRedaction::deterministic_only(Vec::new())
+    }
+
+    fn granted() -> GrantedConsent {
+        GrantedConsent {
+            scopes: vec![
+                ConsentScope::DebuggingEvaluation,
+                ConsentScope::ModelTraining,
+            ],
+            uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+        }
+    }
+
+    /// One turn of session content carrying the secret, plus a tool event with
+    /// a structured payload, so the structured path's per-event walk and its
+    /// payload canonicalization are both on the path a test observes.
+    fn raw_contribution(text: &str) -> RawTraceContribution {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceCaptureTurn, RawTraceContributionEvent, RecordedTraceContributionOptions,
+            TraceContributionEventType,
+        };
+        let started = chrono::Utc::now();
+        let mut raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: text.to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: started,
+                completed_at: Some(started + chrono::Duration::milliseconds(10)),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        // Keys deliberately out of sorted order in the source. Under
+        // `serde_json/preserve_order` -- which `dcap-qvl` turns on in every
+        // graph containing this crate -- an uncanonicalized payload would
+        // serialise in this order, so this fixture is what
+        // `redact_trace`'s `canonicalize_event_payloads` is observable
+        // through.
+        raw.events.push(RawTraceContributionEvent {
+            event_id: uuid::Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::ToolResult,
+            timestamp: started,
+            content: None,
+            structured_payload: serde_json::json!({
+                "zeta": 1,
+                "alpha": {"omega": 2.5, "beta": [3, 4]},
+                "middle": SURVIVOR,
+            }),
+            tool_name: Some("Bash".to_string()),
+            tool_call_id: Some("call-1".to_string()),
+            latency_ms: Some(12),
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+        });
+        raw
+    }
+
+    fn contribution_request(text: &str) -> WitnessContributionRequest {
+        WitnessContributionRequest {
+            raw_contribution: raw_contribution(text),
+            granted: granted(),
+        }
+    }
+
+    fn raw_with_correction(correction: &str) -> WitnessContributionRequest {
+        let mut request = contribution_request("ran the build");
+        request.raw_contribution.outcome.human_correction = Some(correction.to_string());
+        request
+    }
+
+    #[tokio::test]
+    async fn the_certificate_covers_the_bytes_the_response_returns() {
+        let response = witness_contribution(
+            contribution_request(&format!("deploy key {SECRET} and {SURVIVOR}")),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        // Ground truth taken from the returned bytes, not from anything the
+        // witness computed internally and not from a re-serialisation of the
+        // parsed envelope -- a test that re-serialises cannot catch a
+        // serialisation bug.
+        assert_eq!(
+            response.certificate.claimed_redacted_sha256(),
+            hex::encode(Sha256::digest(&response.envelope_bytes)),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_returned_bytes_deserialise_to_a_submittable_envelope_carrying_the_grants() {
+        let response = witness_contribution(
+            contribution_request("ran the build"),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        let envelope: TraceContributionEnvelope =
+            serde_json::from_slice(&response.envelope_bytes).expect("the bytes are an envelope");
+        assert_eq!(envelope.consent.scopes, granted().scopes);
+        assert_eq!(envelope.trace_card.allowed_uses, granted().uses);
+        // The client must not need to stamp anything afterwards: an empty set
+        // here forces a post-certification write, which is a byte change the
+        // certificate does not cover.
+        assert!(!envelope.consent.scopes.is_empty());
+        // And the grants must be the CLAIM's, not the raw contribution's --
+        // otherwise this test would pass on a witness that ignored them.
+        assert_ne!(
+            envelope.consent.scopes,
+            raw_contribution("ran the build").consent.scopes,
+            "the fixture cannot tell an applied grant from an ignored one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reserialisation_of_the_envelope_would_break_the_digest() {
+        // The guard the whole "bytes as received" rule rests on.
+        //
+        // The plan asked this test to assert that a *compact* serde round
+        // trip moves bytes. Measured, it does not, and the reason is
+        // structural rather than a bad fixture: the only untyped JSON in a
+        // `TraceContributionEnvelope` is `event.structured_payload`, and
+        // `redact_trace` runs `canonicalize_event_payloads` over every one
+        // of them before returning, so the map is key-sorted under either
+        // backing map and the round trip is a no-op. Every other field is a
+        // `#[derive(Serialize)]` struct written in declaration order.
+        // `a_compact_round_trip_is_byte_stable_today` records that as a
+        // measured fact.
+        //
+        // So the divergence is constructed rather than hoped for. Pretty
+        // printing is the realistic accident -- a client that logs the
+        // envelope, or reformats it, or hands it to a framework that does --
+        // and it always moves bytes, so this assertion is falsifiable in
+        // every build graph rather than only in one.
+        let response = witness_contribution(
+            contribution_request("ran the build"),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        let reserialised = serde_json::to_vec_pretty(
+            &serde_json::from_slice::<TraceContributionEnvelope>(&response.envelope_bytes).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            reserialised, response.envelope_bytes,
+            "the fixture cannot detect a re-serialisation"
+        );
+        assert_eq!(
+            response.certificate.claimed_redacted_sha256(),
+            hex::encode(Sha256::digest(&response.envelope_bytes)),
+        );
+        assert_ne!(
+            response.certificate.claimed_redacted_sha256(),
+            hex::encode(Sha256::digest(&reserialised)),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_compact_round_trip_is_byte_stable_today() {
+        // Measured, not relied upon. This is the fact that makes the
+        // constructed divergence above necessary, and it is pinned here so
+        // that if it ever stops being true -- a new untyped-JSON field, a
+        // payload the canonicalizer does not reach -- the reason the other
+        // test is shaped the way it is stops being a mystery.
+        //
+        // It is NOT a licence for a client to re-serialise. The rule is that
+        // the bytes travel verbatim; this test says only that today's
+        // envelope happens not to punish breaking it in one specific way.
+        let response = witness_contribution(
+            contribution_request("ran the build"),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        let round_tripped = serde_json::to_vec(
+            &serde_json::from_slice::<TraceContributionEnvelope>(&response.envelope_bytes).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(round_tripped, response.envelope_bytes);
+    }
+
+    #[tokio::test]
+    async fn a_correction_is_not_rewritten_by_the_structured_path() {
+        // The S5 rule. A text pass over a serialized contribution would
+        // scrub the path out of this and destroy the explanation.
+        let correction = "the agent used /Users/zaki/proj/config.toml instead of the staging one";
+        let response = witness_contribution(
+            raw_with_correction(correction),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("a correction naming a path is not a refusal");
+
+        let envelope: TraceContributionEnvelope =
+            serde_json::from_slice(&response.envelope_bytes).unwrap();
+        assert_eq!(
+            envelope.outcome.human_correction.as_deref(),
+            Some(correction)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_shaped_correction_is_refused_by_name() {
+        let err = witness_contribution(
+            raw_with_correction(&format!("the token is {SECRET}")),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect_err("a credential in a correction is refused, not masked");
+        assert_eq!(err, WitnessError::RedactionFailed);
+    }
+
+    #[tokio::test]
+    async fn the_verdict_matches_what_the_envelope_carries() {
+        let response = witness_contribution(
+            contribution_request(&format!("deploy key {SECRET} and {SURVIVOR}")),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        let envelope: TraceContributionEnvelope =
+            serde_json::from_slice(&response.envelope_bytes).unwrap();
+        assert_eq!(
+            response.residual_risk_verdict(),
+            envelope.privacy.residual_pii_risk,
+            "two sources of truth for the field the design turns on"
+        );
+        // A positive control. Both sides being `Low` by default would make
+        // the equality above hold on a witness that read neither.
+        assert_ne!(
+            envelope.privacy.residual_pii_risk,
+            ResidualPiiRisk::Low,
+            "the fixture must carry a finding, or the agreement is vacuous"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_structured_certificate_verifies_against_the_bytes_it_returned() {
+        let signer = TestSigner::new("witness");
+        let response = witness_contribution(
+            contribution_request(&format!("deploy key {SECRET}")),
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        // The end-to-end statement: the server's own verifier, over the exact
+        // bytes the client will submit.
+        verify_witness_certificate(
+            response.certificate.clone(),
+            &response.signature_hex,
+            Some(&pin(&signer)),
+            &response.envelope_bytes,
+        )
+        .expect("the certificate the witness issued verifies against the bytes it returned");
+
+        // And it refuses one byte later, which is what says the check above
+        // is over these bytes rather than over anything a witness asserted.
+        let mut tampered = response.envelope_bytes.clone();
+        tampered.push(b'\n');
+        let err = verify_witness_certificate(
+            response.certificate,
+            &response.signature_hex,
+            Some(&pin(&signer)),
+            &tampered,
+        )
+        .expect_err("an appended newline is a different artifact");
+        assert!(matches!(err, WitnessVerificationError::ArtifactMismatch));
+    }
+
+    #[tokio::test]
+    async fn raw_bytes_never_appear_in_a_structured_response_or_an_error() {
+        let signer = TestSigner::new("witness");
+        let response = witness_contribution(
+            contribution_request(&format!("deploy key {SECRET} and {SURVIVOR}")),
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        let rendered = String::from_utf8(response.envelope_bytes.clone()).unwrap();
+        assert!(!rendered.contains(SECRET), "the secret survived redaction");
+        // The positive control. Without it a redactor that emitted an empty
+        // envelope would satisfy the assertion above.
+        assert!(
+            rendered.contains(SURVIVOR),
+            "the survivor was removed too, so the assertion above proves nothing"
+        );
+        assert!(!format!("{response:?}").contains(SECRET));
+        assert!(
+            !format!("{response:?}").contains(SURVIVOR),
+            "Debug rendered the envelope, which is contributor content"
+        );
+
+        // And on the refusal path.
+        let refused = witness_contribution(
+            raw_with_correction(&format!("the token is {SECRET} {REFUSED_MARKER}")),
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .expect_err("a credential in a correction is refused");
+        for rendering in [format!("{refused}"), format!("{refused:?}")] {
+            assert!(!rendering.contains(SECRET));
+            assert!(!rendering.contains(REFUSED_MARKER));
+        }
+
+        let request = raw_with_correction(REFUSED_MARKER);
+        assert!(!format!("{request:?}").contains(REFUSED_MARKER));
     }
 }

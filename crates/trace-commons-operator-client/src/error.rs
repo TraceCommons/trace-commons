@@ -52,6 +52,15 @@ pub enum Error {
         body: String,
     },
 
+    /// A caller-supplied request header is not a legal HTTP header value.
+    ///
+    /// The name is carried; the value never is. On the path this exists for
+    /// -- forwarding a redaction-witness certificate -- the value is
+    /// certificate material, and an error string is one `tracing::error!`
+    /// away from a log line.
+    #[error("request header {name} is not a legal header value")]
+    HeaderMalformed { name: String },
+
     /// Server returned a success status but the response body didn't deserialize
     /// into the expected type.
     #[error("trace-commons API at {url} returned malformed response: {source}")]
@@ -110,6 +119,7 @@ impl Error {
             Error::HttpFailure { .. } => "http-failure",
             Error::ServerLabel { .. } => "server-label",
             Error::MalformedResponse { .. } => "malformed-response",
+            Error::HeaderMalformed { .. } => "header-malformed",
         }
     }
 }
@@ -128,6 +138,11 @@ impl Error {
             ),
             Error::HostNotAllowed { host, allowed } => {
                 format!("host {host} blocked by allowed-hosts list ({allowed})")
+            }
+            // The name, never the value: on the path this exists for the
+            // value is certificate material.
+            Error::HeaderMalformed { name } => {
+                format!("request header {name} is not a legal header value")
             }
             Error::Transport { url, source } => format!(
                 "request to {} failed: {source}",

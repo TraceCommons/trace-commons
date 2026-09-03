@@ -599,6 +599,26 @@ async fn build_preview_core(
             crate::envelope::build_preview_raw_contribution(&transcript, cfg, Utc::now()),
         )
     };
+    // A witnessed client cannot build a preview envelope here.
+    //
+    // This path has no claim -- it runs before the contributor has answered --
+    // and a witnessed envelope must carry the granted scopes INSIDE the bytes
+    // the certificate covers, which means minting first. There is no issuer
+    // client on this path to mint with.
+    //
+    // Refusing rather than building one locally is the point. The preview
+    // envelope is not merely displayed: `use_approved_envelope` uploads these
+    // exact bytes later, so a locally-redacted preview under a configured
+    // witness would be an unwitnessed submission from a contributor who
+    // believes their submissions are certified. That is the downgrade this
+    // design exists to make noisy, and silence about it is the failure mode.
+    //
+    // The consequence is real and is named here rather than discovered: with
+    // a witness configured, the desktop shells' approve-then-upload flow does
+    // not work. Direct submission does.
+    if enrolled && cfg.witness.is_some() {
+        return Err(anyhow::anyhow!("witness_claim_unavailable"));
+    }
     let envelope = redact_to_envelope(&redactor, raw).await?;
     let would_send_bytes = envelope_size(&envelope)?;
 
@@ -863,6 +883,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
     }
 
@@ -1469,6 +1490,14 @@ mod tests {
                 "schema_version",
                 "tenant_id",
                 "user_subject",
+                // Fingerprinted, deliberately, and NOT in
+                // NON_ENVELOPE_CONFIG_FIELDS. Turning a witness on changes
+                // who builds the envelope and therefore what the bytes are,
+                // so an entry approved before the change must be re-approved
+                // rather than uploaded under the new arrangement. Over-
+                // invalidating re-asks; under-invalidating sends something
+                // the contributor did not approve.
+                "witness",
             ],
             "a new ContributorConfig field must be classified: leave it out of \
              NON_ENVELOPE_CONFIG_FIELDS to fingerprint it, or add it there with a reason"

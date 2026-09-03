@@ -7972,6 +7972,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(process_evaluation_worker_run_handler),
         )
         .route("/v1/audit/events", get(audit_events_handler))
+        // Unauthenticated, like /v1/source and /v1/public/register-stats
+        // above: a contributor needs collateral before they have decided to
+        // trust anything, so it cannot sit behind enrollment.
+        .merge(attestation_collateral_routes())
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
 }
@@ -75476,6 +75480,146 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         Json(self).into_response()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Intel DCAP collateral, for a contributor verifying a witness enclave.
+//
+// The client half of the redaction-witness design has to run `verify_quote`
+// before it sends a raw session anywhere, and `verify_quote` takes collateral
+// as a parameter. Nothing supplies it to a client today.
+//
+// It is served here rather than by the witness for two reasons. `dcap-qvl`'s
+// own collateral client cannot go in `trace-commons-contributor`: its `report`
+// feature pulls a second `reqwest` carrying the aws-lc-rs rustls provider
+// alongside this workspace's ring one, and rustls then panics at the first TLS
+// use unless a binary installs a default explicitly -- which `main()` here
+// does. `trace-commons-contributor` is a library inside a CLI, a GTK binary, a
+// Swift app and a Windows shell; a landmine only a `main()` can defuse does
+// not belong in it. And putting it on the witness would give the enclave an
+// outbound Intel dependency and enlarge the image, which enlarges the
+// measurement a contributor pins.
+//
+// **This does not make ingest a trust dependency.** Collateral is Intel-signed
+// and its validity window is evaluated against the clock the *client* passes,
+// so an intermediary can withhold it but cannot forge it. A client that gets
+// none refuses rather than verifying without it.
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/attestation-collateral` request body.
+///
+/// `deny_unknown_fields`: a caller sending a field this route does not
+/// understand may believe it is scoping the request somehow.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationCollateralRequest {
+    /// The quote to fetch collateral for, as bare hex. No `0x` prefix, for
+    /// the same reason `ContributorNonce::parse_hex` refuses one: one
+    /// encoding means a client and this route cannot disagree about which
+    /// bytes were asked about.
+    quote_hex: String,
+}
+
+/// The refusal for a quote that is not bare hex.
+const ATTESTATION_COLLATERAL_QUOTE_MALFORMED: &str = "attestation_collateral_quote_malformed";
+/// The refusal when the collateral could not be obtained from Intel.
+///
+/// Read only by the `near-attestation-collateral` arm below. Without the
+/// feature this binary cannot fetch collateral at all and refuses earlier,
+/// with the missing-control name instead.
+#[cfg_attr(
+    not(feature = "near-attestation-collateral"),
+    expect(
+        dead_code,
+        reason = "read only by the collateral client, which the \
+                  near-attestation-collateral feature compiles in"
+    )
+)]
+const ATTESTATION_COLLATERAL_UNAVAILABLE: &str = "attestation_collateral_unavailable";
+
+/// The collateral route.
+///
+/// Unauthenticated and outside tenant context, like `GET /v1/source`, and
+/// merged into `app` outside every auth layer on purpose. A contributor needs
+/// collateral *before* they have decided to trust anything, so requiring a
+/// claim to obtain it would make verifying an enclave depend on already being
+/// enrolled with the operator whose enclave it is. That is the wrong order,
+/// and it would make the verification worth less than it looks.
+///
+/// A separate `Router` rather than a line in `app`, so the reachability tests
+/// can drive the real routing table without constructing an `AppState`. A
+/// handler can be correct and unreachable; that exact defect has been found
+/// in this repository before.
+fn attestation_collateral_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/v1/attestation-collateral",
+        post(attestation_collateral_handler),
+    )
+}
+
+/// Fetch Intel collateral for a quote.
+///
+/// No logging at all, hash-only or otherwise. The quote itself is public, but
+/// *which* client asked about *which* enclave and when is a correlation this
+/// route must not be the source of.
+async fn attestation_collateral_handler(
+    Json(request): Json<AttestationCollateralRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Emptiness is checked separately: `hex::decode("")` succeeds and yields
+    // an empty quote, so leaving it to the parse would let a caller reach the
+    // fetch with nothing to fetch collateral for.
+    if request.quote_hex.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        ));
+    }
+    // The error carries no offset and no length. Both are derived from caller
+    // input, and an offset tells a prober exactly how far its guess got.
+    let quote = hex::decode(&request.quote_hex).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            ATTESTATION_COLLATERAL_QUOTE_MALFORMED,
+        )
+    })?;
+
+    Ok(Json(fetch_attestation_collateral(&quote).await?))
+}
+
+/// The collateral fetch, or the missing control that stands in for it.
+///
+/// Two arms behind the `near-attestation-collateral` feature, mirroring
+/// `HttpAttestationClient::fetch_collateral`. The feature-off arm refuses with
+/// the same control name that path uses, so an operator sees one name for one
+/// missing control. It never returns a 200 with an empty body, which a client
+/// checking only the status could not tell from real collateral -- and a
+/// client verifying against empty collateral verifies nothing at all.
+#[cfg(feature = "near-attestation-collateral")]
+async fn fetch_attestation_collateral(
+    quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    let unavailable = || {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ATTESTATION_COLLATERAL_UNAVAILABLE,
+        )
+    };
+    let pccs_url =
+        trimmed_env(TRACE_COMMONS_NEAR_AI_PCCS_URL).unwrap_or_else(|| INTEL_PCS_URL.to_string());
+    let client = dcap_qvl::collateral::CollateralClient::with_default_http(&pccs_url)
+        .map_err(|_| unavailable())?;
+    let collateral = client.fetch(quote).await.map_err(|_| unavailable())?;
+    serde_json::to_value(&collateral).map_err(|_| unavailable())
+}
+
+#[cfg(not(feature = "near-attestation-collateral"))]
+async fn fetch_attestation_collateral(
+    _quote: &[u8],
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    Err(api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
+    ))
 }
 
 #[cfg(test)]
