@@ -146,6 +146,63 @@ public sealed class SessionRootsTests
     }
 
     /// <summary>
+    /// Gemini CLI and Cline are offered but cannot block: the daemon's own
+    /// start gate is two-conjunct, and an unanswered optional source is
+    /// "never asked", which constructs no adapter. So neither one appears in
+    /// the payload until it is answered, and neither one holds Continue.
+    /// </summary>
+    [Fact]
+    public void AnUnansweredOptionalSourceNeitherBlocksNorTravels()
+    {
+        var declaration = new SessionRootsDeclaration
+        {
+            Claude = SourceDecision.Off,
+            Codex = SourceDecision.Off,
+        };
+
+        Assert.True(declaration.IsComplete);
+
+        using JsonDocument json = JsonDocument.Parse(declaration.SettingsJson()!);
+        Assert.False(json.RootElement.TryGetProperty("gemini_source", out _));
+        Assert.False(json.RootElement.TryGetProperty("cline_source", out _));
+    }
+
+    /// <summary>
+    /// Once answered, an optional source travels exactly as the required two
+    /// do: an explicit "off" for a refusal, a path for a folder.
+    /// </summary>
+    [Fact]
+    public void AnAnsweredOptionalSourceTravelsLikeTheRequiredOnes()
+    {
+        var declaration = new SessionRootsDeclaration
+        {
+            Claude = SourceDecision.Off,
+            Codex = SourceDecision.Off,
+            Gemini = SourceDecision.Off,
+            Cline = SourceDecision.Watch(@"C:\Users\z\.cline\tasks"),
+        };
+
+        using JsonDocument json = JsonDocument.Parse(declaration.SettingsJson()!);
+        JsonElement root = json.RootElement;
+
+        Assert.Equal("off", root.GetProperty("gemini_source").GetProperty("mode").GetString());
+        JsonElement cline = root.GetProperty("cline_source");
+        Assert.Equal("watch", cline.GetProperty("mode").GetString());
+        Assert.Equal(@"C:\Users\z\.cline\tasks", cline.GetProperty("path").GetString());
+    }
+
+    /// <summary>
+    /// The roots screen is the one place a shell maps a source id to a name
+    /// itself, mirroring how <c>gemini-cli</c> is already mapped.
+    /// </summary>
+    [Fact]
+    public void TheOptionalSourcesHaveDisplayNames()
+    {
+        Assert.Equal("Gemini CLI", SessionRootsCopy.AgentName(SourceDiscovery.GeminiCli));
+        Assert.Equal("Cline", SessionRootsCopy.AgentName(SourceDiscovery.Cline));
+    }
+
+    /// <summary>
     /// Windows paths are full of backslashes, and a folder may contain a
     /// quote. Hand-built JSON would corrupt the first store with either, which
     /// is why the declaration is serialized rather than concatenated.

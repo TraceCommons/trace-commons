@@ -97,7 +97,7 @@ public class RoutingCopyTests
             .Where(p => p.PropertyType == typeof(string))
             .ToList();
 
-        Assert.Equal(22, strings.Count);
+        Assert.Equal(23, strings.Count);
         foreach (var property in strings)
         {
             string? value = (string?)property.GetValue(copy);

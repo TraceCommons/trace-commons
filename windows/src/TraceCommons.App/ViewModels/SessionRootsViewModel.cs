@@ -83,12 +83,14 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
         Claude = Row(candidates, SourceDiscovery.ClaudeCode);
         Codex = Row(candidates, SourceDiscovery.Codex);
         Gemini = Row(candidates, SourceDiscovery.GeminiCli);
+        Cline = Row(candidates, SourceDiscovery.Cline);
 
         Claude.PropertyChanged += OnRowChanged;
         Codex.PropertyChanged += OnRowChanged;
         Gemini.PropertyChanged += OnRowChanged;
+        Cline.PropertyChanged += OnRowChanged;
 
-        Rows = new ObservableCollection<SourceRowViewModel> { Claude, Codex, Gemini };
+        Rows = new ObservableCollection<SourceRowViewModel> { Claude, Codex, Gemini, Cline };
     }
 
     /// <summary>Raised once the daemon has started with the declaration.</summary>
@@ -107,6 +109,9 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
     /// <summary>The Gemini CLI row. Offered like the others, but it cannot
     /// block Continue -- see <c>SessionRootsDeclaration.IsComplete</c>.</summary>
     public SourceRowViewModel Gemini { get; }
+
+    /// <summary>The Cline row. Optional exactly as the Gemini CLI row is.</summary>
+    public SourceRowViewModel Cline { get; }
 
     /// <summary>Both rows, for a bound list.</summary>
     public ObservableCollection<SourceRowViewModel> Rows { get; }
@@ -202,6 +207,7 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
         Claude = Claude.Decision,
         Codex = Codex.Decision,
         Gemini = Gemini.Decision,
+        Cline = Cline.Decision,
     };
 
     private static SourceRowViewModel Row(

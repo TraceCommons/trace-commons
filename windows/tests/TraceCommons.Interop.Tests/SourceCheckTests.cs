@@ -50,6 +50,20 @@ public class SourceCheckTests
     }
 
     /// <summary>
+    /// The Rust already answers for <c>cline</c>; this shell passes the key
+    /// through and prints what comes back, the same as for the other tools.
+    /// </summary>
+    [Fact]
+    public void ClineGetsItsOwnThreeSentencesAcrossTheAbi()
+    {
+        Assert.Equal("Cline sessions folder set", Line("cline", "watch"));
+        Assert.Equal("Cline sessions read from the usual place", Line("cline", "unset"));
+        Assert.Equal(
+            "Cline marked not used, so nothing is opened for it",
+            Line("cline", "off"));
+    }
+
+    /// <summary>
     /// No mode's sentence contains another's. "Private" is a substring of
     /// "Not private", and a Contains check on this surface has matched the
     /// wrong branch that way before; the "off" line is therefore not the
