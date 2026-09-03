@@ -29,6 +29,7 @@ import XCTest
 private let routingCalls = RoutingCalls(
     tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
     unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    discoveryLine: { TCRoutingCopy.discoveryLine(port: $0) },
     toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
     toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
     stateLine: { TCRoutingCopy.stateLine(state: $0) },
@@ -224,13 +225,19 @@ final class RoutingBindingTests: XCTestCase {
     func testThePortAndFolderFieldsAreLiveOnlyWhileTheSwitchIsOn() throws {
         let body = try XCTUnwrap(RoutingCard.body())
 
-        for label in ["copy.portTitle", "copy.folderTitle"] {
+        // The port is still a box; the folder is a chooser, because on
+        // this platform pointing at a directory through the system's own
+        // panel is what a person can answer and a path string is not.
+        for (label, control) in [
+            ("copy.portTitle", "TextField("),
+            ("copy.folderTitle", "Button(copy.chooseFolder)"),
+        ] {
             let group = try XCTUnwrap(
                 RoutingCard.region(of: body, from: "TCFieldLabel(\(label))", to: ".disabled(")
             )
             XCTAssertTrue(
-                group.contains("TextField("),
-                "the group gated after \(label) holds no TextField: \(group)"
+                group.contains(control),
+                "the group gated after \(label) holds no \(control): \(group)"
             )
             let argument = try XCTUnwrap(
                 RoutingCard.disabledArgument(after: "TCFieldLabel(\(label))", in: body)
@@ -240,6 +247,17 @@ final class RoutingBindingTests: XCTestCase {
                 "the \(label) group is gated on `\(argument)`, not on the switch being on"
             )
         }
+
+        // And the chooser is a chooser: directories only, nothing created,
+        // one answer. Every other affordance on that panel is a way to give
+        // an answer that cannot be right.
+        let panel = try XCTUnwrap(
+            RoutingCard.declaration("private func chooseIronWireFolder() -> String? {")
+        )
+        XCTAssertTrue(panel.contains("panel.canChooseDirectories = true"), panel)
+        XCTAssertTrue(panel.contains("panel.canChooseFiles = false"), panel)
+        XCTAssertTrue(panel.contains("panel.allowsMultipleSelection = false"), panel)
+        XCTAssertTrue(panel.contains("panel.canCreateDirectories = false"), panel)
 
         let applyArgument = try XCTUnwrap(
             RoutingCard.region(of: body, from: "buttonStyle(.bordered)\n", to: "\n")
@@ -258,13 +276,51 @@ final class RoutingBindingTests: XCTestCase {
     /// two things on this card that reach `set_settings` are the switch and
     /// the Apply button, and a third writer hiding in a field's setter would
     /// have this window announce a local service nobody mentioned.
-    func testOnlyTheSwitchAndTheApplyButtonWriteTheDeclaration() throws {
+    func testOnlyTheSwitchAndTheTwoButtonsWriteTheDeclaration() throws {
         let body = try XCTUnwrap(RoutingCard.body())
 
+        // Three, and each one is a thing a contributor pressed: the switch,
+        // Apply, and the connect button discovery offers. The count is the
+        // point -- a fourth writer is a writer that is not a press, and the
+        // only place one can hide on this card is a field's setter.
         XCTAssertEqual(
-            RoutingCard.occurrences(of: "model.applyIronWire(", in: body), 2,
-            "the routing card has a writer besides the switch and Apply"
+            RoutingCard.occurrences(of: "model.applyIronWire(", in: body), 3,
+            "the routing card has a writer besides the switch, Apply and connect"
         )
+
+        // The one discovery added. It writes the form that is ON SCREEN,
+        // turned on -- not one rebuilt from the discovered port -- so a
+        // press cannot declare a number different from the one displayed.
+        let connect = try XCTUnwrap(
+            RoutingCard.region(of: body, from: "Button(copy.connect) {", to: "buttonStyle(")
+        )
+        XCTAssertTrue(
+            connect.contains("RoutingSurface.connecting(form)"),
+            "the connect button builds its own form: \(connect)"
+        )
+        XCTAssertTrue(connect.contains("model.applyIronWire(next)"), connect)
+        XCTAssertFalse(
+            connect.contains("model.routingDiscovery.port"),
+            "the connect button declares the discovered port rather than the shown one"
+        )
+
+        // Discovery itself writes nothing. It is offered above the
+        // disclosure and reads a file; a declaration on that path would be
+        // this window announcing a local service nobody mentioned.
+        let offer = try XCTUnwrap(
+            RoutingCard.region(
+                of: body, from: "RoutingSurface.discoveryLine(", to: "Button(copy.connect)"
+            )
+        )
+        XCTAssertFalse(
+            offer.contains("applyIronWire"),
+            "showing what was discovered declares it: \(offer)"
+        )
+        let lookAgain = try XCTUnwrap(
+            RoutingCard.region(of: body, from: "Button(copy.lookAgain)", to: "\n")
+        )
+        XCTAssertTrue(lookAgain.contains("model.discoverRouting()"), lookAgain)
+        XCTAssertFalse(lookAgain.contains("applyIronWire"), lookAgain)
 
         for label in ["copy.portTitle", "copy.folderTitle"] {
             let group = try XCTUnwrap(
@@ -314,6 +370,93 @@ final class RoutingBindingTests: XCTestCase {
             RoutingForm(on: false, port: 9001, tokenDir: "/Users/x/ironwire")
         )
         XCTAssertTrue(off["ironwire"] is NSNull, "off did not spell null: \(off)")
+    }
+
+    // MARK: - What the machine already knows
+
+    /// The card asks before it asks the contributor.
+    ///
+    /// `discover_routing` has been in the daemon since it was written and
+    /// no shell had ever called it, which is the whole reason this screen
+    /// asked for a port at all. So this pins the call site: the card asks
+    /// on appear, and it asks the model rather than reading a file itself.
+    func testTheCardAsksWhatTheMachineKnowsWhenItAppears() throws {
+        let body = try XCTUnwrap(RoutingCard.body())
+        let appear = try XCTUnwrap(RoutingCard.region(of: body, from: ".onAppear {", to: "}"))
+        XCTAssertTrue(
+            appear.contains("model.discoverRouting()"),
+            "the card no longer asks what the machine knows: \(appear)"
+        )
+    }
+
+    /// The offer is a sentence the Rust assembled, rendered unchanged.
+    ///
+    /// Both branches of it -- a port was published, or nothing was -- and
+    /// neither is an error state here. A machine without IronWire is the
+    /// ordinary machine, and there is no `else` on this card for it to fall
+    /// into.
+    func testTheDiscoveryOfferIsTheSharedSentence() throws {
+        let body = try XCTUnwrap(RoutingCard.body())
+        XCTAssertTrue(
+            body.contains("RoutingSurface.discoveryLine("),
+            "the discovery offer is not built from the surface: \(body)"
+        )
+        XCTAssertTrue(
+            body.contains("model.routingDiscovery, copy: copy, calls: model.routingCalls"),
+            "the offer is not built from what was discovered and the shared sentences"
+        )
+    }
+
+    /// The contributor's declared port always wins.
+    ///
+    /// A pointer is a file that survives the daemon that wrote it --
+    /// IronWire removes it only on a clean stop -- so a stale one naming
+    /// 9000 must not replace a declared 8463 in the field. This is the same
+    /// rule `ironwire_ledger_for` obeys on the reading side.
+    func testADiscoveredPortNeverReplacesADeclaredOne() {
+        let declared = RoutingForm.fromDeclaration(
+            mode: "watch", port: 8463, tokenDir: nil, discoveredPort: 9000
+        )
+        XCTAssertEqual(declared.port, 8463)
+
+        // And where nothing is declared it fills in, ahead of the
+        // conventional number -- which is a display, not a declaration.
+        let undeclared = RoutingForm.fromDeclaration(
+            mode: nil, port: nil, tokenDir: nil, discoveredPort: 9000
+        )
+        XCTAssertEqual(undeclared.port, 9000)
+        XCTAssertFalse(undeclared.on)
+        XCTAssertTrue(RoutingSurface.settingsParams(undeclared)["ironwire"] is NSNull)
+
+        let nothingAnywhere = RoutingForm.fromDeclaration(
+            mode: nil, port: nil, tokenDir: nil, discoveredPort: nil
+        )
+        XCTAssertEqual(nothingAnywhere.port, RoutingForm.conventionalPort)
+    }
+
+    /// The fields become a disclosure only where the machine answered.
+    ///
+    /// Where it did not they are the only way to answer, so they stay open.
+    /// This inverts the default; it does not remove the manual path.
+    func testThePortAndFolderCollapseOnlyOnceSomethingWasDiscovered() throws {
+        XCTAssertTrue(
+            RoutingSurface.overrideIsCollapsed(RoutingDiscovery(port: 9143, tokenPath: nil))
+        )
+        XCTAssertFalse(RoutingSurface.overrideIsCollapsed(.none))
+
+        let body = try XCTUnwrap(RoutingCard.body())
+        let disclosure = try XCTUnwrap(
+            RoutingCard.region(of: body, from: "DisclosureGroup(", to: "TCFieldLabel(copy.portTitle)")
+        )
+        XCTAssertTrue(disclosure.contains("copy.overrideTitle"), disclosure)
+        XCTAssertTrue(
+            disclosure.contains("RoutingSurface.overrideIsCollapsed(model.routingDiscovery)"),
+            "the disclosure's default is not what was discovered: \(disclosure)"
+        )
+        XCTAssertTrue(
+            disclosure.contains("routingOverrideOpen"),
+            "a contributor who opens the disclosure is not obeyed: \(disclosure)"
+        )
     }
 
     // MARK: - Per-tool words
