@@ -27,6 +27,9 @@ CASE_KEYS = {
     "forbidden_classes",
     "expected_disposition",
 }
+# Optional per-case assertions. Kept separate so the strict "no unknown
+# fields" rule still holds for everything else.
+OPTIONAL_CASE_KEYS = {"expects_advisory"}
 FORMATS = {
     "synthetic_claude_jsonl",
     "synthetic_codex_jsonl",
@@ -41,7 +44,7 @@ def validate_case(case: Any, line_number: int) -> list[str]:
     errors: list[str] = []
     if not isinstance(case, dict):
         return [f"line {line_number}: case must be an object"]
-    if set(case) != CASE_KEYS:
+    if not CASE_KEYS <= set(case) <= (CASE_KEYS | OPTIONAL_CASE_KEYS):
         errors.append(f"line {line_number}: fields do not match the schema")
     case_id = case.get("case_id")
     if not isinstance(case_id, str) or CASE_ID_RE.fullmatch(case_id) is None:
@@ -52,9 +55,17 @@ def validate_case(case: Any, line_number: int) -> list[str]:
     if not isinstance(record, dict) or record.get("fixture_notice") != "SYNTHETIC_FUZZ_FIXTURE":
         errors.append(f"line {line_number}: record lacks the synthetic fixture marker")
     forbidden = case.get("forbidden_classes")
+    # A negative case asserts that NOTHING is found, so an empty list is its
+    # only coherent value. The schema used to require a non-empty one on every
+    # case, which forced all 30 negatives to carry a class that means "must not
+    # appear" while the scorer read the field as "must appear" -- so the value
+    # was decorative on exactly the cases where it was mandatory.
+    if not isinstance(case.get("expects_advisory", False), bool):
+        errors.append(f"line {line_number}: invalid expects_advisory")
+    keeps = case.get("expected_disposition") == "keep"
     if (
         not isinstance(forbidden, list)
-        or not forbidden
+        or (not forbidden and not keeps)
         or len(forbidden) != len(set(forbidden))
         or any(item not in CLASSES for item in forbidden)
     ):
@@ -100,6 +111,7 @@ def score(path: Path) -> tuple[dict[str, Any], int]:
     #   flagged -> true positive; one it missed -> false negative.
     #   negative case (expected_disposition == "keep") the auditor correctly left
     #   alone -> true negative; one it wrongly flagged -> false positive.
+    advisory_hits = 0
     true_positives = 0
     false_negatives = 0
     true_negatives = 0
@@ -112,20 +124,38 @@ def score(path: Path) -> tuple[dict[str, Any], int]:
             case_path = temp_root / f"{case_id}.jsonl"
             case_path.write_text(json.dumps(case["record"], sort_keys=True) + "\n", encoding="utf-8")
             report = redaction_audit.audit(case_path)
-            observed = {item["forbidden_class"] for item in report["detections"]}
+            # Advisory detections are expected until the corresponding
+            # client-side rule lands (see ADVISORY_DETECTORS), so they must not
+            # count for or against the score. Without this a broad-but-useful
+            # rule cannot be added at all: every negative case it touches would
+            # read as a false positive, and the honest move -- reporting a
+            # known gap -- would make the number look worse.
+            advisories = [item for item in report["detections"] if item["advisory"]]
+            advisory_hits += len(advisories)
+            observed = {
+                item["forbidden_class"]
+                for item in report["detections"]
+                if not item["advisory"]
+            }
             expected = set(case["forbidden_classes"])
             for item in expected:
                 class_totals[item] += 1
             is_negative = case["expected_disposition"] == "keep"
+            # A case may additionally require an ADVISORY hit. Without this the
+            # advisory detectors are unpinned: their cases are negatives, so
+            # deleting the detector leaves them passing and the corpus silent
+            # about a rule it was added to protect.
+            wants_advisory = bool(case.get("expects_advisory"))
+            advisory_ok = bool(advisories) if wants_advisory else True
             if is_negative:
                 negative_cases += 1
-                ok = not observed and not report["failures"]
+                ok = not observed and not report["failures"] and advisory_ok
                 if ok:
                     true_negatives += 1
                 else:
                     false_positives += 1
             else:
-                ok = expected.issubset(observed) and not report["failures"]
+                ok = expected.issubset(observed) and not report["failures"] and advisory_ok
                 if ok:
                     true_positives += 1
                 else:
@@ -142,6 +172,7 @@ def score(path: Path) -> tuple[dict[str, Any], int]:
                         "expected": sorted(expected),
                         "observed": sorted(observed),
                         "audit_failures": len(report["failures"]),
+                        "advisories": len(advisories),
                     }
                 )
 
@@ -161,6 +192,7 @@ def score(path: Path) -> tuple[dict[str, Any], int]:
         "score": f"{passed}/{len(cases)}",
         "passed": passed,
         "total": len(cases),
+        "advisory_hits": advisory_hits,
         "negative_cases": negative_cases,
         "positive_cases": len(cases) - negative_cases,
         "true_positives": true_positives,

@@ -26,6 +26,7 @@ class Detection(TypedDict):
     source_hash: str
     locator_hash: str
     evidence_shape: str
+    advisory: bool
 
 
 class AuditFailure(TypedDict):
@@ -79,7 +80,12 @@ _PLACEHOLDER_RE = re.compile(
     r"^\s*(?:\[(?:redacted|opaque|user|placeholder|synthetic)[^\]]*\]"
     r"|<[^>]*(?:redacted|placeholder|synthetic)[^>]*>"
     r"|(?:redacted|placeholder|synthetic|example|dummy|none|null|unknown|unset)"
-    r"|\$\{?[A-Z_][A-Z0-9_]*\}?|\*{3,}|x{4,})\s*$",
+    r"|\$\{?[A-Z_][A-Z0-9_]*\}?|\*{3,}|x{4,}"
+    # Bare screaming-snake placeholders: YOUR_TOKEN_HERE, CHANGEME, ...
+    # Gated on a placeholder word so a genuine all-caps credential is not
+    # suppressed just for being upper case.
+    r"|[A-Za-z0-9_-]*(?:your|here|example|sample|dummy|placeholder|changeme|todo|xxx)"
+    r"[A-Za-z0-9_-]*)\s*$",
     re.IGNORECASE,
 )
 
@@ -90,7 +96,18 @@ _ROLE_WORDS = (
     r"participant|prepared\s+by|principal|reviewer|shareholder|signatory|speaker|"
     r"recipient|sender|son|spouse|team\s+member|uncle|vice\s+president|wife"
 )
-_PERSON = r"[A-Z][a-z]{2,}(?:[-'][A-Z][a-z]{2,})?\s+[A-Z][a-z]{2,}(?:[-'][A-Z][a-z]{2,})?"
+# Cased-letter classes spanning the scripts a contributor's transcript
+# plausibly names a person in. Restricting these to [A-Z][a-z] meant
+# `Renee Dupont` was found and `Renée Dupont` was not, and no Cyrillic or
+# Greek name was ever found at all -- the auditor was quietly blind to
+# exactly the third-party people least likely to be reading its report.
+# Scripts without case (CJK, Hebrew, Arabic, Devanagari) cannot express the
+# proper-noun shape this detector keys on and remain out of its reach; that
+# is a known limit, not an oversight.
+_UPPER = "A-ZÀ-ÖØ-ÞĀ-ſΑ-ΩА-Я"
+_LOWER = "a-zß-öø-ÿĀ-ſα-ωа-я"
+_NAME_WORD = rf"[{_UPPER}][{_LOWER}]{{2,}}(?:[-'][{_UPPER}][{_LOWER}]{{2,}})?"
+_PERSON = rf"{_NAME_WORD}\s+{_NAME_WORD}"
 # _PERSON is deliberately compiled case-SENSITIVELY: its whole purpose is the
 # [A-Z][a-z]... proper-noun shape. A surrounding re.IGNORECASE (as this used to
 # carry) degrades that shape to "any two words of 3+ letters", which fires on
@@ -275,6 +292,16 @@ _VENDORED_DEPENDENCY_PATH_RE = re.compile(
 )
 
 
+# Detectors whose hits are EXPECTED until a dedicated client-side rule lands,
+# and so must not count as failures. Mirrors `ADVISORY_PATTERNS` in
+# crates/trace-commons-contributor/tests/local_redaction_audit.rs, and exists
+# for the same reason: opaque bearer tokens are not redacted client-side today
+# (a known, tracked gap), so reporting them as hard failures leaves the audit
+# permanently red and trains everyone to ignore it -- which is how real
+# findings get missed. They are reported, and reported separately.
+ADVISORY_DETECTORS = frozenset({"bearer_value"})
+
+
 def _short_hash(value: str | bytes) -> str:
     if isinstance(value, str):
         value = value.encode("utf-8", "surrogatepass")
@@ -313,14 +340,25 @@ def _shape_signature(value: str, max_runs: int = _SHAPE_MAX_RUNS) -> str:
     """
 
     def class_of(character: str) -> str:
-        if character.islower() and character.isascii():
-            return "a"
-        if character.isupper() and character.isascii():
-            return "A"
-        if character.isdigit() and character.isascii():
-            return "9"
         if character.isspace():
             return "_"
+        if character.isdigit():
+            return "9"
+        # Alphabetic is classed by case for EVERY script, not only ASCII.
+        # Guarding these on `isascii()` meant a non-Latin name fell through to
+        # "kept verbatim" and was written into the findings report in clear --
+        # `Владимир Петров` shaped to itself. That is the exact disclosure the
+        # shape exists to prevent, and it failed precisely for the people least
+        # likely to be reading the report. Scripts without case (CJK, Hebrew,
+        # Arabic) have no upper/lower distinction, so `islower()` and
+        # `isupper()` are both false; class them as `a` rather than leaking the
+        # codepoint.
+        if character.isalpha():
+            if character.isupper():
+                return "A"
+            return "a"
+        if character.isdigit() or character.isnumeric():
+            return "9"
         return character
 
     out: list[str] = []
@@ -421,7 +459,7 @@ def _source_control_identity(text: str) -> bool:
     return False
 
 
-def _credential_value(text: str) -> bool:
+def _credential_value(text: str) -> str | None:
     for match in _CREDENTIAL_RE.finditer(text):
         value = match.group("value").strip(".()")
         if _is_placeholder(value):
@@ -429,8 +467,41 @@ def _credential_value(text: str) -> bool:
         if value.lower() in {"true", "false", "yes", "no", "value", "here"}:
             continue
         if len(value) >= 5:
-            return True
-    return False
+            return value
+    return None
+
+
+# `Authorization: Bearer <value>` separates the cue from the value with nothing
+# but a space, so `_CREDENTIAL_RE` -- which requires one of `is`/`=`/`:`/`#`
+# after the cue -- never matched the commonest bearer form in the world. Both
+# strings in this repo's own BEARER_EVASIONS
+# (crates/trace-commons-contributor/tests/local_redaction_audit.rs) audited
+# clean before this arm existed.
+#
+# Mirrors `count_bearer_values` in that file: the value is the run of entropy
+# candidate characters after "bearer ", at least MIN_LEN long, containing at
+# least one digit or uppercase letter, and not a placeholder. Parity with the
+# Rust mirror is deliberate -- two auditors that disagree report on inputs
+# neither detector considered.
+_BEARER_MIN_LEN = 8
+_BEARER_RE = re.compile(r"\bbearer\s+([A-Za-z0-9+/=_.-]+)", re.IGNORECASE)
+
+
+def _bearer_value(text: str) -> str | None:
+    for match in _BEARER_RE.finditer(text):
+        value = match.group(1)
+        if len(value) < _BEARER_MIN_LEN:
+            continue
+        if not any(character.isdigit() or character.isupper() for character in value):
+            continue
+        if _is_placeholder(value):
+            continue
+        # Deliberately NOT run through `_is_structured_identifier`. After an
+        # explicit credential cue a UUID or a 32-hex string is far likelier to
+        # be an API key in one of its two commonest shapes than a benign
+        # identifier, and exempting them is what let both known evasions pass.
+        return value
+    return None
 
 
 _UUID_RE = re.compile(
@@ -476,6 +547,22 @@ def _opaque_identifier(text: str) -> bool:
     return False
 
 
+def _evidence_span(matched: Any, text: str) -> str:
+    """The text a detection should be described by: its match, not its haystack.
+
+    Shaping the whole scalar meant one hit on a long value published that
+    value's entire structure -- far more than the finding needed, and more
+    than the Rust auditor discloses, which shapes only the matched token
+    (`local_redaction_audit.rs`). Detectors backed by a helper returning a
+    plain bool have no span to offer, so those still fall back to the scalar.
+    """
+    if isinstance(matched, re.Match):
+        return matched.group(0)
+    if isinstance(matched, str):
+        return matched
+    return text
+
+
 def _emit(
     output: list[Detection],
     seen: set[tuple[str, str, str, str]],
@@ -499,6 +586,7 @@ def _emit(
             "source_hash": source_id,
             "locator_hash": locator_hash,
             "evidence_shape": _shape_signature(evidence),
+            "advisory": detector in ADVISORY_DETECTORS,
         }
     )
 
@@ -512,43 +600,53 @@ def _scan_text(
     output: list[Detection],
     seen: set[tuple[str, str, str, str]],
 ) -> None:
-    checks: tuple[tuple[str, str, bool], ...] = (
+    checks: tuple[tuple[str, str, Any], ...] = (
         ("identity", "unsafe_home_segment", _unsafe_home_segment(text)),
-        ("identity", "self_profile", bool(_SELF_PROFILE_RE.search(text))),
-        ("identity", "participant_identity", bool(_PARTICIPANT_NAME_RE.search(text))),
-        ("identity", "account_context", bool(_ACCOUNT_CONTEXT_RE.search(text))),
-        ("identity", "social_handle", bool(_HANDLE_RE.search(text))),
-        ("identity", "law_professional_domain", bool(_LAW_DOMAIN_RE.search(text))),
-        ("identity", "corporate_registry_identity", bool(_CORPORATE_ID_RE.search(text))),
+        ("identity", "self_profile", _SELF_PROFILE_RE.search(text)),
+        ("identity", "participant_identity", _PARTICIPANT_NAME_RE.search(text)),
+        ("identity", "account_context", _ACCOUNT_CONTEXT_RE.search(text)),
+        ("identity", "social_handle", _HANDLE_RE.search(text)),
+        ("identity", "law_professional_domain", _LAW_DOMAIN_RE.search(text)),
+        ("identity", "corporate_registry_identity", _CORPORATE_ID_RE.search(text)),
         ("identity", "public_server_identifier", _public_ip_with_context(text)),
         ("identity", "source_control_identity", _source_control_identity(text)),
-        ("identity", "reverse_dns_personal_label", bool(_REVERSE_DNS_PERSON_RE.search(text))),
-        ("identity", "redaction_neighbor", bool(_REDACTION_NEIGHBOR_RE.search(text))),
-        ("third_party_pii", "name_near_role", bool(_NAME_ROLE_RE.search(text))),
-        ("third_party_pii", "chat_speaker", bool(_CHAT_SPEAKER_RE.search(text))),
-        ("third_party_pii", "named_document", bool(_DOCUMENT_TITLE_RE.search(text))),
-        ("third_party_pii", "named_path", bool(_NAMED_PATH_RE.search(text))),
-        ("third_party_pii", "private_room", bool(_PRIVATE_ROOM_RE.search(text))),
-        ("personal", "postal_address", bool(_POSTAL_ADDRESS_RE.search(text))),
-        ("personal", "date_of_birth", bool(_DOB_RE.search(text))),
-        ("personal", "family_detail", bool(_FAMILY_DETAIL_RE.search(text))),
-        ("personal", "health_detail", bool(_HEALTH_RE.search(text))),
-        ("personal", "private_session", bool(_PRIVATE_SESSION_RE.search(text))),
+        ("identity", "reverse_dns_personal_label", _REVERSE_DNS_PERSON_RE.search(text)),
+        ("identity", "redaction_neighbor", _REDACTION_NEIGHBOR_RE.search(text)),
+        ("third_party_pii", "name_near_role", _NAME_ROLE_RE.search(text)),
+        ("third_party_pii", "chat_speaker", _CHAT_SPEAKER_RE.search(text)),
+        ("third_party_pii", "named_document", _DOCUMENT_TITLE_RE.search(text)),
+        ("third_party_pii", "named_path", _NAMED_PATH_RE.search(text)),
+        ("third_party_pii", "private_room", _PRIVATE_ROOM_RE.search(text)),
+        ("personal", "postal_address", _POSTAL_ADDRESS_RE.search(text)),
+        ("personal", "date_of_birth", _DOB_RE.search(text)),
+        ("personal", "family_detail", _FAMILY_DETAIL_RE.search(text)),
+        ("personal", "health_detail", _HEALTH_RE.search(text)),
+        ("personal", "private_session", _PRIVATE_SESSION_RE.search(text)),
         ("secret", "credential_cue_value", _credential_value(text)),
-        ("secret", "split_literal", bool(_SPLIT_LITERAL_RE.search(text))),
-        ("secret", "private_room_locator", bool(_PRIVATE_ROOM_RE.search(text))),
-        ("secret", "machine_fingerprint", bool(_DARWIN_FINGERPRINT_RE.search(text))),
-        ("secret", "hardware_identifier", bool(_MAC_RE.search(text))),
+        ("secret", "bearer_value", _bearer_value(text)),
+        ("secret", "split_literal", _SPLIT_LITERAL_RE.search(text)),
+        ("secret", "private_room_locator", _PRIVATE_ROOM_RE.search(text)),
+        ("secret", "machine_fingerprint", _DARWIN_FINGERPRINT_RE.search(text)),
+        ("secret", "hardware_identifier", _MAC_RE.search(text)),
         ("secret", "opaque_identifier", surface != "path" and _opaque_identifier(text)),
-        ("legal_matter", "legal_register", bool(_LEGAL_STRONG_RE.search(text))),
-        ("legal_matter", "case_citation", bool(_CASE_CITATION_RE.search(text))),
+        ("legal_matter", "legal_register", _LEGAL_STRONG_RE.search(text)),
+        ("legal_matter", "case_citation", _CASE_CITATION_RE.search(text)),
         ("legal_matter", "legal_path", _path_has_unknown_named_segment(text)),
     )
     if _legal_marker_cluster(text):
         checks += (("legal_matter", "legal_marker_cluster", True),)
     for forbidden_class, detector, matched in checks:
         if matched:
-            _emit(output, seen, forbidden_class, detector, surface, source_id, locator, text)
+            _emit(
+                output,
+                seen,
+                forbidden_class,
+                detector,
+                surface,
+                source_id,
+                locator,
+                _evidence_span(matched, text),
+            )
 
 
 def _walk_json(value: Any, pointer: str = "$") -> Iterator[tuple[str, str, str]]:
