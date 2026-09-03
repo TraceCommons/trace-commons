@@ -1148,7 +1148,7 @@ struct TranscriptTab: View {
     /// The chunks that are typeset right now, and the eviction that keeps
     /// that set under the ceiling. The policy lives in `TCShellCore` so it
     /// can be asserted against real byte counts without a running app.
-    @State private var resident = TranscriptResidentChunks<AttributedString>()
+    @State private var resident = TranscriptResidentChunks<ChippedChunk>()
     /// Where each chunk sits vertically, so a chunk that is not typeset
     /// still holds its place in the scroll.
     @State private var rows: TranscriptRowIndex?
@@ -1214,14 +1214,20 @@ struct TranscriptTab: View {
     @ViewBuilder
     private func chunkRow(_ index: Int) -> some View {
         Group {
-            if let text = resident.rendered[index] {
-                Text(text)
+            if let chunk = resident.rendered[index] {
+                Text(chunk.text)
                     .font(TC.Font_.monoTranscript)
                     .lineSpacing(
                         TC.Font_.LineHeight.spacing(for: 11, TC.Font_.LineHeight.transcript)
                     )
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // The chips are named here and nowhere else: SwiftUI has
+                    // no per-run accessibility label inside a `Text`, and a
+                    // marker left unnamed is spelled out as punctuation and
+                    // capitals in the middle of a sentence. See
+                    // `RedactionMarks`.
+                    .accessibilityLabel(chunk.spoken)
             } else {
                 // Holds the chunk's place so the scroll extent is the whole
                 // body's, not the resident window's.
@@ -1245,7 +1251,11 @@ struct TranscriptTab: View {
     private func refresh() {
         let index = anchor
         resident.update(document: document, visible: index..<(index + 1)) { chunk in
-            TranscriptMarkers.chipped(document.text(of: chunk), font: TC.Font_.monoTranscript)
+            let text = document.text(of: chunk)
+            return ChippedChunk(
+                text: TranscriptMarkers.chipped(text, font: TC.Font_.monoTranscript),
+                spoken: RedactionMarks.spoken(text)
+            )
         }
     }
 
@@ -1292,6 +1302,18 @@ struct TranscriptTab: View {
         """
 }
 
+/// One resident chunk: what it draws as, and what it reads as aloud.
+///
+/// The spoken form is built in the same pass as the chips, off the same
+/// text, so naming costs one scan per chunk that was going to be scanned
+/// anyway -- and a chunk that is evicted drops both together rather than
+/// leaving a name behind for text nobody is holding.
+private struct ChippedChunk {
+    let text: AttributedString
+    /// The chunk with each marker replaced by its name. See `RedactionMarks`.
+    let spoken: String
+}
+
 /// Turns the redaction pipeline's `<PRIVATE_*>` and `[REDACTED*]` markers
 /// into chips: bold, on the measured chip pair rather than the gold ramp,
 /// so they read as objects placed in the text instead of damage done to it.
@@ -1301,6 +1323,14 @@ struct TranscriptTab: View {
 /// avoid cutting through a marker -- half a marker rendered as body text in
 /// one block and the other half in the next would read as content that was
 /// never scrubbed.
+///
+/// The chip's colours are deliberate and are not the gold ramp; that is the
+/// paragraph above and it stands. What the chip does NOT carry is a name:
+/// every one of them draws the same whether it stands for a path, a
+/// credential, or a name found in prose. `RedactionMarks` supplies that,
+/// over this same scan, and `chunkRow` puts it on the chunk's accessibility
+/// label -- SwiftUI has no per-run label inside a `Text`, so the chunk is
+/// the finest grain available.
 private enum TranscriptMarkers {
     static func chipped(_ text: String, font: Font) -> AttributedString {
         var out = AttributedString()
