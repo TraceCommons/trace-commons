@@ -997,8 +997,11 @@ impl Sheet {
         self.sync_contribute();
         let sentence = match label {
             "preview-failed" | "unavailable" => {
-                "Trace Commons can't work out what would be sent right now, so there is nothing \
-                 to decide on yet. Nothing has been sent."
+                concat!(
+                    copy::app_name!(),
+                    " can't work out what would be sent right now, so there is nothing to \
+                     decide on yet. Nothing has been sent."
+                )
             }
             "unknown-entry-id" | "session-file-vanished" => {
                 "This session is no longer waiting. Nothing was sent."

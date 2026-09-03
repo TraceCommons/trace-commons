@@ -2062,6 +2062,36 @@ pub extern "C" fn tc_routing_unreachable_line(port: i32) -> *mut c_char {
     })
 }
 
+/// The routing surface's discovery sentence, assembled.
+///
+/// `port` is what `discover_routing` reported, or 0 for a machine that
+/// published no pointer. A port outside 1..=65535 is treated as 0 -- the
+/// sentence for "nothing was discovered", which names no port rather than
+/// naming one nothing published.
+///
+/// **A machine with no pointer is not an error**, and neither branch of
+/// this sentence says otherwise. It is the ordinary state of a machine
+/// without IronWire, which is most of them, and there is nothing for a
+/// caller to handle: both branches are a real sentence.
+///
+/// Assembled here for the reason on [`tc_routing_token_line`].
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_routing_discovery_line(port: i32) -> *mut c_char {
+    guard(|| {
+        let port = u16::try_from(port).ok().filter(|p| *p != 0);
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::routing_copy::ironwire_discovery_line(port),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
 /// The routing surface's "Last checked ..." sentence, assembled.
 ///
 /// `when` is the shell's own humanised time -- "an hour ago", "yesterday".

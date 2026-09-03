@@ -26,9 +26,13 @@ final class RoutingSurfaceTests: XCTestCase {
       "intro": "S-INTRO",
       "toggle": "S-TOGGLE",
       "applies_at_once": "S-APPLIES",
+      "connect": "S-CONNECT",
+      "override_title": "S-OVERRIDE",
+      "look_again": "S-LOOKAGAIN",
       "port_title": "S-PORTTITLE",
       "port_note": "S-PORTNOTE",
       "folder_title": "S-FOLDERTITLE",
+      "choose_folder": "S-CHOOSEFOLDER",
       "folder_note": "S-FOLDERNOTE",
       "apply": "S-APPLY",
       "checking": "S-CHECKING",
@@ -61,6 +65,7 @@ final class RoutingSurfaceTests: XCTestCase {
         RoutingCalls(
             tokenLine: { path in path.map { "L-TOKEN:\($0)" } ?? "L-TOKEN:none" },
             unreachableLine: { port in port.map { "L-UNREACHABLE:\($0)" } ?? "L-UNREACHABLE:none" },
+            discoveryLine: { port in port.map { "L-DISCOVERY:\($0)" } ?? "L-DISCOVERY:none" },
             toolWord: { mode, wiring in "W:\(mode):\(wiring)" },
             toolTone: { _, wiring in wiring == RoutingToolWiring.notWired.abiValue ? 2 : 0 },
             stateLine: { state in "S:\(state)" },
@@ -77,6 +82,7 @@ final class RoutingSurfaceTests: XCTestCase {
         RoutingCalls(
             tokenLine: { _ in nil },
             unreachableLine: { _ in nil },
+            discoveryLine: { _ in nil },
             toolWord: { _, _ in nil },
             toolTone: { _, _ in 0 },
             stateLine: { _ in nil },
@@ -205,6 +211,88 @@ final class RoutingSurfaceTests: XCTestCase {
             RoutingProbeOutcome.parse(["outcome": "unreachable", "port": 70000]),
             .unreachable(port: nil)
         )
+    }
+
+    // MARK: - Reading the discovery answer
+
+    /// The shape a running IronWire produces.
+    func testAPublishedPointerYieldsThePortAndThePath() {
+        let found = RoutingDiscovery.parse([
+            "found": true,
+            "port": NSNumber(value: 9143),
+            "token_path": "/Users/x/.ironwire/control.token",
+        ])
+        XCTAssertEqual(found.port, 9143)
+        XCTAssertEqual(found.tokenPath, "/Users/x/.ironwire/control.token")
+        XCTAssertTrue(found.found)
+    }
+
+    /// The state of the ordinary machine, and it is not an error.
+    ///
+    /// The daemon answers `found: false` for every reason there is nothing
+    /// to read, and each of these must reach the same place: no port, no
+    /// path, and a card that asks rather than one that reports a fault.
+    func testEveryShapeWithNothingToOfferIsTheSameNoPointerState() {
+        for (result, why) in [
+            ([:] as [String: Any], "an empty answer"),
+            (["found": false], "found: false, which is the daemon's own no-pointer answer"),
+            (["found": true], "found with no port at all"),
+            (["found": true, "port": NSNumber(value: 0)], "port zero, the ask-the-kernel sentinel"),
+            (["found": true, "port": NSNumber(value: 70000)], "a port above 65535"),
+            (["found": true, "port": "8463"], "a port that is not a number"),
+            (["found": "true", "port": NSNumber(value: 8463)], "found as a string"),
+        ] {
+            XCTAssertEqual(RoutingDiscovery.parse(result), .none, "must offer nothing: \(why)")
+        }
+    }
+
+    /// A pointer that named no credential still names a port. The path is
+    /// the extra, not the thing the call is for.
+    func testAPointerWithoutATokenPathStillCarriesThePort() {
+        for result in [
+            ["found": true, "port": NSNumber(value: 9143)] as [String: Any],
+            ["found": true, "port": NSNumber(value: 9143), "token_path": ""],
+        ] {
+            let found = RoutingDiscovery.parse(result)
+            XCTAssertEqual(found.port, 9143)
+            XCTAssertNil(found.tokenPath)
+        }
+    }
+
+    /// Two states, two sentences, both from the shared source.
+    func testTheDiscoverySentenceIsTheSharedOneForBothStates() {
+        let found = RoutingSurface.discoveryLine(
+            RoutingDiscovery(port: 9143, tokenPath: nil), copy: copy(), calls: calls()
+        )
+        XCTAssertEqual(found, "L-DISCOVERY:9143")
+        XCTAssertEqual(
+            RoutingSurface.discoveryLine(.none, copy: copy(), calls: calls()),
+            "L-DISCOVERY:none"
+        )
+    }
+
+    /// A sentence the ABI would not assemble degrades to the line that
+    /// claims nothing, never to a half-sentence and never to wording this
+    /// shell invented.
+    func testADiscoverySentenceTheAbiRefusedFallsBackToTheSharedLine() {
+        XCTAssertEqual(
+            RoutingSurface.discoveryLine(
+                RoutingDiscovery(port: 9143, tokenPath: nil),
+                copy: copy(),
+                calls: silentCalls()
+            ),
+            copy().checkUnavailable
+        )
+    }
+
+    /// The connect action declares what is on screen, turned on -- never a
+    /// number rebuilt from the pointer behind the contributor's back.
+    func testConnectingTurnsOnTheFormThatIsShownAndChangesNothingElse() {
+        let shown = RoutingForm(on: false, port: 9001, tokenDir: "/Users/x/iw")
+        let connecting = RoutingSurface.connecting(shown)
+        XCTAssertTrue(connecting.on)
+        XCTAssertEqual(connecting.port, 9001)
+        XCTAssertEqual(connecting.tokenDir, "/Users/x/iw")
     }
 
     // MARK: - The status line: three states

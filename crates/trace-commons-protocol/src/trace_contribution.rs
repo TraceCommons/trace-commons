@@ -5224,9 +5224,18 @@ fn insert_without_collision(map: &mut BTreeMap<String, String>, key: String, val
 const RESIDUAL_SCAN_MAX_DEPTH: usize = 64;
 const RESIDUAL_SCAN_MAX_NODES: usize = 100_000;
 
+/// Why a residual scan could not cover an envelope.
+///
+/// Public because a caller that shows a contributor what would be sent has
+/// to be able to say "this was not checked" rather than "this is clean".
+/// Both variants are label-only by construction: neither carries a path, a
+/// key, or a byte of the envelope, so this is safe in a `Debug` rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResidualScanError {
+pub enum ResidualScanError {
+    /// The envelope could not be serialized for scanning.
     SerializationFailed,
+    /// The envelope exceeded [`RESIDUAL_SCAN_MAX_DEPTH`] or
+    /// [`RESIDUAL_SCAN_MAX_NODES`], so the scan did not reach every leaf.
     BudgetExceeded,
 }
 
@@ -5263,7 +5272,7 @@ fn log_residual_secret_locations(residual: &RedactionReport) {
     let locations: Vec<&str> = residual
         .counts
         .keys()
-        .filter_map(|label| label.strip_prefix("residual_secret_at:"))
+        .filter_map(|label| label.strip_prefix(RESIDUAL_SECRET_AT_PREFIX))
         .collect();
     if !locations.is_empty() {
         tracing::warn!(
@@ -5375,8 +5384,50 @@ fn note_residual_secret_location(
     path: &str,
 ) {
     if child.blocked_secret_detected {
-        report.increment(format!("residual_secret_at:{path}"));
+        report.increment(format!("{RESIDUAL_SECRET_AT_PREFIX}{path}"));
     }
+}
+
+/// The count-label family marking a secret that was found and left in place.
+///
+/// Every shell keys off this prefix to keep a survivor out of the "removed"
+/// figure and to show it on its own terms, so the mint site
+/// ([`note_residual_secret_location`]) and the readers must agree on one
+/// spelling rather than three copies of a string literal.
+pub const RESIDUAL_SECRET_AT_PREFIX: &str = "residual_secret_at:";
+
+/// The `residual_secret_at:{path}` labels for a finished envelope: where a
+/// secret was detected and **not** removed.
+///
+/// This exists so a contributor-facing surface can run the same located,
+/// per-leaf scan the server runs. The alternative already in the tree --
+/// serializing the envelope and scanning the JSON text as one string --
+/// reports only a boolean and, worse, lets an object key act as the
+/// contextual cue for the value beside it; see [`residual_envelope_scan`].
+///
+/// Only the residual family is returned. The scan's report also accumulates
+/// ordinary `secret:*` / `local_path` detection labels from every leaf it
+/// looked at, and those are *detections on already-redacted output*, not
+/// removals. Folding them into a map rendered under "removed by pattern"
+/// would recreate exactly the miscount this family was introduced to fix.
+///
+/// Returns `Err` when the scan could not cover the envelope. An empty `Ok`
+/// map means "scanned, nothing survived"; a caller must never spell `Err`
+/// as an empty map.
+///
+/// Cost: serializes the whole envelope to a `serde_json::Value` and runs the
+/// secret detector once per string leaf and once per object key, bounded by
+/// [`RESIDUAL_SCAN_MAX_NODES`].
+pub fn residual_secret_labels(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> Result<BTreeMap<String, u32>, ResidualScanError> {
+    let report = residual_envelope_scan(redactor, envelope)?;
+    Ok(report
+        .counts
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(RESIDUAL_SECRET_AT_PREFIX))
+        .collect())
 }
 
 /// The result of attempting a complete, evidence-backed reassessment of an

@@ -58,8 +58,20 @@ struct SettingsContent: View {
     /// Seeded from the declaration on appear and after a write, for the same
     /// reason the profile fields are: a background refresh landing mid-edit
     /// would otherwise replace a half-typed port with the declared one.
-    /// `nil` means not seeded yet.
+    /// `nil` means nothing has been edited, and the card reads the
+    /// daemon's answer -- which is what lets a port discovery supplies
+    /// after this view appeared reach the field at all. A draft seeded
+    /// eagerly on appear would freeze the conventional number in place
+    /// before `discover_routing` had answered.
     @State private var routingDraft: RoutingForm?
+
+    /// Whether the port and folder are open, once the contributor has said.
+    ///
+    /// `nil` is "they have not said", and then the disclosure follows what
+    /// discovery found: closed where the machine already supplied the port,
+    /// open where the only way to answer is to type it. A contributor who
+    /// opens or closes it is obeyed from then on.
+    @State private var routingOverrideOpen: Bool?
 
     /// The project a contributor has asked to arm, held while the
     /// confirmation is on screen. Nil means no sheet. It is the row and not
@@ -726,8 +738,56 @@ struct SettingsContent: View {
 
                 routingState(copy: copy)
 
+                // What the machine already knows, before anything it is
+                // asked. The pointer IronWire writes when its daemon binds
+                // carries the port, so on a machine running it there is
+                // nothing here for a contributor to look up -- and on a
+                // machine without it this sentence says so without saying
+                // anything is wrong, because nothing is.
+                Text(
+                    RoutingSurface.discoveryLine(
+                        model.routingDiscovery, copy: copy, calls: model.routingCalls
+                    )
+                )
+                .font(TC.Font_.body)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: TC.Space.xs) {
+                    // Offered only where there is something to connect to,
+                    // and only while nothing is declared: this is the
+                    // shortcut past the two fields, not a second Apply.
+                    if model.routingDiscovery.found, !form.on {
+                        Button(copy.connect) {
+                            let next = RoutingSurface.connecting(form)
+                            routingDraft = next
+                            model.applyIronWire(next)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.routingChecking)
+                    }
+                    // Offered rather than polled: this card does not go
+                    // looking at a file on a timer, and somebody who
+                    // started IronWire after opening this window needs a
+                    // way to say so.
+                    Button(copy.lookAgain) { model.discoverRouting() }
+                        .buttonStyle(.borderless)
+                }
+
                 // The port and folder are the override, and they are live
-                // only while the switch is on.
+                // only while the switch is on. They sit behind a disclosure
+                // once discovery has supplied the port -- and stay open
+                // where it has not, because then they are the only way to
+                // answer. This inverts the default; it removes nothing.
+                DisclosureGroup(
+                    copy.overrideTitle,
+                    isExpanded: Binding(
+                        get: {
+                            routingOverrideOpen
+                                ?? !RoutingSurface.overrideIsCollapsed(model.routingDiscovery)
+                        },
+                        set: { routingOverrideOpen = $0 }
+                    )
+                ) {
                 VStack(alignment: .leading, spacing: TC.Space.xs) {
                     TCFieldLabel(copy.portTitle)
                     TextField(
@@ -756,24 +816,55 @@ struct SettingsContent: View {
                 }
                 .disabled(!form.on)
 
+                // A chooser, not a box to type a path into.
+                //
+                // On this platform the folder is a permission question
+                // wearing a path's clothes: what makes a directory readable
+                // is that the person at the keyboard pointed at it through
+                // the system's own panel, not that the app was told a
+                // string. This app is NOT sandboxed today -- there is no
+                // entitlements file in the tree and `make-app-bundle.sh`
+                // signs with `--options runtime` and no `--entitlements`
+                // -- so a typed path would in fact work, and no
+                // security-scoped bookmark is needed to keep this one. It
+                // is a chooser anyway, because a panel is what a person can
+                // answer without knowing the path, and because the day this
+                // app is sandboxed the typed box stops working silently
+                // while this does not.
                 VStack(alignment: .leading, spacing: TC.Space.xs) {
                     TCFieldLabel(copy.folderTitle)
-                    TextField("", text: Binding(
-                        get: { form.tokenDir },
-                        set: { value in
-                            var next = form
-                            next.tokenDir = value
-                            routingDraft = next
+                    HStack(spacing: TC.Space.xs) {
+                        Button(copy.chooseFolder) {
+                            // `if let` rather than a `guard ... else`: a
+                            // dismissed panel is nothing to do, and the
+                            // card is asserted to carry no `else` branch
+                            // at all, because the one that mattered was a
+                            // fallback rendering wording of its own.
+                            if let path = chooseIronWireFolder() {
+                                var next = form
+                                next.tokenDir = path
+                                routingDraft = next
+                            }
                         }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel(copy.folderTitle)
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel(copy.folderTitle)
+                        // The chosen folder, shown so the answer is
+                        // visible. Empty until one is chosen, which is the
+                        // ordinary case the note underneath describes.
+                        Text(form.tokenDir)
+                            .font(TC.Font_.meta)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
                     Text(copy.folderNote)
                         .font(TC.Font_.meta)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .disabled(!form.on)
+                }
+                .font(TC.Font_.body)
 
                 Button(model.routingChecking ? copy.checking : copy.apply) {
                     model.applyIronWire(form)
@@ -797,7 +888,10 @@ struct SettingsContent: View {
                     .foregroundStyle(.secondary)
             }
             .onAppear {
-                routingDraft = model.routingForm
+                // Asked before anything is offered, and asked every time
+                // this card appears: IronWire may have started since. It
+                // reads a file, opens no connection and declares nothing.
+                model.discoverRouting()
                 model.refreshRoutedTools()
             }
         }
@@ -844,6 +938,29 @@ struct SettingsContent: View {
         formatter.unitsStyle = .full
         return formatter
     }()
+
+    /// The system folder panel, or nil if it was dismissed.
+    ///
+    /// Directories only, no creating and no multiple selection: the answer
+    /// is one directory that already exists, and every other affordance on
+    /// this panel would be a way to give an answer that cannot be right.
+    ///
+    /// Returns the path rather than the URL because that is what the daemon
+    /// takes and what `settingsParams` sends. There is no security-scoped
+    /// bookmark kept: this app is not sandboxed -- no entitlements file
+    /// exists in the tree, and the bundle is signed with `--options
+    /// runtime` and no `--entitlements` -- so there is no scope to hold on
+    /// to. If that changes, this is the one place that has to learn about
+    /// bookmarks, which is why the panel lives here rather than inline.
+    private func chooseIronWireFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
+    }
 
     private func tone(_ tone: RoutingTone) -> TC.Tone {
         switch tone {

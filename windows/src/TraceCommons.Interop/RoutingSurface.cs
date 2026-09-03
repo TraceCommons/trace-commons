@@ -139,6 +139,15 @@ public static class RoutingSurface
         NativeMethods.TakeOwnedString(NativeMethods.tc_routing_unreachable_line(port ?? 0));
 
     /// <summary>
+    /// What discovery found, assembled on the Rust side. A null port is the
+    /// machine that published no pointer; that branch is a real sentence and
+    /// not an error, because it is the ordinary machine and the screen has to
+    /// say what to do on it.
+    /// </summary>
+    public static string? DiscoveryLine(ushort? port) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_routing_discovery_line(port ?? 0));
+
+    /// <summary>
     /// "Last checked ...", assembled on the Rust side around this shell's own
     /// humanised time -- the one part of this surface each shell renders for
     /// itself, because it is a rendering of a timestamp and not wording about

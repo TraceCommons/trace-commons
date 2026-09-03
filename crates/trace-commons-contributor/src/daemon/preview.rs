@@ -55,7 +55,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{ConfigStore, ContributorConfig};
 use crate::envelope::{
     NearAiSettings, build_raw_contribution_with_correction, build_redactor_with, envelope_size,
-    redact_to_envelope,
+    redact_to_envelope, residual_secret_labels_fail_closed,
 };
 use crate::source::{SessionRef, TraceSource};
 use trace_commons_protocol::canonical_json;
@@ -638,7 +638,22 @@ async fn build_preview_core(
         .unwrap_or_default();
     let opening_prompt = truncate_chars(&opening_prompt, 200);
 
-    let redactions = envelope.privacy.redaction_counts.clone();
+    // The redaction pipeline's own counts describe what it TOOK OUT. Nothing
+    // in them can describe what it left in: `redact_trace` never runs a
+    // residual scan, and the server's two scans feed risk and a log line
+    // without folding their findings back into `redaction_counts`. So until
+    // this call existed, no shell had ever told a contributor that a secret
+    // survived scrubbing -- the `residual_secret_at:*` handling in all three
+    // of them read a label no producer minted.
+    //
+    // Merged into the summary's map only, never into
+    // `envelope.privacy.redaction_counts`: those bytes are what
+    // `use_approved_envelope` uploads and what `redaction_hash` covers, and a
+    // detection-only finding must not change the artifact it describes.
+    let mut redactions = envelope.privacy.redaction_counts.clone();
+    for (label, count) in residual_secret_labels_fail_closed(&redactor, &envelope) {
+        *redactions.entry(label).or_insert(0) += count;
+    }
     let redactions_distinct = envelope.privacy.redaction_distinct_counts.clone();
     let pii_labels_present = envelope.privacy.pii_labels_present.clone();
     let consent_scopes = envelope.consent.scopes.iter().map(wire_name).collect();
@@ -874,6 +889,7 @@ mod tests {
     use super::*;
     use crate::envelope::build_raw_contribution;
     use crate::source::claude_code::ClaudeCodeSource;
+    use trace_commons_protocol::trace_contribution::RESIDUAL_SECRET_AT_PREFIX;
 
     fn sample_cfg(store: &ConfigStore) -> ContributorConfig {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
@@ -915,6 +931,136 @@ mod tests {
         let src = ClaudeCodeSource::new(root);
         let r = src.discover().unwrap().remove(0);
         (dir, src, r)
+    }
+
+    /// A session whose assistant `model` field is a recognized secret shape.
+    ///
+    /// `model` reaches `IronclawTraceMetadata::model_name` verbatim: the
+    /// per-field redaction pass visits `content` and `structured_payload`
+    /// and nothing else, so this is a real field the typed traversal never
+    /// rewrites -- not a value planted into a finished envelope. That is
+    /// what makes it a survivor rather than a fixture trick, and it is the
+    /// same gap `submit_sessions_refuses_session_with_secret_in_unredacted_model_field`
+    /// covers on the submit side.
+    fn session_with_secret_in_unredacted_model_field()
+    -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let session = "33333333-3333-3333-3333-333333333333";
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{session}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                 \"content\":\"what does this do\"}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"{session}\",\"uuid\":\"a1\"}}\n\
+                 {{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\
+                 \"model\":\"sk-ant-EXPOSEDsecret0123456789abcdefghij\",\
+                 \"content\":[{{\"type\":\"text\",\"text\":\"it prints a greeting\"}}],\
+                 \"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}},\
+                 \"cwd\":\"/Users/testuser/code/myproj\",\
+                 \"timestamp\":\"2026-08-08T10:00:05Z\",\"version\":\"2.0.1\",\
+                 \"sessionId\":\"{session}\",\"uuid\":\"a2\"}}\n"
+            ),
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    /// End to end, from a session on disk through the real preview path: a
+    /// secret that survived redaction is reported as a SURVIVOR.
+    ///
+    /// This is the test the `residual_secret_at:*` handling in every shell
+    /// was missing. Those shells filter the family out of the "removed"
+    /// figure and render it separately, but nothing on the contributor's
+    /// machine had ever minted a label in it -- `redact_trace` sets
+    /// `redaction_counts` from the mutating pass only, and the server's two
+    /// residual scans feed risk and a log line without folding their
+    /// findings back. So the reporting was unreachable and a survivor was
+    /// silence.
+    ///
+    /// Deleting the merge in `build_preview_core` makes this fail.
+    #[tokio::test]
+    async fn a_preview_reports_a_secret_that_survived_redaction_as_a_survivor() {
+        let (_d, src, r) = session_with_secret_in_unredacted_model_field();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+
+        // Non-vacuity: the secret really is still in what would be sent, and
+        // the pipeline really did not count it as something it removed.
+        assert!(
+            serde_json::to_string(&envelope)
+                .unwrap()
+                .contains("sk-ant-EXPOSEDsecret0123456789abcdefghij"),
+            "fixture must actually carry a surviving secret, else this test proves nothing"
+        );
+        assert!(
+            !envelope
+                .privacy
+                .redaction_counts
+                .keys()
+                .any(|k| k.starts_with(RESIDUAL_SECRET_AT_PREFIX)),
+            "the envelope's own counts must stay untouched; the survivor is a \
+             summary-only finding and must not change the bytes that upload"
+        );
+
+        let survivors: Vec<(&String, &u32)> = summary
+            .redactions
+            .iter()
+            .filter(|(k, _)| k.starts_with(RESIDUAL_SECRET_AT_PREFIX))
+            .collect();
+        assert!(
+            !survivors.is_empty(),
+            "preview reported no survivor for a session that still carries a \
+             secret; got {:?}",
+            summary.redactions
+        );
+
+        // ...and it is a survivor, not a removal: the shells split the map
+        // on exactly this prefix.
+        for (label, _) in &survivors {
+            assert!(
+                !label.contains("sk-ant-"),
+                "a residual label must be a path, never the secret"
+            );
+        }
+
+        // The queue card reads the same map through the same shared build.
+        let card = build_preview_card(Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(
+            card.redactions, summary.redactions,
+            "card and sheet must agree on what survived"
+        );
+    }
+
+    /// A clean session reports no survivor. Without this, the test above
+    /// would pass against a wiring that labelled every preview.
+    #[tokio::test]
+    async fn a_preview_of_a_clean_session_reports_no_survivor() {
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert!(
+            !summary
+                .redactions
+                .keys()
+                .any(|k| k.starts_with(RESIDUAL_SECRET_AT_PREFIX)),
+            "a session whose secret was redacted has no survivor; got {:?}",
+            summary.redactions
+        );
     }
 
     /// A session with `members` delegated transcripts beside it, each

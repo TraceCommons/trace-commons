@@ -92,6 +92,17 @@ public enum TCRoutingCopy {
         return String(cString: raw)
     }
 
+    /// What discovery found, assembled on the Rust side.
+    ///
+    /// `port` is nil for a machine that published no pointer. That branch
+    /// is a real sentence and not an error: it is the ordinary machine, and
+    /// the screen has to say what to do on it.
+    public static func discoveryLine(port: UInt16?) -> String? {
+        guard let raw = tc_routing_discovery_line(Int32(port ?? 0)) else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// "Last checked ...", assembled on the Rust side around this shell's own
     /// humanised time. The time is the only part this shell renders, because
     /// it is a rendering of a timestamp and not wording about routing.

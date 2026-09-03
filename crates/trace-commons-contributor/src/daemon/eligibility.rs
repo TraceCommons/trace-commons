@@ -46,6 +46,63 @@ pub enum Eligibility {
     ReuploadCapReached,
 }
 
+/// How long an armed project's session must have been quiet before the
+/// daemon sends it with nobody looking.
+///
+/// Twenty-four hours, against the thirty minutes that decides when a session
+/// is *offered*. The two windows answer different questions and only look
+/// alike.
+///
+/// Thirty minutes is right for offering: the entry lands in the queue, a
+/// contributor reads the preview whenever they next look, and they are the
+/// last check. Thirty minutes of quiet is a lunch break, a meeting, or a
+/// commute -- extremely common mid-session -- and under review that costs
+/// nothing, because the human sees a half-finished trace and can decline it.
+///
+/// With nobody looking it costs a great deal. The session resumes, grows,
+/// and takes the re-upload path: each re-upload re-sends the *whole* file,
+/// pays the privacy filter again over the same text, and produces
+/// near-identical envelopes that server-side duplicate clustering collapses
+/// -- diluting the contributor's own credit. `max_reuploads` is 3, so it is
+/// also a budget that premature sending burns.
+///
+/// A day rather than half of one because the commonest long pause is an
+/// evening finish resumed the next morning. Twelve hours sends a session
+/// last written at 6pm at 6am, just before a 9am resume -- long enough to
+/// feel safe and short enough to lose exactly that case. Twenty-four hours
+/// does not: the resume rewrites the file and restarts this clock.
+///
+/// Nothing is lost by waiting. An entry held here sits in the queue, and a
+/// session that grows while it waits is handled by `Queue::supersede`, which
+/// costs no re-upload budget and no duplicate penalty at all. Holding turns
+/// the expensive path into the free one.
+///
+/// What this delays is a *session*, not the arming. The clock is each
+/// observation's own `modified_at`, so arming a project whose sessions have
+/// already been quiet for a day approves that backlog on the next poll --
+/// there is no cool-off on the decision itself. Only sessions still being
+/// written wait. `ProjectPolicy` does record the arming instant if a
+/// cool-off on the decision is ever wanted; nothing reads it for that today.
+///
+/// Neither input is enforceable against the contributor: `now` is the wall
+/// clock and `modified_at` is the file's own mtime, so one `touch -d` or one
+/// clock nudge skips the window. That is acceptable because this protects a
+/// contributor from sending something they have not finished, not from
+/// themselves -- but it is not a control, and nothing should be built on it
+/// as though it were.
+pub const ARMED_SETTLE_SECS: i64 = 86_400;
+
+/// Whether an armed project's session has been quiet long enough to send
+/// unattended.
+///
+/// Read against the same `modified_at` the offer decision uses, which for a
+/// grouped source is the whole group's most recent write -- a conversation
+/// whose delegated transcript is still being written has not settled, and
+/// must not be sent because its parent happens to have stopped.
+pub fn armed_settle_elapsed(modified_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(modified_at) >= Duration::seconds(ARMED_SETTLE_SECS)
+}
+
 /// Decide whether `obs` should be offered for upload.
 ///
 /// `previous_size` is the size recorded at the previous poll; `prior` is what
@@ -284,5 +341,63 @@ mod tests {
             ),
             Eligibility::Eligible
         );
+    }
+
+    fn at2(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn an_armed_session_does_not_settle_inside_the_window() {
+        let written = at2("2026-09-01T18:00:00Z");
+        assert!(!armed_settle_elapsed(written, at2("2026-09-01T18:30:00Z")));
+        assert!(!armed_settle_elapsed(written, at2("2026-09-02T06:00:00Z")));
+        assert!(!armed_settle_elapsed(written, at2("2026-09-02T17:59:00Z")));
+    }
+
+    #[test]
+    fn an_armed_session_settles_once_the_window_elapses() {
+        let written = at2("2026-09-01T18:00:00Z");
+        assert!(armed_settle_elapsed(written, at2("2026-09-02T18:00:00Z")));
+        assert!(armed_settle_elapsed(written, at2("2026-09-03T09:00:00Z")));
+    }
+
+    /// The case the window exists for: a session finished in the evening and
+    /// resumed the next morning. Twelve hours would have sent it at 06:00,
+    /// three hours before the resume, and the resume would then have cost a
+    /// re-upload and a duplicate penalty.
+    #[test]
+    fn an_overnight_resume_beats_the_window() {
+        let finished_evening = at2("2026-09-01T18:00:00Z");
+        assert!(!armed_settle_elapsed(
+            finished_evening,
+            at2("2026-09-02T09:00:00Z")
+        ));
+        // ...and the resume rewrites the file, which restarts the clock.
+        let resumed = at2("2026-09-02T09:00:00Z");
+        assert!(!armed_settle_elapsed(resumed, at2("2026-09-02T18:00:00Z")));
+    }
+
+    /// The settle window is longer than the offer window, and by a lot.
+    /// If these ever converge, arming has quietly become "send after half an
+    /// hour with nobody looking", which is the thing this prevents.
+    #[test]
+    fn the_settle_window_far_outlasts_the_quiescence_window() {
+        let settings = DaemonSettings::default();
+        assert!(
+            ARMED_SETTLE_SECS >= settings.quiescence_secs as i64 * 40,
+            "settle {} vs quiescence {}",
+            ARMED_SETTLE_SECS,
+            settings.quiescence_secs
+        );
+    }
+
+    /// A clock that went backwards must never look like a settled session.
+    #[test]
+    fn a_future_write_never_counts_as_settled() {
+        assert!(!armed_settle_elapsed(
+            at2("2026-09-03T00:00:00Z"),
+            at2("2026-09-01T00:00:00Z")
+        ));
     }
 }
