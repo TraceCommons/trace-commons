@@ -65,7 +65,7 @@ enum ScrubbingCaveat {
     /// What to say on one card, given what scrubbing actually did to it.
     static func rowLine(redactionCount: Int) -> String {
         redactionCount == 0
-            ? "Nothing matched a pattern. That is not the same as nothing being there."
+            ? "Nothing matched a pattern. That is not the same as nothing being there -- search it for anything you need to be sure isn't in it."
             : "Removed by pattern matching. Anything the patterns don't know is still in there."
     }
 

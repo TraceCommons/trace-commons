@@ -220,6 +220,7 @@ struct QueueContent: View {
                 summaryErrors: model.summaryErrors,
                 tooLarge: model.tooLarge,
                 onLookInside: { previewing = $0 },
+                onSearch: { previewing = $0 },
                 onSubmit: { model.approve($0) },
                 onDismiss: { model.dismiss($0) },
                 onAppear: { entry in
@@ -248,6 +249,7 @@ private struct ProjectQueueGroup: View {
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
     let onLookInside: (QueueEntry) -> Void
+    let onSearch: (QueueEntry) -> Void
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
     /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
@@ -306,6 +308,7 @@ private struct ProjectQueueGroup: View {
                 summaryError: summaryErrors[entry.entryID],
                 tooLarge: tooLarge[entry.entryID],
                 onLookInside: { onLookInside(entry) },
+                onSearch: { onSearch(entry) },
                 onSubmit: { onSubmit(entry) },
                 onDismiss: { onDismiss(entry) }
             )
@@ -332,6 +335,13 @@ struct QueueRow: View {
     /// the raw stat -- never a would-send estimate; see `PreviewTooLarge`.
     let tooLarge: PreviewTooLarge?
     let onLookInside: () -> Void
+    /// Opens this session's search. Distinct from `onLookInside` as an
+    /// intent even though the two currently coincide: the sheet opens on its
+    /// Search tab already (`PreviewSheet.tab` starts at `.search`), so there
+    /// is nothing to select and no `initialTab` to add. If the sheet ever
+    /// opens somewhere else, this is the seam that keeps the chip pointing
+    /// at the thing to do about it.
+    let onSearch: () -> Void
     let onSubmit: () -> Void
     let onDismiss: () -> Void
 
@@ -571,22 +581,30 @@ struct QueueRow: View {
     /// glyph the health banner uses, quieter, because this is a thing to weigh
     /// rather than a thing to fix.
     private var nothingMatchedChip: some View {
-        HStack(spacing: TC.Space.xxs) {
-            QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
-            Text(RedactionLabels.nothingMatched)
-                .font(TC.Font_.monoChip)
-                .foregroundStyle(TC.goldText)
+        // A control, not a label. The gold is right and stays gold -- a
+        // session where no pattern fired is the one worth slowing down on --
+        // but a judgement with nothing to do about it is where a contributor
+        // stops. Searching is the thing to do about it.
+        Button(action: onSearch) {
+            HStack(spacing: TC.Space.xxs) {
+                QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
+                Text(RedactionLabels.nothingMatched)
+                    .font(TC.Font_.monoChip)
+                    .foregroundStyle(TC.goldText)
+            }
+            .padding(.horizontal, TC.Space.s)
+            .padding(.vertical, 3)
+            .overlay {
+                Capsule().strokeBorder(
+                    TC.gold.opacity(TC.Border.chipAlpha),
+                    lineWidth: TC.Border.hairline
+                )
+            }
+            .contentShape(Capsule())
         }
-        .padding(.horizontal, TC.Space.s)
-        .padding(.vertical, 3)
-        .overlay {
-            Capsule().strokeBorder(
-                TC.gold.opacity(TC.Border.chipAlpha),
-                lineWidth: TC.Border.hairline
-            )
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Nothing matched a pattern.")
+        .buttonStyle(.plain)
+        .help("Opens this session's search, which is the thing to do about it.")
+        .accessibilityLabel("Nothing matched a pattern. Search this session.")
     }
 
     private func cell<Value: View>(
