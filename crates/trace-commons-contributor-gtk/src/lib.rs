@@ -23,6 +23,7 @@ pub mod copy;
 pub mod model;
 pub mod notify;
 pub mod portal;
+pub mod queue_folders;
 pub mod redaction_labels;
 pub mod toast;
 pub mod transcript_paging;

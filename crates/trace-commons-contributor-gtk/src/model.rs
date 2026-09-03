@@ -100,7 +100,11 @@ pub struct Health {
 ///
 /// `project_key` and `path` are absent from the wire by design; they are
 /// absent from this struct for the same reason.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Default` is consistent with how it deserializes rather than an extra
+/// promise: every field but `entry_id` already carries `#[serde(default)]`,
+/// so an all-defaults value is exactly what an empty object decodes to.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct QueueEntry {
     pub entry_id: String,
     #[serde(default)]
