@@ -12,10 +12,10 @@ use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
-    tc_routing_copy, tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone,
-    tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_unsubscribe,
+    tc_routing_copy, tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original, tc_source_check_line,
+    tc_string_free, tc_subscribe, tc_unsubscribe,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -2103,11 +2103,29 @@ fn the_routing_sentences_cross_assembled_and_never_as_a_template() {
     assert_eq!(no_port, take_owned(tc_routing_unreachable_line(70_000)));
     assert_eq!(no_port, take_owned(tc_routing_unreachable_line(-1)));
 
+    let discovered = take_owned(tc_routing_discovery_line(9143));
+    assert!(discovered.contains("9143"), "{discovered}");
+    // 0 is "nothing was discovered", which is the ordinary machine and not
+    // an error. It must not become "port 0", and it must not wrap.
+    let nothing = take_owned(tc_routing_discovery_line(0));
+    assert!(!nothing.contains('0'), "{nothing}");
+    assert_ne!(discovered, nothing);
+    assert_eq!(nothing, take_owned(tc_routing_discovery_line(70_000)));
+    assert_eq!(nothing, take_owned(tc_routing_discovery_line(-1)));
+
     let when = cstr_str("an hour ago");
     let checked = take_owned(unsafe { tc_routing_last_checked(when.as_ptr()) });
     assert_eq!(checked, "Last checked an hour ago");
 
-    for sentence in [&named, &unnamed, &with_port, &no_port, &checked] {
+    for sentence in [
+        &named,
+        &unnamed,
+        &with_port,
+        &no_port,
+        &discovered,
+        &nothing,
+        &checked,
+    ] {
         for marker in ["{}", "{path}", "{port}", "{when}", "%s", "%d"] {
             assert!(
                 !sentence.contains(marker),

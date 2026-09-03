@@ -114,6 +114,16 @@ final class AppModel: ObservableObject {
     /// shared word like every other on this card.
     @Published private(set) var routingChecking = false
 
+    /// What a running IronWire published about itself, as far as this app
+    /// has asked.
+    ///
+    /// Starts as nothing found rather than as nil, because that is the
+    /// state of a machine nobody has asked about yet AND the state of a
+    /// machine without IronWire, and the card says the same thing about
+    /// both: here are the fields, say which port. It becomes a found port
+    /// only when `discover_routing` says so.
+    @Published private(set) var routingDiscovery = RoutingDiscovery.none
+
     /// Everything on this surface that is decided in the Rust: the sentences
     /// that interpolate, and the two branch tables that pick a word and a
     /// state line. This shell fills in no holes and owns no `switch`; see
@@ -121,6 +131,7 @@ final class AppModel: ObservableObject {
     let routingCalls = RoutingCalls(
         tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
         unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+        discoveryLine: { TCRoutingCopy.discoveryLine(port: $0) },
         toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
         toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
         stateLine: { TCRoutingCopy.stateLine(state: $0) },
@@ -591,12 +602,38 @@ final class AppModel: ObservableObject {
     /// That is display only: `RoutingSurface.settingsParams` writes nothing
     /// while the switch is off, so a default nobody chose never becomes an
     /// announcement that a local service is in use.
+    ///
+    /// A discovered port fills the field only where nothing is declared.
+    /// The contributor's own port always wins -- see
+    /// `RoutingForm.fromDeclaration`.
     var routingForm: RoutingForm {
         RoutingForm.fromDeclaration(
             mode: daemonSettings?.ironwire?.mode,
             port: daemonSettings?.ironwire?.port,
-            tokenDir: daemonSettings?.ironwire?.tokenDir
+            tokenDir: daemonSettings?.ironwire?.tokenDir,
+            discoveredPort: routingDiscovery.port
         )
+    }
+
+    /// Ask what the machine already knows, and show it.
+    ///
+    /// **This writes nothing and reads nothing of the contributor's.** It
+    /// reads one file IronWire left, learns a port from it, and puts that
+    /// port in a field. Declaring is still the switch and the button; a
+    /// discovery that declared on its own would be this window announcing a
+    /// local service nobody mentioned, which is the whole thing the
+    /// declaration exists to stop.
+    ///
+    /// A machine without IronWire is not a failure and produces no error
+    /// state: the answer is `found: false`, and a call that did not run at
+    /// all degrades to the same thing, because both mean there is nothing
+    /// to offer.
+    func discoverRouting() {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let discovery = (try? client.discoverRouting()) ?? .none
+            await MainActor.run { self.routingDiscovery = discovery }
+        }
     }
 
     /// Write the declaration, then -- when it is on -- ask what was found.

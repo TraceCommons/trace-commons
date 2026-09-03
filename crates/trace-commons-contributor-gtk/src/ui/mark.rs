@@ -128,7 +128,7 @@ fn base(size: i32) -> gtk::DrawingArea {
     // in text, and a screen reader announcing a logo on every screen is
     // noise.
     area.set_can_focus(false);
-    area.update_property(&[gtk::accessible::Property::Label("Trace Commons")]);
+    area.update_property(&[gtk::accessible::Property::Label(crate::copy::APP_NAME)]);
     area
 }
 
