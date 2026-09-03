@@ -536,6 +536,8 @@ pub struct Settings {
     pub codex_source_mode: String,
     #[serde(default)]
     pub gemini_source_mode: String,
+    #[serde(default)]
+    pub cline_source_mode: String,
     /// The local proxy declaration as the daemon holds it. Absent means
     /// off -- there is no conventional fallback for a local service, so
     /// unlike a source root there is no third state.

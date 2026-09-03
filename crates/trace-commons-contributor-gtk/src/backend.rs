@@ -619,6 +619,8 @@ mod roots_tests {
         let dir = Scratch::new("every-answer");
         let gemini = dir.path().join("gemini");
         std::fs::create_dir_all(&gemini).unwrap();
+        let cline = dir.path().join("cline");
+        std::fs::create_dir_all(&cline).unwrap();
 
         declare_sources(
             dir.path(),
@@ -637,6 +639,12 @@ mod roots_tests {
                         path: gemini.clone(),
                     },
                 ),
+                (
+                    trace_commons_contributor::source::SOURCE_CLINE,
+                    SourceDeclaration::Watch {
+                        path: cline.clone(),
+                    },
+                ),
             ],
         )
         .unwrap();
@@ -646,6 +654,11 @@ mod roots_tests {
         assert_eq!(
             settings.gemini_source,
             Some(SourceDeclaration::Watch { path: gemini }),
+            "the contributor said to watch it; the answer must survive"
+        );
+        assert_eq!(
+            settings.cline_source,
+            Some(SourceDeclaration::Watch { path: cline }),
             "the contributor said to watch it; the answer must survive"
         );
     }

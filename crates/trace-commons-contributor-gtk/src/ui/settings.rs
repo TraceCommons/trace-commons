@@ -929,7 +929,7 @@ fn routing_tone(state: &str) -> Tone {
 
 /// Fill the declaration controls from the daemon's own answer, and say one
 /// word about each tool.
-/// What the contributor said about each of the three tools this card names.
+/// What the contributor said about each of the four tools this card names.
 ///
 /// Held rather than re-read because the tool rows are repainted from the
 /// tool-list answer, which arrives on its own event and carries no
@@ -944,6 +944,7 @@ struct RoutingModes {
     claude: String,
     codex: String,
     gemini: String,
+    cline: String,
 }
 
 /// What IronWire last answered when asked which tools are pointed at it.
@@ -958,8 +959,8 @@ struct RoutingEvidence {
     /// primary invalidation is the probe, not this stamp.
     taken_at: std::time::Instant,
     /// One entry per tool IronWire listed, keyed by its own stable id.
-    /// A tool absent from the list -- Gemini CLI on every machine today --
-    /// is not in this map and gets no verdict.
+    /// A tool absent from the list -- Gemini CLI and Cline on every machine
+    /// today -- is not in this map and gets no verdict.
     tools: std::collections::HashMap<String, ToolRow>,
 }
 
@@ -969,15 +970,17 @@ struct ToolRow {
     wired: bool,
 }
 
-/// IronWire's own stable ids for the three tools this card names.
+/// IronWire's own stable ids for the four tools this card names.
 ///
 /// `ironwire connect <id>` takes these, and the settings response is keyed
-/// by them. Gemini CLI has no row upstream at all today -- neither built-in
-/// nor in the catalogue -- which is why it is listed here and expected to
-/// be missing rather than left out and quietly defaulted.
+/// by them. Gemini CLI and Cline have no row upstream at all today --
+/// neither built-in nor in the catalogue -- which is why they are listed
+/// here and expected to be missing rather than left out and quietly
+/// defaulted.
 const IRONWIRE_TOOL_CLAUDE: &str = "claude";
 const IRONWIRE_TOOL_CODEX: &str = "codex";
 const IRONWIRE_TOOL_GEMINI: &str = "gemini";
+const IRONWIRE_TOOL_CLINE: &str = "cline";
 
 /// What may be said about one tool, from what IronWire answered about it.
 ///
@@ -1027,6 +1030,7 @@ fn render_tool_rows(app: &Rc<App>) {
         (copy::TOOL_CLAUDE, &modes.claude, IRONWIRE_TOOL_CLAUDE),
         (copy::TOOL_CODEX, &modes.codex, IRONWIRE_TOOL_CODEX),
         (copy::TOOL_GEMINI, &modes.gemini, IRONWIRE_TOOL_GEMINI),
+        (copy::TOOL_CLINE, &modes.cline, IRONWIRE_TOOL_CLINE),
     ] {
         let wiring = tool_wiring(evidence.as_ref(), id);
         let word = copy::tool_word(mode, wiring);
@@ -1064,6 +1068,7 @@ fn render_routing(app: &Rc<App>, settings: &Settings) {
         claude: settings.claude_source_mode.clone(),
         codex: settings.codex_source_mode.clone(),
         gemini: settings.gemini_source_mode.clone(),
+        cline: settings.cline_source_mode.clone(),
     }));
     if !declared {
         // Nothing is declared, so nothing held about IronWire is still
@@ -2976,9 +2981,13 @@ mod tests {
         let claude = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLAUDE));
         let codex = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CODEX));
         let gemini = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_GEMINI));
+        let cline = copy::tool_word("watch", tool_wiring(Some(&evidence), IRONWIRE_TOOL_CLINE));
         assert_eq!(claude, copy::TOOL_PRIVATE);
         assert_eq!(codex, copy::TOOL_DIRECT);
         assert_eq!(gemini, copy::TOOL_UNKNOWN);
+        // Same shape as Gemini: no upstream row, so no verdict, however the
+        // declaration switch is set.
+        assert_eq!(cline, copy::TOOL_UNKNOWN);
         assert_ne!(claude, codex);
         assert_ne!(codex, gemini);
     }
@@ -3096,5 +3105,6 @@ mod tests {
         assert_eq!(IRONWIRE_TOOL_CLAUDE, "claude");
         assert_eq!(IRONWIRE_TOOL_CODEX, "codex");
         assert_eq!(IRONWIRE_TOOL_GEMINI, "gemini");
+        assert_eq!(IRONWIRE_TOOL_CLINE, "cline");
     }
 }
