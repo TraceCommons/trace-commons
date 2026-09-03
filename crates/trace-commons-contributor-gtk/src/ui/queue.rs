@@ -666,8 +666,13 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
         }
         (None, None) => CardPreview::Checking,
     };
+    // Removals only. `redactions` also carries `residual_secret_at:*`,
+    // which counts a secret that was DETECTED AND LEFT IN -- see
+    // `crate::redaction_labels`. Counting those here put a session with a
+    // surviving secret into the ordinary "removed by pattern" arm below,
+    // stating the opposite of what happened.
     let redactions: Option<u32> = match &state {
-        CardPreview::Ready(p) => Some(p.redactions.values().sum()),
+        CardPreview::Ready(p) => Some(crate::redaction_labels::removed_total(&p.redactions)),
         CardPreview::TooLarge { .. } | CardPreview::Checking => None,
     };
 
@@ -747,8 +752,13 @@ fn manifest_block(
         .hexpand(true)
         .build();
 
+    // Removals only. `redactions` also carries `residual_secret_at:*`,
+    // which counts a secret that was DETECTED AND LEFT IN -- see
+    // `crate::redaction_labels`. Counting those here put a session with a
+    // surviving secret into the ordinary "removed by pattern" arm below,
+    // stating the opposite of what happened.
     let redactions: Option<u32> = match &state {
-        CardPreview::Ready(p) => Some(p.redactions.values().sum()),
+        CardPreview::Ready(p) => Some(crate::redaction_labels::removed_total(&p.redactions)),
         CardPreview::TooLarge { .. } | CardPreview::Checking => None,
     };
     let pairs = gtk::Box::new(gtk::Orientation::Horizontal, METRIC_GAP);
@@ -793,6 +803,33 @@ fn manifest_block(
         )),
     }
     facts.append(&pairs);
+
+    // A secret that scrubbing FOUND and did not remove.
+    //
+    // Excluding survivors from the figures above is only half the fix:
+    // filtering one out and then saying nothing would trade a wrong
+    // statement for silence about a secret that is still in the payload,
+    // which on a consent surface is not an improvement. So it gets its own
+    // line, in the attention tone, naming the schema sites -- which are
+    // schema-shaped identifiers by construction, never transcript text.
+    if let CardPreview::Ready(p) = &state {
+        let survivors = crate::redaction_labels::survivor_total(&p.redactions);
+        if survivors > 0 {
+            let sites: Vec<String> = crate::redaction_labels::survivor_sites(&p.redactions)
+                .into_iter()
+                .map(|(site, _)| site)
+                .filter(|site| !site.is_empty())
+                .collect();
+            let line = gtk::Label::builder()
+                .label(copy::residual_secret_line(survivors, &sites))
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            line.add_css_class("tc-meta");
+            line.add_css_class("tc-attention");
+            facts.append(&line);
+        }
+    }
 
     // Never hidden behind a disclosure: conceding that scrubbing is
     // imperfect is what makes the rest credible. What changes here is that

@@ -235,7 +235,24 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// drawn to be found rather than reassured over: a session that obviously
     /// touched credentials and matched no pattern is worth a second look.
     /// </summary>
-    public bool NothingMatched => _summary is not null && _summary.Redactions.Count == 0;
+    /// <summary>
+    /// Whether scrubbing REMOVED nothing.
+    /// </summary>
+    /// <remarks>
+    /// Not "the map is empty": <c>Redactions</c> also carries
+    /// <c>residual_secret_at:*</c>, which counts a secret the scan found and
+    /// did NOT remove. A session whose only entry was a survivor therefore
+    /// used to read as one where scrubbing had done something, and lost the
+    /// note that asks somebody to look. See <c>RedactionLabels</c>.
+    /// </remarks>
+    public bool NothingMatched =>
+        _summary is not null && RedactionLabels.RemovedTotal(_summary.Redactions) == 0;
+
+    /// <summary>Secrets the scan found and left in what would be sent.</summary>
+    public string SurvivingSecrets => _summary?.SurvivingSecrets ?? string.Empty;
+
+    /// <summary>Whether to show <see cref="SurvivingSecrets"/> at all.</summary>
+    public bool HasSurvivingSecrets => _summary?.HasSurvivingSecrets ?? false;
 
     public string TurnsText =>
         _summary is null
@@ -735,6 +752,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         Raise(nameof(RawSessionText));
         Raise(nameof(ScrubbingFoundText));
         Raise(nameof(NothingMatched));
+        Raise(nameof(SurvivingSecrets));
+        Raise(nameof(HasSurvivingSecrets));
         Raise(nameof(TurnsText));
         Raise(nameof(ResidualRiskText));
         Raise(nameof(PiiLabelsText));

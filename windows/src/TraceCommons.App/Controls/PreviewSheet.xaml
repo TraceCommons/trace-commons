@@ -227,6 +227,20 @@
                                Visibility="{x:Bind ViewModel.ShowNothingMatchedNote, Mode=OneWay}"
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap" />
+
+                    <!-- A secret the scan FOUND and did not remove.
+                         redaction_counts carries residual_secret_at:* in the
+                         same map as every genuine removal, and the figures
+                         above render under headings that say "removed"; those
+                         figures now exclude it. Excluding it is only half the
+                         fix. Saying nothing would trade a wrong statement for
+                         silence about a secret still in the payload. This is
+                         the other half. -->
+                    <TextBlock Text="{x:Bind ViewModel.SurvivingSecrets, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.HasSurvivingSecrets, Mode=OneWay}"
+                               Foreground="{ThemeResource TcGoldTextBrush}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
                 </StackPanel>
 
                 <ScrollViewer Grid.Row="4" Margin="0,10,0,0">
