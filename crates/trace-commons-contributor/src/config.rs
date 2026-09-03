@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use trace_commons_attestation::measurements::{ExpectedMeasurements, ExpectedMeasurementsError};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use uuid::Uuid;
+
+use crate::witness::WitnessTrust;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
@@ -98,6 +101,98 @@ pub struct ContributorConfig {
     pub public_bio: Option<String>,
     #[serde(default)]
     pub public_since: Option<DateTime<Utc>>,
+    /// The redaction witness, when one is configured.
+    ///
+    /// **Absent means the witness path does not execute at all** -- not "runs
+    /// and falls back". `redact_to_envelope` runs locally, byte for byte, as
+    /// it does today. There is no discovery, no server-pushed enablement, and
+    /// no default that could move under a contributor.
+    ///
+    /// `#[serde(default)]` is required here rather than decorative: this
+    /// struct is read from a file the previous release wrote, and that file
+    /// has no `witness` key.
+    #[serde(default)]
+    pub witness: Option<WitnessSettings>,
+}
+
+/// Where the redaction witness is, and what this client will accept from it.
+///
+/// A configured witness with no pinned measurement **refuses submissions**. It
+/// does not fall back to local redaction: the contributor's bytes would stay
+/// home, but the envelope would carry a self-reported risk while the
+/// contributor believed it carried a certificate, and the operator would see
+/// an uncertified submission from someone enrolled as certified.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WitnessSettings {
+    /// Base URL of the witness, e.g. `https://witness.example`.
+    pub url: String,
+    /// The address whose signature this client accepts on a certificate, and
+    /// which the quote's report data must name.
+    pub signing_address: String,
+    /// Every admitted measurement set, each a comma-separated `key=value`
+    /// list in `ExpectedMeasurements`' own spelling.
+    ///
+    /// A **list**, because dstack derives the signing key from a stable app
+    /// id: an image upgrade moves the measurement and leaves the address, so
+    /// a pin holding one value would break every client on every upgrade. The
+    /// new measurement is added here before the fleet rolls.
+    ///
+    /// Empty means nothing is pinned, which is a refusal and never a pass.
+    #[serde(default)]
+    pub expected_measurements: Vec<String>,
+}
+
+impl WitnessSettings {
+    /// Parse the pinned measurement sets into a [`WitnessTrust`].
+    ///
+    /// A malformed entry is an error rather than a skipped line: a silently
+    /// dropped pin would leave a contributor believing they had pinned
+    /// something when nothing was checked.
+    pub fn trust(&self) -> Result<WitnessTrust, ExpectedMeasurementsError> {
+        let mut measurements = Vec::new();
+        for entry in &self.expected_measurements {
+            if let Some(parsed) = ExpectedMeasurements::from_env_value(Some(entry))? {
+                measurements.push(parsed);
+            }
+        }
+        Ok(WitnessTrust {
+            signing_address: self.signing_address.clone(),
+            measurements,
+        })
+    }
+}
+
+/// `TRACE_COMMONS_WITNESS_URL`.
+pub const TRACE_COMMONS_WITNESS_URL: &str = "TRACE_COMMONS_WITNESS_URL";
+/// `TRACE_COMMONS_WITNESS_SIGNING_ADDRESS`.
+pub const TRACE_COMMONS_WITNESS_SIGNING_ADDRESS: &str = "TRACE_COMMONS_WITNESS_SIGNING_ADDRESS";
+/// `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS`. Sets are separated by `;`,
+/// keys within a set by `,` -- because `ExpectedMeasurements` already uses the
+/// comma.
+pub const TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS: &str =
+    "TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS";
+
+/// Read witness settings from the environment, for a client that has not
+/// written them into its config file.
+///
+/// All three must be present together. A URL with no address or no
+/// measurements is a **refusal to configure**, not a partially configured
+/// witness: the failure mode of the latter is a client that believes it is
+/// pinned and is not.
+pub fn witness_settings_from_env() -> Option<WitnessSettings> {
+    let url = std::env::var(TRACE_COMMONS_WITNESS_URL).ok()?;
+    let signing_address = std::env::var(TRACE_COMMONS_WITNESS_SIGNING_ADDRESS).ok()?;
+    let expected = std::env::var(TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS).ok()?;
+    Some(WitnessSettings {
+        url,
+        signing_address,
+        expected_measurements: expected
+            .split(';')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+    })
 }
 
 /// Build the allowlist to enforce for issuer/ingest requests: the `allowed_hosts`
@@ -624,6 +719,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
     }
 

@@ -429,6 +429,7 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     store.save_config(&cfg).unwrap();
 
@@ -642,6 +643,7 @@ fn write_config(store_dir: &std::path::Path, display_handle: Option<&str>) {
         display_handle: display_handle.map(str::to_string),
         public_bio: display_handle.map(|_| "Ships billing systems by day.".to_string()),
         public_since: display_handle.map(|_| chrono::Utc::now()),
+        witness: None,
     };
     cfg.consent_scopes.push("public_attribution".into());
     store.save_config(&cfg).unwrap();
@@ -826,6 +828,7 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     store.save_config(&cfg).unwrap();
 
@@ -938,6 +941,7 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     store.save_config(&cfg).unwrap();
 
@@ -1420,6 +1424,7 @@ async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, Con
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     store.save_config(&cfg).unwrap();
 
@@ -1698,6 +1703,7 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     store.save_config(&cfg).unwrap();
 

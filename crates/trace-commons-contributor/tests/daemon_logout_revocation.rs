@@ -44,6 +44,7 @@ fn enrolled_store(dir: &std::path::Path) -> ConfigStore {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         })
         .unwrap();
     store

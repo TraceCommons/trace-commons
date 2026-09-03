@@ -81,6 +81,7 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness: None,
     };
     if enrolled {
         store.save_config(&cfg).unwrap();

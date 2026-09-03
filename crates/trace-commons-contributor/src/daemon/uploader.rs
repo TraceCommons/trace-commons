@@ -862,6 +862,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -927,6 +928,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -990,6 +992,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
 
@@ -1044,6 +1047,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         }
     }
 
@@ -1151,6 +1155,63 @@ mod tests {
             }
         );
         assert_eq!(state.uploads_today, 0);
+    }
+
+    #[tokio::test]
+    async fn a_witnessed_preview_refuses_by_name_rather_than_building_locally() {
+        // The preview path has no claim -- it runs before the contributor has
+        // answered -- and a witnessed envelope must carry the granted scopes
+        // inside the bytes the certificate covers, which means minting first.
+        //
+        // Refusing rather than building locally is the point: these exact
+        // bytes are what `use_approved_envelope` uploads later, so a
+        // locally-redacted preview under a configured witness would be an
+        // uncertified submission from a contributor who believes their
+        // submissions are certified.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let mut cfg = fixture_cfg(&store);
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "http://witness.invalid".into(),
+            signing_address: "0x1111111111111111111111111111111111111111".into(),
+            expected_measurements: vec![format!(
+                "mrtd={},mrconfigid={}",
+                "aa".repeat(48),
+                "bb".repeat(48)
+            )],
+        });
+        store.save_config(&cfg).unwrap();
+
+        let err = crate::daemon::preview::build_preview(
+            &store,
+            Some(&cfg),
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .expect_err("a witnessed preview has no claim to mint the grants from");
+        assert_eq!(err.to_string(), "witness_claim_unavailable");
+    }
+
+    #[tokio::test]
+    async fn an_unwitnessed_preview_still_builds() {
+        // The positive control. Without it the refusal above would pass on a
+        // preview path that had stopped working entirely.
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        crate::daemon::preview::build_preview(
+            &store,
+            Some(&cfg),
+            None,
+            &session.source(),
+            &session.session_ref(),
+        )
+        .await
+        .expect("an unconfigured client previews exactly as it did before");
     }
 
     #[tokio::test]
@@ -1391,6 +1452,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
@@ -1453,6 +1515,7 @@ mod tests {
             display_handle: None,
             public_bio: None,
             public_since: None,
+            witness: None,
         };
         store.save_config(&cfg).unwrap();
 
