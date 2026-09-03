@@ -564,6 +564,17 @@ final class DaemonClient {
     // MARK: - Preview body (in-process only)
 
     /// Opens the redacted body for `entryID`. Blocks for the redaction pass.
+    /// How many times `needle` appears in the entry's PRE-redaction session
+    /// text, or nil if that could not be checked.
+    ///
+    /// The one call in this client that reads unredacted bytes, and it is
+    /// allowed to because it returns a number and nothing else. It is what
+    /// tells "the scrubber took it out" apart from "it was never here",
+    /// which the redacted-body search cannot.
+    func searchOriginal(entryID: String, needle: String) -> Int? {
+        daemon.searchOriginal(entryID: entryID, needle: needle)
+    }
+
     func openPreview(entryID: String) throws -> TCPreview {
         try daemon.openPreview(entryID: entryID)
     }

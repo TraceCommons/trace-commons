@@ -1251,6 +1251,15 @@ final class AppModel: ObservableObject {
 
     // MARK: - Preview body
 
+    /// How many times `needle` appears in an entry's pre-redaction session,
+    /// or nil when that could not be checked.
+    ///
+    /// Synchronous: the ABI call scans an already-parsed session and returns
+    /// a count, with no redaction pass to block on.
+    func searchOriginal(entryID: String, needle: String) -> Int? {
+        client?.searchOriginal(entryID: entryID, needle: needle)
+    }
+
     /// Opens the in-process preview off the main actor -- the redaction pass
     /// blocks -- and hands the open handle back on the main actor.
     func openPreview(entryID: String) async -> PreviewOutcome {

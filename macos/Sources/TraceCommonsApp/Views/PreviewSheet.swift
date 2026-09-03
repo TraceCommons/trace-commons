@@ -282,6 +282,9 @@ struct PreviewSheet: View {
                     SearchTab(
                         document: document,
                         preview: preview,
+                        searchOriginal: { needle in
+                            model.searchOriginal(entryID: entry.entryID, needle: needle)
+                        },
                         initialNeedle: preloaded?.needle ?? "",
                         initialOffsets: preloaded?.offsets
                     )
@@ -737,9 +740,15 @@ struct SearchTab: View {
     /// snippets are cut from those bytes at the offsets the ABI reports.
     let document: TranscriptDocument?
     let preview: TCPreview?
+    /// How many times a term appears in the PRE-redaction session, or nil
+    /// when that could not be checked. A closure rather than a daemon
+    /// reference because `AppModel` is the only thing in this app that talks
+    /// to the daemon.
+    let searchOriginal: (String) -> Int?
 
     @State private var needle: String
     @State private var offsets: [Int]?
+    @State private var outcome: OriginalSearchOutcome?
     @State private var searched: Bool
     @State private var recents: [String] = RecentSearches.load()
     @FocusState private var focused: Bool
@@ -747,11 +756,13 @@ struct SearchTab: View {
     init(
         document: TranscriptDocument?,
         preview: TCPreview?,
+        searchOriginal: @escaping (String) -> Int? = { _ in nil },
         initialNeedle: String = "",
         initialOffsets: [Int]? = nil
     ) {
         self.document = document
         self.preview = preview
+        self.searchOriginal = searchOriginal
         _needle = State(initialValue: initialNeedle)
         _offsets = State(initialValue: initialOffsets)
         _searched = State(initialValue: initialOffsets != nil)
@@ -850,10 +861,26 @@ struct SearchTab: View {
             Text("The search couldn't run on this trace.")
                 .font(TC.Font_.body)
                 .foregroundStyle(TC.inkSecondary)
-        } else if offsets!.isEmpty {
+        } else if let outcome {
             // The answer to the only question this tab exists for, in
             // the app's two loudest tones -- each with a glyph, because a
             // green word and an amber word are the same word in greyscale.
+            //
+            // Which tone is the outcome's to decide: a term that is still in
+            // what would be sent is the one to slow down on, and a term that
+            // was removed reads as clear even though the redacted body and
+            // the original disagree about it.
+            Label(
+                outcome.sentence,
+                systemImage: outcome.isAlarming ? TC.Tone.attention.symbol : TC.Tone.clear.symbol
+            )
+            .font(TC.Font_.headingAlert)
+            .foregroundStyle(
+                outcome.isAlarming ? TC.Tone.attention.textColor : TC.Tone.clear.textColor
+            )
+        } else if offsets!.isEmpty {
+            // No outcome: the preloaded screenshot path, which sets offsets
+            // without running a search.
             Label("0 matches", systemImage: TC.Tone.clear.symbol)
                 .font(TC.Font_.headingAlert)
                 .foregroundStyle(TC.Tone.clear.textColor)
@@ -872,9 +899,16 @@ struct SearchTab: View {
         searched = true
         guard !needle.isEmpty, let preview else {
             offsets = []
+            outcome = nil
             return
         }
         offsets = preview.search(needle)
+        // The redacted-body count alone cannot tell "we took it out" from
+        // "it was never here". See `OriginalSearchOutcome`.
+        outcome = OriginalSearchOutcome.classify(
+            remaining: offsets?.count ?? 0,
+            original: searchOriginal(needle)
+        )
     }
 
     /// Runs the search AND records the term.
