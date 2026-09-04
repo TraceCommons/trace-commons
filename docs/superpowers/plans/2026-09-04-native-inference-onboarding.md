@@ -7,8 +7,10 @@ Branch: `native-onboarding-admission`
 Worktree: `.worktrees/native-onboarding-admission`, based on `dd26e016`.
 The original checkout remains on `witness-production-config`.
 
-Progress: slice 1 implemented and reviewed. Slices 2-5 remain planned;
-public admission and inference funding are not enabled by this branch.
+Progress: slice 1 implemented and reviewed. The first implementation wave
+was dispatched from `bf946228` into the isolated worktrees below. Slices 2-5
+are not yet integrated; public admission and inference funding are not enabled
+by this branch.
 
 Design: [Native inference onboarding](../specs/2026-09-04-native-inference-onboarding-design.md).
 Admission: [Invite or attested inference](../specs/2026-09-04-admission-invite-or-attestation-design.md).
@@ -62,6 +64,35 @@ is actual earned credit funding another call. Public self-service is the
 last milestone, after identity, receipt binding, quotas, and funding all
 work together. A contract brief or isolated mock does not complete a live
 milestone.
+
+### First-wave dispatch record (2026-09-04)
+
+| Task | Running worker | Child branch / worktree under `.worktrees/` |
+|---|---|---|
+| A | `native_flow` | `onboarding-witness-preview` |
+| B | `admission_contract` | `onboarding-near-bootstrap` |
+| C | `funding_review` | `onboarding-inference-funding` |
+
+These are implementation/research assignments, not another decomposition pass.
+Initial coordinator decisions:
+
+- A uses a separate explicit `witness_preview_request` action. Existing
+  preview/card/background methods remain network-inert. Reviewed artifact,
+  certificate, source, permission fingerprint, and contributor context remain
+  bound; upload requires compatible fresh authorization without rewriting.
+- B implements a purpose-bound provisioning ceremony with a five-minute
+  challenge and validated network/account anchor independent of device/key.
+  Its verified result is not account creation or replay protection by itself;
+  durable consume-once and transactional provisioning belong to integration.
+- C verifies actual provider management APIs, writes the funding contract,
+  and implements a tested read-only balance decoder. Organization balance
+  must not be represented as one contributor's spendable funds without the
+  authorization mapping and limits. Redemption APIs and economic terms are
+  not assumed.
+
+Each worker returns its own commit and test results. This record establishes
+dispatch, not completion; accepted changes and validation are recorded when
+the coordinator integrates them.
 
 ### Coordinator ownership and integration rules
 
