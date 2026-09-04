@@ -41,7 +41,8 @@ final class RoutingSurfaceTests: XCTestCase {
       "probe_reachable": "S-REACHABLE",
       "state_off": "S-STATEOFF",
       "state_waiting": "S-STATEWAITING",
-      "state_reading": "S-STATEREADING"
+      "state_reading": "S-STATEREADING",
+      "state_token_unreadable": "S-STATETOKENUNREADABLE"
     }
     """
 
@@ -345,8 +346,33 @@ final class RoutingSurfaceTests: XCTestCase {
         XCTAssertEqual(RoutingTone.fromABI(0), .neutral)
         XCTAssertEqual(RoutingTone.fromABI(1), .held)
         XCTAssertEqual(RoutingTone.fromABI(2), .clear)
-        XCTAssertEqual(RoutingTone.fromABI(3), .neutral)
+        XCTAssertEqual(RoutingTone.fromABI(3), .attention)
+        XCTAssertEqual(RoutingTone.fromABI(4), .neutral)
         XCTAssertEqual(RoutingTone.fromABI(-1), .neutral)
+        // A value this build does not know never reads as the all-clear.
+        for unknown: Int32 in [4, 99, -1] {
+            XCTAssertNotEqual(RoutingTone.fromABI(unknown), .clear)
+        }
+    }
+
+    /// The tone that asks for something withholds the stamp.
+    ///
+    /// It is not "no answer yet" -- it is "no reader was built" -- so there
+    /// has been nothing to check and a "last checked" under it would attach
+    /// a time to something that never happened. Asserted through a fake
+    /// whose tone is provably the one this surface asked for.
+    func testTheAttentionStateShowsNoLastCheckedStamp() {
+        let attention = RoutingCalls(
+            tokenLine: { _ in nil },
+            unreachableLine: { _ in nil },
+            discoveryLine: { _ in nil },
+            toolWord: { _, _ in nil },
+            toolTone: { _, _ in 0 },
+            stateLine: { state in "S:\(state)" },
+            stateTone: { _ in 3 }
+        )
+        XCTAssertEqual(RoutingSurface.tone(forState: "whatever", calls: attention), .attention)
+        XCTAssertFalse(RoutingSurface.showsLastChecked(forState: "whatever", calls: attention))
     }
 
     /// "Last checked" is a per-process stamp on the running daemon, so it is

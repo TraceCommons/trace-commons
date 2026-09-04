@@ -2157,6 +2157,7 @@ const UNKNOWN: i32 = 2;
 const TONE_NEUTRAL: i32 = 0;
 const TONE_HELD: i32 = 1;
 const TONE_CLEAR: i32 = 2;
+const TONE_ATTENTION: i32 = 3;
 
 fn tool_word(mode: &str, wiring: i32) -> String {
     let mode = cstr_str(mode);
@@ -2245,6 +2246,14 @@ fn the_state_branch_table_crosses_the_abi_and_an_unknown_state_claims_nothing() 
     assert_eq!(state_line("awaiting_rows"), copy::IRONWIRE_STATE_WAITING);
     assert_eq!(state_line("rows_seen"), copy::IRONWIRE_STATE_READING);
     assert_eq!(state_line("not_declared"), copy::IRONWIRE_STATE_OFF);
+    assert_eq!(
+        state_line("token_unreadable"),
+        copy::IRONWIRE_STATE_TOKEN_UNREADABLE
+    );
+    // The state that used to arrive as the unknown one. It must not read as
+    // off across the boundary either: this is the sentence a contributor
+    // with the switch on sees.
+    assert_ne!(state_line("token_unreadable"), copy::IRONWIRE_STATE_OFF);
 
     // A state a later daemon grows, an empty one, and no pointer at all all
     // read as the off line. None of them falls through to either "on"
@@ -2271,11 +2280,17 @@ fn the_state_tone_branch_table_crosses_the_abi_and_agrees_with_the_sentence() {
     assert_eq!(tone("awaiting_rows"), TONE_HELD);
     assert_eq!(tone("rows_seen"), TONE_CLEAR);
     assert_eq!(tone("not_declared"), TONE_NEUTRAL);
+    // Neither the calm tone nor the all-clear one, across the ABI.
+    assert_eq!(tone("token_unreadable"), TONE_ATTENTION);
+    assert_ne!(tone("token_unreadable"), TONE_CLEAR);
+    assert_ne!(tone("token_unreadable"), TONE_HELD);
+    assert_ne!(tone("token_unreadable"), TONE_NEUTRAL);
 
     for state in [
         "not_declared",
         "awaiting_rows",
         "rows_seen",
+        "token_unreadable",
         "",
         "ROWS_SEEN",
         "a_state_from_a_later_daemon",
@@ -2284,6 +2299,7 @@ fn the_state_tone_branch_table_crosses_the_abi_and_agrees_with_the_sentence() {
             copy::StateTone::Neutral => TONE_NEUTRAL,
             copy::StateTone::Held => TONE_HELD,
             copy::StateTone::Clear => TONE_CLEAR,
+            copy::StateTone::Attention => TONE_ATTENTION,
         };
         assert_eq!(tone(state), expected, "{state:?}");
         // The tone and the sentence are one decision across the boundary.

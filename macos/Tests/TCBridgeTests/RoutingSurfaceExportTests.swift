@@ -171,16 +171,28 @@ final class RoutingSurfaceExportTests: XCTestCase {
         XCTAssertEqual(RoutingSurface.tone(forState: "awaiting_rows", calls: calls), .held)
         XCTAssertEqual(RoutingSurface.tone(forState: "rows_seen", calls: calls), .clear)
         XCTAssertEqual(RoutingSurface.tone(forState: "not_declared", calls: calls), .neutral)
+        // Declared, and no reader could be built. Not the calm reading and
+        // not the all-clear one: this is the state asking for something.
+        XCTAssertEqual(RoutingSurface.tone(forState: "token_unreadable", calls: calls), .attention)
+        XCTAssertNotEqual(RoutingSurface.tone(forState: "token_unreadable", calls: calls), .clear)
+        XCTAssertNotEqual(RoutingSurface.tone(forState: "token_unreadable", calls: calls), .held)
+        XCTAssertNotEqual(
+            RoutingSurface.tone(forState: "token_unreadable", calls: calls), .neutral
+        )
 
-        for state in ["not_declared", "awaiting_rows", "rows_seen", "", "ROWS_SEEN", "later"] {
+        for state in [
+            "not_declared", "awaiting_rows", "rows_seen", "token_unreadable",
+            "", "ROWS_SEEN", "later",
+        ] {
             let tone = RoutingSurface.tone(forState: state, calls: calls)
             let line = RoutingSurface.stateLine(state, copy: copy, calls: calls)
             // The tone and the sentence are one decision.
             XCTAssertEqual(tone == .neutral, line == copy.stateOff, state)
-            // The stamp is gated on the same reading.
+            // The stamp is gated on the same reading: shown exactly where a
+            // reader exists to have answered.
             XCTAssertEqual(
                 RoutingSurface.showsLastChecked(forState: state, calls: calls),
-                tone != .neutral,
+                tone == .held || tone == .clear,
                 state
             )
         }
@@ -191,7 +203,7 @@ final class RoutingSurfaceExportTests: XCTestCase {
     }
 
     /// A state this build has never heard of claims nothing: it reads as the
-    /// off line and never falls through to either "on" sentence.
+    /// off line and never falls through to any "on" sentence.
     func testAStateThisBuildHasNeverHeardOfReadsAsTheOffLine() {
         guard let copy = copy() else { return }
         for state in ["a_state_from_a_later_daemon", "", "ROWS_SEEN"] {
@@ -199,7 +211,29 @@ final class RoutingSurfaceExportTests: XCTestCase {
             XCTAssertEqual(line, copy.stateOff, state)
             XCTAssertNotEqual(line, copy.stateReading, state)
             XCTAssertNotEqual(line, copy.stateWaiting, state)
+            XCTAssertNotEqual(line, copy.stateTokenUnreadable, state)
         }
+    }
+
+    /// The switch is on and the card must not say "Off".
+    ///
+    /// The defect in its original form: a declared proxy whose token file
+    /// cannot be read builds no reader, the daemon reported that as
+    /// `not_declared`, and this card printed the off sentence under a
+    /// switch the contributor could see was on. Asserted against the real
+    /// dylib, so it is the shipped sentence and not a fixture.
+    func testADeclaredReaderThatCouldNotBeBuiltDoesNotReadAsOff() {
+        guard let copy = copy() else { return }
+        let line = RoutingSurface.stateLine("token_unreadable", copy: copy, calls: calls)
+        XCTAssertEqual(line, copy.stateTokenUnreadable)
+        XCTAssertNotEqual(line, copy.stateOff)
+        XCTAssertNotEqual(line, copy.stateWaiting)
+        XCTAssertNotEqual(line, copy.stateReading)
+        XCTAssertFalse(line.lowercased().hasPrefix("off"), line)
+        // And no stamp under it: nothing was ever checked.
+        XCTAssertFalse(
+            RoutingSurface.showsLastChecked(forState: "token_unreadable", calls: calls)
+        )
     }
 
     /// The tool names on the rows are the shared ones too.
@@ -249,13 +283,19 @@ final class RoutingSurfaceExportTests: XCTestCase {
         XCTAssertEqual(rendered[3].word, "Not known")
     }
 
-    /// The three status states, rendered through the real payload.
+    /// The four status states, rendered through the real payload.
     func testTheStatusStatesRenderTheRustsSentences() {
         guard let copy = copy() else { return }
         XCTAssertEqual(RoutingSurface.stateLine("not_declared", copy: copy, calls: calls), copy.stateOff)
         XCTAssertEqual(RoutingSurface.stateLine("awaiting_rows", copy: copy, calls: calls), copy.stateWaiting)
         XCTAssertEqual(RoutingSurface.stateLine("rows_seen", copy: copy, calls: calls), copy.stateReading)
+        XCTAssertEqual(
+            RoutingSurface.stateLine("token_unreadable", copy: copy, calls: calls),
+            copy.stateTokenUnreadable
+        )
         XCTAssertTrue(copy.stateReading.hasPrefix("On"), copy.stateReading)
+        // On, and asking for something -- so it says "On" too.
+        XCTAssertTrue(copy.stateTokenUnreadable.hasPrefix("On"), copy.stateTokenUnreadable)
     }
 
     /// The probe outcome that matters most on macOS, end to end: a

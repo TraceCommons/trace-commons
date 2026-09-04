@@ -81,7 +81,7 @@ final class RoutingCopyExportTests: XCTestCase {
             XCTAssertFalse(text.isEmpty, "\(child.label ?? "?") arrived empty")
             checked += 1
         }
-        XCTAssertEqual(checked, 27, "the payload's field count changed")
+        XCTAssertEqual(checked, 28, "the payload's field count changed")
     }
 
     /// The sentences arrive finished. This shell never fills in a hole, so

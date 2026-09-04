@@ -598,13 +598,20 @@ final class RoutingBindingTests: XCTestCase {
         }
     }
 
-    /// `awaiting_rows` is not a fault.
+    /// `awaiting_rows` is not a fault, and no state on this card is an
+    /// alarm.
     ///
-    /// A contributor who has just changed anything on this card sees it
-    /// until the daemon's next tick, because a reader built a moment ago
-    /// starts empty by construction. Painting it as a fault accuses a
-    /// working proxy of being broken at exactly that moment -- so no state
-    /// on this card reaches for the two tones that mean something is wrong.
+    /// A contributor who has just changed anything on this card sees
+    /// `awaiting_rows` until the daemon's next tick, because a reader built
+    /// a moment ago starts empty by construction. Painting it as a fault
+    /// accuses a working proxy of being broken at exactly that moment.
+    ///
+    /// The refusal tones stay unreachable from every state. `.attention`
+    /// does not: it is reachable, from exactly one state, and it has to be
+    /// -- `token_unreadable` means the switch is on and nothing could be
+    /// built to read, which is neither "off" nor "fine". What this pins is
+    /// that it is the *only* state that reaches it, and that it is asked
+    /// for through the shared bridge rather than chosen by this card.
     func testNoStateOnThisCardIsPaintedAsAFault() throws {
         let card = try XCTUnwrap(RoutingCard.body())
         let state = try XCTUnwrap(RoutingCard.stateBody())
@@ -615,7 +622,26 @@ final class RoutingBindingTests: XCTestCase {
             bridge.contains("case .held: return .held"),
             "the tone bridge no longer carries held through: \(bridge)"
         )
-        for alarming in [".attention", ".refused", "TC.gold", "TC.red"] {
+        XCTAssertTrue(
+            bridge.contains("case .attention: return .attention"),
+            "the tone bridge drops the state that asks for something: \(bridge)"
+        )
+
+        // The state asking for something is the only one that may be
+        // painted that way, and the four the daemon can report are the
+        // whole vocabulary.
+        for calm in ["not_declared", "awaiting_rows", "rows_seen", "a_later_state"] {
+            XCTAssertNotEqual(
+                RoutingSurface.tone(forState: calm, calls: routingCalls), .attention, calm
+            )
+        }
+        XCTAssertEqual(
+            RoutingSurface.tone(forState: "token_unreadable", calls: routingCalls), .attention
+        )
+
+        // The refusal tones stay unreachable everywhere, including through
+        // the bridge.
+        for alarming in [".refused", "TC.red"] {
             XCTAssertFalse(
                 card.contains(alarming),
                 "the routing card paints something \(alarming)"
@@ -628,6 +654,15 @@ final class RoutingBindingTests: XCTestCase {
                 bridge.contains(alarming),
                 "the routing tone bridge can produce \(alarming)"
             )
+        }
+
+        // And neither the card nor the status line picks a tone for itself.
+        // `.attention` is reachable only by carrying the shared answer
+        // through the bridge; a colour or a case named here would be this
+        // shell deciding how a state reads.
+        for chosen in [".attention", "TC.gold"] {
+            XCTAssertFalse(card.contains(chosen), "the routing card names \(chosen)")
+            XCTAssertFalse(state.contains(chosen), "the routing status line names \(chosen)")
         }
     }
 

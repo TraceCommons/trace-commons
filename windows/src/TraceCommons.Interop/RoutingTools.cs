@@ -63,6 +63,15 @@ public enum RoutingTone
 
     /// <summary>Declared, and answers are arriving.</summary>
     Clear,
+
+    /// <summary>
+    /// Declared, and something on this machine needs fixing before anything
+    /// can be read. The only reading here that asks for an action, and the
+    /// reason this is not three values: a state meaning "cannot read" shown
+    /// as <see cref="Neutral"/> reads as off, and shown as <see cref="Held"/>
+    /// reads as normal. It is neither.
+    /// </summary>
+    Attention,
 }
 
 /// <summary>What the daemon's probe answered, reduced to what may be rendered.</summary>
@@ -414,7 +423,7 @@ public static class RoutingTools
     public const string GeminiId = "gemini";
     public const string ClineId = "cline";
 
-    // The daemon's three routing states, from `status.routing.state`. Wire
+    // The daemon's four routing states, from `status.routing.state`. Wire
     // values, and no longer a branch table: which sentence each reaches is
     // decided in routing_copy.rs and crosses the ABI. They are named here so
     // this shell and its tests can talk about the states the daemon reports
@@ -422,6 +431,12 @@ public static class RoutingTools
     public const string NotDeclared = "not_declared";
     public const string AwaitingRows = "awaiting_rows";
     public const string RowsSeen = "rows_seen";
+
+    // Declared, and no reader could be built -- the ordinary shape of a
+    // proxy that is declared but not running. Reported as NotDeclared until
+    // this state existed, which printed the off sentence under a switch the
+    // contributor could see was on.
+    public const string TokenUnreadable = "token_unreadable";
 
     /// <summary>
     /// One tool's word, from what the contributor said about that tool's
@@ -634,7 +649,13 @@ public static class RoutingTools
         return new RoutingStatusLine(
             StateLine(copy, state),
             tone,
-            tone == RoutingTone.Neutral ? null : LastCheckedLine(lastRefreshAt, now));
+            // Shown exactly where a reader exists to have answered. Named
+            // rather than "not neutral": the state where no reader could be
+            // built has never checked anything either, and a stamp under it
+            // would attach a time to something that did not happen.
+            tone is RoutingTone.Held or RoutingTone.Clear
+                ? LastCheckedLine(lastRefreshAt, now)
+                : null);
     }
 
     /// <summary>
