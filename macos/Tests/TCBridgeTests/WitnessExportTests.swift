@@ -200,6 +200,197 @@ final class WitnessExportTests: XCTestCase {
         }
     }
 
+    // MARK: - The pinned measurements, end to end
+
+    /// The entries survive a read/configure cycle byte for byte.
+    ///
+    /// This is the whole reason `pinned_measurements` exists: the editor is
+    /// pre-filled from it and hands it straight back, so anything this shell
+    /// does in between has to be the identity. A reformat here would rewrite
+    /// a pin nobody touched, and nothing on the card would show which one
+    /// changed.
+    ///
+    /// Driven through the real dylib rather than a fixture, because the
+    /// claim is about what `tc_witness_status_json` and
+    /// `tc_witness_configure` agree on, and a fixture written beside the
+    /// code under test can agree with a bug.
+    func testPinnedMeasurementsSurviveAReadAndAWriteUnchanged() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let stored = [Self.aPin, Self.anotherPin]
+        try enroll(dir: dir, url: "https://witness.example",
+                   signingAddress: Self.anAddress, measurements: stored)
+
+        // Read.
+        let first = try XCTUnwrap(status(at: dir))
+        XCTAssertEqual(WitnessTrustState.fromABI(first.stateCode), .pinned)
+        XCTAssertEqual(first.pinnedMeasurements, stored, "the read did not return them verbatim")
+        XCTAssertEqual(first.pinnedMeasurementCount, first.pinnedMeasurements.count)
+
+        // Through the editor and straight back out.
+        let form = WitnessForm.fromStatus(first)
+        XCTAssertTrue(form.canConfigure)
+        let outcome = TCWitness.configure(
+            configDir: dir,
+            url: form.url,
+            signingAddress: form.signingAddress,
+            measurementsJSON: try XCTUnwrap(form.measurementsJSON)
+        )
+        XCTAssertEqual(outcome, .done(changed: true), "the round trip was refused")
+
+        // Read again: the stored configuration is unchanged.
+        let second = try XCTUnwrap(status(at: dir))
+        XCTAssertEqual(second.pinnedMeasurements, stored, "a pin was rewritten by the round trip")
+        XCTAssertEqual(second.url, first.url)
+        XCTAssertEqual(second.signingAddress, first.signingAddress)
+        XCTAssertEqual(WitnessTrustState.fromABI(second.stateCode), .pinned)
+    }
+
+    /// A malformed entry comes back as it is stored, so the typo can be
+    /// seen and repaired -- and handing that same entry back is still
+    /// refused. The read is permissive; the write is not.
+    func testAMalformedPinIsReturnedForRepairAndStillRefusedOnTheWayBack() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let stored = ["mrtd=nothexatall"]
+        try enroll(dir: dir, url: "https://witness.example",
+                   signingAddress: Self.anAddress, measurements: stored)
+
+        let read = try XCTUnwrap(status(at: dir))
+        XCTAssertEqual(WitnessTrustState.fromABI(read.stateCode), .refusingPinMalformed)
+        // Present, not omitted: dropping it would delete their work on the
+        // next save.
+        XCTAssertEqual(read.pinnedMeasurements, stored)
+        XCTAssertEqual(read.pinnedMeasurementCount, 1)
+        // And the card still shows them a way out of the refusal.
+        XCTAssertTrue(WitnessSurface.offersClear(.refusingPinMalformed))
+        XCTAssertTrue(WitnessSurface.offersConfigure(.refusingPinMalformed))
+
+        let form = WitnessForm.fromStatus(read)
+        XCTAssertEqual(form.measurements, "mrtd=nothexatall", "the editor was not pre-filled")
+        guard case .refused(let label) = TCWitness.configure(
+            configDir: dir, url: form.url, signingAddress: form.signingAddress,
+            measurementsJSON: try XCTUnwrap(form.measurementsJSON)
+        ) else {
+            return XCTFail("a malformed pin was accepted on the way back in")
+        }
+        XCTAssertEqual(label, "witness-pin-malformed")
+    }
+
+    /// The count sentence comes from the Rust and is never a bare numeral.
+    /// It is null where there is no witness to count for, and the card then
+    /// renders nothing.
+    func testTheCountSentenceIsWordsAndIsNullWhereThereIsNoWitness() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        try enroll(dir: dir, url: "https://witness.example",
+                   signingAddress: Self.anAddress, measurements: [Self.aPin, Self.anotherPin])
+        let pinned = try XCTUnwrap(status(at: dir))
+        let line = try XCTUnwrap(pinned.pinnedMeasurementLine, "the count has no sentence")
+        XCTAssertGreaterThan(
+            line.split(separator: " ").count, 1, "\(line) is a bare numeral")
+        XCTAssertTrue(line.hasSuffix("."), "\(line) is not a sentence")
+        // The zero case must not repeat the outage the state line already
+        // leads with; a card saying it twice reads as two separate faults.
+        XCTAssertFalse(line.contains("Nothing is being sent"))
+
+        // No witness at all: no count, and therefore no sentence.
+        try enroll(dir: dir, url: nil, signingAddress: nil, measurements: nil)
+        let absent = try XCTUnwrap(status(at: dir))
+        XCTAssertEqual(WitnessTrustState.fromABI(absent.stateCode), .absent)
+        XCTAssertNil(absent.pinnedMeasurementLine, "absent was given a count sentence")
+        XCTAssertEqual(absent.pinnedMeasurements, [])
+    }
+
+    /// An emptied box is a contributor clearing their pins, and the ABI is
+    /// right to refuse it. There is no keep-what-is-there mode, because that
+    /// would save a pin nobody looked at.
+    func testAnEmptiedBoxIsRefusedRatherThanTreatedAsNoChange() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try enroll(dir: dir, url: "https://witness.example",
+                   signingAddress: Self.anAddress, measurements: [Self.aPin])
+
+        var form = WitnessForm.fromStatus(try XCTUnwrap(status(at: dir)))
+        form.measurements = ""
+        XCTAssertFalse(form.canConfigure, "this shell offered to write an unpinned witness")
+        XCTAssertNil(form.measurementsJSON)
+
+        // And if it were sent anyway, the ABI refuses it.
+        guard case .refused(let label) = TCWitness.configure(
+            configDir: dir, url: form.url, signingAddress: form.signingAddress,
+            measurementsJSON: "[]"
+        ) else {
+            return XCTFail("an empty pin list was written")
+        }
+        XCTAssertEqual(label, "witness-pin-required")
+        // The stored pins are untouched by a refused write.
+        XCTAssertEqual(try XCTUnwrap(status(at: dir)).pinnedMeasurements, [Self.aPin])
+    }
+
+    // MARK: - Fixtures
+
+    /// One measurement set in `ExpectedMeasurements`' own spelling.
+    private static let aPin = "mrtd=" + String(repeating: "ab", count: 48)
+    private static let anotherPin =
+        "mrtd=" + String(repeating: "cd", count: 48)
+        + ",mrconfigid=" + String(repeating: "ef", count: 48)
+    private static let anAddress = "0x" + String(repeating: "11", count: 20)
+
+    private func status(at dir: String, file: StaticString = #filePath, line: UInt = #line)
+        -> WitnessStatus?
+    {
+        switch TCWitness.statusJSON(configDir: dir) {
+        case .status(let json):
+            guard let decoded = WitnessStatus.decode(fromJSON: json) else {
+                XCTFail("the status payload did not decode: \(json)", file: file, line: line)
+                return nil
+            }
+            return decoded
+        case .refused(let label):
+            XCTFail("the status was refused: \(label)", file: file, line: line)
+            return nil
+        }
+    }
+
+    /// Write a contributor config so the witness calls have something to
+    /// read. The Rust helper for this is not on the C ABI, so the file is
+    /// written here -- and the assertion that the state came back as
+    /// expected is what makes a schema drift a loud failure rather than a
+    /// silent pass.
+    private func enroll(
+        dir: String, url: String?, signingAddress: String?, measurements: [String]?
+    ) throws {
+        var config: [String: Any] = [
+            "schema_version": "trace_commons.contributor_config.v1",
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "trace-commons-ingest",
+            "tenant_id": "tenant",
+            "instance_id": "instance",
+            "user_subject": "subject",
+            "device_key_id": "device",
+            "consent_scopes": [String](),
+            "pii_filter": NSNull(),
+            "allowed_hosts": NSNull(),
+            "display_handle": NSNull(),
+            "public_bio": NSNull(),
+            "public_since": NSNull(),
+        ]
+        if let url, let signingAddress, let measurements {
+            config["witness"] = [
+                "url": url,
+                "signing_address": signingAddress,
+                "expected_measurements": measurements,
+            ]
+        } else {
+            config["witness"] = NSNull()
+        }
+        let data = try JSONSerialization.data(withJSONObject: config)
+        try data.write(to: URL(fileURLWithPath: dir + "/contributor.json"))
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "tcw-\(UUID().uuidString.prefix(8))"
         try FileManager.default.createDirectory(

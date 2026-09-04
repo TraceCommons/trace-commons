@@ -1140,24 +1140,32 @@ struct SettingsContent: View {
             }
 
             VStack(alignment: .leading, spacing: TC.Space.xs) {
-                HStack(alignment: .firstTextBaseline) {
-                    TCFieldLabel(copy.measurementsTitle)
-                    Spacer()
-                    // A bare numeral, because there is no shared word for
-                    // "how many are pinned" and this shell will not write
-                    // one. The status carries the COUNT and never the
-                    // measurements themselves, which is why the box below
-                    // starts empty even where several are pinned.
-                    if let status = model.witnessStatus {
-                        Text("\(status.pinnedMeasurementCount)")
-                            .font(TC.Font_.monoChip)
-                            .foregroundStyle(.secondary)
-                    }
+                TCFieldLabel(copy.measurementsTitle)
+                // The count as the Rust's sentence, never as a bare numeral:
+                // a number with no words around it on a privacy surface is
+                // this shell authoring wording by omission.
+                //
+                // Nil where there is no witness to count for -- absent, not
+                // enrolled, unreadable -- and then NOTHING is rendered. A
+                // count of the pins on a witness that does not exist is not
+                // a shorter sentence, it is a wrong one, and there is no
+                // `else` here for exactly that reason.
+                if let line = model.witnessStatus?.pinnedMeasurementLine {
+                    Text(line)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                // One measurement set per line. A list, not a value: an
+                // One measurement set per line, pre-filled from what the ABI
+                // returned and handed straight back. A list, not a value: an
                 // upgrade moves the witness's measurement and leaves its
                 // signing address where it is, so the new one is added
                 // before the fleet rolls.
+                //
+                // The box is the whole answer. Emptying it and saving is a
+                // contributor clearing their pins, which the ABI refuses
+                // with `witness-pin-required`; there is no keep-what-is-there
+                // mode, because that would save a pin nobody looked at.
                 TextEditor(text: Binding(
                     get: { form.measurements },
                     set: { value in

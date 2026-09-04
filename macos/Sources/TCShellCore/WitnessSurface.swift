@@ -207,8 +207,30 @@ public struct WitnessStatus: Decodable, Equatable, Sendable {
     public let url: String?
     public let signingAddress: String?
     /// How many measurements are CONFIGURED, not how many parsed: a
-    /// malformed pin reports the entries that were written.
+    /// malformed pin reports the entries that were written. Always the
+    /// length of `pinnedMeasurements`.
     public let pinnedMeasurementCount: Int
+    /// That count as a sentence, or nil where there is no witness to count
+    /// for -- `absent`, `not_enrolled` and `unreadable`.
+    ///
+    /// Nil is rendered as NOTHING. A count of the pins on a witness that
+    /// does not exist is not a shorter sentence, it is a wrong one, and a
+    /// bare numeral in its place would be this shell writing wording by
+    /// omission.
+    public let pinnedMeasurementLine: String?
+    /// The pinned sets VERBATIM, in stored order.
+    ///
+    /// Exactly what `tc_witness_configure` takes as `measurements_json`:
+    /// pre-fill the editor from it and hand it straight back. It is not
+    /// parsed and must not be re-serialised from anything -- a shell that
+    /// reformats a pin is a shell that can reformat it wrongly, and nothing
+    /// on this card would show which entry had changed.
+    ///
+    /// An entry this build cannot parse is here AS IT IS STORED rather than
+    /// omitted: the state already says `refusing_pin_malformed`, and the
+    /// entry is present so the typo can be seen and repaired. Dropping it
+    /// would delete a contributor's work the next time they saved.
+    public let pinnedMeasurements: [String]
 
     enum CodingKeys: String, CodingKey {
         case stateCode = "state_code"
@@ -216,6 +238,8 @@ public struct WitnessStatus: Decodable, Equatable, Sendable {
         case url
         case signingAddress = "signing_address"
         case pinnedMeasurementCount = "pinned_measurement_count"
+        case pinnedMeasurementLine = "pinned_measurement_line"
+        case pinnedMeasurements = "pinned_measurements"
     }
 
     public init(
@@ -223,13 +247,17 @@ public struct WitnessStatus: Decodable, Equatable, Sendable {
         refusal: String?,
         url: String?,
         signingAddress: String?,
-        pinnedMeasurementCount: Int
+        pinnedMeasurementCount: Int,
+        pinnedMeasurementLine: String?,
+        pinnedMeasurements: [String]
     ) {
         self.stateCode = stateCode
         self.refusal = refusal
         self.url = url
         self.signingAddress = signingAddress
         self.pinnedMeasurementCount = pinnedMeasurementCount
+        self.pinnedMeasurementLine = pinnedMeasurementLine
+        self.pinnedMeasurements = pinnedMeasurements
     }
 
     /// Decode, or nil. Nil rather than a half-filled value, for the reason
@@ -264,25 +292,46 @@ public struct WitnessForm: Equatable, Sendable {
 
     /// Seed from what came back, and from nothing else.
     ///
-    /// The status carries a COUNT of pinned measurements, never the
-    /// measurements themselves, so there is nothing to seed the list with
-    /// and this shell must not invent placeholder lines for it. A nil status
-    /// -- not enrolled, or a config that could not be read -- seeds an empty
-    /// form rather than carrying a previous witness's address forward.
+    /// The editor is PRE-FILLED from `pinnedMeasurements`, one entry per
+    /// line and each entry verbatim. It was write-only before the ABI
+    /// returned them, which meant retyping every pin to change a URL.
+    ///
+    /// Nothing is added: a witness with nothing pinned seeds an EMPTY box.
+    /// The box is the contributor's whole answer -- there is no "keep what
+    /// is there" mode and there must not be one, because it would save a pin
+    /// nobody looked at -- so a placeholder line here would be a pin this
+    /// shell typed.
+    ///
+    /// A nil status -- not enrolled, or a config that could not be read --
+    /// seeds an empty form rather than carrying a previous witness's address
+    /// forward.
     public static func fromStatus(_ status: WitnessStatus?) -> WitnessForm {
         WitnessForm(
             url: status?.url ?? "",
             signingAddress: status?.signingAddress ?? "",
-            measurements: ""
+            measurements: (status?.pinnedMeasurements ?? []).joined(separator: "\n")
         )
     }
 
-    /// The typed lines, blanks dropped.
+    /// The entries, one per line, in order.
+    ///
+    /// **Nothing is trimmed and nothing is rewritten.** These go straight
+    /// back to `tc_witness_configure`, so this has to be the identity on
+    /// everything `pinnedMeasurements` returned -- including an entry this
+    /// build cannot parse, which comes back so a contributor can repair the
+    /// typo and must not be repaired by this shell on the way past.
+    ///
+    /// The one thing dropped is a line with nothing but whitespace on it:
+    /// that is what pressing return in the editor makes, and it is not an
+    /// entry. A line that has any content at all is kept exactly as typed,
+    /// leading and trailing spaces included -- no measurement is whitespace,
+    /// so nothing storable is lost, and trimming a stored entry would be
+    /// this shell rewriting a pin nobody touched.
     public var measurementLines: [String] {
         measurements
             .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 
     /// The measurement list as the JSON array `tc_witness_configure` takes,

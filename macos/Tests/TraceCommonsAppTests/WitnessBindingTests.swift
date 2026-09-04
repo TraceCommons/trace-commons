@@ -323,6 +323,75 @@ final class WitnessBindingTests: XCTestCase {
                 .canConfigure)
     }
 
+    // MARK: - The pinned measurements
+
+    /// The count is a sentence from the Rust, never a bare numeral. A number
+    /// with no words around it on a privacy surface is this shell authoring
+    /// wording by omission.
+    func testTheCountIsRenderedAsASentenceAndNeverAsABareNumeral() throws {
+        let fields = try XCTUnwrap(WitnessCard.fieldsBody())
+        XCTAssertTrue(
+            fields.contains("model.witnessStatus?.pinnedMeasurementLine"),
+            "the card no longer renders the shared count sentence: \(fields)")
+        XCTAssertFalse(
+            fields.contains("pinnedMeasurementCount"),
+            "the card renders a bare count: \(fields)")
+    }
+
+    /// The count sentence is null for `absent`, `not_enrolled` and
+    /// `unreadable`, and the card then renders NOTHING -- a count of the
+    /// pins on a witness that does not exist is a wrong sentence, not a
+    /// short one, so there is no `else` and no placeholder.
+    func testANullCountLineRendersNothingRatherThanAPlaceholder() throws {
+        let fields = try XCTUnwrap(WitnessCard.fieldsBody())
+        let region = try XCTUnwrap(
+            fields.range(of: "if let line = model.witnessStatus?.pinnedMeasurementLine"),
+            "the count sentence is no longer conditional on the ABI answering")
+        let after = String(fields[region.upperBound...])
+        // The next thing after the conditional's own block must not be an
+        // `else`. Checked over the following few lines rather than the whole
+        // body, so an unrelated `else` later on cannot mask this.
+        let window = String(after.prefix(400))
+        XCTAssertFalse(
+            window.contains("} else {"),
+            "the count sentence has a fallback, which can only be wording: \(window)")
+    }
+
+    /// The editor is pre-filled from what the ABI returned, so changing a
+    /// URL does not mean retyping every pin from memory.
+    func testTheMeasurementsEditorIsPreFilledFromWhatWasRead() throws {
+        let fields = try XCTUnwrap(WitnessCard.fieldsBody())
+        XCTAssertTrue(
+            fields.contains("WitnessForm.fromStatus(model.witnessStatus)"),
+            "the fields are no longer seeded from the status: \(fields)")
+        // And the seeding reads the entries rather than inventing lines.
+        let seeded = WitnessForm.fromStatus(
+            WitnessStatus(
+                stateCode: 1, refusal: nil, url: "https://w.example",
+                signingAddress: "0xabc", pinnedMeasurementCount: 2,
+                pinnedMeasurementLine: "2 measurements are pinned.",
+                pinnedMeasurements: ["mrtd=aa", "mrtd=bb"]))
+        XCTAssertEqual(seeded.measurements, "mrtd=aa\nmrtd=bb")
+    }
+
+    /// Nothing between the read and the write rewrites an entry. The editor
+    /// hands back exactly what it was given.
+    func testTheEditorDoesNotRewriteAPin() throws {
+        let stored = ["  mrtd=aa,mrconfigid=bb  ", "mrtd=nothexatall"]
+        let form = WitnessForm.fromStatus(
+            WitnessStatus(
+                stateCode: 3, refusal: "witness_expected_measurement_malformed",
+                url: "https://w.example", signingAddress: "0xabc",
+                pinnedMeasurementCount: stored.count,
+                pinnedMeasurementLine: "2 measurements are pinned.",
+                pinnedMeasurements: stored))
+        XCTAssertEqual(form.measurementLines, stored)
+        let json = try XCTUnwrap(form.measurementsJSON)
+        let decoded = try JSONDecoder().decode(
+            [String].self, from: XCTUnwrap(json.data(using: .utf8)))
+        XCTAssertEqual(decoded, stored)
+    }
+
     // MARK: - The words
 
     /// Not one word on this card is written here. Several of these
