@@ -1,0 +1,140 @@
+# Build and publish the redaction-witness image, and print the digest to pin.
+#
+# Manual only. An image per push would be noise, and worse: a measurement pins
+# an artifact, so every extra image is another thing someone could pin by
+# mistake. Cutting one is a deliberate act.
+#
+# Why here rather than on a laptop. The image is NOT reproducibly buildable --
+# two builds of the same commit produce different digests. A measurement
+# therefore pins a specific artifact that only its builder can produce, which
+# makes *who built it* part of what an auditor is trusting. A runner whose log
+# is public is a better answer to that than a developer machine. It is also
+# natively amd64: TDX is Intel, and the only build this project had exercised
+# was arm64 on Apple Silicon.
+name: witness-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or ref to build (defaults to the branch this is run from)
+        type: string
+        required: false
+
+concurrency:
+  group: witness-image-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # The only reason this workflow needs more than read: pushing to GHCR.
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # The build stamps identity from git, and .gcloudignore-style context
+          # stripping is not in play here, but a shallow clone still has the
+          # commit and its timestamp, which is all the build args need.
+          fetch-depth: 1
+
+      - name: Resolve build identity
+        id: id
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --short HEAD)"
+          # The commit's own timestamp, not the wall clock. This is the
+          # reproducible-builds lever the build script honours in preference to
+          # SystemTime::now(); passing it wrongly makes every rebuild of one
+          # commit produce a different image, which is checked below.
+          epoch="$(git log -1 --format=%ct)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/tracecommons/trace-commons-witness" >> "$GITHUB_OUTPUT"
+          echo "Building $commit with SOURCE_DATE_EPOCH=$epoch"
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build \
+            -f deploy/witness/Dockerfile \
+            --build-arg TRACE_COMMONS_BUILD_COMMIT="${{ steps.id.outputs.commit }}" \
+            --build-arg SOURCE_DATE_EPOCH="${{ steps.id.outputs.epoch }}" \
+            -t "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}" \
+            .
+
+      # The README's three pre-push runs, and they are the point of building
+      # here rather than pushing blind: read-only root, no network, no dstack
+      # socket, no configuration. They catch on a runner what is expensive to
+      # diagnose on a CVM.
+      - name: Check the image before pushing it
+        run: |
+          set -euo pipefail
+          img="${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+          run="docker run --rm --read-only --tmpfs /tmp --network none"
+
+          echo "--- 1. the runtime image resolves every library the binary links"
+          version_out="$($run "$img" --version)"
+          echo "$version_out"
+
+          echo "--- 1b. SOURCE_DATE_EPOCH took"
+          # If the build arg was passed wrongly the binary stamps the wall clock
+          # instead, and every rebuild of this commit yields a different image.
+          # Verified rather than assumed: a wrong stamp is invisible until two
+          # builds disagree, by which point a measurement may already be pinned.
+          expected="$(date -u -d "@${{ steps.id.outputs.epoch }}" +%Y-%m-%d)"
+          if ! grep -q "$expected" <<<"$version_out"; then
+            echo "::error::SOURCE_DATE_EPOCH did not take: --version does not carry $expected"
+            echo "the binary stamped a wall clock, so rebuilds of this commit will differ"
+            exit 1
+          fi
+          echo "ok: stamped $expected"
+
+          echo "--- 2. the redaction mode is required, in both directions"
+          if $run "$img"; then
+            echo "::error::the witness started with no redaction mode; it must refuse"
+            exit 1
+          fi
+
+          echo "--- 3. boot is fail-closed with no enclave identity"
+          if $run -e TRACE_COMMONS_WITNESS_REDACTION=deterministic-only "$img"; then
+            echo "::error::the witness bound a listener with no dstack guest agent"
+            exit 1
+          fi
+          echo "ok: refused without a guest agent"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        run: docker push "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+
+      - name: Report the digest to pin
+        run: |
+          set -euo pipefail
+          img="${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$img")"
+          echo "$digest"
+          {
+            echo "## Witness image"
+            echo
+            echo '```'
+            echo "$digest"
+            echo '```'
+            echo
+            echo "Pin that digest in \`deploy/witness/docker-compose.yml\` — the"
+            echo "tag is a moving target and a measurement pinned over one pins"
+            echo "nothing. Then regenerate the measured manifest:"
+            echo
+            echo '```'
+            echo "deploy/witness/build-app-compose.sh"
+            echo '```'
+            echo
+            echo "and commit both files together."
+          } >> "$GITHUB_STEP_SUMMARY"
