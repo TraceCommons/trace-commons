@@ -1594,6 +1594,274 @@ mod tests {
         );
     }
 
+    /// The verbatim request body the mock proxy captured. Awkward on
+    /// purpose -- a re-serialiser would change it, and then the digest the
+    /// row records would not match.
+    const CAPTURED_REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — the contributor's prompt\"}]}";
+    /// The verbatim response body, as a stream comes back.
+    const CAPTURED_RESPONSE: &str =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
+
+    /// A daemon standing where a contributor's machine stands: a declared
+    /// session root with a session in it, a declared proxy with a captured
+    /// exchange for that session, and the attested-bodies switch set to
+    /// `carry_bodies`.
+    ///
+    /// Every step below is the production one -- `DaemonShared::load`,
+    /// `rebuild_routing`, `refresh_routing`, `source_roots_with_routing`,
+    /// `all_sources`, and the adapter's own `load`. Nothing calls
+    /// `SourceRoots::with_attested_bodies` here, which is the point: that
+    /// function existed and was exercised by tests while the production
+    /// path never reached it.
+    async fn transcript_from_a_declared_proxy(
+        carry_bodies: bool,
+    ) -> (crate::source::SessionTranscript, Vec<tempfile::TempDir>) {
+        use sha2::Digest as _;
+
+        let state = tempfile::tempdir().expect("state dir");
+        let claude_root = tempfile::tempdir().expect("claude root");
+        let ironwire_home = tempfile::tempdir().expect("ironwire home");
+
+        // What the agent wrote.
+        let project = claude_root.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::write(
+            project.join("sess-1.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\
+             \"cwd\":\"/x/proj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+             \"version\":\"2.0.1\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n",
+        )
+        .expect("session file");
+
+        // What the proxy wrote: its control token, and the body store beside
+        // it. The directory name is not restated here -- it is the one the
+        // settings module derives, so a change there fails this test.
+        std::fs::write(ironwire_home.path().join("control.token"), "token\n").expect("token");
+        let bodies = ironwire_home
+            .path()
+            .join(crate::daemon::settings::IRONWIRE_BODIES_SUBDIR);
+        std::fs::create_dir_all(&bodies).expect("body store");
+        let reference = "00000000000000000007-000000";
+        std::fs::write(bodies.join(format!("{reference}.req")), CAPTURED_REQUEST).expect("req");
+        std::fs::write(bodies.join(format!("{reference}.res")), CAPTURED_RESPONSE).expect("res");
+
+        // And the proxy itself, answering with that one exchange.
+        let row = serde_json::json!({
+            "id": 7,
+            "started_at": "2026-08-08T10:05:00Z",
+            "client_session_id": "sess-1",
+            "facade": "openai",
+            "backend": "nearai",
+            "rung": "full",
+            "attempts": 1,
+            "status": 200,
+            "served_model": "Qwen/Qwen3.6-27B-FP8",
+            "upstream_id": "chatcmpl-abc123",
+            "body_ref": reference,
+            "request_sha256": hex::encode(sha2::Sha256::digest(CAPTURED_REQUEST.as_bytes())),
+            "response_sha256": hex::encode(sha2::Sha256::digest(CAPTURED_RESPONSE.as_bytes())),
+        });
+        let app = Router::new().route(
+            "/_ironwire/log",
+            get(move || {
+                let row = row.clone();
+                async move { axum::Json(serde_json::json!({ "exchanges": [row] })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let store = crate::config::ConfigStore::open(state.path().to_path_buf()).expect("store");
+        let shared = crate::daemon::ipc::DaemonShared::load(store).expect("daemon state");
+        {
+            let mut settings = shared.settings.lock().expect("settings lock");
+            settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: claude_root.path().to_path_buf(),
+            });
+            settings.ironwire = Some(crate::daemon::settings::IronWireDeclaration::Watch {
+                port,
+                token_dir: Some(ironwire_home.path().to_path_buf()),
+            });
+            settings.ironwire_attested_bodies = carry_bodies;
+            shared.rebuild_routing(settings.ironwire.as_ref());
+        }
+        shared.refresh_routing().await;
+
+        let roots = shared.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let claude = sources
+            .iter()
+            .find(|src| src.name() == crate::source::SOURCE_CLAUDE_CODE)
+            .expect("the declared claude source is built");
+        let session_ref = claude
+            .discover()
+            .expect("discovery")
+            .into_iter()
+            .next()
+            .expect("the written session was discovered");
+        let transcript = claude.load(&session_ref).expect("the session loads");
+        assert_eq!(
+            transcript.routing.len(),
+            1,
+            "the declared proxy's row must have joined the session, or this \
+             test is proving nothing about the switch"
+        );
+        (transcript, vec![state, claude_root, ironwire_home])
+    }
+
+    /// The wiring, end to end: a declared proxy plus the separate
+    /// attested-bodies switch, through the source roots the daemon actually
+    /// builds, to the bytes that reach a witness -- with the receipt beside
+    /// them, which is the complete shape `submit::witness_envelope` sends.
+    ///
+    /// The two halves are honest about different things. The **bodies** are
+    /// production-derived: nothing in this test writes an `AttestedCall`, it
+    /// comes off a transcript the daemon's own source roots produced, so the
+    /// wiring under test is what put it there. The **receipt** is the fixture
+    /// `offered_receipt`, not a fetched one: `receipt_for_attested_call`
+    /// refuses a plaintext endpoint before it refuses anything else, so a
+    /// mock on loopback cannot be fetched from, and a receipt is only
+    /// verifiable against a signer this test does not have. It is shaped like
+    /// one and carried like one, which is what the wire assertion needs.
+    #[tokio::test]
+    async fn a_declared_bodies_directory_reaches_the_witness_through_the_daemon_source_roots() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        // The bundle, assembled exactly as `submit::witness_envelope` does:
+        // the transcript's own field, mapped into an `AttestedInference` with
+        // whatever receipt was obtained for it.
+        let receipt = offered_receipt();
+        let attested = transcript
+            .attested_call
+            .as_deref()
+            .map(|call| AttestedInference {
+                call,
+                receipt: Some(&receipt),
+            });
+        assert!(
+            attested.is_some(),
+            "the declared body store must have been read on the production path"
+        );
+
+        witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            attested,
+            &granted(),
+        )
+        .await
+        .expect("a witnessed submission carrying the declared bodies succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&sent).expect("the request is JSON");
+        let last = document["raw_contribution"]["events"]
+            .as_array()
+            .expect("events")
+            .last()
+            .cloned()
+            .expect("there is a last event");
+        assert_eq!(
+            last["structured_payload"]["request"]["body"]
+                .as_str()
+                .expect("the request body is a string"),
+            CAPTURED_REQUEST,
+            "the bytes the proxy captured must reach the witness verbatim"
+        );
+        assert_eq!(
+            last["content"].as_str().expect("the response body"),
+            CAPTURED_RESPONSE
+        );
+        // Both halves, in one request: the enclave hashes those bodies and
+        // compares the result against the text this receipt signs.
+        assert_eq!(
+            document["inference_receipt"]["text"].as_str(),
+            Some(receipt.text.as_str()),
+            "the receipt must ride along with the bodies it is about"
+        );
+    }
+
+    /// And the separation: the same declared proxy, the same captured
+    /// exchange, the switch off. Routing metadata still joins the session --
+    /// so the proxy is genuinely declared and genuinely read -- and no body
+    /// goes anywhere.
+    ///
+    /// The receipt goes nowhere either, and not by a second check: the
+    /// bundle is built from the call, so no call is no bundle. A receipt
+    /// with no bodies to verify it against is unrepresentable.
+    #[tokio::test]
+    async fn routing_declared_without_the_switch_carries_no_body_to_the_witness() {
+        let (transcript, _dirs) = transcript_from_a_declared_proxy(false).await;
+        assert!(
+            transcript.attested_call.is_none(),
+            "cost attribution is not consent to send a prompt"
+        );
+
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let receipt = offered_receipt();
+        let attested = transcript
+            .attested_call
+            .as_deref()
+            .map(|call| AttestedInference {
+                call,
+                receipt: Some(&receipt),
+            });
+
+        witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            attested,
+            &granted(),
+        )
+        .await
+        .expect("an unattested submission still succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        let on_the_wire = String::from_utf8_lossy(&sent);
+        assert!(
+            !on_the_wire.contains("http_exchange"),
+            "no switch must mean no exchange event on the wire"
+        );
+        assert!(
+            !on_the_wire.contains("the contributor's prompt"),
+            "the captured prompt must not reach the witness"
+        );
+        assert!(
+            !on_the_wire.contains("inference_receipt"),
+            "no bodies must mean no receipt either"
+        );
+    }
+
     /// And a submission with no attested call sends exactly what it always
     /// sent. This is what a contributor with capture off gets.
     #[tokio::test]
