@@ -999,6 +999,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
         subagent_count: kept,
         subagents_dropped: dropped,
         routing: Vec::new(),
+        attested_call: None,
     })
 }
 

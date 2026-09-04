@@ -187,6 +187,16 @@ pub enum WitnessTrustError {
     /// available.
     #[error("a claim is required before a session can be witnessed")]
     WitnessClaimUnavailable,
+    /// The witness returned an artifact still carrying the raw inference
+    /// bodies it was sent.
+    ///
+    /// The bodies are handed to a witness so it can verify a receipt against
+    /// them, and on the understanding that it strips them before certifying.
+    /// An artifact that still holds them would turn a prompt that never left
+    /// the machine into a submitted one, and the client is the last party
+    /// able to notice. Refused whatever the certificate says.
+    #[error("the witness returned an artifact still carrying the raw bodies")]
+    WitnessBodyNotStripped,
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -227,6 +237,7 @@ impl WitnessTrustError {
             Self::WitnessCertificateUnverified => "witness_certificate_unverified",
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
+            Self::WitnessBodyNotStripped => "witness_body_not_stripped",
         }
     }
 }
@@ -261,6 +272,7 @@ pub async fn witness_session(
     trust: &WitnessTrust,
     now_unix: u64,
     raw: trace_commons_protocol::trace_contribution::RawTraceContribution,
+    attested: Option<&crate::routing::attested::AttestedCall>,
     granted: &transport::GrantedConsent,
 ) -> Result<transport::WitnessedEnvelope, WitnessTrustError> {
     if !trust.is_pinned() {
@@ -284,5 +296,5 @@ pub async fn witness_session(
 
     let verified = verify::verify_witness(url, &evidence, &collateral, &nonce, now_unix, trust)?;
 
-    transport::witness_contribution(transport, &verified, raw, granted).await
+    transport::witness_contribution(transport, &verified, raw, attested, granted).await
 }

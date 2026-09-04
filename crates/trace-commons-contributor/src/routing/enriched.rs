@@ -10,7 +10,7 @@
 //! `load` call sites and four public envelope builders, and a parameter would
 //! touch all of them. This has one insertion point, `all_sources`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::routing::{RoutedExchange, RoutingLedger};
@@ -20,12 +20,32 @@ use crate::source::{SessionRef, SessionTranscript, TraceSource};
 pub struct RoutingEnrichedSource {
     inner: Box<dyn TraceSource>,
     ledger: Arc<dyn RoutingLedger>,
+    /// The proxy's verbatim body store, when this deployment carries attested
+    /// bodies. `None` -- the default -- attaches routing metadata only, which
+    /// is what every deployment does today.
+    bodies_dir: Option<PathBuf>,
 }
 
 impl RoutingEnrichedSource {
     #[must_use]
     pub fn new(inner: Box<dyn TraceSource>, ledger: Arc<dyn RoutingLedger>) -> Self {
-        Self { inner, ledger }
+        Self {
+            inner,
+            ledger,
+            bodies_dir: None,
+        }
+    }
+
+    /// Also carry the final call's verbatim bodies, read from `dir`.
+    ///
+    /// Opt-in and off by default, deliberately. Carrying bodies is the one
+    /// thing this overlay does that puts session *content* into a trace
+    /// rather than metadata about it, so it is never switched on implicitly
+    /// by a ledger being present.
+    #[must_use]
+    pub fn with_attested_bodies(mut self, dir: Option<PathBuf>) -> Self {
+        self.bodies_dir = dir;
+        self
     }
 }
 
@@ -67,6 +87,16 @@ impl TraceSource for RoutingEnrichedSource {
                     .is_some_and(|id| names_the_same_session(id, &session_id))
             })
             .collect::<Vec<RoutedExchange>>();
+        // Bodies last, and only from the rows already joined to this session:
+        // a body from a hop that belongs to a different session would be
+        // attested content this transcript never produced. Every failure
+        // resolves to `None`, in keeping with this module's rule that nothing
+        // here can fail a load.
+        transcript.attested_call = self.bodies_dir.as_deref().and_then(|dir| {
+            super::attested::attested_final_call(&transcript.routing, dir)
+                .ok()
+                .map(Arc::new)
+        });
         Ok(transcript)
     }
 }
@@ -163,6 +193,10 @@ mod tests {
             backend: "claude-sub".to_string(),
             requested_model: None,
             served_model: None,
+            upstream_id: None,
+            request_sha256: None,
+            response_sha256: None,
+            body_ref: None,
             rung: "same_model".to_string(),
             attempts: 1,
             input_tokens: Some(1000),

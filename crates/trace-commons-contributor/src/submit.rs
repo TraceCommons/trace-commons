@@ -511,6 +511,7 @@ impl<'a> SubmitContext<'a> {
         &self,
         settings: &WitnessSettings,
         raw: RawTraceContribution,
+        attested: Option<&crate::routing::attested::AttestedCall>,
         token: &ClaimToken,
         now: DateTime<Utc>,
     ) -> std::result::Result<(TraceContributionEnvelope, WitnessedEnvelope), &'static str> {
@@ -536,6 +537,7 @@ impl<'a> SubmitContext<'a> {
             &trust,
             now.timestamp().max(0) as u64,
             raw,
+            attested,
             &GrantedConsent { scopes, uses },
         )
         .await
@@ -747,7 +749,16 @@ impl<'a> SubmitContext<'a> {
                             Ok(token) => token,
                             Err(outcome) => return Ok(outcome),
                         };
-                        match self.witness_envelope(&settings, raw, &token, now).await {
+                        match self
+                            .witness_envelope(
+                                &settings,
+                                raw,
+                                transcript.attested_call.as_deref(),
+                                &token,
+                                now,
+                            )
+                            .await
+                        {
                             Ok((parsed, response)) => {
                                 // `parse_witnessed_envelope` inside
                                 // `witness_envelope` is what verified this

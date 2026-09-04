@@ -22,8 +22,10 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+pub mod attested;
 pub mod enriched;
 pub mod ironwire;
+pub mod receipt;
 
 /// One inference hop, as the proxy recorded it.
 ///
@@ -56,6 +58,38 @@ pub struct RoutedExchange {
     pub requested_model: Option<String>,
     #[serde(default)]
     pub served_model: Option<String>,
+    /// The provider's own identifier for this exchange, when it gave one.
+    ///
+    /// NEAR AI's `chat_id`, and the only handle that reaches its receipt
+    /// endpoint. `None` on a proxy older than the release that records it,
+    /// and on every backend that returns no such identifier -- which simply
+    /// means this hop can never be attested.
+    ///
+    /// The one exception to this module's attribution-only rule, and it is
+    /// not really an exception: nothing *reads* this as a number. It is a
+    /// lookup key, and what it unlocks (a receipt over the two digests below)
+    /// is checked cryptographically by a party that is not this process.
+    #[serde(default)]
+    pub upstream_id: Option<String>,
+    /// SHA-256 of the request body exactly as it went upstream, hex.
+    ///
+    /// After a model override, after the privacy filter, after translation --
+    /// because those are the bytes the inference enclave hashed. `None` when
+    /// body capture is off, or when the body could not be held whole.
+    #[serde(default)]
+    pub request_sha256: Option<String>,
+    /// SHA-256 of the response body exactly as it came back, hex.
+    ///
+    /// For a streamed response, the digest of the raw concatenated event
+    /// stream. `None` unless the stream was read to its end: a response that
+    /// was cancelled, restarted or truncated has no honest digest, and that
+    /// absence is how [`attested`] recognises an unattestable call.
+    #[serde(default)]
+    pub response_sha256: Option<String>,
+    /// Where the proxy put this exchange's verbatim bodies, under
+    /// `$IRONWIRE_HOME/bodies`. `None` when nothing was captured.
+    #[serde(default)]
+    pub body_ref: Option<String>,
     pub rung: String,
     pub attempts: i64,
     #[serde(default)]
@@ -132,6 +166,10 @@ mod tests {
             backend: "claude-sub".to_string(),
             requested_model: Some("claude-opus-4-6".to_string()),
             served_model: Some("claude-opus-4-6".to_string()),
+            upstream_id: None,
+            request_sha256: None,
+            response_sha256: None,
+            body_ref: None,
             rung: "same_model".to_string(),
             attempts: 1,
             input_tokens: Some(1000),
