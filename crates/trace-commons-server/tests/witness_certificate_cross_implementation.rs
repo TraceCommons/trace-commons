@@ -60,8 +60,8 @@ use trace_commons_server::redaction_witness::verification::{
     WitnessPin, verify_witness_certificate,
 };
 use trace_commons_server::witness_service::http::{
-    WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, certificate_json, verdict_label,
-    witness_router,
+    WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessLoadBound, certificate_json,
+    verdict_label, witness_router,
 };
 use trace_commons_server::witness_service::surface::WitnessService;
 use trace_commons_server::witness_service::{
@@ -206,10 +206,14 @@ async fn witness_over_the_wire(service: Arc<WitnessService>, text: &str) -> From
         .body(Body::from(contribution_body(text)))
         .expect("a well formed request");
 
-    let response = witness_router(service)
-        .oneshot(request)
-        .await
-        .expect("the router is infallible");
+    let response = witness_router(
+        service,
+        // Not what this test is about: wide enough that the bound never fires.
+        WitnessLoadBound::new(8, std::time::Duration::from_secs(30)),
+    )
+    .oneshot(request)
+    .await
+    .expect("the router is infallible");
     assert_eq!(
         response.status(),
         StatusCode::OK,
