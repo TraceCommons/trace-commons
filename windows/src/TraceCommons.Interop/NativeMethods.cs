@@ -369,6 +369,149 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? tool,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? sourceMode);
 
+    // --- The redaction witness ------------------------------------------
+    //
+    // THERE IS NO BOOLEAN IN THIS BLOCK AND THERE MUST NEVER BE ONE. "Is a
+    // witness configured?" has two yes-answers that are opposites: a pinned
+    // witness certifies every submission, and an unpinned one REFUSES every
+    // submission before it touches the network. tc_witness_trust_state is the
+    // one answer, with a value per condition.
+    //
+    // The tone calls here return TC_WITNESS_TONE_* -- 10..14 -- which are
+    // DELIBERATELY DISJOINT from the routing tones above. Do not feed them to
+    // RoutingSurface's mapper: it sends anything it does not recognise to
+    // neutral, and a refusal painted neutral says "nothing to say" about a
+    // total upload outage. WitnessTools.FromAbiTone is the mapper for these,
+    // and its unknown arm is refused.
+
+    /// <summary>
+    /// What the witness is doing, as a <c>TC_WITNESS_STATE_*</c> value.
+    ///
+    /// Needs no handle: it reads the config file, and the screen that calls it
+    /// is often the one deciding whether to start a daemon at all. Records a
+    /// fixed <see cref="tc_last_error"/> label for the two negative values. A
+    /// value this build does not name must be rendered as not usable, NEVER as
+    /// TC_WITNESS_STATE_ABSENT.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_witness_trust_state(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? configDir);
+
+    /// <summary>
+    /// The whole witness configuration, as an owned JSON object; free it with
+    /// <see cref="tc_string_free"/>, which <see cref="TakeOwnedString"/> does.
+    ///
+    /// NULL with <paramref name="err"/> set (owned; free it too) when the
+    /// device is not enrolled or the config cannot be read. A NULL return is
+    /// never "no witness": that is state absent on a successful call.
+    ///
+    /// The URL and signing address come back verbatim, one of the ABI's three
+    /// named exemptions from the no-identifiers rule -- they are the
+    /// contributor's own configuration, and a screen that will not show what
+    /// it is asking them to trust with their raw session is not a settings
+    /// screen. Nothing else about the witness path crosses.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_witness_status_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? configDir,
+        out IntPtr err);
+
+    /// <summary>
+    /// Configures a witness. Returns 0 on success, -1 on failure with
+    /// <paramref name="err"/> set (owned; free with
+    /// <see cref="tc_string_free"/>).
+    ///
+    /// <paramref name="measurementsJson"/> is a JSON array of strings. THIS
+    /// CALL WILL NOT WRITE AN UNPINNED WITNESS: an empty array and an
+    /// unparsable one are both refused, because either produces a client that
+    /// refuses every submission from the moment it is saved.
+    ///
+    /// Takes effect on the next submission, with no daemon restart.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_witness_configure(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? configDir,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? url,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? signingAddress,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? measurementsJson,
+        out IntPtr err);
+
+    /// <summary>
+    /// Removes the configured witness. 1 if one was removed, 0 if there was
+    /// none, -1 on failure with <paramref name="err"/> set (owned).
+    ///
+    /// Idempotent, and a return to LOCAL REDACTION rather than to a broken
+    /// state -- but still a real change, because later submissions carry a
+    /// self-reported residual-risk verdict rather than a certified one.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_witness_clear(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? configDir,
+        out IntPtr err);
+
+    /// <summary>
+    /// What the last submission THIS PROCESS made did about the witness, as an
+    /// owned JSON object. Process-local by design; NULL only on a caught
+    /// panic.
+    /// </summary>
+    /// <remarks>
+    /// Declared for completeness with the header. The sentence form --
+    /// <see cref="tc_witness_last_result_line"/> -- is the only form a shell
+    /// may print: this payload's refusal is a fixed operator label rather than
+    /// wording, and its receipt count is a pair no shell may phrase itself.
+    /// </remarks>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_last_result_json();
+
+    /// <summary>
+    /// Every fixed word on the witness surface, as an owned JSON object; free
+    /// it with <see cref="tc_string_free"/>. NULL only on a caught panic.
+    ///
+    /// ONE CALL, NOT ONE PER STRING. A shell handed the words one at a time
+    /// takes some of them and writes the rest, and a hand-written word on this
+    /// surface is a privacy claim that stops matching what the other two
+    /// shells print.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_copy();
+
+    /// <summary>
+    /// The sentence for a <c>TC_WITNESS_STATE_*</c> value, as an owned char*.
+    ///
+    /// NULL, with the fixed label <c>witness-state-unknown</c> recorded, for a
+    /// value this build cannot name. A caller that gets NULL must render NO
+    /// witness sentence rather than one of its own.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_state_line(int stateCode);
+
+    /// <summary>
+    /// The tone <see cref="tc_witness_state_line"/>'s sentence is painted in,
+    /// as a <c>TC_WITNESS_TONE_*</c> value.
+    ///
+    /// ONE BRANCH TABLE, NOT TWO: it takes what the sentence takes. A state
+    /// this build cannot name is TC_WITNESS_TONE_REFUSED, not neutral -- the
+    /// fail-closed direction, deliberately.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_witness_state_tone(int stateCode);
+
+    /// <summary>
+    /// The sentence for what the last submission this process made did about
+    /// the witness, as an owned char*. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_last_result_line();
+
+    /// <summary>
+    /// The tone <see cref="tc_witness_last_result_line"/>'s sentence is
+    /// painted in. A refused send is TC_WITNESS_TONE_REFUSED and never
+    /// ATTENTION: nothing was sent at all, which is not a
+    /// degraded-but-working state.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_witness_last_result_tone();
+
     /// <summary>
     /// The only valid way to free a char* this library returns. Safe with
     /// NULL.

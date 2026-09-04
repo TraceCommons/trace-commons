@@ -63,6 +63,23 @@
   </ItemGroup>
 
   <!--
+    The witness surface's implementation sources, copied for the same reason
+    and read by NoWordingIsAuthoredInTheWitnessSurface.
+
+    Both files, not just the tools one: the surface file is where the ABI
+    calls live, and a sentence hand-written beside a call is exactly as much
+    of a privacy claim as one written in the branch table.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/WitnessTools.cs"
+          Link="WitnessTools.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/WitnessSurface.cs"
+          Link="WitnessSurface.cs.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     The app layer's routing surface and settings view model, copied next to
     the test assembly.
 

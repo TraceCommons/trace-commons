@@ -571,6 +571,12 @@ impl App {
             if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
                 app.render_health(&status);
                 settings::render_status(app, &status);
+                // The witness lives in the contributor's config rather than
+                // in daemon settings, so nothing in the settings answer
+                // carries it and it is repainted here instead -- including
+                // the last-submission row, which changes when a session
+                // goes out and on no other event.
+                settings::render_witness(app);
                 // Both halves of "does this device need onboarding" are the
                 // daemon's to answer, so the question is asked here rather
                 // than at window construction, where neither is known yet.

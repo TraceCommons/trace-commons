@@ -77,6 +77,43 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// </summary>
     private readonly RoutingRefreshGate _routingGate = new();
 
+    /// <summary>
+    /// The sentence shown when a write did not land. Hoisted because the
+    /// witness card needs the same one, and a second copy of it would be a
+    /// second sentence to keep in step.
+    /// </summary>
+    private const string WriteFailedNotice = "That couldn't be changed just now. Nothing was changed.";
+
+    /// <summary>
+    /// The witness card's words, read once from the Rust across the C ABI.
+    ///
+    /// Null when the call failed or the payload would not parse, and the whole
+    /// card is hidden in that case. Nothing on this surface is written here:
+    /// every sentence, including the two that say what a certificate does and
+    /// does not establish, comes from <see cref="WitnessSurface"/>.
+    /// </summary>
+    private readonly WitnessCopy? _witnessCopy = WitnessSurface.Copy();
+
+    /// <summary>
+    /// The witness state, as a <c>TC_WITNESS_STATE_*</c> value.
+    /// </summary>
+    /// <remarks>
+    /// Starts at not-enrolled rather than at absent. Absent is a claim --
+    /// local redaction runs, everything is normal -- and this card has not
+    /// asked anything yet.
+    /// </remarks>
+    private int _witnessStateCode = WitnessTools.StateNotEnrolled;
+
+    private string _witnessStateText = string.Empty;
+    private WitnessTone _witnessStateTone = WitnessTone.Refused;
+    private string _witnessLastResultText = string.Empty;
+    private WitnessTone _witnessLastResultTone = WitnessTone.Refused;
+    private string _witnessUrl = string.Empty;
+    private string _witnessSigningAddress = string.Empty;
+    private string _witnessMeasurements = string.Empty;
+    private string _witnessMeasurementLine = string.Empty;
+    private bool? _witnessEditorOpen;
+
     public ContributorSettingsViewModel(DaemonHost host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -352,6 +389,237 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         Raise(nameof(HasRoutingLastChecked));
     }
 
+    // --- The redaction witness ------------------------------------------
+    //
+    // Every word below is the payload's. A literal here would be a privacy
+    // claim this shell prints and the GTK and macOS shells do not.
+    //
+    // NO PROPERTY ON THIS CARD IS A BOOLEAN ABOUT WHETHER A WITNESS IS SET.
+    // "Configured" has two opposite yes-answers -- pinned, which certifies
+    // every submission, and unpinned, which refuses every one of them before
+    // any network call -- so the state code is what everything is taken from.
+
+    /// <summary>Whether the shared words arrived at all.</summary>
+    public bool WitnessAvailable => _witnessCopy is not null;
+
+    public string WitnessHeading => _witnessCopy?.Heading ?? string.Empty;
+
+    public string WitnessIntro => _witnessCopy?.Intro ?? string.Empty;
+
+    /// <summary>What a certificate records, and what it does not claim.</summary>
+    public string WitnessCertificateMeans => _witnessCopy?.CertificateMeans ?? string.Empty;
+
+    public string WitnessUrlTitle => _witnessCopy?.UrlTitle ?? string.Empty;
+
+    public string WitnessSigningAddressTitle =>
+        _witnessCopy?.SigningAddressTitle ?? string.Empty;
+
+    public string WitnessMeasurementsTitle => _witnessCopy?.MeasurementsTitle ?? string.Empty;
+
+    public string WitnessMeasurementsNote => _witnessCopy?.MeasurementsNote ?? string.Empty;
+
+    public string WitnessConfigureText => _witnessCopy?.Configure ?? string.Empty;
+
+    public string WitnessClearText => _witnessCopy?.Clear ?? string.Empty;
+
+    /// <summary>
+    /// What clearing does. Rendered beside the action rather than after it:
+    /// stopping is not switching redaction off, and the control must not read
+    /// as though it were.
+    /// </summary>
+    public string WitnessClearNote => _witnessCopy?.ClearNote ?? string.Empty;
+
+    public string WitnessAppliesAtOnceText => _witnessCopy?.AppliesAtOnce ?? string.Empty;
+
+    /// <summary>The witness address, as this device has it. Editable, and shown verbatim.</summary>
+    public string WitnessUrl
+    {
+        get => _witnessUrl;
+        set => Set(ref _witnessUrl, value ?? string.Empty);
+    }
+
+    /// <summary>The witness signing address, under the same rule.</summary>
+    public string WitnessSigningAddress
+    {
+        get => _witnessSigningAddress;
+        set => Set(ref _witnessSigningAddress, value ?? string.Empty);
+    }
+
+    /// <summary>
+    /// The pinned measurements, one per line.
+    /// </summary>
+    /// <remarks>
+    /// Pre-filled from the status payload's read-back, verbatim, and handed
+    /// straight back on save -- including an entry this build cannot parse,
+    /// which is shown rather than dropped so the typo is visible instead of
+    /// being deleted on the next save.
+    ///
+    /// Emptying it and pressing the configure action does not clear the pin:
+    /// the ABI refuses an empty list, because writing one would make this
+    /// client refuse every submission from that moment. Stopping is the other
+    /// action. That refusal is right now that the box can be pre-filled -- an
+    /// empty box means the contributor cleared it, not that nobody looked.
+    /// </remarks>
+    public string WitnessMeasurements
+    {
+        get => _witnessMeasurements;
+        set => Set(ref _witnessMeasurements, value ?? string.Empty);
+    }
+
+    /// <summary>
+    /// The sentence for how many measurements are pinned, or empty where the
+    /// ABI had none.
+    /// </summary>
+    /// <remarks>
+    /// The Rust's sentence, not a numeral this shell wrapped in words. It is
+    /// null on the readings with no witness to count for -- absent, not
+    /// enrolled, unreadable -- and the row is hidden there rather than shown
+    /// with a placeholder or a zero.
+    /// </remarks>
+    public string WitnessMeasurementLine
+    {
+        get => _witnessMeasurementLine;
+        private set
+        {
+            if (Set(ref _witnessMeasurementLine, value))
+            {
+                Raise(nameof(HasWitnessMeasurementLine));
+            }
+        }
+    }
+
+    public bool HasWitnessMeasurementLine => _witnessMeasurementLine.Length > 0;
+
+    /// <summary>
+    /// Whether the address-and-pin editor is open.
+    /// </summary>
+    /// <remarks>
+    /// Null is "the contributor has not said", and then it follows the state:
+    /// every refusal opens it, because a refusal must have a way out and these
+    /// three fields are the way out. Once they have opened or closed it, that
+    /// stands.
+    /// </remarks>
+    public bool WitnessEditorOpen
+    {
+        get => _witnessEditorOpen ?? WitnessTools.EditorOpensFor(_witnessStateCode);
+        set
+        {
+            if (WitnessEditorOpen == value && _witnessEditorOpen is not null)
+            {
+                return;
+            }
+
+            _witnessEditorOpen = value;
+            Raise(nameof(WitnessEditorOpen));
+        }
+    }
+
+    /// <summary>The sentence for the current state, or empty where the ABI had none.</summary>
+    public string WitnessStateText
+    {
+        get => _witnessStateText;
+        private set => Set(ref _witnessStateText, value);
+    }
+
+    public bool HasWitnessStateText => _witnessStateText.Length > 0;
+
+    /// <summary>
+    /// How that sentence is painted, from the state code and never from the
+    /// sentence's own text.
+    /// </summary>
+    public WitnessTone WitnessStateTone
+    {
+        get => _witnessStateTone;
+        private set
+        {
+            if (_witnessStateTone == value)
+            {
+                return;
+            }
+
+            _witnessStateTone = value;
+            Raise(nameof(WitnessStateTone));
+            Raise(nameof(WitnessStateIsNeutral));
+            Raise(nameof(WitnessStateIsHeld));
+            Raise(nameof(WitnessStateIsClear));
+            Raise(nameof(WitnessStateIsAttention));
+            Raise(nameof(WitnessStateIsRefused));
+        }
+    }
+
+    // The XAML projection of the tone, and only that. Five, not four: a
+    // refusal is not an attention. Attention says something needs fixing while
+    // sessions still go out; on a refusal none are going out at all, and
+    // painting the two alike would tell a contributor their sessions are
+    // being sent through an outage.
+
+    public bool WitnessStateIsNeutral =>
+        WitnessStateTone == WitnessTone.Neutral && HasWitnessStateText;
+
+    public bool WitnessStateIsHeld => WitnessStateTone == WitnessTone.Held && HasWitnessStateText;
+
+    public bool WitnessStateIsClear => WitnessStateTone == WitnessTone.Clear && HasWitnessStateText;
+
+    public bool WitnessStateIsAttention =>
+        WitnessStateTone == WitnessTone.Attention && HasWitnessStateText;
+
+    public bool WitnessStateIsRefused =>
+        WitnessStateTone == WitnessTone.Refused && HasWitnessStateText;
+
+    /// <summary>
+    /// What the last submission this process made did about the witness.
+    /// </summary>
+    /// <remarks>
+    /// The sentence, never the JSON: that payload's refusal is a fixed
+    /// operator label rather than wording, and its receipt count is a pair no
+    /// shell may phrase itself.
+    /// </remarks>
+    public string WitnessLastResultText
+    {
+        get => _witnessLastResultText;
+        private set => Set(ref _witnessLastResultText, value);
+    }
+
+    public bool HasWitnessLastResultText => _witnessLastResultText.Length > 0;
+
+    public WitnessTone WitnessLastResultTone
+    {
+        get => _witnessLastResultTone;
+        private set
+        {
+            if (_witnessLastResultTone == value)
+            {
+                return;
+            }
+
+            _witnessLastResultTone = value;
+            Raise(nameof(WitnessLastResultTone));
+            Raise(nameof(WitnessLastResultIsNeutral));
+            Raise(nameof(WitnessLastResultIsHeld));
+            Raise(nameof(WitnessLastResultIsClear));
+            Raise(nameof(WitnessLastResultIsAttention));
+            Raise(nameof(WitnessLastResultIsRefused));
+        }
+    }
+
+    public bool WitnessLastResultIsNeutral =>
+        WitnessLastResultTone == WitnessTone.Neutral && HasWitnessLastResultText;
+
+    public bool WitnessLastResultIsHeld =>
+        WitnessLastResultTone == WitnessTone.Held && HasWitnessLastResultText;
+
+    public bool WitnessLastResultIsClear =>
+        WitnessLastResultTone == WitnessTone.Clear && HasWitnessLastResultText;
+
+    public bool WitnessLastResultIsAttention =>
+        WitnessLastResultTone == WitnessTone.Attention && HasWitnessLastResultText;
+
+    public bool WitnessLastResultIsRefused =>
+        WitnessLastResultTone == WitnessTone.Refused && HasWitnessLastResultText;
+
+    /// <summary>Whether the two witness actions may be pressed.</summary>
+    public bool WitnessControlsEnabled => !_isBusy && _witnessCopy is not null;
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -362,6 +630,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 Raise(nameof(IsNotBusy));
                 Raise(nameof(RoutingControlsEnabled));
                 Raise(nameof(RoutingConnectOffered));
+                Raise(nameof(WitnessControlsEnabled));
             }
         }
     }
@@ -484,6 +753,11 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             // nothing.
             await DiscoverRoutingAsync().ConfigureAwait(true);
             FillRouting(snapshot, status);
+
+            // Read from the config file rather than from the daemon: these
+            // calls take no handle, and this card has to be able to say what
+            // would happen to a session even where nothing is running.
+            RefreshWitness();
 
             DaemonResponse optionsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.ConsentOptions)
@@ -655,7 +929,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             DaemonSettingsSnapshot? settings = response.ResultAs<DaemonSettingsSnapshot>();
             if (response.IsError || settings is null)
             {
-                Notice = "That couldn't be changed just now. Nothing was changed.";
+                Notice = WriteFailedNotice;
                 DaemonResponse current = await _host
                     .CallAsync(DaemonProtocol.Methods.GetSettings)
                     .ConfigureAwait(true);
@@ -951,7 +1225,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 // sentence anybody can act on. What matters is that nothing
                 // changed.
                 RoutingProbeText = string.Empty;
-                Notice = "That couldn't be changed just now. Nothing was changed.";
+                Notice = WriteFailedNotice;
             }
 
             DaemonResponse current = await _host
@@ -973,6 +1247,164 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         {
             await CheckRoutingAsync().ConfigureAwait(true);
         }
+    }
+
+    // --- The redaction witness ------------------------------------------
+
+    /// <summary>
+    /// Points this device at a witness, from the three fields on screen.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The state is re-read from the ABI afterwards UNCONDITIONALLY, including
+    /// on a failed write. Nothing here assumes what it asked for happened: the
+    /// three fields describe a machine this app is about to hand raw sessions
+    /// to, and a card showing the requested configuration rather than the
+    /// saved one would be at its most wrong exactly when the write failed.
+    /// </para>
+    /// <para>
+    /// The ABI declines to write an unpinned witness, so an empty measurements
+    /// box fails here rather than saving a client that refuses every
+    /// submission. The failure notice says nothing changed, which is true, and
+    /// the state sentence beside it says what the machine is actually doing.
+    /// </para>
+    /// </remarks>
+    public async Task ConfigureWitnessAsync()
+    {
+        if (!IsLoaded || IsBusy || _witnessCopy is null)
+        {
+            return;
+        }
+
+        string configDir = _host.ConfigDir;
+        string url = WitnessUrl.Trim();
+        string signingAddress = WitnessSigningAddress.Trim();
+        string measurements = WitnessTools.SerializeMeasurements(WitnessMeasurements);
+
+        IsBusy = true;
+        try
+        {
+            WitnessWriteResult result = await Task
+                .Run(() => WitnessSurface.Configure(configDir, url, signingAddress, measurements))
+                .ConfigureAwait(true);
+            Notice = result.Code == 0 ? string.Empty : WriteFailedNotice;
+            RefreshWitness();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Stops using a witness, returning this device to local redaction.
+    /// </summary>
+    /// <remarks>
+    /// A supported arrangement rather than a broken one, and still a real
+    /// change: later sessions carry this app's own judgement of what was left
+    /// rather than a signed record of it. The sentence beside the control says
+    /// so, and it comes from the Rust.
+    ///
+    /// Idempotent at the ABI: clearing a witness that is not there answers
+    /// zero and is not a failure, so no notice is raised for it.
+    /// </remarks>
+    public async Task ClearWitnessAsync()
+    {
+        if (!IsLoaded || IsBusy || _witnessCopy is null)
+        {
+            return;
+        }
+
+        string configDir = _host.ConfigDir;
+
+        IsBusy = true;
+        try
+        {
+            WitnessWriteResult result = await Task
+                .Run(() => WitnessSurface.Clear(configDir))
+                .ConfigureAwait(true);
+            Notice = result.Code < 0 ? WriteFailedNotice : string.Empty;
+            RefreshWitness();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Re-reads everything the witness card shows, from the ABI.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Synchronous: these calls read a config file and hold no lock, and the
+    /// error labels they record are thread-local -- so this runs on the caller's
+    /// thread with no await inside it, and the two write paths above take their
+    /// own turn on the pool for the write itself.
+    /// </para>
+    /// <para>
+    /// The trust state is asked for first and separately, because it is the
+    /// one answer that is always available. A null status is NOT "no witness":
+    /// it is an unenrolled device or a config that could not be read, and the
+    /// state code already distinguishes those. The address fields are filled
+    /// only from a status that arrived, so a failed read leaves what is on
+    /// screen rather than blanking it into an apparent absence.
+    /// </para>
+    /// </remarks>
+    private void RefreshWitness()
+    {
+        if (_witnessCopy is null)
+        {
+            return;
+        }
+
+        _witnessStateCode = WitnessSurface.TrustState(_host.ConfigDir);
+
+        // Both halves of the state row from the same input. The sentence is
+        // never parsed to recover the tone, and a state with no sentence shows
+        // none -- while still being painted, and painted closed.
+        WitnessStateText = WitnessSurface.StateLine(_witnessStateCode) ?? string.Empty;
+        WitnessStateTone = WitnessSurface.StateTone(_witnessStateCode);
+        Raise(nameof(HasWitnessStateText));
+        Raise(nameof(WitnessStateIsNeutral));
+        Raise(nameof(WitnessStateIsHeld));
+        Raise(nameof(WitnessStateIsClear));
+        Raise(nameof(WitnessStateIsAttention));
+        Raise(nameof(WitnessStateIsRefused));
+
+        WitnessLastResultText = WitnessSurface.LastResultLine() ?? string.Empty;
+        WitnessLastResultTone = WitnessSurface.LastResultTone();
+        Raise(nameof(HasWitnessLastResultText));
+        Raise(nameof(WitnessLastResultIsNeutral));
+        Raise(nameof(WitnessLastResultIsHeld));
+        Raise(nameof(WitnessLastResultIsClear));
+        Raise(nameof(WitnessLastResultIsAttention));
+        Raise(nameof(WitnessLastResultIsRefused));
+
+        WitnessStatus? status = WitnessSurface.Status(_host.ConfigDir).Status;
+        if (status is not null)
+        {
+            WitnessUrl = status.Url ?? string.Empty;
+            WitnessSigningAddress = status.SigningAddress ?? string.Empty;
+
+            // Verbatim, through the helper that touches nothing. Filling this
+            // box from anything the entries were parsed into would let this
+            // screen rewrite a pin nobody edited, and leaving it empty would
+            // make an untouched configuration indistinguishable from a
+            // cleared one -- so changing only the URL would be refused.
+            WitnessMeasurements = WitnessTools.JoinMeasurements(status.PinnedMeasurements);
+        }
+
+        // Null wherever there is no witness to count for. Nothing is rendered
+        // then: a bare numeral would be this shell inventing wording by
+        // omission, and a count of the pins on a witness that does not exist
+        // is not a shorter sentence but a wrong one.
+        WitnessMeasurementLine = status?.PinnedMeasurementLine ?? string.Empty;
+
+        // The editor follows the state until the contributor says otherwise,
+        // so a refusal that arrives while this screen is open opens the way
+        // out of it.
+        Raise(nameof(WitnessEditorOpen));
     }
 
     /// <summary>

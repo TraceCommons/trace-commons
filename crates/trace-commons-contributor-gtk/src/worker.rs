@@ -53,6 +53,16 @@ pub struct Worker {
     pub events: async_channel::Receiver<DaemonEvent>,
     hosts_the_loop: bool,
     next_id: std::cell::Cell<u64>,
+    /// The contributor state directory this shell was started against.
+    ///
+    /// Held because two things live in `config.json` rather than in daemon
+    /// settings -- the witness among them -- and the IPC contract has no
+    /// method for either, so the settings screen reads them through
+    /// `ConfigStore` directly. Taken from what `Backend::open` was given,
+    /// never re-resolved: `--state-dir` exists so a container run does not
+    /// touch a real one, and a second `ConfigStore::resolve` here would
+    /// quietly ignore it and edit the contributor's own configuration.
+    pub dir: std::path::PathBuf,
 }
 
 impl Worker {
@@ -61,6 +71,7 @@ impl Worker {
         let (result_tx, results) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<bool, String>>();
+        let held = dir.clone();
 
         std::thread::spawn(move || {
             let backend = match Backend::open(dir) {
@@ -111,6 +122,7 @@ impl Worker {
             events,
             hosts_the_loop,
             next_id: std::cell::Cell::new(1),
+            dir: held,
         })
     }
 
