@@ -1,6 +1,6 @@
 # Partial Scoring Visibility — Design
 
-Status: design only, no implementation. Written 2026-08-21 against `main`
+Status: design only, no implementation, and nothing has landed since. Written 2026-08-21 against `main`
 (902a3011). A release is pending; the release verdict is at the end.
 
 ## The mechanism, in one paragraph
