@@ -27,6 +27,12 @@ pub enum Job {
     Preview {
         entry_id: String,
     },
+    /// How many times a needle appears in an entry's PRE-redaction session
+    /// text. A count and nothing else; see `Backend::search_original`.
+    SearchOriginal {
+        entry_id: String,
+        needle: String,
+    },
 }
 
 pub enum Outcome {
@@ -34,6 +40,11 @@ pub enum Outcome {
     /// The summary, and the redacted body when this deployment can serve
     /// one. `None` for the body is "not available here", never "empty".
     Preview(Result<(PreviewSummary, Option<String>), String>),
+    /// `None` for any failure. Not a `Result`: the caller must never round a
+    /// failure off to a clean answer, and one shape for "did not find it"
+    /// and "could not look" would invite exactly that. See
+    /// `crate::original_search::Outcome::Unknown`.
+    SearchOriginal(Option<u32>),
 }
 
 pub struct Worker {
@@ -78,6 +89,9 @@ impl Worker {
                     }
                     Job::Preview { entry_id } => {
                         Outcome::Preview(backend.preview(&entry_id).map_err(|e| e.to_string()))
+                    }
+                    Job::SearchOriginal { entry_id, needle } => {
+                        Outcome::SearchOriginal(backend.search_original(&entry_id, &needle))
                     }
                 };
                 if result_tx.send_blocking((id, outcome)).is_err() {
@@ -126,6 +140,13 @@ impl Worker {
     pub fn preview(&self, entry_id: &str) -> u64 {
         self.submit(Job::Preview {
             entry_id: entry_id.to_string(),
+        })
+    }
+
+    pub fn search_original(&self, entry_id: &str, needle: &str) -> u64 {
+        self.submit(Job::SearchOriginal {
+            entry_id: entry_id.to_string(),
+            needle: needle.to_string(),
         })
     }
 }

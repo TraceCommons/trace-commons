@@ -177,6 +177,16 @@ pub struct App {
     /// search term is the contributor's own sensitive string -- a client
     /// name, usually. It does not need to outlive the process to do its job.
     pub recent_searches: RefCell<Vec<String>>,
+    /// Which level of the queue is showing. Resolved against the live
+    /// folders on every render (`queue_folders::resolve`), so a folder that
+    /// empties while it is open returns to the list.
+    pub queue_location: RefCell<crate::queue_folders::Location>,
+    /// The same, for history. A second field rather than one shared with the
+    /// queue: the two screens hold different sets of projects -- history
+    /// keeps a folder the queue has emptied -- and sharing one location
+    /// would drop a contributor into a folder that does not exist on the
+    /// screen they just switched to.
+    pub history_location: RefCell<crate::queue_folders::Location>,
     quit_confirmed: Cell<bool>,
 }
 
@@ -320,6 +330,8 @@ impl App {
             withdrawals: RefCell::new(HashMap::new()),
             outcome_counts: RefCell::new(Default::default()),
             recent_searches: RefCell::new(Vec::new()),
+            queue_location: RefCell::new(crate::queue_folders::Location::Root),
+            history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
         });
 
@@ -520,6 +532,23 @@ impl App {
         );
     }
 
+    /// How many times `needle` was in the entry's pre-redaction session
+    /// text. `None` for any failure -- see `worker::Outcome::SearchOriginal`.
+    pub fn search_original<F>(self: &Rc<Self>, entry_id: &str, needle: &str, callback: F)
+    where
+        F: FnOnce(&Rc<App>, Option<u32>) + 'static,
+    {
+        let id = self.worker.search_original(entry_id, needle);
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::SearchOriginal(matches) = outcome {
+                    callback(app, matches)
+                }
+            }),
+        );
+    }
+
     pub fn preview<F>(self: &Rc<Self>, entry_id: &str, callback: F)
     where
         F: FnOnce(&Rc<App>, Result<(PreviewSummary, Option<String>), String>) + 'static,
@@ -663,7 +692,7 @@ impl App {
             Some(CardOutcome::Ready(summary)) => {
                 self.previews
                     .borrow_mut()
-                    .insert(entry_id.to_string(), summary);
+                    .insert(entry_id.to_string(), *summary);
                 queue::render(self);
             }
             Some(CardOutcome::TooLarge {
@@ -915,9 +944,32 @@ impl App {
     ///
     /// Called by `queue::render` rather than computed here, so there is
     /// exactly one place that decides which entries count as waiting.
-    pub fn set_queue_count(self: &Rc<Self>, waiting: usize) {
-        self.queue_badge.set_label(&waiting.to_string());
+    /// The sidebar's queue badge: the number, and a shield glyph beside it.
+    ///
+    /// The glyph is ADDED to the count, not substituted for it. At 149
+    /// waiting sessions the number is the signal a contributor reads, and an
+    /// icon meaning "there is a queue" says strictly less. What the glyph
+    /// adds is the one thing the number cannot carry: whether anything in
+    /// there wants looking at. See [`crate::shield`].
+    pub fn set_queue_count(self: &Rc<Self>, waiting: usize, shield: crate::shield::Shield) {
+        let label = match shield {
+            // Nothing waiting: the badge is hidden anyway, so the glyph
+            // would be a decoration on an invisible widget.
+            crate::shield::Shield::Clear => waiting.to_string(),
+            crate::shield::Shield::Waiting => format!("{waiting}"),
+            crate::shield::Shield::Attention => {
+                format!("{waiting} {}", style::Tone::Attention.glyph())
+            }
+        };
+        self.queue_badge.set_label(&label);
         self.queue_badge.set_visible(waiting > 0);
+        // A colour is never the only carrier: the glyph above is what
+        // survives greyscale, and this is what makes it findable.
+        if shield == crate::shield::Shield::Attention {
+            self.queue_badge.add_css_class("tc-attention");
+        } else {
+            self.queue_badge.remove_css_class("tc-attention");
+        }
     }
 
     /// Render the sentence `approve` earns -- see `crate::toast` -- and, when
@@ -1122,7 +1174,11 @@ pub fn titled_paragraph(title: &str, body: &str) -> gtk::Box {
 /// to, once the wire object has been read -- see
 /// `App::handle_preview_request_result`.
 enum CardOutcome {
-    Ready(PreviewSummary),
+    /// Boxed because the two variants are otherwise wildly unequal -- a
+    /// summary is a few hundred bytes of maps and vectors, the refusal is
+    /// two integers -- and every `Option<CardOutcome>` would carry the
+    /// larger of the two.
+    Ready(Box<PreviewSummary>),
     TooLarge {
         raw_session_bytes: u64,
         limit_bytes: u64,
@@ -1140,7 +1196,7 @@ fn parse_preview_outcome(value: &serde_json::Value) -> Option<CardOutcome> {
     match value.get("state").and_then(|v| v.as_str()) {
         Some(STATE_READY) => {
             let summary = serde_json::from_value(value.get("summary")?.clone()).ok()?;
-            Some(CardOutcome::Ready(summary))
+            Some(CardOutcome::Ready(Box::new(summary)))
         }
         Some(STATE_TOO_LARGE) => Some(CardOutcome::TooLarge {
             raw_session_bytes: value.get("raw_session_bytes")?.as_u64()?,
@@ -1283,6 +1339,7 @@ mod card_preview_tests {
                         event_count: 0,
                         opening_prompt: String::new(),
                         redactions: Default::default(),
+                        redactions_distinct: Default::default(),
                         pii_labels_present: Vec::new(),
                         consent_scopes: Vec::new(),
                         residual_risk: String::new(),
@@ -1332,6 +1389,7 @@ mod card_preview_tests {
                 event_count: 1,
                 opening_prompt: String::new(),
                 redactions: Default::default(),
+                redactions_distinct: Default::default(),
                 pii_labels_present: Vec::new(),
                 consent_scopes: Vec::new(),
                 residual_risk: String::new(),

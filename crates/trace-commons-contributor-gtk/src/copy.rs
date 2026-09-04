@@ -61,7 +61,8 @@ pub const RESIDUAL_RISK: &str =
 pub fn residual_risk_line(total_redactions: u32) -> String {
     match total_redactions {
         0 => "Scrubbing matched nothing here. That is not the same as there being nothing to \
-              find -- it only recognises patterns it has seen before."
+              find -- it only recognises patterns it has seen before. Search this session for \
+              anything you are worried about."
             .to_string(),
         1 => "Scrubbing removed 1 thing it recognised. It works from patterns, so it misses \
               what it hasn't seen before."
@@ -213,15 +214,130 @@ pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) ->
     ))
 }
 
-/// A project group's header line: the label and how many are waiting under
-/// it. Deliberately plain -- the manifest strip already carries the figures
-/// a contributor weighs; this is only what tells the sessions below apart
-/// from the ones above.
-pub fn project_group_heading(project_label: &str, waiting: usize) -> String {
-    match waiting {
-        1 => format!("{project_label} -- 1 waiting"),
-        n => format!("{project_label} -- {n} waiting"),
+/// The four things a search can find, in the words the sheet says them.
+///
+/// The search scans the REDACTED body, so a value that was removed returns
+/// zero matches -- indistinguishable, on that count alone, from a value that
+/// was never in the session. The daemon's `search_original` counts the same
+/// needle in the pre-redaction text, and these four sentences are what tell
+/// the two apart. See [`crate::original_search`].
+pub fn search_absent() -> String {
+    "0 matches \u{2014} not in this session".to_string()
+}
+
+pub fn search_all_removed(total: u32) -> String {
+    format!("{total} matches \u{2014} all {total} were removed")
+}
+
+pub fn search_some_remain(remaining: u32, total: u32) -> String {
+    format!("{total} matches \u{2014} {remaining} would still be sent")
+}
+
+/// The arm where the app does not know, and must not round that off to a
+/// clean answer. Saying "not in this session" because a call failed would be
+/// the most dangerous wrong sentence this tab can print.
+/// What the summary says between the local scan finding nothing and the
+/// daemon answering about the original.
+///
+/// Zero matches in the redacted body is not yet an answer to "was it ever
+/// here", so this sentence deliberately claims nothing. The reassuring one
+/// is `search_absent`, and only `apply_original_count` may print it.
+pub const SEARCH_CHECKING_ORIGINAL: &str = "0 matches here. Checking the original session…";
+
+pub fn search_unknown() -> String {
+    "0 matches in what would be sent \u{2014} couldn't check the original".to_string()
+}
+
+/// What each redaction family IS, in words -- the panel's actual value to a
+/// reader who has never seen these labels.
+///
+/// Deliberately not exhaustive. The vocabulary is generated and open, which
+/// is why `redaction_summary::describe` falls back rather than panicking.
+pub const REDACTION_CATEGORY_LOCAL_PATH: &str = "File paths from this machine.";
+pub const REDACTION_CATEGORY_SECRET: &str =
+    "API keys, tokens, private keys, and high-entropy strings found next to credential words.";
+pub const REDACTION_CATEGORY_PRIVACY_FILTER: &str =
+    "Names, emails, and other personal details found in prose.";
+pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
+    "Fields whose name marks them sensitive, like password or authorization.";
+pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
+    "Tool-call arguments whose name marks them sensitive.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str = "Found, and still in what would be sent. Either a credential inside a correction \
+     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
+
+/// The neutral description for a family this build has no words for. It must
+/// still appear: dropping an unrecognised category would understate what
+/// happened.
+pub const REDACTION_CATEGORY_UNKNOWN: &str =
+    "Removed by a pattern this version has no description for.";
+
+/// The two headings over the summary panel. The second is a sentence rather
+/// than a noun because it is the one a contributor must not skim past.
+pub const REDACTION_PANEL_REMOVED: &str = "Removed";
+pub const REDACTION_PANEL_STILL_PRESENT: &str = "Found, and still in what would be sent";
+
+/// One panel row's figures: how many times a family fired, and over how many
+/// distinct values. The distinct half is omitted when it repeats the first,
+/// for the same reason [`crate::redaction_labels::line`] omits it.
+pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
+    if distinct > 0 && distinct < occurrences {
+        format!("{occurrences} ({distinct} distinct)")
+    } else {
+        format!("{occurrences}")
     }
+}
+
+/// What a redaction mark in the transcript is, named on hover.
+///
+/// The marks themselves are not new -- the transcript has washed them in
+/// gold since the pane was written. What is new is the NAME, which a
+/// `GtkTextTag` cannot carry: a tag colours a run and has no label of its
+/// own, so the name arrives as the tooltip over the mark.
+///
+/// Three sentences because the scrubber leaves three marker forms carrying
+/// three different amounts of information, and none of them may be padded
+/// out with a guess. See `crate::placeholders`.
+pub fn redaction_mark_tooltip(kind: &str) -> String {
+    format!("Removed: {kind}")
+}
+
+/// A repeat of a value already marked earlier in this transcript.
+///
+/// Only a numbered placeholder supports this claim: the redactor mints one
+/// token per DISTINCT value and reuses it, so the same label and ordinal
+/// twice is the same original string twice. Never said of a mark whose
+/// marker carries no ordinal.
+pub fn redaction_mark_repeat(kind: &str) -> String {
+    format!("Removed: {kind} -- the same value as an earlier mark")
+}
+
+/// A mark whose marker names no category -- a bare `[REDACTED]`, which is
+/// the form plain secrets land in. It says what it can and stops. Guessing
+/// a category here would put a word on screen the scrubber never said.
+pub const REDACTION_MARK_UNNAMED: &str = "Removed";
+
+/// The back control at the head of a folder's sessions.
+pub const ALL_FOLDERS: &str = "All folders";
+
+/// A history folder row's right-hand figure. No byte total: a submitted
+/// trace's size is not a thing the account keeps, and inventing one would be
+/// worse than saying nothing.
+pub fn history_folder_summary(submissions: usize) -> String {
+    let unit = if submissions == 1 {
+        "submission"
+    } else {
+        "submissions"
+    };
+    format!("{submissions} {unit}")
+}
+
+/// A folder row's right-hand figures: how much is waiting, and how big.
+pub fn folder_summary(sessions: usize, bytes: u64) -> String {
+    let unit = if sessions == 1 { "session" } else { "sessions" };
+    format!(
+        "{sessions} {unit}  \u{00b7}  {}",
+        crate::model::human_bytes(bytes)
+    )
 }
 
 /// Shown instead of the toast's own sentence when `approve` itself refused
@@ -280,6 +396,9 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 /// reassurance, which is why they share a wording that concedes rather than
 /// one that congratulates.
 pub const NOTHING_MATCHED: &str = "nothing matched";
+
+/// What the chip does now that it is a control.
+pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this session for a value you are worried about";
 
 /// A secret scrubbing FOUND and did not remove.
 ///
@@ -398,8 +517,19 @@ pub const NOTHING_MATCHED_BODY: &str = "A search only finds what is written the 
 /// string copy rather than a layout, so it is bounded work at any size.
 pub const TRANSCRIPT_COPY_ALL: &str = "Copy everything";
 
+/// The example is a `local_path` placeholder for a reason: `local_path` and
+/// `private_email` are the only two labels that mint a numbered
+/// `<PRIVATE_..._n>` token. `<PRIVATE_SECRET_1>`, which this line used to
+/// show, is a shape the scrubber never produces -- a secret is replaced with
+/// a bare `[REDACTED]`. Naming an impossible token taught the wrong thing on
+/// the one screen that must be right about this.
+///
+/// The second sentence is not decoration. A mark shows where the rewriter
+/// reached a typed field; the detector scans every leaf and the rewriter
+/// does not reach all of them, so an unmarked stretch is not a clean one.
 pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval covers. Marks like \
-     <PRIVATE_SECRET_1> show where scrubbing fired -- legible as chips, not holes.";
+     <PRIVATE_LOCAL_PATH_1> and [REDACTED] show where scrubbing fired. A stretch with no mark \
+     is not a stretch with nothing in it -- scrubbing only rewrites the fields it reaches.";
 
 /// What the sheet says about redaction at the moment of consent.
 ///
@@ -1965,6 +2095,100 @@ pub fn ironwire_last_checked(at: Option<chrono::DateTime<chrono::Utc>>) -> Optio
 
 #[cfg(test)]
 mod tests {
+
+    /// The caption names a token shape as an example, so that shape has to
+    /// be one the scrubber can actually produce. Only `local_path` and
+    /// `private_email` mint a numbered placeholder; a secret never does.
+    #[test]
+    fn the_transcript_caption_names_only_a_token_shape_that_can_exist() {
+        assert!(TRANSCRIPT_CAPTION.contains("<PRIVATE_LOCAL_PATH_1>"));
+        assert!(
+            !TRANSCRIPT_CAPTION.contains("<PRIVATE_SECRET"),
+            "secrets mint no numbered placeholder"
+        );
+    }
+
+    /// Marking makes the app look more thorough than it is, so the caption
+    /// beside the marks has to concede what a mark does not cover.
+    #[test]
+    fn the_transcript_caption_concedes_what_a_mark_does_not_mean() {
+        assert!(
+            TRANSCRIPT_CAPTION.contains("no mark is not"),
+            "{TRANSCRIPT_CAPTION}"
+        );
+    }
+
+    #[test]
+    fn a_redaction_mark_names_what_left() {
+        assert_eq!(redaction_mark_tooltip("local path"), "Removed: local path");
+    }
+
+    /// The repeat wording may only ever be said of a numbered placeholder,
+    /// so it has to be distinguishable from the plain one.
+    #[test]
+    fn a_repeated_mark_says_it_is_the_same_value() {
+        let repeat = redaction_mark_repeat("local path");
+        assert_ne!(repeat, redaction_mark_tooltip("local path"));
+        assert!(repeat.contains("the same value"), "{repeat}");
+    }
+
+    /// An unnamed mark must not acquire a category it never had.
+    #[test]
+    fn an_unnamed_mark_names_no_category() {
+        assert_eq!(REDACTION_MARK_UNNAMED, "Removed");
+        assert!(!REDACTION_MARK_UNNAMED.contains(':'));
+    }
+
+    #[test]
+    fn a_history_folder_summary_inflects_its_count() {
+        assert_eq!(history_folder_summary(1), "1 submission");
+        assert_eq!(history_folder_summary(4), "4 submissions");
+    }
+
+    /// The zero case names a doubt. It has to name the thing to do about it
+    /// too, and that thing is the search tab -- which the card's chip now
+    /// opens.
+    #[test]
+    fn the_nothing_matched_line_offers_a_next_step() {
+        assert!(
+            residual_risk_line(0).to_lowercase().contains("search"),
+            "the line must point at the thing to do about it"
+        );
+    }
+
+    #[test]
+    fn a_panel_row_omits_a_distinct_count_that_repeats_the_occurrence_count() {
+        assert_eq!(redaction_row_counts(185, 12), "185 (12 distinct)");
+        assert_eq!(redaction_row_counts(3, 3), "3");
+        assert_eq!(redaction_row_counts(3, 0), "3");
+    }
+
+    /// The one direction this panel must not fail in is understating what
+    /// happened, and a survivor's description is where that is decided.
+    #[test]
+    fn the_residual_description_never_claims_a_removal() {
+        assert!(REDACTION_CATEGORY_RESIDUAL.contains("still in what would be sent"));
+        assert!(
+            !REDACTION_CATEGORY_RESIDUAL
+                .to_lowercase()
+                .contains("removed")
+        );
+    }
+
+    #[test]
+    fn a_folder_summary_inflects_its_session_count() {
+        assert!(folder_summary(1, 1024).starts_with("1 session "));
+        assert!(folder_summary(2, 1024).starts_with("2 sessions "));
+    }
+
+    #[test]
+    fn a_folder_summary_carries_its_size() {
+        assert!(
+            folder_summary(2, 1024).ends_with("1 KB"),
+            "{}",
+            folder_summary(2, 1024)
+        );
+    }
     use super::*;
 
     use crate::model::human_bytes;

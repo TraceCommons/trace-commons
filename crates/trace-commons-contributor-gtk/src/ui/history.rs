@@ -338,9 +338,195 @@ fn render(
         header.append(&count);
         content.append(&header);
     }
-    for record in records {
-        content.append(&record_row(app, record));
+    // Two levels, the same shape the queue uses: folders first, one
+    // project's submissions a level in. A hundred rows in one column is a
+    // list a contributor cannot find anything in, and the folder is the
+    // thing they are actually looking for.
+    let folders = history_folders(records);
+    let here = match &*app.history_location.borrow() {
+        crate::queue_folders::Location::Project(key)
+            if folders.iter().any(|(existing, _, _)| existing == key) =>
+        {
+            crate::queue_folders::Location::Project(key.clone())
+        }
+        // A folder that is no longer in the loaded page -- history reloads
+        // and a withdrawal can empty one -- returns to the list rather than
+        // standing on a blank pane.
+        _ => crate::queue_folders::Location::Root,
+    };
+    *app.history_location.borrow_mut() = here.clone();
+
+    match &here {
+        crate::queue_folders::Location::Root => {
+            let mut path_labels: Vec<(String, gtk::Label)> = Vec::new();
+            for (key, label, members) in &folders {
+                let (row, path_label) = history_folder_row(app, key, label, members.len());
+                content.append(&row);
+                // A synthetic `label:` key names no project the daemon can
+                // resolve, so there is no path to ask for.
+                if !key.starts_with("label:") {
+                    path_labels.push((key.clone(), path_label));
+                }
+            }
+            resolve_folder_paths(app, path_labels);
+        }
+        crate::queue_folders::Location::Project(key) => {
+            if let Some((_, label, members)) =
+                folders.iter().find(|(existing, _, _)| existing == key)
+            {
+                content.append(&history_folder_heading(app, label));
+                for record in members {
+                    content.append(&record_row(app, record));
+                }
+            }
+        }
     }
+}
+
+/// One folder row on the history screen, and the label its path goes into
+/// once `list_projects` answers.
+///
+/// A history record carries no path by design -- the daemon's path
+/// relaxation reaches the socket's live views and never a persisted record
+/// -- so the path is asked for separately, by `project_id`, and the row
+/// reads correctly without it.
+fn history_folder_row(
+    app: &Rc<App>,
+    key: &str,
+    label: &str,
+    submissions: usize,
+) -> (gtk::Widget, gtk::Label) {
+    let bar = style::card(gtk::Orientation::Horizontal, space::M);
+    bar.set_valign(gtk::Align::Center);
+
+    let opener = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    opener.set_hexpand(true);
+
+    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    naming.set_hexpand(true);
+    let heading = gtk::Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    heading.add_css_class("tc-card-title");
+    naming.append(&heading);
+    let path = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .visible(false)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+    path.add_css_class("tc-meta");
+    naming.append(&path);
+    opener.append(&naming);
+
+    let count = gtk::Label::new(Some(&copy::history_folder_summary(submissions)));
+    count.add_css_class("tc-meta");
+    count.set_valign(gtk::Align::Center);
+    opener.append(&count);
+
+    let open = gtk::Button::builder().child(&opener).build();
+    open.add_css_class("flat");
+    open.set_hexpand(true);
+    let app_for_open = Rc::clone(app);
+    let key_for_open = key.to_string();
+    open.connect_clicked(move |_| {
+        *app_for_open.history_location.borrow_mut() =
+            crate::queue_folders::Location::Project(key_for_open.clone());
+        // Re-fetched rather than re-rendered from a cache: this screen owns
+        // no copy of the records, and a navigation is rare enough that two
+        // round trips is the cheaper thing to maintain.
+        refresh(&app_for_open);
+    });
+    bar.append(&open);
+
+    (bar.upcast(), path)
+}
+
+/// The head of one folder's submissions: the way back, and which folder.
+fn history_folder_heading(app: &Rc<App>, label: &str) -> gtk::Widget {
+    let bar = style::card(gtk::Orientation::Horizontal, space::M);
+    bar.set_valign(gtk::Align::Center);
+
+    let back = gtk::Button::with_label(copy::ALL_FOLDERS);
+    back.add_css_class("flat");
+    let app_for_back = Rc::clone(app);
+    back.connect_clicked(move |_| {
+        *app_for_back.history_location.borrow_mut() = crate::queue_folders::Location::Root;
+        refresh(&app_for_back);
+    });
+    bar.append(&back);
+
+    let heading = gtk::Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    heading.add_css_class("tc-card-title");
+    bar.append(&heading);
+
+    bar.upcast()
+}
+
+/// Fill in each folder row's path, once the daemon says what it is.
+///
+/// One call for the whole screen rather than one per row, and a row whose id
+/// the daemon does not know keeps its label alone -- a folder with no path
+/// is still a folder, and a guessed path would be worse than none.
+fn resolve_folder_paths(app: &Rc<App>, rows: Vec<(String, gtk::Label)>) {
+    if rows.is_empty() {
+        return;
+    }
+    app.call("list_projects", serde_json::json!({}), move |_, result| {
+        let Ok(value) = result else { return };
+        let projects: Vec<crate::model::Project> = value
+            .get("projects")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        for (project_id, label) in rows {
+            if let Some(project) = projects
+                .iter()
+                .find(|p| p.project_id == project_id && !p.project_path.is_empty())
+            {
+                label.set_text(&project.project_path);
+                label.set_visible(true);
+            }
+        }
+    });
+}
+
+/// History, grouped into the same folders the queue uses.
+///
+/// Grouped on `project_id`, never on the label: two projects can share a
+/// basename, and one row over another repository's submissions would be
+/// worse than no grouping at all.
+///
+/// A record written before project keys were normalized carries no id. Those
+/// fall back to a `label:`-prefixed synthetic key rather than all landing
+/// under `""` -- a real id always starts with `proj_`, so the two key spaces
+/// cannot collide, and an identified record never merges with an
+/// unidentified one that happens to share a label. Claiming the two are the
+/// same folder would be a guess; two rows is the honest answer.
+///
+/// Returns `(key, label, records)` in first-seen order, which is what
+/// `list_history` already sorts by.
+fn history_folders(records: &[HistoryRecord]) -> Vec<(String, String, Vec<HistoryRecord>)> {
+    let mut groups: Vec<(String, String, Vec<HistoryRecord>)> = Vec::new();
+    for record in records {
+        let key = if record.project_id.is_empty() {
+            format!("label:{}", record.project_label)
+        } else {
+            record.project_id.clone()
+        };
+        match groups.iter_mut().find(|(existing, _, _)| existing == &key) {
+            Some((_, _, members)) => members.push(record.clone()),
+            None => groups.push((key, record.project_label.clone(), vec![record.clone()])),
+        }
+    }
+    groups
 }
 
 /// The `refresh_history` control.
@@ -1097,6 +1283,59 @@ fn grouped(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn folder_record(id: &str, project: &str, label: &str) -> HistoryRecord {
+        HistoryRecord {
+            submission_id: id.to_string(),
+            project_id: project.to_string(),
+            project_label: label.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn history_groups_by_project_id() {
+        let groups = history_folders(&[
+            folder_record("1", "proj_a", "api"),
+            folder_record("2", "proj_b", "web"),
+            folder_record("3", "proj_a", "api"),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].2.len(), 2);
+    }
+
+    #[test]
+    fn two_projects_sharing_a_label_stay_separate_in_history() {
+        let groups = history_folders(&[
+            folder_record("1", "proj_a", "api"),
+            folder_record("2", "proj_b", "api"),
+        ]);
+        assert_eq!(groups.len(), 2, "a label is not an identity");
+    }
+
+    /// Records submitted before project keys were normalized carry no id.
+    /// Grouping them all under "" would put unrelated repositories in one
+    /// row.
+    #[test]
+    fn records_with_no_project_id_group_by_label_instead() {
+        let groups = history_folders(&[
+            folder_record("1", "", "api"),
+            folder_record("2", "", "web"),
+            folder_record("3", "", "api"),
+        ]);
+        assert_eq!(groups.len(), 2);
+    }
+
+    /// Same label, one resolvable and one not. Claiming they are the same
+    /// folder is a guess; two rows is the honest answer.
+    #[test]
+    fn an_identified_and_an_unidentified_record_do_not_merge() {
+        let groups = history_folders(&[
+            folder_record("1", "proj_a", "api"),
+            folder_record("2", "", "api"),
+        ]);
+        assert_eq!(groups.len(), 2);
+    }
     use super::*;
 
     #[test]
@@ -1172,6 +1411,7 @@ mod tests {
         HistoryRecord {
             submission_id: submission_id.to_string(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: status.to_string(),
             credit_points_pending: 0.0,
@@ -1221,6 +1461,7 @@ mod tests {
         let record = HistoryRecord {
             submission_id: String::new(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: "accepted".to_string(),
             credit_points_pending: 0.0,
@@ -1239,6 +1480,7 @@ mod tests {
         let mut record = HistoryRecord {
             submission_id: String::new(),
             submitted_at: None,
+            project_id: String::new(),
             project_label: String::new(),
             status: "submitted".to_string(),
             credit_points_pending: 3.0,
