@@ -306,15 +306,16 @@ mod tests {
         // comparing a field that now has both sides. Nothing in the type
         // system catches that, so this does.
         //
-        // Read the guarantee narrowly. The checked-in fixture is TRIMMED (see
-        // its `_fixture_note`): tcb_info keys other than mrtd/rtmr0-3 were
-        // removed when it was captured, so this does not establish that NEAR
-        // AI's untrimmed response omits mrconfigid -- that is currently
-        // unverified. What it does catch is the case that matters for
-        // maintenance: a re-captured fixture whose tcb_info is preserved and
-        // carries the register. Then the fix is to add the field to
-        // `UnverifiedJsonMeasurements` and make the arm compare it, not to
-        // relax this assertion.
+        // The checked-in fixture is TRIMMED (see its `_fixture_note`), so on
+        // its own it could not show that NEAR AI's untrimmed response omits
+        // mrconfigid. That was settled separately on 2026-09-02 with an
+        // untrimmed live capture: `info.tcb_info` carries app_compose,
+        // compose_hash, device_id, event_log, mrtd, os_image_hash and
+        // rtmr0-3, and no key anywhere in the document names the register.
+        // What this test catches is the case that matters for maintenance: a
+        // re-captured fixture whose tcb_info carries mrconfigid. Then the fix
+        // is to add the field to `UnverifiedJsonMeasurements` and make the arm
+        // compare it, not to relax this assertion.
         assert!(
             !tcb_info_names_mrconfigid(FIXTURE),
             "the captured report's tcb_info now names mrconfigid; read_claim's \
