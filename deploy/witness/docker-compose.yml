@@ -16,10 +16,19 @@
 
 services:
   witness:
-    # REPLACE THIS. There is no default that is safe to inherit: a tag is a
-    # moving target and pinning a measurement over one is pinning nothing.
-    # Push the image built from ./Dockerfile and reference it by digest.
-    image: ghcr.io/OWNER/trace-commons-witness@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # By digest, never a tag: a tag is a moving target and a measurement
+    # pinned over one is pinning nothing.
+    #
+    # Built by the `witness-image` workflow from commit 2c55868 -- natively
+    # amd64, because TDX is Intel, and in CI rather than on a developer
+    # machine because this image is not reproducibly buildable. A measurement
+    # therefore pins a specific artifact only its builder can produce, which
+    # makes who built it part of what an auditor is trusting; a public run log
+    # answers that better than a laptop.
+    #
+    # Replacing this means rebuilding and re-pinning the measurement
+    # everywhere it is named -- in ingest and in every client.
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:cb2de0dbd26a9f68e79db06a719f36cc48b216e10968e6076eddd126a557edb7
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
