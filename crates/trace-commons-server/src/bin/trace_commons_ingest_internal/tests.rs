@@ -89861,8 +89861,7 @@ mod witness_receipt {
             "witness_measurement": MEASUREMENT,
             "timestamp": 1_788_000_000i64,
         });
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&json).expect("the certificate serialises"));
+        let encoded = serde_json::to_string(&json).expect("the certificate serialises");
 
         // Sign the same way the enclave does: the decoder rebuilds the
         // certificate and the signature must recover over ITS signing bytes,

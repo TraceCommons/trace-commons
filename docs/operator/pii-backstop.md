@@ -191,8 +191,8 @@ headers:
 
 | Header | Carries |
 |---|---|
-| `x-trace-commons-witness-certificate` | the certificate JSON, base64url (unpadded) |
-| `x-trace-commons-witness-signature` | the EIP-191 signature over it, `0x`-hex |
+| `x-trace-witness-certificate` | the certificate as compact JSON, forwarded byte for byte from the witness's own response header |
+| `x-trace-witness-signature` | the EIP-191 signature over it, `0x`-hex |
 
 When the bypass is configured and that certificate verifies, the submission
 is left `accepted` instead of being held on `awaiting_pii_backstop`.

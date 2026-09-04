@@ -41,18 +41,26 @@
 //! `&'static str` field name this module wrote itself.
 
 use axum::http::HeaderMap;
-use base64::Engine as _;
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 
 use super::certificate::{CertificateDetails, WitnessCertificate};
 
-/// Header carrying the base64url (unpadded) encoding of the certificate JSON
-/// object the witness service serves.
-pub const CERTIFICATE_HEADER: &str = "x-trace-commons-witness-certificate";
+/// Header carrying the certificate as compact JSON, exactly as the witness
+/// service put it on its own response.
+///
+/// The name and the encoding are both the witness's, not this module's
+/// choice. A contributor forwards the header value it received byte for
+/// byte -- that is the whole reason the witness serves it in a header rather
+/// than in a body a client would have to re-render -- so a second spelling
+/// here is not an alternative form, it is a header nothing ever sends.
+/// `crates/trace-commons-server/tests/witness_certificate_cross_implementation.rs`
+/// drives the witness's own router and requires this constant to name a
+/// header that response actually carries.
+pub const CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
 
 /// Header carrying the EIP-191 signature over the certificate's signing
-/// bytes, as `0x`-prefixed hex.
-pub const SIGNATURE_HEADER: &str = "x-trace-commons-witness-signature";
+/// bytes, as `0x`-prefixed hex. Same rule: the witness's spelling.
+pub const SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
 /// Why a request's witness headers could not be read.
 ///
@@ -77,10 +85,7 @@ pub enum WitnessHeaderError {
     /// Carries no value: the bytes are attacker-chosen.
     #[error("a witness header value is not valid ASCII")]
     HeaderNotAscii,
-    /// The certificate header is not unpadded base64url.
-    #[error("the witness certificate header is not base64url")]
-    CertificateNotBase64,
-    /// The decoded certificate is not a JSON object.
+    /// The certificate header is not a JSON object.
     #[error("the witness certificate is not a JSON object")]
     CertificateNotJson,
     /// A required certificate field is absent, or is not of the type the wire
@@ -124,11 +129,8 @@ pub fn witness_headers(
         (Some(certificate), Some(signature)) => (certificate, signature),
     };
 
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(certificate)
-        .map_err(|_| WitnessHeaderError::CertificateNotBase64)?;
     let value: serde_json::Value =
-        serde_json::from_slice(&decoded).map_err(|_| WitnessHeaderError::CertificateNotJson)?;
+        serde_json::from_str(certificate).map_err(|_| WitnessHeaderError::CertificateNotJson)?;
     let object = value
         .as_object()
         .ok_or(WitnessHeaderError::CertificateNotJson)?;
@@ -219,9 +221,10 @@ mod tests {
         })
     }
 
+    /// The wire form: compact JSON, which is what the witness's own response
+    /// header carries and what a contributor forwards unchanged.
     fn encoded(value: &serde_json::Value) -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(value).expect("the fixture serialises"))
+        serde_json::to_string(value).expect("the fixture serialises")
     }
 
     fn encoded_certificate() -> String {
@@ -266,17 +269,23 @@ mod tests {
     }
 
     #[test]
-    fn a_certificate_that_is_not_base64url_refuses_by_name() {
-        let headers = headers_with(Some("!!!not-base64!!!"), Some("0x00"));
+    fn a_certificate_that_is_not_json_refuses_by_name() {
+        let headers = headers_with(Some("!!!not-json!!!"), Some("0x00"));
         let err = witness_headers(&headers).expect_err("bad encoding must refuse");
-        assert_eq!(err, WitnessHeaderError::CertificateNotBase64, "{err}");
+        assert_eq!(err, WitnessHeaderError::CertificateNotJson, "{err}");
     }
 
+    /// Base64 of the certificate JSON was this module's previous wire form,
+    /// and nothing ever sent it: the witness serves compact JSON and the
+    /// contributor forwards that value verbatim. It must refuse now, or the
+    /// header would accept two spellings of which only one is ever produced.
     #[test]
-    fn base64_that_is_not_json_refuses_by_name() {
-        let not_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json at all");
-        let headers = headers_with(Some(&not_json), Some("0x00"));
-        let err = witness_headers(&headers).expect_err("non-JSON must refuse");
+    fn base64_of_the_certificate_is_no_longer_a_certificate() {
+        use base64::Engine as _;
+        let legacy = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&certificate_json()).expect("the fixture serialises"));
+        let headers = headers_with(Some(&legacy), Some("0x00"));
+        let err = witness_headers(&headers).expect_err("the old encoding must refuse");
         assert_eq!(err, WitnessHeaderError::CertificateNotJson, "{err}");
     }
 
@@ -441,7 +450,7 @@ mod tests {
 
     #[test]
     fn the_header_names_are_the_ones_the_operator_doc_states() {
-        assert_eq!(CERTIFICATE_HEADER, "x-trace-commons-witness-certificate");
-        assert_eq!(SIGNATURE_HEADER, "x-trace-commons-witness-signature");
+        assert_eq!(CERTIFICATE_HEADER, "x-trace-witness-certificate");
+        assert_eq!(SIGNATURE_HEADER, "x-trace-witness-signature");
     }
 }
