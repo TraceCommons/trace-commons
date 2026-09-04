@@ -617,7 +617,76 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public bool WitnessLastResultIsRefused =>
         WitnessLastResultTone == WitnessTone.Refused && HasWitnessLastResultText;
 
-    /// <summary>Whether the two witness actions may be pressed.</summary>
+    // Inference-body export consent is independent of witness configuration.
+    private bool _inferenceEvidenceEnabled;
+    private bool _inferenceEvidenceSupported;
+    public bool InferenceEvidenceControlsEnabled => WitnessControlsEnabled && _inferenceEvidenceSupported;
+    private string _inferenceEvidenceNotice = string.Empty;
+    public bool InferenceEvidenceEnabled => _inferenceEvidenceEnabled;
+    public string InferenceEvidenceHeading => _witnessCopy?.InferenceHeading ?? string.Empty;
+    public string InferenceEvidenceDisclosure => _witnessCopy?.InferenceDisclosure ?? string.Empty;
+    public string InferenceEvidenceCaptureNote => _witnessCopy?.InferenceCaptureNote ?? string.Empty;
+    public string InferenceEvidenceScopeNote => _witnessCopy?.InferenceScopeNote ?? string.Empty;
+    public string InferenceEvidenceConfirm => _witnessCopy?.InferenceConfirm ?? string.Empty;
+    public string InferenceEvidenceCancel => _witnessCopy?.InferenceCancel ?? string.Empty;
+    public string InferenceEvidenceEnable => _witnessCopy?.InferenceEnable ?? string.Empty;
+    public string InferenceEvidenceDisable => _witnessCopy?.InferenceDisable ?? string.Empty;
+    public string InferenceEvidenceState => !_inferenceEvidenceSupported
+        ? string.Empty
+        : (_inferenceEvidenceEnabled ? _witnessCopy?.InferenceEnabled : _witnessCopy?.InferenceDisabled)
+          ?? string.Empty;
+    public string InferenceEvidenceNotice => _inferenceEvidenceNotice;
+
+    private void FillInferenceEvidence(DaemonSettingsSnapshot settings)
+    {
+        _inferenceEvidenceEnabled = settings.InferenceEvidenceEnabled;
+        _inferenceEvidenceSupported = settings.IronwireAttestedBodies.HasValue;
+        Raise(nameof(InferenceEvidenceControlsEnabled));
+        Raise(nameof(InferenceEvidenceEnabled));
+        Raise(nameof(InferenceEvidenceState));
+    }
+
+    public async Task SetInferenceEvidenceAsync(bool enabled, bool disclosureConfirmed = false)
+    {
+        if (!IsLoaded || IsBusy || _witnessCopy is null || (enabled && !_inferenceEvidenceSupported))
+        {
+            return;
+        }
+        IsBusy = true;
+        _inferenceEvidenceNotice = string.Empty;
+        try
+        {
+            string payload = InferenceEvidenceConsent.Serialize(enabled, disclosureConfirmed);
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
+                .ConfigureAwait(true);
+            DaemonSettingsSnapshot? settings = response.ResultAs<DaemonSettingsSnapshot>();
+            if (response.IsError || !InferenceEvidenceConsent.ConfirmsWrite(settings, enabled))
+            {
+                _inferenceEvidenceNotice = _witnessCopy.InferenceSaveFailed;
+            }
+            else
+            {
+                FillInferenceEvidence(settings!);
+            }
+        }
+        catch
+        {
+            _inferenceEvidenceNotice = _witnessCopy.InferenceSaveFailed;
+        }
+        finally
+        {
+            if (_inferenceEvidenceNotice.Length > 0)
+            {
+                _inferenceEvidenceSupported = false;
+                Raise(nameof(InferenceEvidenceState));
+            }
+            Raise(nameof(InferenceEvidenceNotice));
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Whether the witness actions may be pressed.</summary>
     public bool WitnessControlsEnabled => !_isBusy && _witnessCopy is not null;
 
     public bool IsBusy
@@ -631,6 +700,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 Raise(nameof(RoutingControlsEnabled));
                 Raise(nameof(RoutingConnectOffered));
                 Raise(nameof(WitnessControlsEnabled));
+                Raise(nameof(InferenceEvidenceControlsEnabled));
             }
         }
     }
@@ -982,6 +1052,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     private void FillSettings(DaemonSettingsSnapshot? settings)
     {
+        if (settings is not null)
+        {
+            FillInferenceEvidence(settings);
+        }
         ConnectionRows.Clear();
         if (settings is null)
         {

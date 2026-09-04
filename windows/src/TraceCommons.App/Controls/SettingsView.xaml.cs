@@ -46,6 +46,33 @@ public sealed partial class SettingsView : UserControl
         await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync());
     }
 
+    private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)
+    {
+        await Settings.SetInferenceEvidenceAsync(false);
+    }
+
+    private async void OnInferenceEvidence(object sender, RoutedEventArgs e)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = Settings.InferenceEvidenceHeading,
+            Content = new TextBlock
+            {
+                Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
+                    Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = Settings.InferenceEvidenceConfirm,
+            CloseButtonText = Settings.InferenceEvidenceCancel,
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            await Settings.SetInferenceEvidenceAsync(true, disclosureConfirmed: true);
+        }
+    }
+
     private async void OnStartAtLoginToggled(object sender, RoutedEventArgs e)
     {
         if (sender is ToggleSwitch toggle && Settings.IsLoaded)

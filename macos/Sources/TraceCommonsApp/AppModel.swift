@@ -927,6 +927,32 @@ final class AppModel: ObservableObject {
         return outcome
     }
 
+    @Published private(set) var inferenceEvidenceBusy = false
+    @Published private(set) var inferenceEvidenceSaveFailed = false
+
+    func setInferenceEvidence(_ enabled: Bool, disclosureConfirmed: Bool = false) async {
+        guard !inferenceEvidenceBusy else { return }
+        inferenceEvidenceSaveFailed = false
+        guard let client else {
+            daemonSettings?.ironwireAttestedBodies = nil
+            inferenceEvidenceSaveFailed = true
+            return
+        }
+        inferenceEvidenceBusy = true
+        defer { inferenceEvidenceBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setInferenceEvidence(enabled, disclosureConfirmed: disclosureConfirmed) }
+        }.value
+        switch result {
+        case .success(let settings):
+            daemonSettings = settings
+            refreshAudit()
+        case .failure:
+            daemonSettings?.ironwireAttestedBodies = nil
+            inferenceEvidenceSaveFailed = true
+        }
+    }
+
     // MARK: - Onboarding resume
 
     /// Whether onboarding has been walked to the end (the Done screen) for

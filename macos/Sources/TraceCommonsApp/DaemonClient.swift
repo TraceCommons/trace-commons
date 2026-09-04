@@ -211,6 +211,21 @@ final class DaemonClient {
         return try call("set_settings", params: params, as: DaemonSettingsView.self)
     }
 
+    /// Enabling requires a separate disclosure decision; disabling always works.
+    func setInferenceEvidence(_ enabled: Bool, disclosureConfirmed: Bool) throws -> DaemonSettingsView {
+        guard !enabled || disclosureConfirmed else { throw InferenceEvidenceRefusal.disclosureRequired }
+        let settings = try setSettings(["ironwire_attested_bodies": enabled])
+        guard settings.ironwireAttestedBodies == enabled else {
+            throw InferenceEvidenceRefusal.unconfirmedWrite
+        }
+        return settings
+    }
+
+    enum InferenceEvidenceRefusal: Error {
+        case disclosureRequired
+        case unconfirmedWrite
+    }
+
     /// Shape-checks a settings object, refusing rather than returning one
     /// that cannot honestly be sent.
     ///

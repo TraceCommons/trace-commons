@@ -533,6 +533,9 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// because nobody said otherwise would probe a service the contributor
     /// never mentioned.
     let ironwire: IronWireDeclarationView?
+    /// Older daemons omit this independent, default-off consent.
+    var ironwireAttestedBodies: Bool? = nil
+    var inferenceEvidenceEnabled: Bool { ironwireAttestedBodies == true }
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -561,6 +564,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case ironwire
+        case ironwireAttestedBodies = "ironwire_attested_bodies"
     }
 }
 

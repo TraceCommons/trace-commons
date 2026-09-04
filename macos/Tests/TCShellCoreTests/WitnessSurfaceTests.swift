@@ -403,7 +403,18 @@ final class WitnessSurfaceTests: XCTestCase {
              "url_title":"C-URL","signing_address_title":"C-SIGNING",
              "measurements_title":"C-MEASUREMENTS","configure":"C-CONFIGURE",
              "clear":"C-CLEAR","clear_note":"C-CLEARNOTE",
-             "applies_at_once":"C-APPLIES"}
+             "applies_at_once":"C-APPLIES",
+             "inference_heading":"C-INFERENCE-HEADING",
+             "inference_disclosure":"C-INFERENCE-DISCLOSURE",
+             "inference_capture_note":"C-INFERENCE-CAPTURE_NOTE",
+             "inference_scope_note":"C-INFERENCE-SCOPE_NOTE",
+             "inference_enable":"C-INFERENCE-ENABLE",
+             "inference_disable":"C-INFERENCE-DISABLE",
+             "inference_confirm":"C-INFERENCE-CONFIRM",
+             "inference_cancel":"C-INFERENCE-CANCEL",
+             "inference_enabled":"C-INFERENCE-ENABLED",
+             "inference_disabled":"C-INFERENCE-DISABLED",
+             "inference_save_failed":"C-INFERENCE-SAVE_FAILED"}
             """
         let copy = try XCTUnwrap(WitnessCopy.decode(fromJSON: json))
         XCTAssertEqual(copy.heading, "C-HEADING")
@@ -417,6 +428,11 @@ final class WitnessSurfaceTests: XCTestCase {
         XCTAssertEqual(copy.clear, "C-CLEAR")
         XCTAssertEqual(copy.clearNote, "C-CLEARNOTE")
         XCTAssertEqual(copy.appliesAtOnce, "C-APPLIES")
+        XCTAssertEqual(copy.inferenceDisclosure, "C-INFERENCE-DISCLOSURE")
+        XCTAssertEqual(copy.inferenceScopeNote, "C-INFERENCE-SCOPE_NOTE")
+        XCTAssertEqual(copy.inferenceConfirm, "C-INFERENCE-CONFIRM")
+        XCTAssertNil(WitnessCopy.decode(fromJSON: json.replacingOccurrences(
+            of: "\"inference_disclosure\":\"C-INFERENCE-DISCLOSURE\",", with: "")))
 
         // A payload missing one string decodes to nothing at all. A card
         // rendering "" where a sentence belongs is worse than a card that

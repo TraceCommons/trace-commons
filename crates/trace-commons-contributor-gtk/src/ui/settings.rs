@@ -186,6 +186,12 @@ pub struct SettingsView {
     witness_measurements: gtk::TextView,
     witness_configure: gtk::Button,
     witness_clear: gtk::Button,
+    inference_status: gtk::Label,
+    inference_error: gtk::Label,
+    inference_enable: gtk::Button,
+    inference_disable: gtk::Button,
+    inference_saving: std::cell::Cell<bool>,
+    inference_supported: std::cell::Cell<bool>,
 }
 
 impl Default for SettingsView {
@@ -450,6 +456,33 @@ impl SettingsView {
             .build();
         witness_applies.add_css_class("tc-caveat");
         witness_card.append(&witness_applies);
+        witness_card.append(&style::eyebrow(copy::WITNESS_INFERENCE_HEADING));
+        for text in [
+            copy::WITNESS_INFERENCE_DISCLOSURE,
+            copy::WITNESS_INFERENCE_CAPTURE_NOTE,
+            copy::WITNESS_INFERENCE_SCOPE_NOTE,
+        ] {
+            let label = gtk::Label::builder()
+                .label(text)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class("tc-body");
+            witness_card.append(&label);
+        }
+        let inference_status = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        witness_card.append(&inference_status);
+        let inference_error = gtk::Label::builder().wrap(true).xalign(0.0).build();
+        inference_error.add_css_class("tc-caveat");
+        witness_card.append(&inference_error);
+        let inference_enable = gtk::Button::with_label(copy::WITNESS_INFERENCE_ENABLE);
+        // No enabling before a persisted settings answer arrives.
+        inference_enable.set_sensitive(false);
+        let inference_disable = gtk::Button::with_label(copy::WITNESS_INFERENCE_DISABLE);
+        for button in [&inference_enable, &inference_disable] {
+            button.set_halign(gtk::Align::Start);
+            witness_card.append(button);
+        }
         content.append(&witness_card);
 
         content.append(&style::section("Projects"));
@@ -642,6 +675,12 @@ impl SettingsView {
             witness_measurements,
             witness_configure,
             witness_clear,
+            inference_status,
+            inference_error,
+            inference_enable,
+            inference_disable,
+            inference_saving: std::cell::Cell::new(false),
+            inference_supported: std::cell::Cell::new(false),
         }
     }
 }
@@ -740,6 +779,7 @@ pub fn wire(app: &Rc<App>) {
         .connect_clicked(move |_| discover_routing(&a));
 
     wire_witness(app);
+    wire_inference_consent(app);
     // Painted immediately rather than waiting on `get_settings`: the
     // witness is not a daemon setting, so no daemon answer is coming, and a
     // card that stayed blank until one arrived would say nothing about the
@@ -1703,13 +1743,17 @@ pub fn refresh(app: &Rc<App>) {
         render_projects(app, &projects);
     });
     app.call("get_settings", serde_json::json!({}), |app, result| {
+        invalidate_inference_consent(app);
         let Ok(value) = result else { return };
+        let supports_inference = inference_consent_supported(&value);
         let Ok(settings) = serde_json::from_value::<Settings>(value) else {
             return;
         };
+        app.settings.inference_supported.set(supports_inference);
         render_connection_checks(app, &settings);
         render_knobs(app, &settings);
         render_routing(app, &settings);
+        render_inference_consent(app, &settings);
     });
     // The roster state, from the daemon rather than from what this window
     // last did. A failure -- `not-logged-in` on a device that has never
@@ -3116,6 +3160,123 @@ pub fn render_witness(app: &Rc<App>) {
     }
 }
 
+/// Only persisted daemon answers paint consent. Witness availability never
+/// prevents withdrawing it, including when a witness is misconfigured.
+fn render_inference_consent(app: &Rc<App>, settings: &Settings) {
+    let view = &app.settings;
+    if view.inference_saving.get() {
+        return;
+    }
+    view.inference_status.set_text(inference_consent_label(
+        view.inference_supported
+            .get()
+            .then_some(settings.ironwire_attested_bodies),
+    ));
+    view.inference_enable
+        .set_sensitive(view.inference_supported.get() && !settings.ironwire_attested_bodies);
+    view.inference_disable.set_sensitive(true);
+}
+
+fn inference_consent_label(persisted: Option<bool>) -> &'static str {
+    match persisted {
+        Some(true) => copy::WITNESS_INFERENCE_ENABLED,
+        Some(false) => copy::WITNESS_INFERENCE_DISABLED,
+        None => "",
+    }
+}
+
+fn invalidate_inference_consent(app: &Rc<App>) {
+    let view = &app.settings;
+    view.inference_supported.set(false);
+    view.inference_status
+        .set_text(inference_consent_label(None));
+    view.inference_enable.set_sensitive(false);
+    view.inference_disable
+        .set_sensitive(!view.inference_saving.get());
+}
+
+fn inference_consent_supported(value: &serde_json::Value) -> bool {
+    value
+        .get("ironwire_attested_bodies")
+        .is_some_and(serde_json::Value::is_boolean)
+}
+
+fn inference_consent_response(value: serde_json::Value) -> Option<Settings> {
+    if !inference_consent_supported(&value) {
+        return None;
+    }
+    serde_json::from_value(value).ok()
+}
+
+fn inference_consent_patch(enabled: bool) -> serde_json::Value {
+    serde_json::json!({ "ironwire_attested_bodies": enabled })
+}
+
+fn save_inference_consent(app: &Rc<App>, enabled: bool) {
+    let view = &app.settings;
+    if view.inference_saving.replace(true) {
+        return;
+    }
+    view.inference_error.set_text("");
+    view.inference_enable.set_sensitive(false);
+    view.inference_disable.set_sensitive(false);
+    app.call(
+        "set_settings",
+        inference_consent_patch(enabled),
+        move |app, result| {
+            app.settings.inference_saving.set(false);
+            let saved = result.ok().and_then(inference_consent_response);
+            if let Some(settings) = saved {
+                if settings.ironwire_attested_bodies == enabled {
+                    app.settings.inference_supported.set(true);
+                    render_inference_consent(app, &settings);
+                    return;
+                }
+            }
+            invalidate_inference_consent(app);
+            app.settings
+                .inference_error
+                .set_text(copy::WITNESS_INFERENCE_SAVE_FAILED);
+            refresh(app);
+        },
+    );
+}
+
+fn wire_inference_consent(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings
+        .inference_disable
+        .connect_clicked(move |_| save_inference_consent(&a, false));
+    let a = Rc::clone(app);
+    app.settings.inference_enable.connect_clicked(move |_| {
+        let body = [
+            copy::WITNESS_INFERENCE_DISCLOSURE,
+            copy::WITNESS_INFERENCE_CAPTURE_NOTE,
+            copy::WITNESS_INFERENCE_SCOPE_NOTE,
+        ]
+        .join("\n\n");
+        let dialog = adw::MessageDialog::new(
+            Some(&a.window),
+            Some(copy::WITNESS_INFERENCE_HEADING),
+            Some(&body),
+        );
+        dialog.add_responses(&[
+            ("cancel", copy::WITNESS_INFERENCE_CANCEL),
+            ("enable", copy::WITNESS_INFERENCE_CONFIRM),
+        ]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let a = Rc::clone(&a);
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response == "enable" {
+                save_inference_consent(&a, true);
+            }
+        });
+        dialog.present();
+    });
+}
+
 /// Wire the two actions. Both write the config directly and then repaint
 /// from what is on disk, never from what this window believes it wrote.
 fn wire_witness(app: &Rc<App>) {
@@ -3144,6 +3305,45 @@ fn wire_witness(app: &Rc<App>) {
 #[cfg(test)]
 mod witness_tests {
     use super::*;
+
+    #[test]
+    fn inference_consent_has_no_status_without_persisted_evidence() {
+        assert!(inference_consent_label(None).is_empty());
+        assert_eq!(
+            inference_consent_label(Some(false)),
+            copy::WITNESS_INFERENCE_DISABLED
+        );
+        assert_eq!(
+            inference_consent_label(Some(true)),
+            copy::WITNESS_INFERENCE_ENABLED
+        );
+        assert_ne!(
+            inference_consent_label(None),
+            inference_consent_label(Some(false))
+        );
+    }
+
+    #[test]
+    fn inference_consent_requires_a_supported_daemon_and_preserves_old_settings() {
+        let old = serde_json::json!({"ironwire": {"mode": "watch", "port": 8463}});
+        assert!(!inference_consent_supported(&old));
+        assert!(inference_consent_response(old.clone()).is_none());
+        assert!(
+            inference_consent_response(serde_json::json!({"ironwire_attested_bodies": null}))
+                .is_none()
+        );
+        let settings: Settings = serde_json::from_value(old).unwrap();
+        assert!(!settings.ironwire_attested_bodies);
+        for enabled in [false, true] {
+            let patch = inference_consent_patch(enabled);
+            assert!(inference_consent_supported(&patch));
+            assert_eq!(patch.as_object().unwrap().len(), 1);
+            let settings: Settings = serde_json::from_value(patch).unwrap();
+            assert_eq!(settings.ironwire_attested_bodies, enabled);
+            assert!(settings.ironwire.is_none());
+        }
+    }
+
     use trace_commons_contributor::config::{ContributorConfig, WitnessSettings};
     use trace_commons_contributor::witness::status::{
         InferenceReceiptCount, WitnessLastResult, WitnessTrustState,
@@ -3708,7 +3908,8 @@ mod witness_tests {
         let end = source
             .find("mod witness_tests")
             .expect("the region ends at its tests");
-        let region = &source[start..end];
+        // The daemon wire key is an identifier, never displayed copy.
+        let region = source[start..end].replace("ironwire_attested_bodies", "");
         for forbidden in ["attested", "genuine", "verified clean"] {
             assert!(
                 !region.to_lowercase().contains(forbidden),

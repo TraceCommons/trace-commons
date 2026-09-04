@@ -161,6 +161,18 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     /// this machine.
     public let clearNote: String
     public let appliesAtOnce: String
+    public let inferenceHeading: String
+    public let inferenceDisclosure: String
+    public let inferenceCaptureNote: String
+    public let inferenceScopeNote: String
+    public let inferenceEnable: String
+    public let inferenceDisable: String
+    public let inferenceConfirm: String
+    public let inferenceCancel: String
+    public let inferenceEnabled: String
+    public let inferenceDisabled: String
+    public let inferenceSaveFailed: String
+
 
     enum CodingKeys: String, CodingKey {
         case heading
@@ -174,6 +186,18 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case clear
         case clearNote = "clear_note"
         case appliesAtOnce = "applies_at_once"
+        case inferenceHeading = "inference_heading"
+        case inferenceDisclosure = "inference_disclosure"
+        case inferenceCaptureNote = "inference_capture_note"
+        case inferenceScopeNote = "inference_scope_note"
+        case inferenceEnable = "inference_enable"
+        case inferenceDisable = "inference_disable"
+        case inferenceConfirm = "inference_confirm"
+        case inferenceCancel = "inference_cancel"
+        case inferenceEnabled = "inference_enabled"
+        case inferenceDisabled = "inference_disabled"
+        case inferenceSaveFailed = "inference_save_failed"
+
     }
 
     /// Decode the payload, or nil if it will not parse.

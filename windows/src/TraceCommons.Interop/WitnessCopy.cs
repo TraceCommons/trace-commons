@@ -46,6 +46,18 @@ public sealed record WitnessCopy
 
     [JsonPropertyName("applies_at_once")] public string AppliesAtOnce { get; init; } = "";
 
+    [JsonPropertyName("inference_heading")] public string InferenceHeading { get; init; } = "";
+    [JsonPropertyName("inference_disclosure")] public string InferenceDisclosure { get; init; } = "";
+    [JsonPropertyName("inference_capture_note")] public string InferenceCaptureNote { get; init; } = "";
+    [JsonPropertyName("inference_scope_note")] public string InferenceScopeNote { get; init; } = "";
+    [JsonPropertyName("inference_enable")] public string InferenceEnable { get; init; } = "";
+    [JsonPropertyName("inference_disable")] public string InferenceDisable { get; init; } = "";
+    [JsonPropertyName("inference_confirm")] public string InferenceConfirm { get; init; } = "";
+    [JsonPropertyName("inference_cancel")] public string InferenceCancel { get; init; } = "";
+    [JsonPropertyName("inference_enabled")] public string InferenceEnabled { get; init; } = "";
+    [JsonPropertyName("inference_disabled")] public string InferenceDisabled { get; init; } = "";
+    [JsonPropertyName("inference_save_failed")] public string InferenceSaveFailed { get; init; } = "";
+
     /// <summary>
     /// Every word the payload carries, for the whole-or-nothing check.
     ///
@@ -66,6 +78,18 @@ public sealed record WitnessCopy
         Clear,
         ClearNote,
         AppliesAtOnce,
+        InferenceHeading,
+        InferenceDisclosure,
+        InferenceCaptureNote,
+        InferenceScopeNote,
+        InferenceEnable,
+        InferenceDisable,
+        InferenceConfirm,
+        InferenceCancel,
+        InferenceEnabled,
+        InferenceDisabled,
+        InferenceSaveFailed,
+
     };
 }
 

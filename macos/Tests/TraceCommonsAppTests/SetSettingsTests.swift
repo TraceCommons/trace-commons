@@ -72,6 +72,36 @@ final class SetSettingsTests: XCTestCase {
         client = DaemonClient(daemon: daemon)
     }
 
+    func testInferenceEvidenceNeedsExplicitDisclosureBeforeAnyWrite() {
+        XCTAssertThrowsError(try client.setInferenceEvidence(true, disclosureConfirmed: false))
+        XCTAssertTrue(daemon.calls.isEmpty)
+    }
+
+    func testInferenceEvidenceDoesNotInferConsentFromPrivacyScanOrRouting() throws {
+        daemon.response = settingsFrame
+        let settings = try client.settings()
+        XCTAssertFalse(settings.inferenceEvidenceEnabled)
+        XCTAssertNil(settings.ironwireAttestedBodies)
+    }
+
+    func testInferenceEvidenceWritesOnlyConsentAndRequiresDaemonConfirmation() throws {
+        daemon.response = settingsFrame.replacingOccurrences(of: "\"near_ai_configured\":false", with: "\"ironwire_attested_bodies\":true,\"near_ai_configured\":false")
+        let settings = try client.setInferenceEvidence(true, disclosureConfirmed: true)
+        XCTAssertTrue(settings.inferenceEvidenceEnabled)
+        XCTAssertEqual(daemon.lastParams?.count, 1)
+        XCTAssertEqual(daemon.lastParams?["ironwire_attested_bodies"] as? Bool, true)
+
+        daemon.response = settingsFrame
+        XCTAssertThrowsError(try client.setInferenceEvidence(true, disclosureConfirmed: true))
+        XCTAssertThrowsError(try client.setInferenceEvidence(false, disclosureConfirmed: false))
+    }
+
+    func testInferenceEvidenceCanBeDisabledWithoutAnotherConsentDecision() throws {
+        daemon.response = settingsFrame.replacingOccurrences(of: "\"near_ai_configured\":false", with: "\"ironwire_attested_bodies\":false,\"near_ai_configured\":false")
+        XCTAssertFalse(try client.setInferenceEvidence(false, disclosureConfirmed: false).inferenceEvidenceEnabled)
+        XCTAssertEqual(daemon.lastParams?["ironwire_attested_bodies"] as? Bool, false)
+    }
+
     // MARK: - What goes out
 
     /// The method name is the contract's, and the object carries exactly

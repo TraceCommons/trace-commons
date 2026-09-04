@@ -72,6 +72,37 @@ pub const WITNESS_CLEAR_NOTE: &str = concat!(
 /// Changes take effect on the next upload, with no restart.
 pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next session sent.";
 
+/// Consent to carry inference content is independent of observing a proxy's
+/// ledger, configuring a witness, and acknowledging the extra privacy scan.
+pub const WITNESS_INFERENCE_HEADING: &str = "Include captured inference evidence";
+pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
+    "When a contribution uses a witness, this allows the final model call's exact request ",
+    "and response to be sent to that remote witness before redaction. These may include ",
+    "prompts, conversation history, tool results, and secrets. The witness checks the ",
+    "evidence and removes these attached bodies from the contribution it returns. ",
+    "Looking up a receipt with NEAR AI can also reveal which call you are contributing."
+);
+pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
+    "IronWire capture must be configured separately. When capture is enabled, request ",
+    "and response bodies are stored on this machine. Turning this permission off stops ",
+    "including bodies in future contributions; it does not turn off IronWire capture ",
+    "or delete bodies already stored. Work already in progress may still finish."
+);
+pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
+    "This permission does not connect an agent to NEAR AI, fund inference, or prove a ",
+    "receipt was verified. Witness-backed review is not yet available in the desktop ",
+    "app. Setting this permission does not make a blocked submission ready to send."
+);
+pub const WITNESS_INFERENCE_ENABLE: &str = "Review permission";
+pub const WITNESS_INFERENCE_DISABLE: &str = "Stop including inference bodies";
+pub const WITNESS_INFERENCE_CONFIRM: &str = "Allow sending captured bodies";
+pub const WITNESS_INFERENCE_CANCEL: &str = "Not now";
+pub const WITNESS_INFERENCE_ENABLED: &str =
+    "Permission saved. Captured bodies may be included when a contribution uses a witness.";
+pub const WITNESS_INFERENCE_DISABLED: &str = "Captured inference bodies are not included.";
+pub const WITNESS_INFERENCE_SAVE_FAILED: &str =
+    "Couldn't confirm this permission was saved. Reload settings to check before continuing.";
+
 /// How a witness sentence is painted.
 ///
 /// Five values, and the fifth is the reason this is not
@@ -306,6 +337,17 @@ pub struct WitnessCopy {
     pub clear: &'static str,
     pub clear_note: &'static str,
     pub applies_at_once: &'static str,
+    pub inference_heading: &'static str,
+    pub inference_disclosure: &'static str,
+    pub inference_capture_note: &'static str,
+    pub inference_scope_note: &'static str,
+    pub inference_enable: &'static str,
+    pub inference_disable: &'static str,
+    pub inference_confirm: &'static str,
+    pub inference_cancel: &'static str,
+    pub inference_enabled: &'static str,
+    pub inference_disabled: &'static str,
+    pub inference_save_failed: &'static str,
 }
 
 /// The witness surface's fixed words.
@@ -323,6 +365,17 @@ pub fn witness_copy() -> WitnessCopy {
         clear: WITNESS_CLEAR,
         clear_note: WITNESS_CLEAR_NOTE,
         applies_at_once: WITNESS_APPLIES_AT_ONCE,
+        inference_heading: WITNESS_INFERENCE_HEADING,
+        inference_disclosure: WITNESS_INFERENCE_DISCLOSURE,
+        inference_capture_note: WITNESS_INFERENCE_CAPTURE_NOTE,
+        inference_scope_note: WITNESS_INFERENCE_SCOPE_NOTE,
+        inference_enable: WITNESS_INFERENCE_ENABLE,
+        inference_disable: WITNESS_INFERENCE_DISABLE,
+        inference_confirm: WITNESS_INFERENCE_CONFIRM,
+        inference_cancel: WITNESS_INFERENCE_CANCEL,
+        inference_enabled: WITNESS_INFERENCE_ENABLED,
+        inference_disabled: WITNESS_INFERENCE_DISABLED,
+        inference_save_failed: WITNESS_INFERENCE_SAVE_FAILED,
     }
 }
 
@@ -580,7 +633,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            11,
+            22,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
