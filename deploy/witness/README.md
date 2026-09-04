@@ -413,6 +413,42 @@ verify in principle and does not verify in practice.
 
 ---
 
+## Which KMS, and why that is not a detail
+
+`phala deploy` takes `--kms-id`, and on a node that supports on-chain KMS it
+refuses without one. **This deployment uses `phala-usc1`**, on node `18`
+(`prod9`, US-WEST-1).
+
+The reasoning, so the next person inherits it rather than rediscovering it at
+the same prompt:
+
+- The signing address derives from the **KMS and the app id together**. Moving
+  to a different KMS later therefore rotates the signing address — which is a
+  **key rotation**, not an upgrade, and re-allowlisting a measurement does not
+  help, because it is not the measurement that moved. It has the same shape as
+  the `/v0` → `/v1` guest-API change described below, and the same cost: every
+  client that pinned the old address stops verifying.
+- So this is chosen once and is expensive to revisit. It is not a deployment
+  detail even though it looks like one on the command line.
+- `phala-usc1` is Phala-operated and regionally matched to `prod9`. The
+  alternatives offered were other `phala-*` instances and the on-chain
+  `kms-eth-*` / `kms-base-*` families, which put key-release policy under a
+  contract on Ethereum or Base respectively.
+- Neither on-chain family was chosen because **nothing in this project already
+  depends on those chains.** Credit settlement is on NEAR, so an Ethereum or
+  Base KMS would introduce a second chain into the trust path for no benefit
+  this deployment can name. That is a reason to revisit if the surrounding
+  architecture ever moves on-chain in a way that makes one of them the natural
+  home for key-release policy.
+
+What choosing a KMS does *not* change: `kms_enabled: true` and
+`local_key_provider_enabled: false` are settled and recorded in
+`build-app-compose.sh`. A local key provider seals to one host TPM and would
+tie the signing address to a single machine, losing the property that makes the
+upgrade path below work at all.
+
+---
+
 ## Upgrades — the order matters, and one case breaks it
 
 ### The ordinary case: a new image
@@ -595,6 +631,36 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 A malformed nonce is rejected rather than padded — `parse_hex` accepts exactly
 64 bare hex characters, no `0x` prefix — so a `400` here is usually your nonce,
 not the witness.
+
+---
+
+## The deployment that exists
+
+First deployed 2026-09-04. Recorded here because an app id is what a signing
+address derives from, and a CVM that nobody can name is one nobody can audit.
+
+| | |
+|---|---|
+| CVM ID | `fa62907e-209f-45cd-8b70-86e450a62399` |
+| App ID | `39cdd01fcb7bba691f07ee6951de147f7814f829` |
+| Node | `18` (`prod9`, US-WEST-1) |
+| KMS | `phala-usc1` |
+| dstack image | `dstack-0.5.9` |
+| Sizing | 4 vCPU, 8 GB |
+| Container image | `ghcr.io/tracecommons/trace-commons-witness@sha256:f1d4c00266656f0227292efe7239595d6ad0bd7b9083c750d610c0e11b2689bc` |
+| Manifest hash | `ee2a8af364272fae211fb5b7443d3c28de6153b300c781d75d06aaa9db547e2e` |
+
+The sizing is not a default. `phala deploy` defaults to 1 vCPU and 2048 MB, and
+the compose admits four concurrent witness requests at a 64 MiB body cap — on
+the order of a gigabyte of buffers at full occupancy before the runtime. On a
+public unauthenticated route an OOM kill is the denial of service the
+concurrency bound exists to prevent, so the memory is sized above the worst
+case rather than onto it.
+
+**Still to be read from the running instance, and not yet recorded here:** the
+signing address, the measurement, and the gateway hostname. Until those exist
+no client can be pinned, and until `tcb_info.compose_hash` has been compared
+against the manifest hash above, none of them should be.
 
 ---
 
