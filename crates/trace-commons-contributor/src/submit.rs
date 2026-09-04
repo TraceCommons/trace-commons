@@ -333,6 +333,7 @@ pub struct SubmitContext<'a> {
     receipts: Vec<Receipt>,
     canary_runs: u32,
     approved_envelope: Option<TraceContributionEnvelope>,
+    approved_witness: Option<WitnessedEnvelope>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -374,6 +375,7 @@ impl<'a> SubmitContext<'a> {
             receipts,
             canary_runs: 0,
             approved_envelope: None,
+            approved_witness: None,
         })
     }
 
@@ -423,6 +425,76 @@ impl<'a> SubmitContext<'a> {
     /// envelope cannot leak onto an unrelated later session.
     pub fn use_approved_envelope(&mut self, envelope: Option<TraceContributionEnvelope>) {
         self.approved_envelope = envelope;
+        self.approved_witness = None;
+    }
+
+    /// One-shot witnessed artifact. Caller has checked the atomic record's pin
+    /// and bindings; submit rechecks its certificate and fresh authorization.
+    pub(crate) fn use_approved_witness(&mut self, response: WitnessedEnvelope) -> Result<()> {
+        self.approved_envelope = None;
+        self.approved_witness = None;
+        self.approved_envelope = Some(parse_witnessed_envelope(&response)?);
+        self.approved_witness = Some(response);
+        self.invalidate_claim();
+        Ok(())
+    }
+
+    /// Explicit review only. Ordinary preview/card paths never call this.
+    pub(crate) async fn prepare_witnessed_review(
+        &mut self,
+        transcript: &crate::source::SessionTranscript,
+        correction: Option<&str>,
+        include_inference_bodies: bool,
+    ) -> Result<WitnessedEnvelope> {
+        let settings = self
+            .cfg
+            .witness
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?
+            .clone();
+        if !settings
+            .trust()
+            .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?
+            .is_pinned()
+        {
+            anyhow::bail!("witness_expected_measurement");
+        }
+        let now = Utc::now();
+        let token = self
+            .ensure_claim(now, &transcript.session_hash)
+            .await?
+            .map_err(|_| anyhow::anyhow!("witness-claim-unavailable"))?;
+        validate_review_grant(&self.effective_cfg, &token, now)?;
+        let raw = crate::envelope::build_raw_contribution_with_correction(
+            transcript,
+            &self.effective_cfg,
+            now,
+            self.opts.verdict,
+            correction,
+        );
+        let attested = if include_inference_bodies {
+            transcript.attested_call.as_deref()
+        } else {
+            None
+        };
+        let (envelope, response) = self
+            .witness_envelope(&settings, raw, attested, &token, now)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        ensure_certified_grant(&envelope, &token, Utc::now())?;
+        if envelope.submission_id != crate::source::submission_id_for(&transcript.session_hash) {
+            anyhow::bail!("witness-review-source-mismatch");
+        }
+        let redactor = build_redactor_with(
+            &self.effective_cfg,
+            transcript.cwd.as_deref(),
+            self.near_ai.clone(),
+        )
+        .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
+        if residual_secret_refusal(&redactor, &envelope, &transcript.session_hash)?.is_some() {
+            anyhow::bail!("secret-leak-detected");
+        }
+        Ok(response)
     }
 
     /// The effective contributor config this pipeline stamps onto
@@ -644,6 +716,7 @@ impl<'a> SubmitContext<'a> {
         // filter, an over-size refusal), and an approved envelope left
         // behind would apply to whatever session came next.
         let approved_envelope = self.approved_envelope.take();
+        let approved_witness = self.approved_witness.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -715,14 +788,29 @@ impl<'a> SubmitContext<'a> {
 
         let mut envelope = match approved_envelope {
             Some(approved) => {
-                // An approved envelope was built by the preview path, which
-                // under a configured witness refuses to build one at all
-                // (`witness_claim_unavailable`). So reaching here with both an
-                // approved envelope and a configured witness means the
-                // envelope predates the witness configuration, and uploading
-                // it would be an uncertified submission from a contributor who
-                // believes their submissions are certified.
-                if witness_settings.is_some() {
+                // Only the explicit witnessed-review path persists a certificate.
+                // A local preview saved before witness configuration must still
+                // refuse rather than upload an uncertified artifact.
+                if let Some(response) = approved_witness {
+                    let Some(settings) = witness_settings.as_ref() else {
+                        return Ok(refused("witness-review-stale", &transcript.session_hash));
+                    };
+                    if settings
+                        .trust()
+                        .map(|trust| !trust.is_pinned())
+                        .unwrap_or(true)
+                        || crate::witness::transport::verify_certificate(
+                            &response,
+                            &settings.signing_address,
+                        )
+                        .is_err()
+                        || approved.submission_id
+                            != crate::source::submission_id_for(&transcript.session_hash)
+                    {
+                        return Ok(refused("witness-review-stale", &transcript.session_hash));
+                    }
+                    witnessed = Some(response);
+                } else if witness_settings.is_some() {
                     record_last_result(WitnessLastResult::Refused {
                         label: "witness_certificate_missing".to_string(),
                         certificate_obtained: false,
@@ -912,6 +1000,8 @@ impl<'a> SubmitContext<'a> {
         // and break the digest.
         if witnessed.is_none() {
             stamp_granted_scopes(&mut envelope, &self.effective_cfg, &token);
+        } else if ensure_certified_grant(&envelope, &token, Utc::now()).is_err() {
+            return Ok(refused("witness-grant-changed", &transcript.session_hash));
         }
 
         if let Some(outcome) =
@@ -1507,6 +1597,59 @@ fn granted_consent_for(
     }
 }
 
+fn validate_review_grant(
+    cfg: &ContributorConfig,
+    token: &ClaimToken,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    let granted: BTreeSet<_> = token.consent_scopes.iter().collect();
+    let requested: BTreeSet<_> = cfg.consent_scopes.iter().collect();
+    if !token.is_fresh(now)
+        || token.access_token.is_empty()
+        || granted.is_empty()
+        || !granted.is_subset(&requested)
+        || parse_scope_names(&token.consent_scopes).len() != token.consent_scopes.len()
+        || parse_use_names(&token.allowed_uses).len() != token.allowed_uses.len()
+    {
+        anyhow::bail!("witness-claim-invalid");
+    }
+    let permitted_uses = crate::consent::scopes_to_allowed_uses(&token.consent_scopes);
+    if token
+        .allowed_uses
+        .iter()
+        .any(|name| !permitted_uses.contains(name))
+    {
+        anyhow::bail!("witness-claim-invalid");
+    }
+    Ok(())
+}
+
+fn ensure_certified_grant(
+    envelope: &TraceContributionEnvelope,
+    token: &ClaimToken,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if !token.is_fresh(now) || token.access_token.is_empty() || token.consent_scopes.is_empty() {
+        anyhow::bail!("witness-grant-changed");
+    }
+    let mut expected = envelope.clone();
+    apply_granted_scopes(
+        &mut expected,
+        &parse_scope_names(&token.consent_scopes),
+        &parse_use_names(&token.allowed_uses),
+    );
+    if expected.consent != envelope.consent
+        || expected.trace_card.allowed_uses != envelope.trace_card.allowed_uses
+        || expected.trace_card.consent_scope != envelope.trace_card.consent_scope
+        || parse_scope_names(&token.consent_scopes).len() != token.consent_scopes.len()
+        || parse_use_names(&token.allowed_uses).len() != token.allowed_uses.len()
+    {
+        anyhow::bail!("witness-grant-changed");
+    }
+    Ok(())
+}
+
 fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
@@ -1536,10 +1679,9 @@ fn build_ingest_client(
 /// `witnessed` carries the bytes the certificate covers. When it is `Some`,
 /// those bytes go on the wire **verbatim** through `call_bytes`, with the
 /// certificate and signature in headers, and `envelope` is not consulted for
-/// the body at all. A re-mint on that path **refuses** rather than restamping:
-/// the restamp would break the digest, and silently re-witnessing would send
-/// the raw session a second time on the strength of a verification made for a
-/// different exchange.
+/// the body at all. A re-mint retries only if all certified permissions match
+/// the fresh grant exactly. Otherwise it refuses; it never restamps signed
+/// bytes or sends the raw session to the witness a second time.
 async fn upload_with_retry(
     cfg: &ContributorConfig,
     issuer: &IssuerClient,
@@ -1620,17 +1762,14 @@ async fn upload_with_retry(
                     return Err("auth-failed".to_string());
                 }
                 remint_attempted = true;
-                if witnessed.is_some() {
-                    // A re-mint cannot restamp certified bytes, and
-                    // re-witnessing here would send the raw session a second
-                    // time on a verification made for a different exchange.
-                    // The contributor re-runs, which re-verifies and
-                    // re-witnesses explicitly.
-                    return Err("witness_claim_expired".to_string());
-                }
                 match mint_claim(issuer, cfg, device, Utc::now()).await {
                     Ok(new_token) => {
-                        stamp_granted_scopes(envelope, effective_cfg, &new_token);
+                        if witnessed.is_some() {
+                            ensure_certified_grant(envelope, &new_token, Utc::now())
+                                .map_err(|_| "witness-grant-changed".to_string())?;
+                        } else {
+                            stamp_granted_scopes(envelope, effective_cfg, &new_token);
+                        }
                         if envelope_size_ok(envelope).is_err() {
                             return Err("session-too-large".to_string());
                         }
@@ -1659,6 +1798,243 @@ mod tests {
     use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
+
+    fn review_options() -> SubmitOptions {
+        SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        }
+    }
+
+    async fn reviewed_fixture(
+        cfg: &mut ContributorConfig,
+    ) -> (
+        crate::source::SessionTranscript,
+        crate::daemon::approved_envelope::WitnessReviewArtifact,
+    ) {
+        let (source, reference) = fixture_selection().remove(0);
+        let transcript = source.load(&reference).unwrap();
+        let mut envelope = baseline_envelope(cfg).await;
+        let token = ClaimToken {
+            access_token: "review-only-not-stored".into(),
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            consent_scopes: cfg.consent_scopes.clone(),
+            allowed_uses: vec![
+                "debugging".into(),
+                "evaluation".into(),
+                "model_training".into(),
+                "aggregate_analytics".into(),
+            ],
+        };
+        stamp_granted_scopes(&mut envelope, cfg, &token);
+        let (response, signer) = crate::witness::transport::signed_fixture(
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        );
+        cfg.witness = Some(WitnessSettings {
+            url: "https://no-repeat-witness.invalid".into(),
+            signing_address: signer,
+            expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+        });
+        let fingerprint = crate::daemon::preview::input_fingerprint(cfg, None, false);
+        let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            response,
+            transcript.session_hash.clone(),
+            fingerprint,
+            None,
+            None,
+        );
+        (transcript, artifact)
+    }
+
+    #[tokio::test]
+    async fn witness_review_survives_restart_and_uploads_exact_certified_bytes() {
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        artifact
+            .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+            .unwrap();
+        let entry_id = crate::daemon::queue::entry_id_for(&transcript.session_hash);
+        crate::daemon::approved_envelope::save_witnessed(&store, entry_id, &artifact).unwrap();
+        let restored = crate::daemon::approved_envelope::load_witnessed(&store, entry_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.digest().unwrap(), restored.digest().unwrap());
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(restored.response().clone())
+            .unwrap();
+        assert!(matches!(
+            context.submit_loaded(transcript).await.unwrap(),
+            SubmitOutcome::Submitted { .. }
+        ));
+        let captured = capture.lock().unwrap();
+        assert_eq!(
+            captured.bodies.as_slice(),
+            &[artifact.response().envelope_bytes.clone()]
+        );
+        assert_eq!(
+            captured.headers[0][WITNESS_CERTIFICATE_HEADER]
+                .to_str()
+                .unwrap(),
+            artifact.response().certificate_json
+        );
+        assert_eq!(
+            captured.headers[0][WITNESS_SIGNATURE_HEADER]
+                .to_str()
+                .unwrap(),
+            artifact.response().signature_hex
+        );
+    }
+
+    #[tokio::test]
+    async fn witness_review_re_mints_compatible_expired_authorization_without_rewitnessing() {
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 401)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        assert!(matches!(
+            context.submit_loaded(transcript).await.unwrap(),
+            SubmitOutcome::Submitted { .. }
+        ));
+        let captured = capture.lock().unwrap();
+        assert_eq!(captured.bodies.len(), 2);
+        assert_eq!(captured.bodies[0], artifact.response().envelope_bytes);
+        assert_eq!(captured.bodies[0], captured.bodies[1]);
+    }
+
+    #[tokio::test]
+    async fn witness_review_refuses_changed_grants_before_upload() {
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(Router::new().route("/v1/trace-upload-claim", post(|| async {
+            Json(serde_json::json!({"access_token":"fresh-narrow-grant", "expires_at": Utc::now() + chrono::Duration::minutes(5),
+                "consent_scopes":["debugging_evaluation"], "allowed_uses":["debugging"]}))
+        }))).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        context
+            .use_approved_witness(artifact.response().clone())
+            .unwrap();
+        assert!(
+            matches!(context.submit_loaded(transcript).await.unwrap(), SubmitOutcome::Refused { reason_label, .. } if reason_label == "witness-grant-changed")
+        );
+        assert!(capture.lock().unwrap().bodies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn witness_review_binds_source_identity_settings_and_approval_answers() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "https://issuer.invalid",
+            "https://ingest.invalid",
+            &device.device_key_id,
+        );
+        let (transcript, artifact) = reviewed_fixture(&mut cfg).await;
+        let fingerprint = crate::daemon::preview::input_fingerprint(&cfg, None, false);
+        assert!(
+            artifact
+                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .is_ok()
+        );
+        assert!(
+            artifact
+                .validate(&cfg, "foreign-source", &fingerprint, None, None)
+                .is_err()
+        );
+        assert!(
+            artifact
+                .validate(
+                    &cfg,
+                    &transcript.session_hash,
+                    "changed-settings",
+                    None,
+                    None
+                )
+                .is_err()
+        );
+        assert!(
+            artifact
+                .validate(
+                    &cfg,
+                    &transcript.session_hash,
+                    &fingerprint,
+                    Some("worked"),
+                    None
+                )
+                .is_err()
+        );
+        assert!(
+            artifact
+                .validate(
+                    &cfg,
+                    &transcript.session_hash,
+                    &fingerprint,
+                    None,
+                    Some("new correction")
+                )
+                .is_err()
+        );
+        cfg.tenant_id.push_str("-foreign");
+        assert!(
+            artifact
+                .validate(&cfg, &transcript.session_hash, &fingerprint, None, None)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn witness_review_grants_require_explicit_known_fresh_scopes() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "https://issuer.invalid",
+            "https://ingest.invalid",
+            &device.device_key_id,
+        );
+        let now = Utc::now();
+        let valid = stub_claim(now);
+        assert!(validate_review_grant(&cfg, &valid, now).is_ok());
+        let mut token = valid.clone();
+        token.expires_at = now;
+        assert!(validate_review_grant(&cfg, &token, now).is_err());
+        token = valid.clone();
+        token.consent_scopes.clear();
+        assert!(validate_review_grant(&cfg, &token, now).is_err());
+        token = valid.clone();
+        token.consent_scopes.push("foreign-scope".into());
+        assert!(validate_review_grant(&cfg, &token, now).is_err());
+        token = valid.clone();
+        token.allowed_uses.push("foreign-use".into());
+        assert!(validate_review_grant(&cfg, &token, now).is_err());
+        token = valid;
+        token.consent_scopes.push("ranking_training".into());
+        assert!(validate_review_grant(&cfg, &token, now).is_err());
+    }
 
     /// Body limit every stub endpoint is mounted with. axum defaults to
     /// 2 MiB, which is BELOW the envelope cap -- a stub left on the default
@@ -4079,6 +4455,17 @@ mod tests {
         std::result::Result<TraceSubmissionReceipt, String>,
         CapturedUpload,
     ) {
+        upload_once_with_compatible_grant(witnessed, first_status, false).await
+    }
+
+    async fn upload_once_with_compatible_grant(
+        witnessed: Option<&WitnessedEnvelope>,
+        first_status: u16,
+        compatible_grant: bool,
+    ) -> (
+        std::result::Result<TraceSubmissionReceipt, String>,
+        CapturedUpload,
+    ) {
         let captured = Arc::new(Mutex::new(CapturedUpload::default()));
         let issuer_url = spawn(stub_issuer()).await;
         let ingest_url = spawn(stub_ingest_raw(captured.clone(), first_status)).await;
@@ -4089,8 +4476,19 @@ mod tests {
         let issuer = IssuerClient::new(allowlist_for(None)).unwrap();
 
         let now = Utc::now();
-        let mut claim = Some(stub_claim(now));
+        let mut initial = stub_claim(now);
+        if compatible_grant {
+            initial.consent_scopes = vec!["debugging_evaluation".into(), "model_training".into()];
+            initial.allowed_uses = vec![
+                "debugging".into(),
+                "evaluation".into(),
+                "model_training".into(),
+                "aggregate_analytics".into(),
+            ];
+        }
+        let mut claim = Some(initial);
         let mut envelope = baseline_envelope(&cfg).await;
+        stamp_granted_scopes(&mut envelope, &cfg, claim.as_ref().unwrap());
 
         let result = upload_with_retry(
             &cfg,
@@ -4182,7 +4580,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_re_mint_refuses_rather_than_restamping_certified_bytes() {
+    async fn witness_review_compatible_401_retry_preserves_bytes_and_certificate() {
+        let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        let (result, captured) =
+            upload_once_with_compatible_grant(Some(&witnessed), 401, true).await;
+        result.expect("a compatible fresh grant permits the exact approved artifact");
+        assert_eq!(captured.bodies.len(), 2);
+        assert_eq!(captured.bodies[0], witnessed.envelope_bytes);
+        assert_eq!(captured.bodies[1], witnessed.envelope_bytes);
+        for headers in &captured.headers {
+            assert_eq!(
+                headers[WITNESS_CERTIFICATE_HEADER],
+                witnessed.certificate_json
+            );
+            assert_eq!(headers[WITNESS_SIGNATURE_HEADER], witnessed.signature_hex);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_re_mint_refuses_rather_than_restamping_certified_bytes() {
         // upload_with_retry restamps granted scopes after a 401 re-mint,
         // deliberately, so a stale grant is not resent. On a witnessed
         // submission that write breaks the digest, and silently re-witnessing
@@ -4190,7 +4606,7 @@ mod tests {
         // verification made for a different exchange.
         let witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
         let (result, captured) = upload_once(Some(&witnessed), 401).await;
-        assert_eq!(result.unwrap_err(), "witness_claim_expired");
+        assert_eq!(result.unwrap_err(), "witness-grant-changed");
         assert_eq!(
             captured.bodies.len(),
             1,

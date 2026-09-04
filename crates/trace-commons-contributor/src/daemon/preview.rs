@@ -675,8 +675,26 @@ async fn build_preview_core(
         return Err(anyhow::anyhow!("witness_claim_unavailable"));
     }
     let envelope = redact_to_envelope(&redactor, raw).await?;
-    let would_send_bytes = envelope_size(&envelope)?;
+    summarize_envelope(
+        &envelope,
+        raw_session_bytes,
+        &transcript,
+        fingerprint,
+        enrolled,
+        &redactor,
+    )
+    .map(|summary| (summary, envelope))
+}
 
+fn summarize_envelope(
+    envelope: &TraceContributionEnvelope,
+    raw_session_bytes: u64,
+    transcript: &crate::source::SessionTranscript,
+    fingerprint: String,
+    enrolled: bool,
+    redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
+) -> Result<PreviewCardSummary> {
+    let would_send_bytes = envelope_size(envelope)?;
     let event_count = envelope.events.len();
     let opening_prompt = envelope
         .events
@@ -699,7 +717,7 @@ async fn build_preview_core(
     // `use_approved_envelope` uploads and what `redaction_hash` covers, and a
     // detection-only finding must not change the artifact it describes.
     let mut redactions = envelope.privacy.redaction_counts.clone();
-    for (label, count) in residual_secret_labels_fail_closed(&redactor, &envelope) {
+    for (label, count) in residual_secret_labels_fail_closed(redactor, envelope) {
         *redactions.entry(label).or_insert(0) += count;
     }
     let redactions_distinct = envelope.privacy.redaction_distinct_counts.clone();
@@ -710,24 +728,120 @@ async fn build_preview_core(
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "pattern-based".to_string());
 
-    Ok((
-        PreviewCardSummary {
-            would_send_bytes,
-            raw_session_bytes,
-            event_count,
-            opening_prompt,
-            redactions,
-            redactions_distinct,
-            pii_labels_present,
-            consent_scopes,
-            residual_risk,
-            input_fingerprint: fingerprint,
-            enrolled,
-            subagent_count: transcript.subagent_count,
-            subagents_dropped: transcript.subagents_dropped,
-        },
-        envelope,
-    ))
+    Ok(PreviewCardSummary {
+        would_send_bytes,
+        raw_session_bytes,
+        event_count,
+        opening_prompt,
+        redactions,
+        redactions_distinct,
+        pii_labels_present,
+        consent_scopes,
+        residual_risk,
+        input_fingerprint: fingerprint,
+        enrolled,
+        subagent_count: transcript.subagent_count,
+        subagents_dropped: transcript.subagents_dropped,
+    })
+}
+
+/// Explicit user authorization for a single remote review. Not inferred from
+/// enrollment, proxy configuration, optional scanner consent, or card visibility.
+#[derive(Default)]
+pub struct WitnessPreviewOptions<'a> {
+    pub raw_session_confirmed: bool,
+    pub expected_session_hash: &'a str,
+    pub include_inference_bodies: bool,
+    pub verdict: Option<crate::envelope::ContributorVerdict>,
+    pub correction: Option<&'a str>,
+}
+
+pub struct WitnessPreview {
+    pub summary: PreviewSummary,
+    pub body: String,
+    pub artifact: super::approved_envelope::WitnessReviewArtifact,
+}
+
+/// Only the explicit `witness_preview_request` handler may call this helper.
+/// It does not persist or approve; the IPC handler atomically pins the returned
+/// artifact under its queue lock after rechecking source/configuration state.
+pub async fn build_witnessed_preview(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    options: WitnessPreviewOptions<'_>,
+) -> Result<WitnessPreview> {
+    if !options.raw_session_confirmed {
+        anyhow::bail!("witness-review-consent-required");
+    }
+    let device = crate::identity::DeviceIdentity::load(store)
+        .map_err(|_| anyhow::anyhow!("witness-review-not-enrolled"))?
+        .ok_or_else(|| anyhow::anyhow!("witness-review-not-enrolled"))?;
+    if device.device_key_id != cfg.device_key_id {
+        anyhow::bail!("witness-review-not-enrolled");
+    }
+    let transcript = source
+        .load(session_ref)
+        .map_err(|_| anyhow::anyhow!("parse-failed"))?;
+    if transcript.session_hash != options.expected_session_hash {
+        anyhow::bail!("witness-review-source-changed");
+    }
+    let submit_options = crate::submit::SubmitOptions {
+        dry_run: false,
+        pii_filter: None,
+        no_reasoning: false,
+        machine_readable: true,
+        unenrolled_preview: false,
+        remediate_quarantined: false,
+        verdict: options.verdict,
+    };
+    let mut context =
+        crate::submit::SubmitContext::new(store, cfg, &submit_options, near_ai.clone())
+            .map_err(|_| anyhow::anyhow!("witness-review-unavailable"))?;
+    let response = context
+        .prepare_witnessed_review(
+            &transcript,
+            options.correction,
+            options.include_inference_bodies,
+        )
+        .await?;
+    let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), options.include_inference_bodies);
+    let verdict = options.verdict.map(|verdict| match verdict {
+        crate::envelope::ContributorVerdict::Worked => "worked",
+        crate::envelope::ContributorVerdict::Partly => "partly",
+        crate::envelope::ContributorVerdict::Failed => "failed",
+    });
+    let artifact = super::approved_envelope::WitnessReviewArtifact::new(
+        response,
+        transcript.session_hash.clone(),
+        fingerprint.clone(),
+        verdict,
+        options.correction,
+    );
+    let envelope = artifact.validate(
+        cfg,
+        &transcript.session_hash,
+        &fingerprint,
+        verdict,
+        options.correction,
+    )?;
+    let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)
+        .map_err(|_| anyhow::anyhow!("pii-filter-unavailable"))?;
+    let summary = summarize_envelope(
+        &envelope,
+        session_ref.size_bytes,
+        &transcript,
+        fingerprint,
+        true,
+        &redactor,
+    )?;
+    Ok(WitnessPreview {
+        summary: summary.into_summary(artifact.digest()?),
+        body: body_of(&envelope)?,
+        artifact,
+    })
 }
 
 /// The redacted body a contributor is shown for one envelope: the redacted
@@ -938,6 +1052,70 @@ mod tests {
     use crate::envelope::build_raw_contribution;
     use crate::source::claude_code::ClaudeCodeSource;
     use trace_commons_protocol::trace_contribution::RESIDUAL_SECRET_AT_PREFIX;
+
+    #[tokio::test]
+    async fn witness_review_requires_explicit_confirmation_before_loading_or_minting() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (_session_dir, source, reference) = fixture_session();
+        let error = build_witnessed_preview(
+            &store,
+            &cfg,
+            None,
+            &source,
+            &reference,
+            WitnessPreviewOptions::default(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "witness-review-consent-required");
+    }
+
+    #[tokio::test]
+    async fn witness_review_refuses_a_changed_source_before_network_access() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (_session_dir, source, reference) = fixture_session();
+        let options = WitnessPreviewOptions {
+            raw_session_confirmed: true,
+            expected_session_hash: "changed",
+            ..Default::default()
+        };
+        let error = build_witnessed_preview(&store, &cfg, None, &source, &reference, options)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "witness-review-source-changed");
+    }
+
+    #[tokio::test]
+    async fn ordinary_witness_preview_and_cards_remain_fail_closed() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = sample_cfg(&store);
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://witness.invalid".into(),
+            signing_address: "invalid".into(),
+            expected_measurements: vec![],
+        });
+        let (_session_dir, source, reference) = fixture_session();
+        assert_eq!(
+            build_preview(&store, Some(&cfg), None, &source, &reference)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "witness_claim_unavailable"
+        );
+        assert_eq!(
+            build_preview_card(Some(&cfg), None, true, &source, &reference)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "witness_claim_unavailable"
+        );
+    }
 
     fn sample_cfg(store: &ConfigStore) -> ContributorConfig {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();

@@ -654,6 +654,64 @@ preview a local file; that requirement was incidental and is gone.
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
 
+### Explicit witnessed review: contributor helper contract
+
+The contributor supports an explicitly authorized witnessed-review builder.
+**IPC dispatch/native trigger integration is separate:** this section specifies
+`witness_preview_request`; clients must not offer it unless the daemon advertises
+that method. Existing `preview`, `preview_request`, card summaries, and background
+refresh never invoke this builder. A configured witness still refuses ordinary
+preview with `witness_claim_unavailable`, rather than building a local substitute.
+
+The root-owned handler must enforce these conditions:
+
+1. Require an authenticated local IPC caller, an enrolled device, a pending entry
+   the caller already holds, and explicit confirmation to send this session to
+   the configured remote witness before redaction. Body-export consent remains
+   separate: read `ironwire_attested_bodies` from current daemon settings, never
+   from a caller's inferred proxy/scanner state. No confirmation means no work.
+2. Snapshot the selected entry's source hash and current configuration, including
+   consent and witness pins. Call `preview::build_witnessed_preview` with
+   `WitnessPreviewOptions { raw_session_confirmed, expected_session_hash,
+   include_inference_bodies, verdict, correction }`. A missing/stale device,
+   changed source, unpinned witness, failed claim, or unverified certificate
+   refuses. There is no local-redaction fallback.
+3. This is an ordinary authenticated upload-claim request, not an admission or
+   credit action. Its explicitly echoed grant must be fresh and no wider than
+   requested permissions. The granted scopes/uses are included in the bytes the
+   witness certifies. The helper never uploads a contribution or persists a token.
+4. On completion, take the queue lock and recheck that the entry is still pending
+   and its source/configuration/consent match the snapshot. Persist via
+   `approved_envelope::save_witnessed`, then pin `summary.envelope_digest` and save
+   the queue. A failed save must not allow approval without a persisted artifact.
+   Never route this result through the local-envelope `save` function.
+5. `witness-sha256:` pins identify the full versioned record: exact wire bytes,
+   certificate/signature, source hash, configuration fingerprint, and approval
+   answers. Read through `load_witnessed`; check its digest and `validate` against
+   current context, then use `envelope()` for existing body/turn/summary rendering.
+   Missing, corrupt, partial, unknown-version, or legacy local records are refused.
+6. The witnessed artifact is immutable. Corrections/verdicts must be supplied
+   before that explicit review, and approval must match those answers exactly.
+   A changed answer requires another explicit review; neither ordinary `approve`
+   nor background upload may re-witness on the contributor's behalf. Keep local
+   envelope approval semantics unchanged.
+7. Upload obtains fresh authorization. All certified scopes/uses must match; a
+   compatible 401/403 re-mint may resend the **same bytes and certificate**, while
+   a changed grant re-offers the entry for review. No restamping, second redaction,
+   or new raw witness request occurs. Existing source/fingerprint/residual-secret
+   checks remain enforced. Record cleanup uses the existing pin lifetime/sweep.
+
+The record stores only redacted artifact content and hash-only bindings; attached
+inference bodies, bearer claims, and plaintext correction inputs are excluded.
+Exact envelope bytes are base64-encoded only inside the atomic local record;
+ingest receives the original bytes. The envelope remains bounded by the existing
+size limit; the record including encoding/certificate overhead is limited to twice
+that size, under the existing aggregate approved-artifact storage ceiling.
+
+This enables a local implementation seam, not a deployed capability claim.
+Live acceptance still requires configured trusted witness deployment, usable
+provider receipt retrieval, and an invited end-to-end artifact check.
+
 ### Scheduled previews
 
 `preview` is synchronous: the connection is held for the whole

@@ -99,16 +99,42 @@ pub struct AttestationEvidence {
 
 /// The witnessed result: the envelope bytes as received, and the certificate
 /// over them.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WitnessedEnvelope {
     /// The serialised envelope, byte for byte as it came off the wire.
     /// Nothing may deserialise, re-serialise, re-order, pretty-print or
     /// append to these before they reach `POST /v1/traces`.
+    #[serde(
+        serialize_with = "serialize_envelope_bytes",
+        deserialize_with = "deserialize_envelope_bytes"
+    )]
     pub envelope_bytes: Vec<u8>,
     /// The certificate as compact JSON, exactly as the header carried it.
     pub certificate_json: String,
     /// The signature, `0x`-prefixed hex.
     pub signature_hex: String,
+}
+
+fn serialize_envelope_bytes<S: serde::Serializer>(
+    bytes: &[u8],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use base64::Engine as _;
+    serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn deserialize_envelope_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    use base64::Engine as _;
+    let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if encoded.len() > MAX_ENVELOPE_BYTES.div_ceil(3) * 4 {
+        return Err(serde::de::Error::custom("witness-artifact-too-large"));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| serde::de::Error::custom("witness-artifact-malformed"))
 }
 
 impl std::fmt::Debug for WitnessedEnvelope {
@@ -669,6 +695,11 @@ pub fn parse_witnessed_envelope(
 }
 
 #[cfg(test)]
+pub(crate) fn signed_fixture(bytes: Vec<u8>) -> (WitnessedEnvelope, String) {
+    tests::signed_fixture(bytes)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::Router;
@@ -1023,6 +1054,19 @@ mod tests {
     const COLLATERAL: &str = include_str!(
         "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
     );
+
+    pub(crate) fn signed_fixture(bytes: Vec<u8>) -> (WitnessedEnvelope, String) {
+        let key = test_signer("witness-review-test-only");
+        let (certificate_json, signature_hex, _) = signed_answer(&key, &bytes);
+        (
+            WitnessedEnvelope {
+                envelope_bytes: bytes,
+                certificate_json,
+                signature_hex,
+            },
+            address_of(&key),
+        )
+    }
 
     fn test_signer(seed: &str) -> k256::ecdsa::SigningKey {
         use sha3::Digest as _;

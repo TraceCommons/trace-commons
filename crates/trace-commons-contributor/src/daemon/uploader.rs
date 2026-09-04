@@ -212,6 +212,14 @@ pub fn budget_snapshot(
 /// fixed label rather than pipeline internals.
 fn decision_for(outcome: SubmitOutcome) -> UploadDecision {
     match outcome {
+        SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label }
+            if matches!(
+                reason_label.as_str(),
+                "witness-grant-changed" | "witness-review-stale"
+            ) =>
+        {
+            UploadDecision::ApprovalStale { reason_label }
+        }
         SubmitOutcome::Submitted { submission_id, .. } => {
             UploadDecision::Uploaded { submission_id }
         }
@@ -295,6 +303,30 @@ impl Uploader<'_, '_> {
     /// The digest re-check is a consistency check on this crate's own
     /// storage -- a truncated file, a file crossed over from another entry
     /// -- not a check on redaction. Redaction is not re-run here at all.
+    fn approved_witness_for(
+        &self,
+        entry: &QueueEntry,
+    ) -> Result<super::approved_envelope::WitnessReviewArtifact> {
+        let artifact = super::approved_envelope::load_witnessed(self.store, entry.entry_id)?
+            .ok_or_else(|| anyhow::anyhow!("witness-review-stale"))?;
+        if Some(artifact.digest()?.as_str()) != entry.previewed_envelope_digest.as_deref() {
+            anyhow::bail!("witness-review-stale");
+        }
+        let fingerprint = super::preview::input_fingerprint(
+            self.ctx.effective_cfg(),
+            self.ctx.near_ai(),
+            self.settings.ironwire_attested_bodies,
+        );
+        artifact.validate(
+            self.ctx.effective_cfg(),
+            &entry.session_hash,
+            &fingerprint,
+            entry.approved_verdict.as_deref(),
+            entry.approved_correction.as_deref(),
+        )?;
+        Ok(artifact)
+    }
+
     fn approved_envelope_for(
         &self,
         entry: &QueueEntry,
@@ -421,10 +453,34 @@ impl Uploader<'_, '_> {
         // pinned goes back in front of the contributor. It is never
         // silently rebuilt, because rebuilding is precisely how a
         // contributor ends up sending something they were never shown.
-        match self.approved_envelope_for(entry) {
-            Ok(approved) => self.ctx.use_approved_envelope(approved),
-            Err(reason_label) => {
-                return Ok(UploadDecision::ApprovalStale { reason_label });
+        if entry
+            .previewed_envelope_digest
+            .as_deref()
+            .is_some_and(|pin| pin.starts_with("witness-sha256:"))
+        {
+            let result = self.approved_witness_for(entry);
+            match result {
+                Ok(artifact) => {
+                    if self
+                        .ctx
+                        .use_approved_witness(artifact.response().clone())
+                        .is_err()
+                    {
+                        return Ok(UploadDecision::ApprovalStale {
+                            reason_label: "witness-review-stale".to_string(),
+                        });
+                    }
+                }
+                Err(_) => {
+                    return Ok(UploadDecision::ApprovalStale {
+                        reason_label: "witness-review-stale".to_string(),
+                    });
+                }
+            }
+        } else {
+            match self.approved_envelope_for(entry) {
+                Ok(approved) => self.ctx.use_approved_envelope(approved),
+                Err(reason_label) => return Ok(UploadDecision::ApprovalStale { reason_label }),
             }
         }
 
