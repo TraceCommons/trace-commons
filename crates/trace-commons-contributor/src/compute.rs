@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigStore;
 
+mod controller;
+pub use controller::{
+    ComputeCommand, ComputeController, ComputeCopy, ComputeSnapshot, ComputeState,
+};
+
 const SETTINGS_FILE: &str = "settings.json";
 const SETTINGS_SCHEMA: &str = "trace_commons.compute_settings.v1";
 const MAX_SETTINGS_BYTES: u64 = 4096;

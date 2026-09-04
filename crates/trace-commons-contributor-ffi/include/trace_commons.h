@@ -124,6 +124,22 @@ extern "C" {
 /* Opaque handle to a running daemon, returned by tc_daemon_start. */
 typedef struct tc_handle tc_handle;
 
+/* Independent compute controller, one per app, with no trace enrollment needed.
+ * Open restores consent as paused and never starts a worker. This build has no
+ * packaged worker backend: available/can_enable/can_resume/can_pause are false.
+ * Status/command return owned JSON strings (tc_string_free), or NULL with a
+ * fixed tc_last_error label. Open errors use the owned err output. Commands
+ * serialize settings I/O and must run off the UI thread. command_json is a
+ * NUL-terminated string of at most 4096 bytes: {"command":"enable",
+ * "ram_allowance_gib":8}, or {"command":"resume"|"pause"|"disable"}.
+ * Unknown fields are refused. Never free concurrently with another handle call.
+ * Free releases controller memory; this build owns no worker to drain. */
+typedef struct tc_compute_handle tc_compute_handle;
+tc_compute_handle *tc_compute_open(const char *config_dir, char **err);
+char *tc_compute_status_json(tc_compute_handle *handle);
+char *tc_compute_command_json(tc_compute_handle *handle, const char *command_json);
+void tc_compute_free(tc_compute_handle *handle);
+
 /* Opaque handle to one open preview, returned by tc_preview_open. */
 typedef struct tc_preview tc_preview;
 

@@ -24,6 +24,25 @@ passed. No dependencies were added. Paired Holonear validation is recorded in
 `docs/trace-commons-compute-worker-contract.md`. The original phase acceptance
 gates below remain open until their complete criteria are met.
 
+### Controller/FFI foundation
+
+The shared controller serializes strict enable/resume/pause/disable commands,
+restores granted consent as paused, and provides state, capability flags, and
+shared shell wording. Four independent C exports open/read/command/free the
+controller without trace enrollment. Both C headers describe the same surface.
+
+This build deliberately has no worker backend: enable/resume return a visible
+unavailable result, and refused enable does not save consent. Disable persists
+revocation atomically; write failure leaves previous consent visible. No worker
+process, pool request, unauthenticated IPC, or Holonear dependency is introduced.
+Commands perform synchronous settings I/O and belong on a background thread;
+the handle must not be freed concurrently with other calls.
+
+Live lifecycle states are reserved in the schema but not emitted yet. The
+authenticated supervisor adapter, telemetry freshness, serialized async launch
+and drain, cross-process ownership, bounded worker deadlines, and real worker
+verification remain required before the pilot capability can become available.
+
 ## Outcome and scope
 
 Trace Commons users can independently opt into contributing compute to Holonear,
