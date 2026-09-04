@@ -258,6 +258,13 @@ fn verify_certificate(
 /// fields directly would let content shift across a boundary without changing
 /// the bytes.
 ///
+/// **Little-endian, both prefixes.** The server's `signing_bytes` is the
+/// single source of truth for this encoding and writes every fixed-width
+/// field little-endian; a big-endian length prefix here recovers a different
+/// address and refuses every honest certificate. Nothing about the layout is
+/// observable from a client-only test, which is why the cross-implementation
+/// test below is the thing that holds it.
+///
 /// This is a second implementation of an encoding whose first implementation
 /// is AGPL and unreachable from here. That duplication is a real cost and the
 /// reason `a_certificate_this_client_accepts_is_one_the_server_issued` exists:
@@ -285,11 +292,11 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SIGNING_DOMAIN);
     for field in [digest, policy, measurement] {
-        bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
         bytes.extend_from_slice(field.as_bytes());
     }
     bytes.push(verdict_tag);
-    bytes.extend_from_slice(&timestamp.to_be_bytes());
+    bytes.extend_from_slice(&timestamp.to_le_bytes());
     Some(bytes)
 }
 
