@@ -768,11 +768,17 @@ impl DaemonShared {
                 "state": if declared { ROUTING_TOKEN_UNREADABLE } else { ROUTING_NOT_DECLARED },
                 // No reader was built, so nothing has ever been checked.
                 "last_refresh_at": serde_json::Value::Null,
+                "unreadable_rows": 0,
             });
         };
         serde_json::json!({
             "state": if ledger.has_rows() { ROUTING_ROWS_SEEN } else { ROUTING_AWAITING_ROWS },
             "last_refresh_at": ledger.last_refresh_at(),
+            // Zero everywhere it is working. Non-zero is the only signal a
+            // contributor gets that the proxy is serving rows this client
+            // cannot read -- the alternative is enrichment that thins out
+            // with nothing anywhere saying so. A count, never a row.
+            "unreadable_rows": ledger.unreadable_rows(),
         })
     }
 
@@ -7221,7 +7227,11 @@ mod tests {
     #[test]
     fn discovery_reports_what_a_running_proxy_published() {
         let dir = pointer_dir(9143, "a-secret-token");
-        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+        // `IronWireAt::pointer` pins the token directory to the pointer's
+        // own directory, which is where this fixture's token is. A
+        // `token_path` outside it is refused, so a test that did not pin it
+        // would be asserting the refusal rather than the discovery.
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
             &dir.path().join("endpoint.json"),
         );
 
@@ -7231,9 +7241,16 @@ mod tests {
 
         assert_eq!(result["found"], serde_json::json!(true));
         assert_eq!(result["port"], serde_json::json!(9143));
+        // Canonicalized, because the confinement compares resolved paths and
+        // returns the resolved one -- on macOS a temp dir under `/var` is a
+        // symlink to `/private/var`.
         assert_eq!(
             result["token_path"],
-            serde_json::json!(dir.path().join("control.token").to_string_lossy()),
+            serde_json::json!(
+                std::fs::canonicalize(dir.path().join("control.token"))
+                    .expect("token canonicalises")
+                    .to_string_lossy()
+            ),
         );
     }
 
@@ -7242,7 +7259,7 @@ mod tests {
     /// fall back to asking.
     #[test]
     fn no_pointer_is_answered_as_not_found_rather_than_as_an_error() {
-        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+        let _none = super::super::ironwire_pointer::test_support::IronWireAt::none();
 
         let response = handle_discover_routing(&discover_request());
 
@@ -7264,7 +7281,7 @@ mod tests {
     #[test]
     fn discovery_never_carries_the_token() {
         let dir = pointer_dir(9143, "a-secret-token");
-        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
             &dir.path().join("endpoint.json"),
         );
 
@@ -7281,7 +7298,7 @@ mod tests {
     /// request actually takes for a method that opens no connection.
     #[test]
     fn the_sync_dispatcher_answers_discovery_for_real() {
-        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+        let _none = super::super::ironwire_pointer::test_support::IronWireAt::none();
 
         let response = handle_request(&shared(), &discover_request());
 

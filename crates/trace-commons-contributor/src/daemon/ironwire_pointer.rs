@@ -42,11 +42,98 @@
 //!   remote host;
 //! * the **token** is never read from the pointer. The pointer names a path;
 //!   the caller opens that path itself, at call time, exactly as it opens
-//!   every other resolved token path.
+//!   every other resolved token path;
+//! * the **`token_path`** is accepted only when it resolves inside the
+//!   pointer's own token directory -- `$IRONWIRE_HOME` when that is set,
+//!   else `~/.ironwire`. See [`confine_token_path`].
+//!
+//! # The pointer is untrusted input at a well-known path
+//!
+//! Anything running as this user can write `~/.ironwire/endpoint.json`.
+//! Before the confinement above, a pointer naming any absolute file that
+//! existed made the daemon read that file and send its contents as a
+//! `Bearer` to a loopback port the same file chose -- an arbitrary-file
+//! exfiltration primitive armed by one press of the settings screen's
+//! "Connect and check" button, which declares a port with no token folder
+//! and so resolves the credential straight from the pointer.
+//!
+//! [`trustworthy_file`] is the second half of the same rule: on unix the
+//! pointer and the token must be regular files, not symlinks, owned by this
+//! process's effective uid, and writable by nobody else.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// Metadata for a file this process is about to trust, or `None`.
+///
+/// On unix a file is trustworthy when it is a regular file, reached without
+/// traversing a symlink at the final component, owned by this process's
+/// effective uid, and not writable by group or other. Anything else is a
+/// file some other principal could have chosen the contents of, and both
+/// things this module resolves -- the pointer and the control token -- are
+/// acted on directly: the pointer decides which file becomes a credential,
+/// and the token *is* one.
+///
+/// `symlink_metadata` rather than `metadata`, so a symlink is refused rather
+/// than followed to whatever it names.
+///
+/// Off unix this is the shape check that was here before. Windows has no
+/// uid, and its equivalent -- a DACL comparison -- is the named-pipe work in
+/// `daemon::transport`, not something to half-do here.
+#[must_use]
+pub(crate) fn trustworthy_file(path: &Path) -> Option<std::fs::Metadata> {
+    // Checked before reading rather than after: the point is not to hold the
+    // bytes at all. A path that is not a regular file (a directory, a fifo
+    // that would block a read forever) is not one of ours either.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return None;
+        }
+        if metadata.uid() != current_uid()? {
+            return None;
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return None;
+        }
+        Some(metadata)
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        metadata.is_file().then_some(metadata)
+    }
+}
+
+/// This process's effective uid.
+///
+/// Read from a file this process creates, because no dependency in this
+/// crate exposes `geteuid` and `std` does not either. A file is created with
+/// the creating process's effective uid, so the owner of a private temporary
+/// file is the number wanted, and `tempfile` is already a direct dependency
+/// of this crate. Probed once and cached; the value cannot change under a
+/// running process.
+///
+/// `None` when the probe fails -- an unwritable temporary directory. That
+/// fails [`trustworthy_file`] closed, which costs routing enrichment on a
+/// machine in that state and is the same outcome as no proxy at all.
+#[cfg(unix)]
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::OnceLock;
+
+    static UID: OnceLock<Option<u32>> = OnceLock::new();
+    *UID.get_or_init(|| {
+        tempfile::tempfile()
+            .ok()?
+            .metadata()
+            .ok()
+            .map(|metadata| metadata.uid())
+    })
+}
 
 /// The directory IronWire keeps its pointer in, under the user's home.
 pub const POINTER_DIR: &str = ".ironwire";
@@ -118,22 +205,63 @@ fn pointer_path() -> Option<PathBuf> {
 #[must_use]
 pub fn read_pointer() -> Option<IronWirePointer> {
     let path = pointer_path()?;
-    // Checked before reading rather than after: the point is not to hold the
-    // bytes at all. A pointer that is not a regular file (a directory, a
-    // fifo that would block a read forever) is not one of ours either.
-    let metadata = std::fs::metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_POINTER_BYTES {
+    let metadata = trustworthy_file(&path)?;
+    if metadata.len() > MAX_POINTER_BYTES {
         return None;
     }
     let body = std::fs::read_to_string(&path).ok()?;
-    parse_pointer(&body)
+    let mut pointer = parse_pointer(&body)?;
+    // The confinement, applied here rather than in `parse_pointer` because
+    // it is the one step that needs the machine: it compares against the
+    // real token directory. A `token_path` outside it is dropped and the
+    // port survives, exactly as a relative one is -- the token then resolves
+    // the way it did before this file existed, from a directory the
+    // contributor or the convention names rather than one the pointer does.
+    pointer.token_path = pointer
+        .token_path
+        .as_deref()
+        .and_then(|candidate| confine_token_path(candidate, allowed_token_dir()?.as_path()));
+    Some(pointer)
+}
+
+/// The only directory a pointer may name a token in.
+///
+/// `$IRONWIRE_HOME` when set, else `~/.ironwire`: where IronWire itself puts
+/// `control.token`, and the same folder
+/// [`super::settings::ironwire_default_token_dir`] falls back to. Resolved
+/// through that function so the two cannot drift.
+fn allowed_token_dir() -> Option<PathBuf> {
+    super::settings::ironwire_default_token_dir()
+}
+
+/// `candidate` if it resolves inside `allowed_dir`, else nothing.
+///
+/// Both sides are canonicalized before the comparison, so neither a `..`
+/// segment nor a symlink pointing out of the directory can escape it. A
+/// candidate that does not exist does not canonicalize and is refused, which
+/// costs nothing: a token file that is not there could not be read anyway.
+///
+/// Strictly inside: the directory itself is not a token file.
+///
+/// The refusal is silent by construction -- there is no error type here and
+/// nothing logs the path, which is the contributor's home directory laid out
+/// in a log line.
+#[must_use]
+fn confine_token_path(candidate: &Path, allowed_dir: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(candidate).ok()?;
+    let allowed = std::fs::canonicalize(allowed_dir).ok()?;
+    (resolved != allowed && resolved.starts_with(&allowed)).then_some(resolved)
 }
 
 /// Parse a pointer document. `None` for anything this reader will not act on.
 ///
-/// Pure, so the whole decision table above is testable without a filesystem.
+/// Pure, so the whole decision table above is testable without a filesystem
+/// -- and therefore *not* the whole decision. A `token_path` that survives
+/// here has passed a shape check only; [`read_pointer`] is what confines it
+/// to the token directory, and nothing outside this module may take a
+/// `token_path` from this function instead of from there.
 #[must_use]
-pub fn parse_pointer(body: &str) -> Option<IronWirePointer> {
+pub(crate) fn parse_pointer(body: &str) -> Option<IronWirePointer> {
     let parsed: PointerFile = serde_json::from_str(body).ok()?;
     // A pointer with no usable `control_url` is rejected whole, `token_path`
     // included. The document describes one daemon: if this reader cannot
@@ -200,36 +328,81 @@ pub(crate) mod test_support {
             .clone()
     }
 
-    /// Decide what [`super::read_pointer`] sees for the life of the guard.
+    /// What this process believes about IronWire, for the life of the guard.
     ///
-    /// Serialized on a mutex because the override is process-wide and the
-    /// harness runs tests on threads, and cleared on drop so a test that
-    /// panics does not leave the next one reading its tempdir.
-    pub(crate) struct PointerAt {
+    /// Pins **both** process-wide things the resolution path reads: the
+    /// pointer location [`super::read_pointer`] consults, and
+    /// `IRONWIRE_HOME`, which is what
+    /// [`crate::daemon::settings::ironwire_default_token_dir`] answers with
+    /// and therefore what [`super::confine_token_path`] compares against.
+    ///
+    /// One guard and one lock, deliberately. These were two guards with two
+    /// locks and a comment saying which to take first, and that cost a CI
+    /// failure: `a_pointer_port_never_overrides_a_declared_port` held the
+    /// pointer lock but not the environment one, so it read whatever
+    /// `IRONWIRE_HOME` a *concurrently running* test happened to have set.
+    /// It passed on every parallel run and failed under `--test-threads=1`
+    /// and on CI. A rule a test can silently not follow is not a rule, so
+    /// there is now no way to pin one without excluding the other.
+    ///
+    /// Cleared and restored on drop, so a test that panics does not leave
+    /// the next one reading its tempdir.
+    pub(crate) struct IronWireAt {
         _lock: MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
     }
 
-    impl PointerAt {
-        pub(crate) fn set(path: &Path) -> Self {
+    impl IronWireAt {
+        /// A machine with no pointer and no `IRONWIRE_HOME`: the ordinary
+        /// state of one without IronWire. A test asserting that state needs
+        /// the lock as much as one setting a path, or a concurrent guard
+        /// decides what it sees.
+        pub(crate) fn none() -> Self {
+            // A poisoned lock means some other test panicked while holding
+            // it; both the override and the environment were still restored
+            // by its guard's drop, so there is nothing here to refuse over.
+            let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            let previous_home = std::env::var_os("IRONWIRE_HOME");
+            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            unsafe { std::env::remove_var("IRONWIRE_HOME") };
+            Self {
+                _lock: lock,
+                previous_home,
+            }
+        }
+
+        /// `IRONWIRE_HOME` at `home`, and no pointer.
+        pub(crate) fn home(home: &Path) -> Self {
             let guard = Self::none();
-            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            unsafe { std::env::set_var("IRONWIRE_HOME", home) };
             guard
         }
 
-        /// Hold the lock with no pointer in place: the state of a machine
-        /// without IronWire. A test asserting that state needs the lock as
-        /// much as one setting a path, or a concurrent `set` decides what
-        /// it sees.
-        pub(crate) fn none() -> Self {
-            let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
-            Self { _lock: lock }
+        /// A pointer at `path`, with the token directory set to the
+        /// directory holding it.
+        ///
+        /// That pairing is the real layout, not a convenience: IronWire
+        /// writes `~/.ironwire/endpoint.json` and, with no `IRONWIRE_HOME`
+        /// set, `~/.ironwire/control.token` beside it. Deriving the token
+        /// directory from the pointer's own path rather than asking each
+        /// test for it is what stops a fixture from forgetting to say.
+        pub(crate) fn pointer(path: &Path) -> Self {
+            let guard = match path.parent() {
+                Some(dir) => Self::home(dir),
+                None => Self::none(),
+            };
+            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            guard
         }
     }
 
-    impl Drop for PointerAt {
+    impl Drop for IronWireAt {
         fn drop(&mut self) {
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            match self.previous_home.take() {
+                Some(v) => unsafe { std::env::set_var("IRONWIRE_HOME", v) },
+                None => unsafe { std::env::remove_var("IRONWIRE_HOME") },
+            }
         }
     }
 }
@@ -401,15 +574,28 @@ mod tests {
     #[test]
     fn a_missing_pointer_file_is_not_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let _at = test_support::PointerAt::set(&dir.path().join("endpoint.json"));
+        let _at = test_support::IronWireAt::pointer(&dir.path().join("endpoint.json"));
         assert_eq!(read_pointer(), None);
     }
 
+    /// The positive case, and only the positive case.
+    ///
+    /// This was `a_pointer_on_disk_is_read`, and it asserted that a
+    /// `token_path` naming `/t/control.token` -- an absolute path to a file
+    /// that did not exist -- came back verbatim. That property was the
+    /// defect: it said an arbitrary absolute path passes through unchecked.
+    /// It is now asserted inverted, by
+    /// `a_token_path_outside_the_token_directory_is_refused` and its `..`
+    /// and symlink siblings. What is left here is what the name says: a
+    /// token inside the token directory is read back, exactly.
     #[test]
-    fn a_pointer_on_disk_is_read() {
+    fn a_token_path_inside_the_token_directory_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
+        // The token has to be inside the token directory, and has to exist:
+        // `confine_token_path` canonicalizes before comparing.
+        let token = dir.path().join("control.token");
+        std::fs::write(&token, "tok\n").expect("write token");
         let path = dir.path().join("endpoint.json");
-        let token = absolute("t/control.token");
         std::fs::write(
             &path,
             serde_json::to_string(&serde_json::json!({
@@ -419,15 +605,138 @@ mod tests {
             .expect("fixture serialises"),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         assert_eq!(
             read_pointer(),
             Some(IronWirePointer {
                 port: 9111,
-                token_path: Some(PathBuf::from(&token)),
+                token_path: Some(std::fs::canonicalize(&token).expect("token canonicalises")),
             }),
         );
+    }
+
+    /// The confused deputy this confinement exists to close.
+    ///
+    /// The pointer sits at a well-known path any same-uid process can write.
+    /// Before the confinement, a `token_path` naming any absolute file that
+    /// existed was returned verbatim, and a contributor pressing "Connect
+    /// and check" -- which declares a port and no token folder -- made the
+    /// daemon read that file and send its contents as a `Bearer` to a
+    /// loopback port the same attacker chose. One press, arbitrary file,
+    /// attacker's listener.
+    #[test]
+    fn a_token_path_outside_the_token_directory_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+
+        let secret = elsewhere.path().join("id_ed25519");
+        std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
+        let path = home.path().join("endpoint.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9111",
+                "token_path": secret,
+            }))
+            .expect("fixture serialises"),
+        )
+        .expect("write pointer");
+        let _at = test_support::IronWireAt::pointer(&path);
+
+        let pointer = read_pointer().expect("the port is still usable");
+        assert_eq!(pointer.port, 9111);
+        assert_eq!(
+            pointer.token_path, None,
+            "a file outside the token directory must never become a credential",
+        );
+    }
+
+    /// `..` does not escape either, because both sides are canonicalized
+    /// before the comparison. Spelled separately from the plain outside case
+    /// because a `starts_with` on unresolved paths accepts this one.
+    #[test]
+    fn a_token_path_that_climbs_out_with_dot_dot_is_refused() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let home = outer.path().join("home");
+        std::fs::create_dir(&home).expect("mkdir");
+
+        let secret = outer.path().join("secret");
+        std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
+        let path = home.join("endpoint.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9111",
+                "token_path": home.join("..").join("secret"),
+            }))
+            .expect("fixture serialises"),
+        )
+        .expect("write pointer");
+        let _at = test_support::IronWireAt::pointer(&path);
+
+        assert_eq!(read_pointer().expect("port survives").token_path, None);
+    }
+
+    /// And a symlink inside the directory pointing out of it is refused, for
+    /// the same reason and by the same canonicalization.
+    #[cfg(unix)]
+    #[test]
+    fn a_token_path_symlinked_out_of_the_token_directory_is_refused() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let home = outer.path().join("home");
+        std::fs::create_dir(&home).expect("mkdir");
+
+        let secret = outer.path().join("secret");
+        std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
+        let link = home.join("control.token");
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+
+        let path = home.join("endpoint.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "control_url": "http://127.0.0.1:9111",
+                "token_path": link,
+            }))
+            .expect("fixture serialises"),
+        )
+        .expect("write pointer");
+        let _at = test_support::IronWireAt::pointer(&path);
+
+        assert_eq!(read_pointer().expect("port survives").token_path, None);
+    }
+
+    /// A pointer anything on the machine can rewrite is not one to act on:
+    /// it is the file that decides which other file becomes a credential.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_pointer_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("endpoint.json");
+        std::fs::write(&path, r#"{"control_url":"http://127.0.0.1:9111"}"#).expect("write pointer");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod");
+        let _at = test_support::IronWireAt::pointer(&path);
+
+        assert_eq!(read_pointer(), None, "fail closed, not fall back");
+    }
+
+    /// A symlink at the pointer's own path is refused rather than followed.
+    /// `symlink_metadata` is what makes the difference: `metadata` would
+    /// report the target and read whatever it named.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_pointer_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.json");
+        std::fs::write(&real, r#"{"control_url":"http://127.0.0.1:9111"}"#).expect("write");
+        let link = dir.path().join("endpoint.json");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let _at = test_support::IronWireAt::pointer(&link);
+
+        assert_eq!(read_pointer(), None, "fail closed, not fall back");
     }
 
     /// A directory at the pointer's path is not a pointer. Named because
@@ -438,7 +747,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("endpoint.json");
         std::fs::create_dir(&path).expect("mkdir");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
         assert_eq!(read_pointer(), None);
     }
 
@@ -452,7 +761,7 @@ mod tests {
             format!(r#"{{"control_url":"http://127.0.0.1:8463","pad":"{padding}"}}"#),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
         assert_eq!(read_pointer(), None);
     }
 
@@ -462,7 +771,7 @@ mod tests {
     /// installed.
     #[test]
     fn tests_see_no_pointer_unless_they_ask_for_one() {
-        let _none = test_support::PointerAt::none();
+        let _none = test_support::IronWireAt::none();
         assert_eq!(pointer_path(), None);
         assert_eq!(read_pointer(), None);
     }
