@@ -844,6 +844,30 @@ pub async fn build_witnessed_preview(
     })
 }
 
+/// Describe the certified envelope without invoking the remote redaction pipeline.
+pub fn summarize_witnessed_preview(
+    artifact: &super::approved_envelope::WitnessReviewArtifact,
+    cfg: &ContributorConfig,
+    near_ai: Option<NearAiSettings>,
+    transcript: &crate::source::SessionTranscript,
+    raw_session_bytes: u64,
+    include_inference_bodies: bool,
+) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), include_inference_bodies);
+    let envelope = artifact.validate_stored(cfg, &transcript.session_hash, &fingerprint)?;
+    let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), near_ai)?;
+    let summary = summarize_envelope(
+        &envelope,
+        raw_session_bytes,
+        transcript,
+        fingerprint,
+        true,
+        &redactor,
+    )?
+    .into_summary(artifact.digest()?);
+    Ok((summary, body_of(&envelope)?, envelope))
+}
+
 /// The redacted body a contributor is shown for one envelope: the redacted
 /// events, pretty-printed.
 ///

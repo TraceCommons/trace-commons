@@ -394,6 +394,7 @@ history record, audit entry, notification text, or IPC response.
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
+| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
@@ -654,16 +655,14 @@ preview a local file; that requirement was incidental and is gone.
 are real in both cases; an unenrolled preview understates nothing about
 redaction except what an external filter would additionally have removed.
 
-### Explicit witnessed review: contributor helper contract
+### Explicit witnessed review
 
-The contributor supports an explicitly authorized witnessed-review builder.
-**IPC dispatch/native trigger integration is separate:** this section specifies
-`witness_preview_request`; clients must not offer it unless the daemon advertises
-that method. Existing `preview`, `preview_request`, card summaries, and background
+The daemon exposes `witness_preview_request` through authenticated local IPC.
+Clients must not offer it unless the daemon advertises that method. Existing `preview`, `preview_request`, card summaries, and background
 refresh never invoke this builder. A configured witness still refuses ordinary
 preview with `witness_claim_unavailable`, rather than building a local substitute.
 
-The root-owned handler must enforce these conditions:
+The handler enforces these conditions:
 
 1. Require an authenticated local IPC caller, an enrolled device, a pending entry
    the caller already holds, and explicit confirmation to send this session to

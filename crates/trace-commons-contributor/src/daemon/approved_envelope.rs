@@ -172,11 +172,25 @@ impl WitnessReviewArtifact {
         verdict: Option<&str>,
         correction: Option<&str>,
     ) -> Result<TraceContributionEnvelope> {
+        if self.verdict.as_deref() != verdict
+            || self.correction_hash != correction.map(correction_hash)
+        {
+            bail!("witness-review-stale");
+        }
+        self.validate_stored(cfg, source_hash, input_fingerprint)
+    }
+
+    /// Validate a saved review for display without recovering correction text.
+    /// Callers must separately compare the complete artifact digest to its pin.
+    pub fn validate_stored(
+        &self,
+        cfg: &crate::config::ContributorConfig,
+        source_hash: &str,
+        input_fingerprint: &str,
+    ) -> Result<TraceContributionEnvelope> {
         if self.review_schema != WITNESS_REVIEW_SCHEMA
             || self.source_hash != source_hash
             || self.input_fingerprint != input_fingerprint
-            || self.verdict.as_deref() != verdict
-            || self.correction_hash != correction.map(correction_hash)
             || self.response.envelope_bytes.len() > MAX_ENVELOPE_BYTES
         {
             bail!("witness-review-stale");

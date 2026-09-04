@@ -70,6 +70,13 @@ pub fn try_call(
         None => return Ok(None),
     };
 
+    // A witness round trip has a 120-second transport budget plus claim minting.
+    // Never retry this explicit off-device action after a read timeout.
+    #[cfg(unix)]
+    if method == "witness_preview_request" {
+        stream.set_read_timeout(Some(Duration::from_secs(240)))?;
+    }
+
     let mut line = serde_json::to_string(&serde_json::json!({
         "id": 1,
         "method": method,
