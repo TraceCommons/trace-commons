@@ -117,6 +117,19 @@ public sealed class DaemonHost : IAsyncDisposable
         return Path.Combine(root, "trace-commons");
     }
 
+    /// <summary>
+    /// The state directory this host's daemon runs against.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the settings screen's witness card, whose ABI calls read
+    /// the config file directly and take no handle. It must be THIS host's
+    /// directory rather than <see cref="DefaultConfigDir"/>: a host built with
+    /// an override -- which is how the app is driven under test -- would
+    /// otherwise have the card reading and writing the developer's real
+    /// configuration.
+    /// </remarks>
+    public string ConfigDir => _configDir;
+
     /// <summary>Whether a daemon is currently running in this process.</summary>
     public bool IsRunning => _daemon is not null;
 
