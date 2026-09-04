@@ -176,8 +176,13 @@ public struct RoutingSourceModes: Equatable, Sendable {
         self.cline = cline
     }
 
-    /// A daemon that answered nothing about a source is watching the
-    /// conventional location, which is a tool in use.
+    /// A daemon that answered nothing about a source leaves that source
+    /// undeclared, and what that means is the adapter's own policy rather
+    /// than one rule for all four: claude and codex are watched at their
+    /// conventional location and are tools in use, while gemini and cline
+    /// construct no adapter at all and open nothing. Every word this shell
+    /// prints about that comes from the Rust, which reads the policy off the
+    /// registration table -- do not re-derive one here from the mode alone.
     public static let unset = RoutingSourceModes(
         claude: "unset", codex: "unset", gemini: "unset", cline: "unset"
     )

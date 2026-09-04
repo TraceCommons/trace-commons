@@ -635,6 +635,22 @@ pub fn cli_source_roots(trajectory: Option<&Path>) -> SourceRoots {
     SourceRoots::conventional().with_trajectory(selection)
 }
 
+/// Whether an *undeclared* source scans the contributor's conventional
+/// location, by adapter name.
+///
+/// The settings screen has to say what an absent declaration actually does,
+/// and that answer is per-adapter ([`Undeclared`]) rather than one rule for
+/// everybody. Read off [`NATIVE_SOURCES`] rather than restated in
+/// [`crate::source_copy`], so the sentence cannot come to disagree with the
+/// table that decides it. An unknown name reads as `false`: this build
+/// constructs no adapter for it, so nothing is scanned.
+#[must_use]
+pub fn undeclared_scans_conventional(name: &str) -> bool {
+    NATIVE_SOURCES
+        .iter()
+        .any(|spec| spec.name == name && matches!(spec.undeclared, Undeclared::Conventional))
+}
+
 /// Construct the set of available `TraceSource` adapters from what the
 /// contributor declared.
 ///

@@ -482,6 +482,12 @@ char*       tc_routing_last_checked(const char* when);
  *
  * Assembled on the Rust side, for the reason on tc_routing_token_line.
  *
+ * "unset" is answered per tool, not once for everybody: an undeclared
+ * "claude" or "codex" is scanned at its conventional location and its row says
+ * sessions are read, while an undeclared "gemini" or "cline" constructs no
+ * adapter and its row says nothing is opened. Render what comes back for the
+ * tool you asked about; never carry one tool's "unset" sentence to another.
+ *
  * A source_mode this build does not know renders as "unset", deliberately:
  * an older daemon sends no mode at all, and claiming nothing is read from a
  * folder that is being scanned is the worse of the two errors. An unknown

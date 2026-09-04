@@ -26,8 +26,11 @@ public enum TCSourceChecks {
     /// declared OFF as well as for one nobody was asked about. The GTK and
     /// Windows shells branched on it and told a contributor who does not use
     /// Claude Code that its sessions were being read from the usual place.
-    /// Nothing is read from an off source; an unset one is scanned where it
-    /// usually lives. Three facts, three sentences, and the Rust picks which.
+    /// Nothing is read from an off source. What an UNSET source means is per
+    /// tool -- claude and codex are scanned where they usually live, gemini
+    /// and cline construct no adapter and open nothing -- so never carry one
+    /// tool's unset sentence to another. The Rust picks the words from the
+    /// mode and the tool together.
     ///
     /// Nil when the ABI refused -- an unknown tool key, or a caught panic.
     /// The caller shows nothing rather than a sentence written in Swift.

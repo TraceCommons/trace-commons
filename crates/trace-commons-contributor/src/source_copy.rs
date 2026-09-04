@@ -12,9 +12,12 @@
 //! It is therefore **false for both `off` and `unset`**, and a shell that
 //! branches on it prints one sentence for two different facts:
 //!
-//! - `unset` -- nobody was asked, so the daemon watches the conventional
-//!   location. Sessions ARE being read. "read from the usual place" is
-//!   true.
+//! - `unset` -- nobody was asked. What happens then is the adapter's own
+//!   [`crate::source::Undeclared`] policy: `claude-code` and `codex` watch
+//!   the conventional location, so sessions ARE being read and "read from
+//!   the usual place" is true of them; `gemini-cli` and `cline` construct
+//!   no adapter at all and open nothing. One sentence for both would be
+//!   false for one of them whichever one it claimed.
 //! - `off` -- the contributor said they do not use this tool. No adapter is
 //!   constructed and there is no fallback. Nothing is read. The same
 //!   sentence is a **false statement in the fail-open direction**, on the
@@ -27,12 +30,14 @@
 //!
 //! # The mirror-image bug, which is worse
 //!
-//! `unset` is not "declared nothing". For `claude-code` and `codex` it is a
-//! live scan of the contributor's real home
+//! `unset` is not "declared nothing" for every tool. For `claude-code` and
+//! `codex` it is a live scan of the contributor's real home
 //! (`source::Undeclared::Conventional`). Telling that contributor nothing is
 //! being read would be false in the fail-*closed* direction, which is the
-//! worse of the two. The three modes get three sentences and
-//! [`the_three_modes_never_share_a_sentence`] pins that they stay three.
+//! worse of the two. So `unset` branches on the adapter's policy rather
+//! than being one sentence, and
+//! [`the_modes_never_share_a_sentence`] pins that every sentence a tool can
+//! render stays distinct from the others.
 //!
 //! # What crosses the boundary
 //!
@@ -43,6 +48,10 @@
 //! crate; macOS and Windows call `tc_source_check_line`.
 
 use crate::routing_copy::{TOOL_CLAUDE, TOOL_CLINE, TOOL_CODEX, TOOL_GEMINI};
+use crate::source::{
+    SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI,
+    undeclared_scans_conventional,
+};
 
 /// The tools the settings screen has a session-source row for.
 ///
@@ -80,6 +89,19 @@ impl SourceTool {
             Self::Cline => TOOL_CLINE,
         }
     }
+
+    /// The adapter name this tool's sessions are read by, which is what
+    /// [`crate::source::undeclared_scans_conventional`] is keyed on. Not the
+    /// wire key: `claude` on the settings wire is `claude-code` in the
+    /// registration table, and the sentence must follow the table.
+    fn adapter_name(self) -> &'static str {
+        match self {
+            Self::Claude => SOURCE_CLAUDE_CODE,
+            Self::Codex => SOURCE_CODEX,
+            Self::Gemini => SOURCE_GEMINI_CLI,
+            Self::Cline => SOURCE_CLINE,
+        }
+    }
 }
 
 /// One tool's session-source row, in words, from `*_source_mode`.
@@ -89,10 +111,21 @@ impl SourceTool {
 /// - `watch` -- the contributor pointed us at a folder. Says so, and does
 ///   not name it: the path never crosses the socket and there is nothing
 ///   here to print even if it did.
-/// - `unset` -- nobody was asked, and the conventional location is being
-///   scanned. Says that sessions are read, because they are.
+/// - `unset` -- nobody was asked, and what that means is the adapter's own
+///   [`crate::source::Undeclared`] policy. For a tool whose undeclared
+///   policy is a conventional scan, says sessions are read, because they
+///   are. For one that constructs no adapter when undeclared, says the tool
+///   is not set up and nothing is opened -- saying "read from the usual
+///   place" there is the same fail-open falsehood, on the same screen, that
+///   this module was written to remove.
 /// - `off` -- the contributor said they do not use this tool. Says nothing
 ///   is opened for it.
+///
+/// The two "nothing is opened" sentences share that clause on purpose: they
+/// are two reasons for one fact, and a shell that confused them would still
+/// be telling the contributor the truth about whether anything is read.
+/// They are still distinct sentences, and neither is a substring of the
+/// other, because the contributor is owed the reason.
 ///
 /// # An unknown mode reads as `unset`
 ///
@@ -102,7 +135,15 @@ impl SourceTool {
 /// declaration this build cannot see. Falling back to the `off` sentence
 /// there would tell a contributor nothing is read from a tool that is being
 /// scanned. Falling back to the `unset` sentence is the pre-existing
-/// behaviour and claims no privacy.
+/// behaviour and claims no privacy for the tools whose undeclared policy is
+/// a scan.
+///
+/// For a `Nothing`-policy tool the fallback does claim that nothing is
+/// opened, and that is still safe: no released daemon has ever scanned a
+/// conventional location for one undeclared. Gemini CLI and Cline took that
+/// policy in the commit that introduced them, precisely because every shell
+/// already shipped declares only claude and codex and carries no field for
+/// anything newer.
 ///
 /// # The `off` sentence is not built as a negation
 ///
@@ -118,7 +159,10 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     match source_mode {
         "watch" => format!("{name} sessions folder set"),
         "off" => format!("{name} marked not used, so nothing is opened for it"),
-        _ => format!("{name} sessions read from the usual place"),
+        _ if undeclared_scans_conventional(tool.adapter_name()) => {
+            format!("{name} sessions read from the usual place")
+        }
+        _ => format!("{name} is not set up, so nothing is opened for it"),
     }
 }
 
@@ -146,9 +190,11 @@ mod tests {
             source_check_line(SourceTool::Codex, "off"),
             "Codex marked not used, so nothing is opened for it"
         );
+        // Gemini CLI and Cline construct no adapter when undeclared, so the
+        // scan sentence would be false for them in the fail-open direction.
         assert_eq!(
             source_check_line(SourceTool::Gemini, "unset"),
-            "Gemini CLI sessions read from the usual place"
+            "Gemini CLI is not set up, so nothing is opened for it"
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "watch"),
@@ -156,7 +202,7 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "unset"),
-            "Cline sessions read from the usual place"
+            "Cline is not set up, so nothing is opened for it"
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "off"),
@@ -164,11 +210,13 @@ mod tests {
         );
     }
 
-    /// `off` must not say what `unset` says, `unset` must not say what `off`
-    /// says, and neither may be the other with a word bolted on: a substring
-    /// relation is how a `contains` check comes to match the wrong branch.
+    /// No two modes may render the same sentence, and none may be another
+    /// with a word bolted on: a substring relation is how a `contains` check
+    /// comes to match the wrong branch. The two "nothing is opened"
+    /// sentences share a clause and neither contains the other, which this
+    /// checks rather than assumes.
     #[test]
-    fn the_three_modes_never_share_a_sentence() {
+    fn the_modes_never_share_a_sentence() {
         for tool in [
             SourceTool::Claude,
             SourceTool::Codex,
@@ -193,29 +241,76 @@ mod tests {
                 );
             }
             // And the specific phrases, so that a rewrite cannot quietly put
-            // the `unset` claim back into the `off` branch by other words.
-            assert!(!off.contains("usual place"), "off claims a scan: {off}");
-            assert!(!off.contains("folder set"), "off claims a folder: {off}");
-            assert!(
-                !off.to_lowercase().contains("read"),
-                "off uses the verb the other two use: {off}"
-            );
+            // the scan claim back into a branch that opens nothing by other
+            // words. The `unset` branch of a tool that constructs no adapter
+            // when undeclared is held to exactly the same rule as `off`: the
+            // fact it reports is the same fact.
+            let mut opens_nothing = vec![&off];
+            if !crate::source::undeclared_scans_conventional(tool.adapter_name()) {
+                opens_nothing.push(&unset);
+            }
+            for line in opens_nothing {
+                assert!(!line.contains("usual place"), "claims a scan: {line}");
+                assert!(!line.contains("folder set"), "claims a folder: {line}");
+                assert!(
+                    !line.to_lowercase().contains("read"),
+                    "uses the verb a scan uses: {line}"
+                );
+            }
         }
     }
 
     /// A mode word this build does not know reads as `unset`, never as
     /// `off`. An older daemon sends no `*_source_mode` at all, and every
-    /// shell defaults that to the empty string.
+    /// shell defaults that to the empty string. For Claude Code and Codex
+    /// that keeps the scan sentence, which is the fail-open direction and
+    /// the safe one here.
     #[test]
     fn an_unknown_mode_never_claims_that_nothing_is_read() {
         let unset = source_check_line(SourceTool::Claude, "unset");
+        assert!(unset.contains("usual place"));
         for mode in ["", "watching", "OFF", "disabled", "unknown"] {
+            for tool in [SourceTool::Claude, SourceTool::Codex] {
+                assert_eq!(
+                    source_check_line(tool, mode),
+                    source_check_line(tool, "unset"),
+                    "mode {mode:?} did not fall back to the unset sentence"
+                );
+            }
+        }
+    }
+
+    /// The sentence follows the registration table, not a second copy of it
+    /// kept here. If an adapter's [`crate::source::Undeclared`] policy is
+    /// ever changed, this is what makes the words change with it.
+    #[test]
+    fn the_unset_sentence_follows_the_adapters_undeclared_policy() {
+        for tool in [
+            SourceTool::Claude,
+            SourceTool::Codex,
+            SourceTool::Gemini,
+            SourceTool::Cline,
+        ] {
+            let scans = crate::source::undeclared_scans_conventional(tool.adapter_name());
             assert_eq!(
-                source_check_line(SourceTool::Claude, mode),
-                unset,
-                "mode {mode:?} did not fall back to the unset sentence"
+                source_check_line(tool, "unset").contains("read from the usual place"),
+                scans,
+                "the unset sentence disagrees with {}'s undeclared policy",
+                tool.adapter_name()
             );
         }
+        // The policies as the table has them today, so that a change to the
+        // table is a deliberate change to what the screen says.
+        assert!(crate::source::undeclared_scans_conventional(
+            SOURCE_CLAUDE_CODE
+        ));
+        assert!(crate::source::undeclared_scans_conventional(SOURCE_CODEX));
+        assert!(!crate::source::undeclared_scans_conventional(
+            SOURCE_GEMINI_CLI
+        ));
+        assert!(!crate::source::undeclared_scans_conventional(SOURCE_CLINE));
+        // A name this build has no adapter for scans nothing.
+        assert!(!crate::source::undeclared_scans_conventional("near"));
     }
 
     /// The name in the sentence is the Tools surface's name, so the two

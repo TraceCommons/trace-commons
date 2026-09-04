@@ -2085,6 +2085,13 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 /// line with a "not" in front: no word on this surface may deny a privacy
 /// claim another word makes.
 ///
+/// `unset` is answered per tool, not once for everybody: an undeclared
+/// `claude` or `codex` is scanned at its conventional location and its row
+/// says sessions are read, while an undeclared `gemini` or `cline`
+/// constructs no adapter and its row says nothing is opened. Render what
+/// comes back for the tool you asked about; do not carry one tool's `unset`
+/// sentence to another.
+///
 /// A mode this build does not know reads as `unset`, deliberately -- see
 /// `source_copy::source_check_line`. A `tool` this build does not know is an
 /// error, because there is no safe sentence for a tool with no name.
