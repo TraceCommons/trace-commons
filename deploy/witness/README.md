@@ -462,7 +462,9 @@ a server that requires the classifier can and should refuse the certificate. A
 `deterministic-only` witness is honest about being narrower — it is not a
 witness whose verdict silently means less than it appears to.
 
-This is what the reference compose ships, because the alternative is not free.
+The reference compose no longer ships this mode. It remains available, and it
+is the right choice for a deployment unwilling to put any classifier operator
+inside its trust boundary.
 
 ### `full-pipeline`
 
@@ -493,6 +495,20 @@ The two ways to supply one, and the cost of each:
   that ordering is deliberate and is why it is this way round — but prose PII
   is still present in what leaves. If you choose this, you have decided that
   the classifier operator is inside your trust boundary. Decide it explicitly.
+
+**What this deployment ships.** `full-pipeline` against `near-ai`, pinned in
+the compose to `https://cloud-api.near.ai/v1` and `openai/privacy-filter`. That
+is a decision that partially-redacted text leaves the enclave and that NEAR AI
+is inside the trust boundary of every transcript this witness sees. The
+deterministic pass runs first, so credentials and local paths are masked in
+what goes out; prose PII is not.
+
+The API key is the one value in `allowed_envs` — injected encrypted at deploy
+time rather than written into the measured compose, because this repository is
+public and the manifest is committed. The destination and the model stay
+measured, so an injected key can change which account is billed and cannot
+change where a transcript goes. See `build-app-compose.sh` for the argument in
+full, and make it again before adding a second name to that list.
 
 Changing the mode changes the measurement. See "The configuration is measured".
 

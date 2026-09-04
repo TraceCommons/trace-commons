@@ -77,11 +77,31 @@ jq -S -n --rawfile compose "${compose}" '{
   # the guest, and the measurement is a value we publish on purpose.
   public_tcbinfo: true,
 
-  # Nothing is injectable at runtime. Every setting the witness reads is in the
-  # compose file above, and the compose file is measured, so the configuration
-  # is part of the enclave identity. An allowed env var would be a knob outside
-  # the measurement -- exactly the hole this closes.
-  allowed_envs: [],
+  # One injectable value, and it is a credential rather than a setting.
+  #
+  # The rule this list started with was that NOTHING is injectable: every
+  # setting the witness reads is in the measured compose, so the configuration
+  # is part of the enclave identity, and an allowed env var is a knob outside
+  # the measurement. That rule still holds for everything that decides what
+  # this enclave DOES.
+  #
+  # `full-pipeline` with an external classifier needs an API key, and the two
+  # ways of supplying it are not equal. This repository is public and
+  # app-compose.json is committed and uploaded, so a key written into the
+  # compose is a published key. Injecting it encrypted at deploy time keeps it
+  # out of the manifest and out of git.
+  #
+  # What makes that safe is what is NOT injectable beside it:
+  # TRACE_NEAR_AI_PRIVACY_BASE_URL and TRACE_NEAR_AI_PRIVACY_MODEL are pinned
+  # in the compose and therefore measured. The destination and the model are
+  # part of the enclave identity; only the credential presented to that fixed
+  # destination is injected. A different key cannot redirect a transcript
+  # somewhere else -- it can only change which account is billed.
+  #
+  # Adding any FURTHER name here needs the same argument made explicitly. A
+  # name that changes behaviour rather than authenticating to a measured
+  # destination reopens the hole this list exists to close.
+  allowed_envs: ["TRACE_NEAR_AI_PRIVACY_API_KEY"],
 
   # Leaving the per-deployment random instance-id in place. It is what makes
   # RTMR3 differ between two instances of identical code, and therefore
