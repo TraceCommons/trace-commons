@@ -28,7 +28,7 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:f1d4c00266656f0227292efe7239595d6ad0bd7b9083c750d610c0e11b2689bc
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:473e8898d2c2b618402dbcdec9472cc0d237d3c7ed97e314163b9a8778b5e44b
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
