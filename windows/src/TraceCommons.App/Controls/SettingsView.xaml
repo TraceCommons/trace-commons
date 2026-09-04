@@ -388,10 +388,12 @@
                                    TextWrapping="Wrap" />
                         <!--
                             The state sentence, painted from the daemon's
-                            state and never from its own text. None of the
-                            three states is a fault, so none of these three
-                            reaches a fault colour: awaiting_rows is held, not
-                            broken.
+                            state and never from its own text. awaiting_rows
+                            is held, not broken. The last of the four is the
+                            only one that asks for something: declared, with
+                            no reader built. It is painted apart from the
+                            other three because neutral reads as off and held
+                            reads as normal.
                         -->
                         <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
                                    Visibility="{x:Bind Settings.RoutingStateIsNeutral, Mode=OneWay}"
@@ -406,6 +408,11 @@
                                    Visibility="{x:Bind Settings.RoutingStateIsClear, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.RoutingStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.RoutingStateIsAttention, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGoldTextBrush}"
                                    TextWrapping="Wrap" />
                         <!--
                             Per process, and shown only where there has been an

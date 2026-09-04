@@ -66,6 +66,14 @@ public sealed record RoutingCopy
     [JsonPropertyName("state_waiting")] public string StateWaiting { get; init; } = "";
     [JsonPropertyName("state_reading")] public string StateReading { get; init; } = "";
 
+    /// <summary>
+    /// Declared, and no reader could be built. Carried because the payload
+    /// carries it: the three shells read the same set, and a field this one
+    /// dropped would be a sentence it could not show.
+    /// </summary>
+    [JsonPropertyName("state_token_unreadable")]
+    public string StateTokenUnreadable { get; init; } = "";
+
     /// <summary>The four words, in the order the surface uses them.</summary>
     public string[] Words => new[] { WordPrivate, WordDirect, WordUnknown, WordNotUsed };
 }

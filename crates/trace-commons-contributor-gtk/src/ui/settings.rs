@@ -989,20 +989,26 @@ fn probe_line(outcome: &ProbeOutcome) -> String {
     }
 }
 
-/// The tone of the daemon's three states, onto this shell's palette.
+/// The tone of the daemon's four states, onto this shell's palette.
 ///
 /// NOT A BRANCH TABLE HERE. Which tone each state reads in is decided once,
 /// in `routing_copy`, beside the sentence it goes with -- this only carries
-/// that answer onto `style::Tone`, which has two values this surface can
-/// never reach. `awaiting_rows` is `Held` and not `Attention`: a reader
-/// built a moment ago starts cold by construction, so this is the state a
-/// contributor sees immediately after touching anything on this card, and
-/// painting it as a fault would accuse a working proxy at exactly that
-/// moment.
+/// that answer onto `style::Tone`. `awaiting_rows` is `Held` and not
+/// `Attention`: a reader built a moment ago starts cold by construction, so
+/// this is the state a contributor sees immediately after touching anything
+/// on this card, and painting it as a fault would accuse a working proxy at
+/// exactly that moment.
+///
+/// `token_unreadable` is the one state that does read as `Attention`, and
+/// the reason this mapping has a fourth arm at all. It is the state where
+/// the switch is on and nothing could be built to read: neutral would paint
+/// it like the off line and held would paint it like the normal one, and it
+/// is neither.
 fn routing_tone(state: &str) -> Tone {
     match copy::ironwire_state_tone(state) {
         copy::StateTone::Held => Tone::Held,
         copy::StateTone::Clear => Tone::Clear,
+        copy::StateTone::Attention => Tone::Attention,
         copy::StateTone::Neutral => Tone::Neutral,
     }
 }
@@ -1406,9 +1412,29 @@ fn ask_routed_tools(app: &Rc<App>, settings: &Settings) {
             // cache is left empty so the next render asks again, and every
             // word stays "not known" meanwhile.
             if let Ok(value) = result {
-                app.settings
-                    .routing_evidence
-                    .replace(Some(parse_routed_tools(&value)));
+                let evidence = parse_routed_tools(&value);
+                // The same answer the button's probe reads, so the card can
+                // say why the four words are blank without waiting for
+                // somebody to press anything. Reopening this page with a
+                // declared proxy that is not running used to paint four
+                // "not known" rows and no sentence at all -- a dead end,
+                // with the reason already in hand and thrown away.
+                //
+                // Only where the line is saying nothing yet. This callback
+                // also runs on the background re-ask, and rewriting a line
+                // that answered a press would answer a question nobody
+                // asked. That is the rule the Windows shell already keeps.
+                //
+                // No extra call is made for this: it reads the outcome of
+                // the tool-list answer this function was already asking
+                // for.
+                if !app.settings.routing_probe.is_visible() {
+                    app.settings
+                        .routing_probe
+                        .set_text(&probe_line(&evidence.outcome));
+                    app.settings.routing_probe.set_visible(true);
+                }
+                app.settings.routing_evidence.replace(Some(evidence));
             }
             render_tool_rows(app);
         },
@@ -3069,6 +3095,30 @@ mod tests {
         assert_eq!(routing_tone("something_new"), Tone::Neutral);
     }
 
+    /// The one state that must not be painted calmly.
+    ///
+    /// The switch is on and nothing could be built to read, so this is the
+    /// state that is asking for something. Neutral would paint it exactly
+    /// like the off line and held would paint it exactly like the normal
+    /// one; either reading tells a contributor there is nothing to do.
+    #[test]
+    fn a_reader_that_could_not_be_built_is_not_painted_as_off_or_as_fine() {
+        use trace_commons_contributor::daemon::ipc::ROUTING_TOKEN_UNREADABLE;
+        let tone = routing_tone(ROUTING_TOKEN_UNREADABLE);
+        assert_eq!(tone, Tone::Attention);
+        assert_ne!(tone, Tone::Neutral);
+        assert_ne!(tone, Tone::Held);
+        assert_ne!(tone, Tone::Clear);
+        assert_ne!(
+            copy::ironwire_state_line(ROUTING_TOKEN_UNREADABLE),
+            copy::IRONWIRE_STATE_OFF
+        );
+        assert_eq!(
+            copy::ironwire_state_line(ROUTING_TOKEN_UNREADABLE),
+            copy::IRONWIRE_STATE_TOKEN_UNREADABLE
+        );
+    }
+
     /// The probe is asked in the parameter names the daemon reads, and an
     /// empty folder box is left out rather than sent as an empty string,
     /// which `probe_routing` refuses outright.
@@ -3147,6 +3197,7 @@ mod tests {
     fn the_daemon_state_tone_is_not_reimplemented_in_this_shell() {
         use trace_commons_contributor::daemon::ipc::{
             ROUTING_AWAITING_ROWS, ROUTING_NOT_DECLARED, ROUTING_ROWS_SEEN,
+            ROUTING_TOKEN_UNREADABLE,
         };
         let source = include_str!("settings.rs");
         let start = source
@@ -3164,6 +3215,7 @@ mod tests {
             "ROUTING_ROWS_SEEN",
             "awaiting_rows",
             "rows_seen",
+            "token_unreadable",
         ] {
             assert!(
                 !body.contains(spelled),
@@ -3177,19 +3229,32 @@ mod tests {
             ROUTING_NOT_DECLARED,
             ROUTING_AWAITING_ROWS,
             ROUTING_ROWS_SEEN,
+            ROUTING_TOKEN_UNREADABLE,
             "",
             "a_state_from_a_later_daemon",
         ] {
             let expected = match copy::ironwire_state_tone(state) {
                 copy::StateTone::Held => Tone::Held,
                 copy::StateTone::Clear => Tone::Clear,
+                copy::StateTone::Attention => Tone::Attention,
                 copy::StateTone::Neutral => Tone::Neutral,
             };
             assert_eq!(routing_tone(state), expected, "{state}");
-            // Neither of this palette's fault tones is reachable from any
-            // state, including one this build has never heard of.
-            assert_ne!(routing_tone(state), Tone::Attention, "{state}");
+            // The palette's hardest tone stays unreachable from every
+            // state, including one this build has never heard of: nothing
+            // here is a refusal.
             assert_ne!(routing_tone(state), Tone::Refused, "{state}");
+        }
+        // And the only state that may reach `Attention` is the one asking
+        // for something. A state this build cannot read never does.
+        for state in [
+            ROUTING_NOT_DECLARED,
+            ROUTING_AWAITING_ROWS,
+            ROUTING_ROWS_SEEN,
+            "",
+            "a_state_from_a_later_daemon",
+        ] {
+            assert_ne!(routing_tone(state), Tone::Attention, "{state}");
         }
     }
 
@@ -3433,6 +3498,55 @@ mod tests {
         assert!(
             !body.contains("routing_evidence.replace(None)"),
             "re-asking must not clear the answer that is on screen"
+        );
+    }
+
+    /// Opening this card against a declared proxy that is not running says
+    /// why, without a press.
+    ///
+    /// `check_routing` is the only other writer of the probe line and it
+    /// runs from a button. So the card could be opened, paint four "not
+    /// known" rows, and offer no sentence at all -- while the answer that
+    /// explains them was in the tool-list result this function had already
+    /// received. Windows has filled this line on load since it was written;
+    /// this is that parity, and it costs no extra call.
+    ///
+    /// Read from the source, because "this callback also writes that label,
+    /// and only when it is saying nothing" is a fact about one function's
+    /// body that no value-level assertion in this crate can reach.
+    #[test]
+    fn opening_the_card_says_why_the_words_are_blank_without_a_press() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn ask_routed_tools(")
+            .expect("the asker exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("probe_line(&evidence.outcome)"),
+            "the open-time refresh throws the outcome away: {body}"
+        );
+        assert!(
+            body.contains("routing_probe.set_visible(true)"),
+            "the sentence is written and never shown: {body}"
+        );
+        // And it does not overwrite an answer to a press. A background
+        // re-ask rewriting that line would answer a question nobody asked.
+        assert!(
+            body.contains("if !app.settings.routing_probe.is_visible()"),
+            "the re-ask rewrites a line somebody asked for: {body}"
+        );
+        // One call, not two: the outcome comes from the tool-list answer
+        // this function already asks for.
+        assert!(
+            !body.contains("probe_routing"),
+            "opening the card must not add a second probe call: {body}"
+        );
+        assert_eq!(
+            body.matches("app.call(").count(),
+            1,
+            "opening the card must make exactly one call: {body}"
         );
     }
 

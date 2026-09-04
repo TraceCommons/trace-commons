@@ -211,18 +211,24 @@ public enum RoutingTone: Equatable, Sendable {
     case held
     /// The reassuring reading.
     case clear
+    /// Declared, and something on this machine needs fixing before anything
+    /// can be read. The only reading here that asks for an action, and the
+    /// reason this is not three cases: a state meaning "cannot read" shown
+    /// as `.neutral` reads as off, and shown as `.held` reads as normal.
+    case attention
 
     /// A tone as the ABI answers it: `TC_ROUTING_TONE_*`.
     ///
     /// One numbering serves both the tool words and the daemon's state, so
     /// this is the only decoder. Anything this build does not know is
-    /// `.neutral`, the tone that claims nothing. Spelled out rather than
-    /// derived from this enum's declaration order, which is a Swift detail
-    /// and not the contract.
+    /// `.neutral`, the tone that claims nothing -- never `.clear`. Spelled
+    /// out rather than derived from this enum's declaration order, which is
+    /// a Swift detail and not the contract.
     public static func fromABI(_ value: Int32) -> RoutingTone {
         switch value {
         case 1: return .held
         case 2: return .clear
+        case 3: return .attention
         default: return .neutral
         }
     }
@@ -491,7 +497,7 @@ public enum RoutingSurface {
 
     // MARK: The status line
 
-    /// The daemon's three states, in words. A state this build does not know
+    /// The daemon's four states, in words. A state this build does not know
     /// says what the off state says: it claims nothing.
     /// NOT A BRANCH TABLE HERE. Which sentence each state reaches is decided
     /// once, in `routing_copy.rs`, and crosses the ABI. A line the ABI would
@@ -520,9 +526,15 @@ public enum RoutingSurface {
     /// It is a per-process stamp on the running daemon -- never an install
     /// date, never a connected-since -- and it starts empty again every time
     /// that process comes back up. On a state that has had no answer at all
-    /// there is nothing for it to report.
+    /// there is nothing for it to report -- which is both the state where
+    /// nothing is declared and the state where the reader could not be
+    /// built, so the two tones that mean a reader exists are named rather
+    /// than "not neutral".
     public static func showsLastChecked(forState state: String, calls: RoutingCalls) -> Bool {
-        tone(forState: state, calls: calls) != .neutral
+        switch tone(forState: state, calls: calls) {
+        case .held, .clear: return true
+        case .neutral, .attention: return false
+        }
     }
 
     // MARK: Per-tool words

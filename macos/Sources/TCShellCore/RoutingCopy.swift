@@ -46,6 +46,10 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
     public let stateOff: String
     public let stateWaiting: String
     public let stateReading: String
+    /// Declared, and no reader could be built. Carried because the payload
+    /// carries it: the three shells read the same set, and a field this one
+    /// dropped would be a sentence it could not show.
+    public let stateTokenUnreadable: String
 
     enum CodingKeys: String, CodingKey {
         case toolsHeading = "tools_heading"
@@ -75,6 +79,7 @@ public struct RoutingCopy: Decodable, Equatable, Sendable {
         case stateOff = "state_off"
         case stateWaiting = "state_waiting"
         case stateReading = "state_reading"
+        case stateTokenUnreadable = "state_token_unreadable"
     }
 
     /// Decode the payload, or nil if it will not parse.

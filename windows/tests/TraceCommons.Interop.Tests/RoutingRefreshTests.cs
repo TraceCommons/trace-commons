@@ -210,10 +210,14 @@ public class RoutingRefreshTests
             Assert.NotEqual(copy.StateOff, line.Text);
         }
 
-        // There is no fault tone to reach for in the first place.
-        Assert.Equal(
-            new[] { RoutingTone.Neutral, RoutingTone.Held, RoutingTone.Clear },
-            Enum.GetValues(typeof(RoutingTone)).Cast<RoutingTone>().ToArray());
+        // And it is not the state that asks for something. Asserted on
+        // awaiting_rows itself rather than on the shape of the tone enum:
+        // this test is about one state's reading, and the vocabulary of
+        // readings grows -- it grew when `token_unreadable` arrived, which
+        // is a different state and is where `Attention` belongs.
+        Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.NotEqual(RoutingTone.Attention, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.NotEqual(RoutingTone.Neutral, RoutingTools.StateTone(RoutingTools.AwaitingRows));
     }
 
     /// <summary>

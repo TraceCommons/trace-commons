@@ -437,6 +437,23 @@ pub const ROUTING_AWAITING_ROWS: &str = "awaiting_rows";
 /// `status.routing.state`: a proxy is declared and rows have been read.
 pub const ROUTING_ROWS_SEEN: &str = "rows_seen";
 
+/// `status.routing.state`: a proxy is declared, and no reader could be
+/// built for it.
+///
+/// The fourth situation, and the one that used to be reported as
+/// [`ROUTING_NOT_DECLARED`]. `settings::ironwire_ledger_for` answers `None`
+/// whenever `control.token` cannot be read -- the ordinary case where the
+/// proxy is not running, or keeps its record somewhere this daemon was not
+/// told about -- and that is indistinguishable, from the held ledger alone,
+/// from a contributor who declared nothing. Collapsing them printed "Off"
+/// on a card whose switch was on.
+///
+/// **Not `awaiting_rows` either.** That state says a reader exists and has
+/// seen nothing yet, which is normal and needs no action. This one says no
+/// reader exists, and it will stay that way until somebody changes
+/// something on this machine.
+pub const ROUTING_TOKEN_UNREADABLE: &str = "token_unreadable";
+
 impl DaemonShared {
     pub fn load(store: ConfigStore) -> Result<Self> {
         let mut queue = Queue::load(&store)?;
@@ -712,20 +729,44 @@ impl DaemonShared {
 
     /// The `routing` sub-object of [`Self::status_value`].
     ///
-    /// Three states, because the two a boolean can carry are the defect:
+    /// Four states, because the two a boolean can carry are the defect:
     /// "no proxy declared" and "declared but reading nothing" are different
     /// situations with different answers, and only the second is worth
     /// telling a contributor about. `has_rows` alone cannot tell them apart
     /// -- the distinction lives in the `Option` on shared state, which is
     /// why this reads the held instance rather than the settings blob.
     ///
+    /// The fourth is [`ROUTING_TOKEN_UNREADABLE`]: declared, and no reader
+    /// could be built. The held instance cannot express that one either --
+    /// it is `None` for it, exactly as it is for a contributor who declared
+    /// nothing -- so the declaration is read as well. Without it the card
+    /// says "Off" beside a switch the contributor left on.
+    ///
     /// `last_refresh_at` is reported alongside because `has_rows` is a poor
     /// health signal on its own: it says data exists, not that the proxy
     /// answers now. A proxy that died an hour ago still has rows.
     fn routing_value(&self) -> serde_json::Value {
         let Some(ledger) = self.routing_ledger() else {
+            // No ledger is two situations, not one, and only the second is
+            // the contributor's to fix. The declaration is what separates
+            // them: it is what the contributor themselves set, and it is
+            // still on while the reader it asked for could not be built.
+            //
+            // The settings lock is taken and released before the routing
+            // lock is touched, because `set_settings` holds settings while
+            // it rebuilds routing and one order everywhere is what keeps
+            // that safe.
+            let declared = {
+                let settings = self.settings.lock().expect("settings lock");
+                settings
+                    .ironwire
+                    .as_ref()
+                    .and_then(super::settings::IronWireDeclaration::port)
+                    .is_some()
+            };
             return serde_json::json!({
-                "state": ROUTING_NOT_DECLARED,
+                "state": if declared { ROUTING_TOKEN_UNREADABLE } else { ROUTING_NOT_DECLARED },
+                // No reader was built, so nothing has ever been checked.
                 "last_refresh_at": serde_json::Value::Null,
                 "unreadable_rows": 0,
             });
@@ -7395,6 +7436,49 @@ mod tests {
         );
     }
 
+    /// The state neither `has_rows()` nor the held ledger can express.
+    ///
+    /// This is the ordinary shape of a declared-but-not-running proxy: the
+    /// switch is on, the settings file says `watch`, and the token file the
+    /// reader needs is not there -- so `ironwire_ledger_for` builds nothing
+    /// and the daemon holds no ledger, exactly as it does for a contributor
+    /// who declared nothing at all. Reporting `not_declared` for it printed
+    /// "Off" under a switch the contributor could see was on.
+    #[test]
+    fn a_declared_proxy_whose_token_cannot_be_read_is_not_reported_as_undeclared() {
+        // A directory with no `control.token` in it, which is what a
+        // stopped proxy leaves behind.
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared();
+        let r = handle_request(&s, &req("set_settings", watch_params(8463, dir.path())));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(
+            s.routing_ledger().is_none(),
+            "no token file means no reader -- the premise of this test"
+        );
+
+        let routing = s.status_value()["routing"].clone();
+        assert_eq!(
+            routing["state"], ROUTING_TOKEN_UNREADABLE,
+            "the declaration is on; the status must not say otherwise: {routing}"
+        );
+        assert_ne!(routing["state"], ROUTING_NOT_DECLARED, "{routing}");
+        assert_eq!(
+            routing["last_refresh_at"],
+            serde_json::Value::Null,
+            "nothing was built, so nothing was ever checked"
+        );
+
+        // And the words a shell renders from it: neither "off" nor an
+        // all-clear.
+        use crate::routing_copy::{
+            IRONWIRE_STATE_OFF, StateTone, ironwire_state_line, ironwire_state_tone,
+        };
+        let state = routing["state"].as_str().expect("a state string");
+        assert_ne!(ironwire_state_line(state), IRONWIRE_STATE_OFF);
+        assert_eq!(ironwire_state_tone(state), StateTone::Attention);
+    }
+
     /// The state `has_rows()` alone cannot express.
     #[test]
     fn status_reports_not_declared_when_no_proxy_is_declared() {
@@ -7513,7 +7597,11 @@ mod tests {
         assert_eq!(ROUTING_NOT_DECLARED, "not_declared");
         assert_eq!(ROUTING_AWAITING_ROWS, "awaiting_rows");
         assert_eq!(ROUTING_ROWS_SEEN, "rows_seen");
+        assert_eq!(ROUTING_TOKEN_UNREADABLE, "token_unreadable");
         for (a, b) in [
+            (ROUTING_NOT_DECLARED, ROUTING_TOKEN_UNREADABLE),
+            (ROUTING_AWAITING_ROWS, ROUTING_TOKEN_UNREADABLE),
+            (ROUTING_ROWS_SEEN, ROUTING_TOKEN_UNREADABLE),
             (ROUTING_NOT_DECLARED, ROUTING_AWAITING_ROWS),
             (ROUTING_AWAITING_ROWS, ROUTING_ROWS_SEEN),
             (ROUTING_ROWS_SEEN, ROUTING_NOT_DECLARED),

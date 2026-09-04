@@ -680,11 +680,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Refresh the per-tool words without touching the declaration.
+    /// Refresh the per-tool words without touching the declaration, and say
+    /// what the answer was.
     ///
     /// Called when the card appears, and only while something is declared:
     /// asking about a proxy nobody mentioned would be the probe of an
     /// undeclared local service that the declaration exists to prevent.
+    ///
+    /// The sentence is set from the same answer, which is what the Windows
+    /// shell does when its settings card loads with a proxy declared.
+    /// Without it, opening Settings against a declared proxy that is not
+    /// running painted four "not known" rows and no sentence: the reason
+    /// was in this answer's outcome and was thrown away, and only a button
+    /// press could put it on screen. No second call is made for it -- the
+    /// tool-list answer this already asks for carries the outcome.
     func refreshRoutedTools() {
         let form = routingForm
         guard form.on, let client else { return }
@@ -692,8 +701,15 @@ final class AppModel: ObservableObject {
             let evidence = try? client.probeRoutedTools(form)
             await MainActor.run {
                 // Left as it was when the call did not run: a stale answer
-                // is replaced by a new one, never by a blank.
-                if let evidence { self.routingEvidence = evidence }
+                // is replaced by a new one, never by a blank -- and a
+                // sentence about a call that did not happen is not a fact
+                // about the proxy, so none is written either.
+                guard let evidence else { return }
+                self.routingEvidence = evidence
+                guard let copy = self.routingCopy else { return }
+                self.routingProbeLine = RoutingSurface.probeLine(
+                    evidence.outcome, copy: copy, calls: self.routingCalls
+                )
             }
         }
     }

@@ -328,12 +328,17 @@ char*       tc_routing_copy(void);
  * different things on one ABI, and a shell that mapped the wrong one would
  * mispaint a privacy claim rather than fail.
  *
- * None of these is a fault tone. Neither call can return one, because none of
- * the states this surface has is a fault.
+ * A tool word is never HELD or ATTENTION. ATTENTION is reachable only from
+ * tc_routing_state_tone, and only for the one state that is asking somebody
+ * to change something on this machine: declared, and no reader could be
+ * built. It is not an alarm and not a fault verdict about anything remote --
+ * it is the tone that stops "cannot read" being painted as "off" or as "all
+ * fine". A shell that does not know it must not fall back to CLEAR.
  */
-#define TC_ROUTING_TONE_NEUTRAL 0
-#define TC_ROUTING_TONE_HELD    1
-#define TC_ROUTING_TONE_CLEAR   2
+#define TC_ROUTING_TONE_NEUTRAL   0
+#define TC_ROUTING_TONE_HELD      1
+#define TC_ROUTING_TONE_CLEAR     2
+#define TC_ROUTING_TONE_ATTENTION 3
 
 /* One tool's word, from what the contributor said about that tool's sessions
  * and what IronWire said about that tool.
@@ -386,7 +391,12 @@ int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
  *
  * A state this build has never heard of -- and a NULL or non-UTF-8 state --
  * reads as the off line, which claims nothing. It never falls through to
- * either "on" sentence.
+ * any of the three "on" sentences.
+ *
+ * "token_unreadable" is one of those three: the proxy is declared, and the
+ * reader could not be built at all. It used to arrive here as the unknown
+ * state and read as off, which told a contributor with the switch on that
+ * the feature was off.
  *
  * Returns an owned string; free it with tc_string_free. NULL only on a caught
  * panic.
@@ -394,7 +404,7 @@ int32_t     tc_routing_tool_tone(const char* source_mode, int32_t wiring);
 char*       tc_routing_state_line(const char* state);
 
 /* How firmly the sentence tc_routing_state_line returned reads:
- * TC_ROUTING_TONE_NEUTRAL, _HELD or _CLEAR.
+ * TC_ROUTING_TONE_NEUTRAL, _HELD, _CLEAR or _ATTENTION.
  *
  * Exported for the reason the sentence is. This was the last routing branch
  * table still written out natively in all three shells, and three copies of
@@ -404,6 +414,11 @@ char*       tc_routing_state_line(const char* state);
  * empty by construction, and that is the state a contributor sees immediately
  * after touching anything on this card. Painting it as broken would accuse a
  * working proxy at exactly that moment.
+ *
+ * token_unreadable is ATTENTION, and it is the only state that reaches that
+ * tone. It is neither NEUTRAL nor CLEAR on purpose: painted neutral it reads
+ * as off, painted clear it reads as fine, and it is a state somebody has to
+ * act on.
  *
  * Never fails. A state this build has never heard of, a NULL or non-UTF-8
  * state, and a caught panic all answer TC_ROUTING_TONE_NEUTRAL -- the same
