@@ -727,11 +727,17 @@ impl DaemonShared {
             return serde_json::json!({
                 "state": ROUTING_NOT_DECLARED,
                 "last_refresh_at": serde_json::Value::Null,
+                "unreadable_rows": 0,
             });
         };
         serde_json::json!({
             "state": if ledger.has_rows() { ROUTING_ROWS_SEEN } else { ROUTING_AWAITING_ROWS },
             "last_refresh_at": ledger.last_refresh_at(),
+            // Zero everywhere it is working. Non-zero is the only signal a
+            // contributor gets that the proxy is serving rows this client
+            // cannot read -- the alternative is enrichment that thins out
+            // with nothing anywhere saying so. A count, never a row.
+            "unreadable_rows": ledger.unreadable_rows(),
         })
     }
 
