@@ -1890,6 +1890,20 @@ mod tests {
     const REQUEST_BODY_MARKER: &str = "zzq-request-body-marker-zzq";
     const RESPONSE_BODY_MARKER: &str = "zzq-response-body-marker-zzq";
     const HEADER_MARKER: &str = "zzq-bearer-marker-zzq";
+    /// The positive control's marker, and it is in the URL's **host**, not
+    /// its path.
+    ///
+    /// It used to be a path segment, and it survived only because
+    /// `tool_payload_profile` recognised no profile for the name `inference`
+    /// and so ran no structural rules at all. That fallback now falls closed,
+    /// and the restrictive profile sanitizes a URL exactly as the browser
+    /// profile always did -- host kept, path replaced. So a path segment is
+    /// no longer a control for "the exchange survived"; it is a control for
+    /// the hole this test was written to describe.
+    ///
+    /// The host is the right marker: it survives redaction under every
+    /// profile, so the assertion still fails if the witness deletes the
+    /// event, empties the artifact, or strips more than the bodies.
     const URL_MARKER: &str = "zzq-url-marker-zzq";
 
     /// A contribution whose final `HttpExchange` carries bodies, a header
@@ -1902,15 +1916,22 @@ mod tests {
         // Two fixture choices that are load-bearing, and both were found by
         // watching this test fail rather than by reading.
         //
-        // The tool name is `inference` rather than `http`. The deterministic
-        // pass keys its tool-payload profiles on the *name*, and a name
-        // containing http, browser or web already drops `body` and
-        // `headers` as `browser_content` and `browser_header`. So an exchange
-        // captured under one of those names never needed this strip -- and an
-        // exchange captured under any other name is a raw prompt and a live
-        // `Authorization` header on their way to storage. This strip is what
-        // makes the guarantee a property of the witness rather than of a
-        // classifier profile keyed on a string a capture chose.
+        // The tool name is `inference` rather than `http`, which is the case
+        // the profile table used to miss entirely: it keyed on the *name*,
+        // and a name containing http, browser or web dropped `body` and
+        // `headers` while every other name ran no structural rules at all.
+        // An exchange captured under any other name was a raw prompt and a
+        // live `Authorization` header on their way to storage.
+        //
+        // The protocol's fallback now falls closed, so the pass no longer
+        // leaves them behind. This strip is still not redundant: it *removes*
+        // the fields rather than replacing them with markers a reader has to
+        // reason about, it runs before the digest so the certificate covers
+        // the bytes the contributor holds, and it makes the guarantee a
+        // property of the witness rather than of a classifier table. Keeping
+        // this fixture on an unrecognised name keeps both controls honest --
+        // if the protocol fallback regresses, the protocol's own tests fail;
+        // if this strip regresses, these do.
         //
         // Payload consent is granted, which is the other configuration in which
         // this strip does any work: without it the redaction pass already
@@ -1934,7 +1955,7 @@ mod tests {
                 structured_payload: serde_json::json!({
                     "request": {
                         "method": "POST",
-                        "url": format!("https://example.invalid/{URL_MARKER}"),
+                        "url": format!("https://{URL_MARKER}.invalid/v1/chat/completions"),
                         "headers": {"authorization": format!("Bearer {HEADER_MARKER}")},
                         "body": format!(r#"{{"model":"m","prompt":"{REQUEST_BODY_MARKER}"}}"#),
                     },

@@ -460,18 +460,23 @@ pub fn check_inference_attestation(
 ///
 /// # How much of this the redaction pass already did, measured
 ///
-/// Some of it, conditionally, and the condition is a string a capture chose.
-/// `BROWSER_RULES` in `trace-commons-protocol` drops `body` and redacts
-/// `headers` for any event whose **tool name** contains `http`, `browser` or
-/// `web`. `from_recorded_trace` names its exchanges `http`, so on that path
-/// this function finds nothing to remove.
+/// Most of it now, and it used to be "some of it, conditionally, and the
+/// condition is a string a capture chose". `BROWSER_RULES` in
+/// `trace-commons-protocol` drops `body` and redacts `headers` for any event
+/// whose **tool name** contains `http`, `browser` or `web`, and a name
+/// matching no profile at all used to run no structural rules whatsoever --
+/// so an `HttpExchange` named `inference`, or whatever an IronWire capture
+/// picked, kept its request body and its `Authorization` header all the way
+/// through the pass. That fallback now falls closed: an unrecognised tool
+/// gets the most restrictive profile rather than none.
 ///
-/// It is not therefore redundant, and the test fixture proves which case is
-/// which: an `HttpExchange` event named anything else -- `inference`, or
-/// whatever an IronWire capture picks -- keeps its request body and its
-/// `Authorization` header all the way through the pass, and this function is
-/// the only thing that removes them. Deleting it puts a raw prompt and a live
-/// token in the returned artifact, which is what
+/// This function is still not redundant, for three reasons. It **removes**
+/// the fields rather than leaving `[REDACTED:...]` markers a reader has to
+/// reason about, so nothing downstream can mistake a marker for evidence.
+/// It runs before the digest, so the certificate covers the bytes the
+/// contributor actually holds. And it is enforcement inside the enclave
+/// rather than a classifier table two crates away, which is where a
+/// guarantee of this kind should live. Deleting it is what
 /// `the_returned_artifact_carries_no_inference_bodies_or_headers` fails on.
 ///
 /// So the guarantee moves from "a classifier profile matched the tool name" to
