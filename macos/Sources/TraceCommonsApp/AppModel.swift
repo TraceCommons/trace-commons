@@ -137,6 +137,138 @@ final class AppModel: ObservableObject {
         stateLine: { TCRoutingCopy.stateLine(state: $0) },
         stateTone: { TCRoutingCopy.stateTone(state: $0) }
     )
+    // MARK: - The redaction witness
+
+    /// The witness surface's fixed words, decoded once from the Rust.
+    ///
+    /// Nil only if the export or the decode failed, and the card renders
+    /// nothing at all in that case, for the reason `routingCopy` gives.
+    @Published private(set) var witnessCopy: WitnessCopy? = WitnessCopy.decode(
+        fromJSON: TCWitness.copyJSON() ?? ""
+    )
+
+    /// What the witness is doing, as `TC_WITNESS_STATE_*`.
+    ///
+    /// **Nil is "nobody has asked yet", not "absent".** The config directory
+    /// is not resolved until `start()` runs, and seeding this with a state
+    /// would be this shell asserting something about a file it has not read.
+    /// The card renders no witness sentence while it stands.
+    @Published private(set) var witnessStateCode: Int32?
+
+    /// The configuration behind that state, when it could be read.
+    ///
+    /// Nil is NOT "no witness" -- that is state `absent` on a successful
+    /// read. It is an unenrolled device or a config that could not be read,
+    /// and `witnessStateCode` is what says which.
+    @Published private(set) var witnessStatus: WitnessStatus?
+
+    /// The ABI's fixed label from the last witness read or write that
+    /// refused, or nil.
+    ///
+    /// An operator string like `witness-pin-required`, never wording, and no
+    /// sentence is built around it: that sentence would exist in this shell
+    /// alone. It carries no path, no token and no trace content.
+    @Published private(set) var witnessLabel: String?
+
+    /// A witness read or write is in flight.
+    @Published private(set) var witnessBusy = false
+
+    /// The sentences and tones that are decided in Rust. This shell fills in
+    /// no holes and owns no `switch`; see `TCWitness`.
+    let witnessCalls = WitnessCalls(
+        stateLine: { TCWitness.stateLine(state: $0) },
+        stateTone: { TCWitness.stateTone(state: $0) },
+        lastResultLine: { TCWitness.lastResultLine() },
+        lastResultTone: { TCWitness.lastResultTone() }
+    )
+
+    /// The witness state as a case, or nil while nothing has been asked.
+    ///
+    /// Derived from the state code and from nothing else -- never from
+    /// `witnessStatus?.url` being non-nil, which is the boolean this surface
+    /// refuses to hand a shell, spelled differently.
+    var witnessState: WitnessTrustState? {
+        witnessStateCode.map(WitnessTrustState.fromABI)
+    }
+
+    /// Ask what the witness is doing and publish the answer.
+    ///
+    /// Two calls, deliberately: `tc_witness_trust_state` answers for every
+    /// input, including the unenrolled and unreadable cases where the status
+    /// JSON refuses. A card driven off the status alone would have nothing
+    /// to say in exactly the states that matter most.
+    func refreshWitness() {
+        let dir = configDirectory
+        guard !dir.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            let code = TCWitness.trustState(configDir: dir)
+            let read = TCWitness.statusJSON(configDir: dir)
+            await MainActor.run { self.publishWitness(code: code, read: read, wrote: nil) }
+        }
+    }
+
+    /// Write the configuration, then re-read and publish what came back.
+    ///
+    /// `canConfigure` is checked here as well as in the card: an empty pin
+    /// list produces a client that refuses every submission from the moment
+    /// it is saved, and this shell does not make that call.
+    func configureWitness(_ form: WitnessForm) {
+        guard form.canConfigure, let pins = form.measurementsJSON else { return }
+        let url = form.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = form.signingAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        writeWitness { dir in
+            TCWitness.configure(
+                configDir: dir, url: url, signingAddress: address, measurementsJSON: pins)
+        }
+    }
+
+    /// Stop using a witness, then re-read and publish what came back.
+    ///
+    /// This is the way out of a refusal, and it is a real change rather than
+    /// a setting being switched off: later submissions carry this app's own
+    /// judgement of what was left rather than a certificate. The card says
+    /// so, in the Rust's words.
+    func clearWitness() {
+        writeWitness { TCWitness.clear(configDir: $0) }
+    }
+
+    /// Nothing is applied optimistically. The write's own answer decides
+    /// only whether a refusal label is shown; what the card renders is the
+    /// state and status read back afterwards.
+    private func writeWitness(_ work: @escaping @Sendable (String) -> TCWitness.Outcome) {
+        let dir = configDirectory
+        guard !dir.isEmpty else { return }
+        witnessBusy = true
+        witnessLabel = nil
+        Task.detached(priority: .userInitiated) {
+            let wrote = work(dir)
+            let code = TCWitness.trustState(configDir: dir)
+            let read = TCWitness.statusJSON(configDir: dir)
+            await MainActor.run {
+                self.witnessBusy = false
+                self.publishWitness(code: code, read: read, wrote: wrote)
+            }
+        }
+    }
+
+    private func publishWitness(
+        code: Int32, read: TCWitness.StatusRead, wrote: TCWitness.Outcome?
+    ) {
+        publishIfChanged(\.witnessStateCode, code)
+        var label: String?
+        switch read {
+        case .status(let json):
+            publishIfChanged(\.witnessStatus, WitnessStatus.decode(fromJSON: json))
+        case .refused(let refusalLabel):
+            publishIfChanged(\.witnessStatus, nil)
+            label = refusalLabel
+        }
+        // A refused write is the more specific answer, and the one somebody
+        // just asked for, so it wins over a refused read.
+        if case .refused(let writeLabel) = wrote { label = writeLabel }
+        publishIfChanged(\.witnessLabel, label)
+    }
+
     @Published private(set) var outcomeCounts: [String: Int] = [:]
     @Published private(set) var audit: [AuditEntry] = []
     @Published var undo: Undo?
