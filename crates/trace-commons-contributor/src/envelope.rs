@@ -877,6 +877,13 @@ fn raw_events_for_with_routing(
 ) -> Vec<RawTraceContributionEvent> {
     let mut mapped = raw_events_for(events, now);
     mapped.extend(routing.iter().map(raw_routing_event_for));
+    // Deliberately NOT the attested exchange. A captured inference body is
+    // carried only in transit to a witness -- see
+    // `crate::witness::transport::witness_contribution` -- and never by
+    // anything this function builds, because what this function builds is
+    // what gets redacted locally, queued on disk and submitted. A contributor
+    // with no witness configured ships exactly what they shipped before.
+    // `a_locally_built_trace_never_carries_an_attested_body` pins it.
     mapped
 }
 
@@ -1040,6 +1047,10 @@ mod tests {
             backend: "claude-sub".to_string(),
             requested_model: Some("claude-opus-4-6".to_string()),
             served_model: Some("claude-opus-4-6".to_string()),
+            upstream_id: None,
+            request_sha256: None,
+            response_sha256: None,
+            body_ref: None,
             rung: "same_model".to_string(),
             attempts: 1,
             input_tokens: Some(1000),
@@ -2676,5 +2687,67 @@ mod tests {
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
 
         assert_eq!(raw.events[0].success, Some(false));
+    }
+
+    /// The safety property the whole design now rests on: a captured
+    /// inference body never reaches anything this builder produces.
+    ///
+    /// `build_raw_contribution` is what gets redacted locally, written to the
+    /// queue and submitted to ingest. A contributor with no witness
+    /// configured ships exactly what they shipped before this feature
+    /// existed, and that is true even when the transcript is holding a fully
+    /// attestable call. Bodies live only in transit to a witness -- see
+    /// `crate::witness::transport::witness_contribution`.
+    #[test]
+    fn a_locally_built_trace_never_carries_an_attested_body() {
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType;
+
+        // Non-alphabetical keys, ragged whitespace, non-ASCII inside a
+        // string and a float no re-serialiser reproduces.
+        const AWKWARD: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — naïve\"}]}";
+        const RESPONSE: &str =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reference = "00000000000000000009-000000";
+        std::fs::write(dir.path().join(format!("{reference}.req")), AWKWARD).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
+
+        let mut row = sample_routed_exchange();
+        row.body_ref = Some(reference.to_string());
+        row.upstream_id = Some("chatcmpl-abc123".to_string());
+        row.request_sha256 = Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+            AWKWARD.as_bytes(),
+        )));
+        row.response_sha256 = Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+            RESPONSE.as_bytes(),
+        )));
+
+        let call = crate::routing::attested::attested_final_call(&[row.clone()], dir.path())
+            .expect("the fixture must actually be attestable, or this proves nothing");
+
+        let cfg = test_config();
+        let mut t = fixture_transcript();
+        t.routing = vec![row];
+        t.attested_call = Some(std::sync::Arc::new(call));
+
+        let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
+
+        assert!(
+            !raw.events
+                .iter()
+                .any(|event| event.event_type == TraceContributionEventType::HttpExchange),
+            "a locally built trace must declare no inference exchange at all"
+        );
+        let serialized = serde_json::to_string(&raw).expect("serializes");
+        assert!(
+            !serialized.contains("café"),
+            "a captured body must not reach the locally built trace"
+        );
+        assert!(
+            !serialized.contains("chatcmpl-abc123"),
+            "the provider's exchange identifier must not reach the locally \
+             built trace either"
+        );
     }
 }

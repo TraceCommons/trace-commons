@@ -22,7 +22,14 @@ trace-commons-build-info = { path = "../trace-commons-build-info" }
 #
 # Measured cost, `cargo tree -p trace-commons-contributor -e normal`:
 # 162 packages before, 227 after. Approved at that figure.
-trace-commons-attestation = { path = "../trace-commons-attestation" }
+# `receipt` is on because this crate now fetches and carries NEAR AI
+# inference receipts to a witness. That feature's own comment used to say a
+# contributor client does not enable it "because it makes no inference calls
+# and holds no receipts" -- true until the attested-inference path existed,
+# false now. It adds NO packages: `k256` and `sha3` are unconditional in that
+# crate because EIP-191 recovery also verifies a redaction-witness
+# certificate, which this crate already did.
+trace-commons-attestation = { path = "../trace-commons-attestation", features = ["receipt"] }
 anyhow = "1"
 # Promoted from dev-dependencies: the witness transport is a trait object so
 # a recording double can assert the verify-then-send ordering. Adds no

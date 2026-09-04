@@ -13993,3 +13993,207 @@ mod tests {
         assert_eq!(map.distinct_count("secret"), 0);
     }
 }
+
+/// Whether a captured HTTP body survives the local redaction pass.
+///
+/// The safety question behind carrying verbatim inference bodies into a
+/// trace: this repo's detector scans every leaf, but the *rewriting* passes
+/// only touch fields they know about. If a raw request body reached the
+/// published envelope untouched, a contributor with no witness configured
+/// would ship prompts, secrets and PII that had never left the machine.
+///
+/// These tests answer that with the pipeline itself rather than by reading
+/// it. They are the evidence, and they must keep failing if either of the
+/// two mechanisms they depend on is removed:
+///
+/// - the request body travels in `structured_payload["request"]["body"]` on
+///   an event whose `tool_name` is `"http"`, which selects `BROWSER_RULES`,
+///   whose `body` rule is a wholesale `Replace("browser_content")`;
+/// - the response body travels in `content`, which every event's content
+///   goes through -- deterministic passes here, and the prose-PII filter on
+///   the paths that have one.
+#[cfg(test)]
+mod attested_body_redaction_tests {
+    use super::*;
+
+    /// A request body of the shape an inference call actually puts on the
+    /// wire: the whole conversation prefix, carrying whatever the user typed.
+    const SECRET_IN_REQUEST: &str = "sk-live-QvR7dTnLbXk2MwZ9pAsE4uYcH6jFgN3t";
+    const PATH_IN_REQUEST: &str = "/Users/zaki/code/api/.env";
+    const SECRET_IN_RESPONSE: &str = "ghp_ZmNkZTEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY";
+
+    fn request_body() -> String {
+        format!(
+            r#"{{"model":"Qwen/Qwen3.6-27B-FP8","messages":[{{"role":"user","content":"deploy with {SECRET_IN_REQUEST} from {PATH_IN_REQUEST}"}}]}}"#
+        )
+    }
+
+    fn response_body() -> String {
+        format!(r#"{{"choices":[{{"message":{{"content":"use {SECRET_IN_RESPONSE}"}}}}]}}"#)
+    }
+
+    /// An `HttpExchange` event shaped exactly as `from_recorded_trace` writes
+    /// one under `include_tool_payloads`, and as the contributor path must
+    /// write one for a witness to find the bodies.
+    fn raw_with_attested_exchange() -> RawTraceContribution {
+        let now = Utc::now();
+        let mut raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "ship it".to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: now,
+                completed_at: Some(now),
+                state: Some("Completed".to_string()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                include_tool_payloads: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        raw.events.push(RawTraceContributionEvent {
+            event_id: Uuid::new_v4(),
+            parent_event_id: None,
+            event_type: TraceContributionEventType::HttpExchange,
+            timestamp: now,
+            content: Some(response_body()),
+            structured_payload: serde_json::json!({
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.example.invalid/v1/chat/completions",
+                    "headers": [["authorization", "Bearer secret-token-value"]],
+                    "body": request_body(),
+                },
+                "response": { "status": 200 },
+            }),
+            tool_name: Some("http".to_string()),
+            tool_call_id: None,
+            latency_ms: None,
+            token_counts: None,
+            cost_usd: None,
+            success: Some(true),
+            failure_modes: Vec::new(),
+        });
+        raw
+    }
+
+    /// CONFIRMED, by running the pipeline: the raw request body does not
+    /// reach the envelope at all. `BROWSER_RULES` replaces the whole `body`
+    /// field, so this is not "the secrets inside it were masked" -- the field
+    /// is gone.
+    #[tokio::test]
+    async fn a_captured_request_body_does_not_reach_the_envelope() {
+        let envelope =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/zaki".to_string()])
+                .redact_trace(raw_with_attested_exchange())
+                .await
+                .expect("an exchange carrying bodies is not a refusal");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+
+        assert!(
+            !serialized.contains(SECRET_IN_REQUEST),
+            "a credential inside a captured request body reached the envelope"
+        );
+        assert!(
+            !serialized.contains(PATH_IN_REQUEST),
+            "a local path inside a captured request body reached the envelope"
+        );
+        assert!(
+            !serialized.contains("Qwen/Qwen3.6-27B-FP8"),
+            "the request body reached the envelope"
+        );
+        assert!(
+            !serialized.contains("secret-token-value"),
+            "a captured request header value reached the envelope"
+        );
+
+        let exchange = envelope
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::HttpExchange)
+            .expect("the exchange event survives as an event");
+        assert_eq!(
+            exchange.structured_payload["request"]["body"],
+            serde_json::json!("[REDACTED:browser_content]"),
+            "the request body must be replaced wholesale, not merely scrubbed"
+        );
+    }
+
+    /// The response body is content, not a typed field, so it is scrubbed
+    /// rather than replaced. That is weaker, and the test says which of the
+    /// two it is so nobody reads the pair as equivalent.
+    #[tokio::test]
+    async fn a_captured_response_body_is_scrubbed_in_place() {
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw_with_attested_exchange())
+            .await
+            .expect("an exchange carrying bodies is not a refusal");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+        assert!(
+            !serialized.contains(SECRET_IN_RESPONSE),
+            "a credential inside a captured response body reached the envelope"
+        );
+
+        let exchange = envelope
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::HttpExchange)
+            .expect("the exchange event survives as an event");
+        let content = exchange
+            .redacted_content
+            .as_deref()
+            .expect("the response body is still carried as content");
+        assert!(
+            content.contains("choices"),
+            "scrubbing rewrites the body in place; it does not discard it"
+        );
+    }
+
+    /// And the same bodies are still bounded by consent. Without
+    /// `include_tool_payloads` the conversion writes neither of them, so a
+    /// contribution that withheld payloads carries nothing for a witness to
+    /// attest -- which is the fail-closed direction.
+    #[test]
+    fn withholding_tool_payloads_carries_no_bodies_at_all() {
+        let trace = crate::llm::recording::TraceFile {
+            model_name: "Qwen/Qwen3.6-27B-FP8".to_string(),
+            memory_snapshot: Vec::new(),
+            http_exchanges: vec![crate::llm::recording::HttpExchange {
+                request: crate::llm::recording::HttpExchangeRequest {
+                    method: "POST".to_string(),
+                    url: "https://api.example.invalid/v1/chat/completions".to_string(),
+                    headers: Vec::new(),
+                    body: Some(request_body()),
+                },
+                response: crate::llm::recording::HttpExchangeResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: response_body(),
+                },
+            }],
+            steps: Vec::new(),
+        };
+
+        let raw = RawTraceContribution::from_recorded_trace(
+            &trace,
+            RecordedTraceContributionOptions::default(),
+        );
+
+        let exchange = raw
+            .events
+            .iter()
+            .find(|event| event.event_type == TraceContributionEventType::HttpExchange)
+            .expect("the exchange is still declared");
+        assert!(
+            exchange.content.is_none(),
+            "no consent for tool payloads must mean no response body"
+        );
+        assert!(
+            exchange.structured_payload["request"].get("body").is_none(),
+            "no consent for tool payloads must mean no request body"
+        );
+    }
+}

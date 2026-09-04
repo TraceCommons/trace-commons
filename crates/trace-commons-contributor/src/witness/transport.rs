@@ -170,10 +170,33 @@ pub struct GrantedConsent {
 /// **pinned** address, and the digest matches the returned envelope bytes *as
 /// received on the wire* -- never a re-serialisation of a parsed envelope,
 /// which would compare the certificate against bytes nobody will ever send.
+///
+/// # Why the attested bodies are attached HERE and nowhere else
+///
+/// `attested` carries the final inference call's verbatim request and
+/// response bytes, and this function is the **only** place in the client that
+/// puts them into a contribution. They are appended to a copy that exists for
+/// the length of one request: not to the transcript's own raw contribution,
+/// not to anything redacted locally, not to anything queued or submitted.
+///
+/// That is the whole safety argument for carrying them at all. The witness
+/// runs in an enclave, verifies the receipt against these bytes, **strips
+/// them**, and certifies the stripped artifact. So the bodies exist in one
+/// process's memory and one TLS connection, and nothing downstream ever holds
+/// them. A contributor who has configured no witness ships exactly what they
+/// shipped before, because this function is not on their path.
+///
+/// The strip is the witness's job and this client cannot perform it, but it
+/// can refuse to accept an artifact where it did not happen -- see
+/// [`WitnessTrustError::WitnessBodyNotStripped`]. That check is not a
+/// courtesy: a witness that returned the bodies would have turned a private
+/// prompt into a submitted one, and the client is the only party that can
+/// still tell.
 pub async fn witness_contribution(
     transport: &dyn WitnessTransport,
     witness: &VerifiedWitness,
     raw: RawTraceContribution,
+    attested: Option<&crate::routing::attested::AttestedCall>,
     granted: &GrantedConsent,
 ) -> Result<WitnessedEnvelope, WitnessTrustError> {
     // Refused locally, before anything is offered. The client already refuses
@@ -182,12 +205,33 @@ pub async fn witness_contribution(
     // finding out late is that the session was already transmitted.
     raw_contribution_size_ok(&raw).map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
 
+    // The in-transit copy. `raw` itself is left alone so a caller that keeps
+    // it -- for a retry, for a local fallback -- never finds bodies in it.
+    let mut offered = raw;
+    if let Some(call) = attested {
+        // Strictly last. A witness attests the LAST `HttpExchange` event a
+        // trace declares, so an exchange that is not in the final position is
+        // a claim about a call that was not the final one. Nothing may be
+        // appended after this.
+        offered
+            .events
+            .push(crate::routing::attested::attested_exchange_event(call));
+    }
+
     let body = serde_json::to_vec(&serde_json::json!({
-        "raw_contribution": raw,
+        "raw_contribution": offered,
         "granted_scopes": granted.scopes,
         "granted_uses": granted.uses,
     }))
     .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    // Bounded again after the bodies were added: `raw_contribution_size_ok`
+    // above judged the session without them, and the witness has its own
+    // request limit. Refused here rather than discovered as a transport
+    // error, so the contributor is told the session was too large rather
+    // than that the witness was unreachable.
+    if body.len() > MAX_WITNESS_REQUEST_BYTES {
+        return Err(WitnessTrustError::WitnessPayloadTooLarge);
+    }
 
     let response = transport.witness(witness, &body).await?;
 
@@ -198,8 +242,58 @@ pub async fn witness_contribution(
         return Err(WitnessTrustError::WitnessPayloadTooLarge);
     }
 
+    // Before the certificate, deliberately. An artifact still carrying the
+    // raw bodies is a privacy failure whatever its signature says, and a
+    // valid certificate over it is worse than an invalid one -- it would be
+    // submitted.
+    if let Some(call) = attested {
+        if artifact_still_carries(&response.envelope_bytes, call) {
+            return Err(WitnessTrustError::WitnessBodyNotStripped);
+        }
+    }
+
     verify_certificate(&response, witness.signing_address())?;
     Ok(response)
+}
+
+/// How large the witnessed request may be once the bodies are in it.
+///
+/// 32 MiB, half the witness's own 64 MiB request limit. Half rather than all
+/// of it because the limit the witness enforces is on the whole HTTP request
+/// and this bound is on the JSON document alone; a client that budgeted the
+/// server's exact limit would send requests the server refuses.
+const MAX_WITNESS_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+
+/// Whether a returned artifact still contains either attested body.
+///
+/// A containment test over the bytes as received, not a structural walk. The
+/// question is not "is the field still there" -- a witness could move it, put
+/// it in a different event, or leave it in a diagnostic string -- but "did
+/// any of these bytes come back". Substring containment answers exactly that
+/// and cannot be satisfied by a rename.
+///
+/// Only the request body is checked in full. The response body is checked the
+/// same way, and both are checked as their raw JSON-escaped forms, because
+/// that is how they would appear inside a serialized envelope.
+fn artifact_still_carries(
+    envelope_bytes: &[u8],
+    call: &crate::routing::attested::AttestedCall,
+) -> bool {
+    let Ok(text) = std::str::from_utf8(envelope_bytes) else {
+        // Not a JSON document at all. Reported as malformed by the checks
+        // that follow rather than as an un-stripped body.
+        return false;
+    };
+    [call.request_body(), call.response_body()]
+        .into_iter()
+        .filter(|body| !body.is_empty())
+        .any(|body| {
+            // The escaped form is what a serialized envelope would hold; the
+            // literal form catches an artifact that is not JSON-escaping.
+            let escaped = serde_json::to_string(body).unwrap_or_default();
+            let escaped = escaped.trim_matches('"');
+            text.contains(body) || (!escaped.is_empty() && text.contains(escaped))
+        })
 }
 
 /// Check a certificate against the bytes that came back with it.
@@ -951,6 +1045,7 @@ mod tests {
             &unpinnable_trust(&address_of(&signer)),
             1_788_264_000,
             raw_with_secret(),
+            None,
             &granted(),
         )
         .await;
@@ -992,6 +1087,7 @@ mod tests {
             &unpinnable_trust(&address_of(&signer)),
             1_788_264_000,
             raw_with_secret(),
+            None,
             &granted(),
         )
         .await
@@ -1029,6 +1125,7 @@ mod tests {
             &unpinned,
             1_788_264_000,
             raw_with_secret(),
+            None,
             &granted(),
         )
         .await
@@ -1058,7 +1155,7 @@ mod tests {
         let witness =
             crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
 
-        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
             .await
             .expect_err("only the client can catch this; the server cannot");
         assert_eq!(err, WitnessTrustError::WitnessCertificateMismatched);
@@ -1083,7 +1180,7 @@ mod tests {
             &address_of(&witness_key),
         );
 
-        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
             .await
             .expect_err("a certificate from an unpinned key is worth nothing");
         assert_eq!(err, WitnessTrustError::WitnessCertificateUnverified);
@@ -1103,9 +1200,10 @@ mod tests {
         let witness =
             crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
 
-        let response = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
-            .await
-            .expect("a certificate over these bytes from the pinned key is accepted");
+        let response =
+            witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                .await
+                .expect("a certificate over these bytes from the pinned key is accepted");
         // And what comes back is the bytes as received, byte for byte.
         assert_eq!(response.envelope_bytes, envelope_bytes());
     }
@@ -1125,7 +1223,7 @@ mod tests {
         let mut oversized = raw_with_secret();
         oversized.events[0].content = Some("x".repeat(MAX_ENVELOPE_BYTES + 1));
 
-        let err = witness_contribution(&transport, &witness, oversized, &granted())
+        let err = witness_contribution(&transport, &witness, oversized, None, &granted())
             .await
             .expect_err("an oversized contribution is refused before it is offered");
         assert_eq!(err, WitnessTrustError::WitnessPayloadTooLarge);
@@ -1147,12 +1245,242 @@ mod tests {
         let transport = transport_for(&server.base, permissive());
         let witness =
             crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
-        let err = witness_contribution(&transport, &witness, raw_with_secret(), &granted())
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
             .await
             .unwrap_err();
         for rendering in [format!("{err}"), format!("{err:?}")] {
             assert!(!rendering.contains(SECRET));
             assert!(!rendering.contains(&server.base));
         }
+    }
+
+    /// A fully attestable call, built from a temporary body store so the
+    /// digests are real and the bodies are the ones the module actually
+    /// carries.
+    ///
+    /// The request body is one a re-serialiser would demonstrably change:
+    /// non-alphabetical keys, ragged whitespace, non-ASCII inside a string,
+    /// and a float with more precision than a round trip preserves.
+    fn attestable_call() -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
+        use sha2::Digest as _;
+
+        const AWKWARD: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — naïve secret-in-prompt\"}]}";
+        const RESPONSE: &str =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reference = "00000000000000000003-000000";
+        std::fs::write(dir.path().join(format!("{reference}.req")), AWKWARD).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
+
+        let row = crate::routing::RoutedExchange {
+            id: Some(3),
+            started_at: chrono::Utc::now(),
+            client_session_id: Some("session".to_string()),
+            total_ms: Some(10),
+            facade: "openai".to_string(),
+            backend: "nearai".to_string(),
+            requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            served_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            upstream_id: Some("chatcmpl-abc123".to_string()),
+            request_sha256: Some(hex::encode(sha2::Sha256::digest(AWKWARD.as_bytes()))),
+            response_sha256: Some(hex::encode(sha2::Sha256::digest(RESPONSE.as_bytes()))),
+            body_ref: Some(reference.to_string()),
+            rung: "full".to_string(),
+            attempts: 1,
+            input_tokens: Some(1),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(1),
+            cost_usd: Some(0.0),
+            status: 200,
+        };
+        let call = crate::routing::attested::attested_final_call(&[row], dir.path())
+            .expect("the fixture must actually be attestable, or these tests prove nothing");
+        (call, dir)
+    }
+
+    /// The link: the bodies reach the witness verbatim, as the last
+    /// `HttpExchange` event, so the enclave can hash them against a receipt.
+    #[tokio::test]
+    async fn the_attested_bodies_reach_the_witness_verbatim() {
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+        let (call, _dir) = attestable_call();
+
+        witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            Some(&call),
+            &granted(),
+        )
+        .await
+        .expect("a witnessed submission carrying bodies succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&sent).expect("the request is JSON");
+        let events = document["raw_contribution"]["events"]
+            .as_array()
+            .expect("the contribution carries events");
+        let last = events.last().expect("there is a last event");
+
+        assert_eq!(
+            last["event_type"], "http_exchange",
+            "the attested exchange must be the LAST event; a witness attests \
+             the last one and nothing else"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "http_exchange")
+                .count(),
+            1,
+            "one call is attested, never one per turn"
+        );
+        assert_eq!(
+            last["structured_payload"]["request"]["body"]
+                .as_str()
+                .expect("the request body is a string the enclave can hash"),
+            call.request_body(),
+            "the request body must reach the enclave byte for byte"
+        );
+        assert_eq!(
+            last["content"].as_str().expect("the response body"),
+            call.response_body(),
+            "the response body must reach the enclave byte for byte"
+        );
+        assert_eq!(
+            last["structured_payload"]["response"]["stream_restarted"],
+            serde_json::json!(false),
+            "the marker the witness reads must be written"
+        );
+    }
+
+    /// And a submission with no attested call sends exactly what it always
+    /// sent. This is what a contributor with capture off gets.
+    #[tokio::test]
+    async fn a_submission_without_an_attested_call_sends_no_exchange() {
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect("an unattested submission still succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        assert!(
+            !String::from_utf8_lossy(&sent).contains("http_exchange"),
+            "no attested call must mean no exchange event on the wire"
+        );
+    }
+
+    /// The witness is required to strip the bodies before certifying. This
+    /// client cannot make it do that, but it is the last party that can tell
+    /// when it did not -- and an artifact still carrying a raw prompt would
+    /// otherwise be submitted, certificate and all.
+    #[tokio::test]
+    async fn an_artifact_that_still_carries_the_bodies_is_refused() {
+        let signer = test_signer("witness");
+        let (call, _dir) = attestable_call();
+
+        // An artifact that came back with the request body still in it. The
+        // certificate covers it perfectly, so every other check passes.
+        let leaked = serde_json::to_vec(&serde_json::json!({
+            "schema_version": "test",
+            "events": [{
+                "event_type": "http_exchange",
+                "structured_payload": { "request": { "body": call.request_body() } },
+            }],
+        }))
+        .expect("serializes");
+        // `signed_answer` always returns the standard artifact as its body,
+        // so the leaked bytes are substituted here -- otherwise the digest
+        // check fires first and this test would pass for the wrong reason.
+        let server = local_witness(Answers {
+            witness: Some({
+                let (certificate, signature, _) = signed_answer(&signer, &leaked);
+                (certificate, signature, leaked)
+            }),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let err = witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            Some(&call),
+            &granted(),
+        )
+        .await
+        .expect_err("an artifact still carrying the raw bodies must be refused");
+        assert_eq!(err, WitnessTrustError::WitnessBodyNotStripped);
+        assert_eq!(err.refusal_label(), "witness_body_not_stripped");
+    }
+
+    /// The same check, over the response body, which comes back as event
+    /// content rather than as a payload field.
+    #[tokio::test]
+    async fn an_artifact_that_still_carries_the_response_body_is_refused() {
+        let signer = test_signer("witness");
+        let (call, _dir) = attestable_call();
+
+        let leaked = serde_json::to_vec(&serde_json::json!({
+            "schema_version": "test",
+            "events": [{ "redacted_content": call.response_body() }],
+        }))
+        .expect("serializes");
+        // `signed_answer` always returns the standard artifact as its body,
+        // so the leaked bytes are substituted here -- otherwise the digest
+        // check fires first and this test would pass for the wrong reason.
+        let server = local_witness(Answers {
+            witness: Some({
+                let (certificate, signature, _) = signed_answer(&signer, &leaked);
+                (certificate, signature, leaked)
+            }),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+
+        let err = witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            Some(&call),
+            &granted(),
+        )
+        .await
+        .expect_err("a response body that came back must be refused too");
+        assert_eq!(err, WitnessTrustError::WitnessBodyNotStripped);
     }
 }

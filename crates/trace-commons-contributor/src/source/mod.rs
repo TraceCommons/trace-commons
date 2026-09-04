@@ -208,6 +208,20 @@ pub struct SessionTranscript {
     /// the envelope builder needs, which is why this lives here rather than
     /// being threaded through the four builders separately.
     pub routing: Vec<crate::routing::RoutedExchange>,
+    /// The final inference call's verbatim bodies, when the proxy captured
+    /// them and they could be carried faithfully.
+    ///
+    /// `None` in every other case, which is nearly all of them:
+    /// `capture.bodies` is off by default, and a call whose bodies cannot be
+    /// carried byte-for-byte is refused rather than approximated. See
+    /// [`crate::routing::attested`].
+    ///
+    /// `Arc` rather than an owned value because a transcript is cloned on
+    /// the queue path and these bodies are the largest thing on it -- up to
+    /// [`crate::routing::attested::MAX_ATTESTED_BODY_BYTES`] each. Cloning
+    /// them per queue entry would multiply the daemon's peak by the queue
+    /// depth.
+    pub attested_call: Option<Arc<crate::routing::attested::AttestedCall>>,
 }
 
 /// `Send + Sync` because the background daemon holds source adapters across
@@ -525,6 +539,14 @@ pub struct SourceRoots {
     /// wants, so `SourceRoots` implements `Debug` by hand below rather than
     /// deriving it and requiring `dyn RoutingLedger: Debug`.
     routing: Option<Arc<dyn crate::routing::RoutingLedger>>,
+    /// Where the proxy keeps verbatim bodies, when this deployment carries
+    /// the final call's bodies into a trace.
+    ///
+    /// A second switch beside `routing`, not a consequence of it. A routing
+    /// ledger carries metadata about calls; this carries the calls' content,
+    /// and the two must be separately decidable -- a contributor who wants
+    /// cost attribution has not thereby agreed to publish a prompt.
+    attested_bodies_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for SourceRoots {
@@ -547,6 +569,18 @@ impl SourceRoots {
     /// majority case.
     pub fn with_routing(mut self, ledger: Option<Arc<dyn crate::routing::RoutingLedger>>) -> Self {
         self.routing = ledger;
+        self
+    }
+
+    /// Also carry the final inference call's verbatim bodies, read from the
+    /// proxy's body store at `dir`.
+    ///
+    /// Has no effect without a routing ledger: the bodies are located through
+    /// the rows the ledger joined to the session, so there is nothing to read
+    /// without one.
+    #[must_use]
+    pub fn with_attested_bodies(mut self, dir: Option<PathBuf>) -> Self {
+        self.attested_bodies_dir = dir;
         self
     }
 
@@ -693,10 +727,10 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     sources
         .into_iter()
         .map(|source| {
-            Box::new(crate::routing::enriched::RoutingEnrichedSource::new(
-                source,
-                Arc::clone(&routing),
-            )) as Box<dyn TraceSource>
+            Box::new(
+                crate::routing::enriched::RoutingEnrichedSource::new(source, Arc::clone(&routing))
+                    .with_attested_bodies(roots.attested_bodies_dir.clone()),
+            ) as Box<dyn TraceSource>
         })
         .collect()
 }
@@ -844,6 +878,10 @@ mod tests {
                     backend: "claude-sub".to_string(),
                     requested_model: None,
                     served_model: None,
+                    upstream_id: None,
+                    request_sha256: None,
+                    response_sha256: None,
+                    body_ref: None,
                     rung: "same_model".to_string(),
                     attempts: 1,
                     input_tokens: Some(1000),
