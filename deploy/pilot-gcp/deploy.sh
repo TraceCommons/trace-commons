@@ -13,9 +13,16 @@
 #   8. Smoke /health on both ingest and issuer.
 #   9. Smoke the AGPL section 13 source offer through the public ingress.
 #
-# Required features when building the ingest binary on the host:
-#   cargo build --release --bin trace-commons-ingest \
-#     --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
+# Required features for the ingest binary:
+#   --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
+#
+# The pilot no longer builds on the host. cloudbuild.yaml compiles the binary,
+# publishes it to GCS with a sha256 sidecar, and pull-and-install.sh fetches
+# and installs it. That build is the one whose feature list decides what the
+# pilot runs, so this list has to match it -- keep the two in step. They were
+# out of step: this comment named the collateral feature and cloudbuild.yaml
+# did not build it, so the deployed binary silently lacked it while the
+# documentation said it was required.
 #
 # near-attestation-collateral compiles the Intel DCAP collateral client. Without
 # it POST /v1/admin/near-attestation-drill runs but refuses at its collateral
