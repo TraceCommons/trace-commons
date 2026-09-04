@@ -3213,6 +3213,7 @@ mod witness_tests {
                 public_bio: None,
                 public_since: None,
                 witness,
+                inference_receipt_endpoint: None,
             })
             .unwrap();
     }
