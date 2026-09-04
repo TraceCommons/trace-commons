@@ -1302,3 +1302,170 @@ mod tests {
         assert!(debug.contains("Medium"));
     }
 }
+
+/// The verifier against a certificate a real enclave actually issued.
+///
+/// Every other fixture in this file was written beside the code that checks
+/// it, so all of them agree by construction: if the signing preimage, the
+/// address recovery or the digest were wrong in the same way on both sides,
+/// they would still pass. This one was captured, not authored -- from CVM
+/// `8b8e6543-9743-41fc-ac05-a6b414888d5e` on dstack-pha-prod9, whose signing
+/// key the Phala KMS derived and which this project has never held. It is the
+/// only case here that can fail because our end is wrong.
+///
+/// What it therefore pins, and nothing weaker: that the preimage this crate
+/// builds is byte-for-byte the one the witness binary signed, and that the
+/// address recovered from a real secp256k1 signature is the one dstack
+/// reported for the app. A drift in field order, in the domain string, or in
+/// how the digest is spelled breaks this test and no other.
+///
+/// The verdict is `Medium` and the policy version is the deterministic alias
+/// because that is what the enclave returned; a certificate is not required
+/// to be admissible to be authentic, and the checks that would refuse this one
+/// for a fast-path bypass live elsewhere. Do not "fix" those fields.
+#[cfg(test)]
+mod live_capture {
+    use super::*;
+    use crate::redaction_witness::certificate::CertificateDetails;
+
+    // Captured 2026-09-04 from POST /v1/witness. Kept verbatim, including the
+    // trailing newline, because the digest is over exactly these bytes.
+    const ARTIFACT: &[u8] =
+        b"user: deploy the thing\nassistant: using AWS_SECRET_ACCESS_KEY=[REDACTED] and my home dir <PRIVATE_LOCAL_PATH_1>\n";
+
+    const REDACTED_SHA256: &str =
+        "d78e9cfa5e7b3c58f44511084041127b05552c38665166de3d7e5f8d59c137f0";
+
+    // The address the KMS derived for app f1654b0beac2ac2afae4235ee3d907096cd8f3de.
+    // Nothing in this repository can produce a signature that recovers to it.
+    const SIGNING_ADDRESS: &str = "0x655a17fcf6d0b9069e1b1dd07a7f5535d0c76798";
+
+    const MEASUREMENT: &str = "mrtd:f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077+mrconfigid:01c2511a8b98937b819d4bd40bdbc65d38c766cb853649657ff9151ab4117befbd000000000000000000000000000000";
+
+    const SIGNATURE_HEX: &str = "0x18ba77ef989ef61039f5c1d41f93916a1b4e211de4ad5fe88de499c8aa67e34156134a547392d783f78a0b4c9ec47ef320ecf791c1e9047a7a8771fe6e76c2a61c";
+
+    const ISSUED_AT: i64 = 1788530732;
+
+    fn captured() -> WitnessCertificate {
+        WitnessCertificate::from_wire(
+            REDACTED_SHA256.to_string(),
+            CertificateDetails {
+                residual_risk_verdict: ResidualPiiRisk::Medium,
+                redaction_policy_version: "ironclaw-deterministic-secret-path-v3".to_string(),
+                witness_measurement: MEASUREMENT.to_string(),
+                timestamp: ISSUED_AT,
+            },
+        )
+    }
+
+    fn pin() -> WitnessPin {
+        WitnessPin::new(SIGNING_ADDRESS, [MEASUREMENT.to_string()])
+            .expect("the captured address and measurement are well-formed")
+    }
+
+    /// The clock is fixed at issue time rather than read, so this test does
+    /// not start failing a day after the capture. Freshness has its own tests
+    /// against synthetic certificates; what this one is for is the signature.
+    fn just_after_issue() -> i64 {
+        ISSUED_AT + 1
+    }
+
+    #[test]
+    fn a_certificate_from_the_live_enclave_verifies() {
+        let verified = verify_witness_certificate_at(
+            captured(),
+            SIGNATURE_HEX,
+            Some(&pin()),
+            ARTIFACT,
+            just_after_issue(),
+        )
+        .expect("the captured certificate verifies against the address dstack reported");
+
+        assert_eq!(verified.redacted_sha256(), REDACTED_SHA256);
+        assert_eq!(verified.residual_risk_verdict(), ResidualPiiRisk::Medium);
+        assert_eq!(verified.witness_measurement(), MEASUREMENT);
+    }
+
+    /// The digest in the captured certificate is over the captured artifact.
+    ///
+    /// Separate from the test above because that one would still pass if
+    /// `verify_witness_certificate_at` compared the digest against itself
+    /// rather than against the bytes it was handed.
+    #[test]
+    fn the_captured_digest_is_over_the_captured_artifact() {
+        assert_eq!(hex::encode(Sha256::digest(ARTIFACT)), REDACTED_SHA256);
+    }
+
+    /// A single flipped bit in the artifact is refused.
+    ///
+    /// Guards against the digest comparison being dropped: with it gone, the
+    /// test above still passes and this one does not.
+    #[test]
+    fn a_modified_artifact_is_refused() {
+        let mut tampered = ARTIFACT.to_vec();
+        *tampered.last_mut().expect("the artifact is not empty") = b'!';
+
+        assert!(matches!(
+            verify_witness_certificate_at(
+                captured(),
+                SIGNATURE_HEX,
+                Some(&pin()),
+                &tampered,
+                just_after_issue(),
+            ),
+            Err(WitnessVerificationError::ArtifactMismatch)
+        ));
+    }
+
+    /// The signature recovers to that address and not to a neighbouring one.
+    ///
+    /// Without this, a recovery that returned some fixed wrong address would
+    /// pass every test above, since the pin would simply be that address.
+    #[test]
+    fn the_signature_does_not_verify_against_a_different_address() {
+        let other = "0x655a17fcf6d0b9069e1b1dd07a7f5535d0c76799";
+        assert_ne!(other, SIGNING_ADDRESS, "the decoy must differ");
+
+        let pin = WitnessPin::new(other, [MEASUREMENT.to_string()])
+            .expect("the decoy address is well-formed");
+
+        assert!(matches!(
+            verify_witness_certificate_at(
+                captured(),
+                SIGNATURE_HEX,
+                Some(&pin),
+                ARTIFACT,
+                just_after_issue(),
+            ),
+            Err(WitnessVerificationError::Signature(_))
+        ));
+    }
+
+    /// Any change to a signed field breaks the signature.
+    ///
+    /// The verdict is the field a forger would most want to move, and it is
+    /// the one the fast-path decision reads. `Low` is the admissible value.
+    #[test]
+    fn upgrading_the_verdict_breaks_the_signature() {
+        let forged = WitnessCertificate::from_wire(
+            REDACTED_SHA256.to_string(),
+            CertificateDetails {
+                residual_risk_verdict: ResidualPiiRisk::Low,
+                redaction_policy_version: "ironclaw-deterministic-secret-path-v3".to_string(),
+                witness_measurement: MEASUREMENT.to_string(),
+                timestamp: ISSUED_AT,
+            },
+        );
+
+        assert!(matches!(
+            verify_witness_certificate_at(
+                forged,
+                SIGNATURE_HEX,
+                Some(&pin()),
+                ARTIFACT,
+                just_after_issue(),
+            ),
+            Err(WitnessVerificationError::Signature(_))
+        ));
+    }
+}

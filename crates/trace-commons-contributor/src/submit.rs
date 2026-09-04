@@ -32,6 +32,9 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::status::{
+    WitnessLastResult, certificate_obtained_for, n_of_m_from_certificate, record_last_result,
+};
 use crate::witness::transport::{
     GrantedConsent, HttpWitnessTransport, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER,
     WitnessedEnvelope, parse_witnessed_envelope,
@@ -659,6 +662,10 @@ impl<'a> SubmitContext<'a> {
                 // it would be an uncertified submission from a contributor who
                 // believes their submissions are certified.
                 if witness_settings.is_some() {
+                    record_last_result(WitnessLastResult::Refused {
+                        label: "witness_certificate_missing".to_string(),
+                        certificate_obtained: false,
+                    });
                     return Ok(refused(
                         "witness_certificate_missing",
                         &transcript.session_hash,
@@ -690,7 +697,15 @@ impl<'a> SubmitContext<'a> {
                     // this is byte for byte what it was before the feature
                     // existed.
                     None => match redact_to_envelope(&redactor, raw).await {
-                        Ok(e) => e,
+                        Ok(e) => {
+                            // Recorded, rather than left at whatever the
+                            // previous submission set: a shell asking "what
+                            // happened last time" must be told that the last
+                            // submission redacted locally, not handed a stale
+                            // certificate from before the witness was cleared.
+                            record_last_result(WitnessLastResult::LocalRedaction);
+                            e
+                        }
                         Err(_) => {
                             return Ok(refused("redaction-failed", &transcript.session_hash));
                         }
@@ -704,12 +719,20 @@ impl<'a> SubmitContext<'a> {
                         match settings.trust() {
                             Ok(trust) if trust.is_pinned() => {}
                             Ok(_) => {
+                                record_last_result(WitnessLastResult::Refused {
+                                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
+                                    certificate_obtained: false,
+                                });
                                 return Ok(refused(
                                     WITNESS_EXPECTED_MEASUREMENT_CONTROL,
                                     &transcript.session_hash,
                                 ));
                             }
                             Err(_) => {
+                                record_last_result(WitnessLastResult::Refused {
+                                    label: "witness_expected_measurement_malformed".to_string(),
+                                    certificate_obtained: false,
+                                });
                                 return Ok(refused(
                                     "witness_expected_measurement_malformed",
                                     &transcript.session_hash,
@@ -726,10 +749,22 @@ impl<'a> SubmitContext<'a> {
                         };
                         match self.witness_envelope(&settings, raw, &token, now).await {
                             Ok((parsed, response)) => {
+                                // `parse_witnessed_envelope` inside
+                                // `witness_envelope` is what verified this
+                                // certificate against the bytes that came
+                                // back, so reaching here IS "obtained and
+                                // verified" -- there is no other way in.
+                                record_last_result(WitnessLastResult::Certified {
+                                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
+                                });
                                 witnessed = Some(response);
                                 parsed
                             }
                             Err(label) => {
+                                record_last_result(WitnessLastResult::Refused {
+                                    label: label.to_string(),
+                                    certificate_obtained: certificate_obtained_for(label),
+                                });
                                 return Ok(refused(label, &transcript.session_hash));
                             }
                         }

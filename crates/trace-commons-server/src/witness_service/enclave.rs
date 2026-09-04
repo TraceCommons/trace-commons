@@ -96,11 +96,15 @@
 //!
 //! That guarantee holds for an image upgrade **and not for a surface
 //! migration**. dstack's v1 guest API derives different key material by
-//! design, with no compatibility mode: moving off `/v0/` would change the
+//! design, with no compatibility mode: moving to `/v1/` would change the
 //! signing address for every deployment at once. This module therefore pins
-//! the surface explicitly in [`GET_KEY_PATH`] and [`GET_QUOTE_PATH`], and an
-//! operator reading the runbook needs to know that changing them is a key
+//! the surface in [`GET_KEY_PATH`] and [`GET_QUOTE_PATH`], and an operator
+//! reading the runbook needs to know that moving them to v1 is a key
 //! rotation, not a version bump.
+//!
+//! Those constants name the v0 surface by its versioned path, which a live
+//! 0.5.9 agent does serve -- see [`GET_KEY_PATH`]. Switching between the two
+//! v0 spellings would not be a rotation; only v1 is.
 
 use super::{Enclave, SeamUnavailable, Signer};
 use async_trait::async_trait;
@@ -112,12 +116,40 @@ use zeroize::Zeroizing;
 /// witness proxies it.
 pub const DSTACK_SOCKET_PATH: &str = "/var/run/dstack.sock";
 
-/// The pinned `GetKey` surface. Changing the `v0` here changes the derived
-/// key, and therefore the signing address of every deployment.
+/// The pinned `GetKey` surface.
+///
+/// Versioned, and the spelling is load-bearing enough to have been changed
+/// once on a wrong diagnosis and changed back on evidence.
+///
+/// A deployment did crash-loop unable to derive a signing identity, and this
+/// path was blamed for it: dstack documents the legacy methods at `/v0/
+/// <Method>` **and** at an unversioned `/<Method>`, every example in its API
+/// reference uses the unversioned form, and a 404 in the logs made "only the
+/// unversioned one is served" look obvious. It is not what happened. The
+/// image now running on a live CVM -- built from the tree that carries this
+/// constant as `/v0/GetKey` -- derives its key and answers `/v1/attestation`
+/// with a signing address and a TDX quote. A 0.5.9 agent serves this path.
+///
+/// The unversioned form was never deployed and remains untested here, so the
+/// versioned one stays: it is the spelling with a working deployment behind
+/// it, and it is the one that cannot be silently repointed.
+///
+/// Whatever produced that 404 is therefore still undiagnosed. That is the
+/// honest state, and it is why [`SeamUnavailable::AgentRefused`] carries the
+/// status code -- the original refusal did not, which is what allowed one
+/// plausible cause to be adopted without being checked against a running
+/// agent.
+///
+/// Changing this to the other v0 spelling would NOT be a key rotation: both
+/// name the same surface and derive the same material. Only the v1 surface
+/// derives differently, and moving to it would change the signing address of
+/// every deployment at once. That is why this is a constant rather than
+/// something a caller passes.
 pub const GET_KEY_PATH: &str = "/v0/GetKey";
 
-/// The pinned `GetQuote` surface. See [`GET_KEY_PATH`] on why the version is
-/// spelled out rather than left to the agent's unversioned alias.
+/// The pinned `GetQuote` surface. See [`GET_KEY_PATH`]: same surface, same
+/// reason for the versioned spelling, and the same live deployment behind it
+/// -- the quote in that attestation response came through this path.
 pub const GET_QUOTE_PATH: &str = "/v0/GetQuote";
 
 /// `GetKey`'s HKDF info string. `Sign` uses this same value internally, which
@@ -191,8 +223,16 @@ pub enum EnclaveError {
     #[error("the guest agent could not be reached")]
     Transport,
     /// The guest agent answered, and refused.
-    #[error("the guest agent refused the request")]
-    AgentRefused,
+    #[error("the guest agent refused the request with HTTP {status}")]
+    AgentRefused {
+        /// The status line's code, carried because "refused" alone is not
+        /// diagnosable: a 404 means the method or its surface is wrong, a 400
+        /// means the arguments are, and a 403 means the caller is. Those need
+        /// different fixes and the operator cannot tell them apart from the
+        /// message otherwise. A status code is not contributor data and does
+        /// not fall under the hash-only rule.
+        status: u16,
+    },
     /// The guest agent's answer did not have the shape this client expects.
     #[error("the guest agent's response could not be read")]
     MalformedResponse,
@@ -556,8 +596,15 @@ fn http_body(response: &[u8]) -> Result<&[u8], EnclaveError> {
         .ok_or(EnclaveError::MalformedResponse)?;
     if status != "200" {
         // The agent answered and said no. Distinct from a socket that was not
-        // there, because the two mean different things to an operator.
-        return Err(EnclaveError::AgentRefused);
+        // there, because the two mean different things to an operator -- and
+        // carrying the code, because "refused" alone does not say whether the
+        // method, the arguments or the caller is what it objected to.
+        return Err(EnclaveError::AgentRefused {
+            // A status line this side of the check is ASCII digits or the
+            // response was malformed; 0 records "unparseable" rather than
+            // inventing a code.
+            status: status.parse::<u16>().unwrap_or(0),
+        });
     }
     let body = &response[split + 4..];
     if head
@@ -1078,7 +1125,7 @@ mod tests {
             EnclaveError::ReportDataTooLong,
             EnclaveError::SigningAddressMalformed,
             EnclaveError::Transport,
-            EnclaveError::AgentRefused,
+            EnclaveError::AgentRefused { status: 500 },
             EnclaveError::MalformedResponse,
             EnclaveError::SigningKeyUnusable,
             EnclaveError::QuoteUnparsable,
@@ -1090,13 +1137,32 @@ mod tests {
         // Pinned so a new variant has to be added here rather than skipping
         // the check silently.
         assert_eq!(variants.len(), 12);
+        // The property is that no refusal echoes the nonce or the signing
+        // address. This used to be enforced as "no ASCII digit anywhere",
+        // which is a proxy rather than the property -- and it is the reason
+        // AgentRefused could not carry the status code that says whether the
+        // agent objected to the method, the arguments or the caller. A
+        // deployment spent a long time undiagnosable behind that.
+        //
+        // Checked against the real shapes instead: a nonce is 32 bytes and an
+        // address 20, so both render as long hex runs. Anything that long is
+        // refused; a three-digit status is not, and cannot be either of them.
+        const LONGEST_SAFE_RUN: usize = 8;
         for variant in variants {
             let rendered = format!("{variant} {variant:?}");
             assert!(!rendered.contains("0x"), "{rendered}");
-            assert!(
-                !rendered.chars().any(|character| character.is_ascii_digit()),
-                "{rendered}"
-            );
+            let mut run = 0usize;
+            for character in rendered.chars() {
+                run = if character.is_ascii_hexdigit() {
+                    run + 1
+                } else {
+                    0
+                };
+                assert!(
+                    run <= LONGEST_SAFE_RUN,
+                    "a hex run this long can carry a nonce or an address: {rendered}"
+                );
+            }
         }
     }
 
@@ -1206,7 +1272,7 @@ mod tests {
                 DstackSocketAgent::at(&path)
                     .quote(&[0u8; REPORT_DATA_LEN])
                     .await,
-                Err(EnclaveError::AgentRefused)
+                Err(EnclaveError::AgentRefused { status: 500 })
             );
             assert_eq!(
                 DstackSocketAgent::at("/nonexistent/dstack.sock")

@@ -51,6 +51,13 @@ jq -S -n --rawfile compose "${compose}" '{
   # The KMS derives the app signing key. This is what makes the signing address
   # survive an image upgrade, and it is why the upgrade story in the README
   # works at all: the key comes from a stable app id, not from a measurement.
+  #
+  # WHICH KMS is not in this file -- it is a deploy-time flag, --kms-id --
+  # but it is not a deploy-time DETAIL. See "Which KMS, and why that is not a
+  # detail" in README.md. In short: the signing address derives from the KMS
+  # and the app id together, so moving KMS later rotates that address and
+  # breaks every client that pinned it, exactly as a guest-API surface change
+  # does. Pick once, record why, and treat a change as a key rotation.
   kms_enabled: true,
 
   # A KMS-derived key and a local key provider are alternatives, not a pair.
