@@ -28,6 +28,8 @@ use super::style::{self, Tone, space};
 use crate::copy;
 use crate::copy::SourceTool;
 use crate::model::{Project, Settings, Status};
+use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
+use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
 /// Byte budget for the bio, from §5.6 ("280 bytes, plaintext, no HTML").
 /// Bytes, not characters: the field is a plaintext byte budget on the wire,
@@ -167,6 +169,23 @@ pub struct SettingsView {
     /// where there is none, and the conventional number is what is left.
     /// See `render_routing`.
     routing_discovered_port: std::cell::Cell<Option<u16>>,
+    /// The witness card's two rows: what the configuration says will happen
+    /// to a session, and what the last submission this process made
+    /// actually did. Rebuilt on each render, because both are labels.
+    witness_status: gtk::Box,
+    /// The address, the signing key and the pins. Built once and only ever
+    /// refilled, for the same reason the routing fields are: a refresh runs
+    /// on every daemon event and would otherwise replace a half-typed
+    /// measurement.
+    witness_form: gtk::Expander,
+    witness_url: gtk::Entry,
+    witness_signing_address: gtk::Entry,
+    /// A list, not a value: an upgrade to the witness moves its measurement,
+    /// so the new one is pinned alongside the old before the fleet rolls.
+    /// One per line, which is why this is a `TextView` and not an `Entry`.
+    witness_measurements: gtk::TextView,
+    witness_configure: gtk::Button,
+    witness_clear: gtk::Button,
 }
 
 impl Default for SettingsView {
@@ -335,6 +354,103 @@ impl SettingsView {
         routing_applies.add_css_class("tc-caveat");
         routing_card.append(&routing_applies);
         content.append(&routing_card);
+
+        // The witness card. Its own section rather than a row on the card
+        // above: routing is about what a tool sends, this is about who does
+        // the redacting, and the two are answered independently.
+        //
+        // Every sentence on it comes from `copy`, which re-exports the
+        // core's own words -- the three shells print this card and a word
+        // kept in three places is a privacy claim that stops matching
+        // itself. Nothing here is authored in this view.
+        content.append(&style::section(copy::WITNESS_HEADING));
+        let witness_card = style::card(gtk::Orientation::Vertical, space::M);
+        let witness_intro = gtk::Label::builder()
+            .label(copy::WITNESS_INTRO)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        witness_intro.add_css_class("tc-body");
+        witness_card.append(&witness_intro);
+        // The two rows `render_witness` paints. Empty until it runs: this
+        // window has no business claiming anything about a witness before
+        // it has read the configuration.
+        let witness_status = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
+        witness_card.append(&witness_status);
+        // What a certificate actually proves, stated where a contributor
+        // reads it, so this shell never has to summarise it and never
+        // summarises it wrongly.
+        let witness_means = gtk::Label::builder()
+            .label(copy::WITNESS_CERTIFICATE_MEANS)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        witness_means.add_css_class("tc-caveat");
+        witness_card.append(&witness_means);
+
+        // The fields, behind a disclosure. `render_witness` opens it on
+        // every refusing state: a card that says nothing is being sent must
+        // not fold the thing that ends that out of sight.
+        let witness_form = gtk::Expander::new(Some(copy::WITNESS_CONFIGURE));
+        let witness_form_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        witness_form.set_child(Some(&witness_form_box));
+        witness_card.append(&witness_form);
+
+        witness_form_box.append(&style::eyebrow(copy::WITNESS_URL_TITLE));
+        let witness_url = gtk::Entry::new();
+        witness_url.update_property(&[gtk::accessible::Property::Label(copy::WITNESS_URL_TITLE)]);
+        witness_form_box.append(&witness_url);
+        witness_form_box.append(&style::eyebrow(copy::WITNESS_SIGNING_ADDRESS_TITLE));
+        let witness_signing_address = gtk::Entry::new();
+        witness_signing_address.update_property(&[gtk::accessible::Property::Label(
+            copy::WITNESS_SIGNING_ADDRESS_TITLE,
+        )]);
+        witness_form_box.append(&witness_signing_address);
+        witness_form_box.append(&style::eyebrow(copy::WITNESS_MEASUREMENTS_TITLE));
+        let witness_measurements = gtk::TextView::new();
+        witness_measurements.set_monospace(true);
+        witness_measurements.set_wrap_mode(gtk::WrapMode::WordChar);
+        witness_measurements.update_property(&[gtk::accessible::Property::Label(
+            copy::WITNESS_MEASUREMENTS_TITLE,
+        )]);
+        let witness_measurements_frame = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(72)
+            .child(&witness_measurements)
+            .build();
+        witness_form_box.append(&witness_measurements_frame);
+        let witness_measurements_note = gtk::Label::builder()
+            .label(copy::WITNESS_MEASUREMENTS_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        witness_measurements_note.add_css_class("tc-caveat");
+        witness_form_box.append(&witness_measurements_note);
+        let witness_configure = gtk::Button::with_label(copy::WITNESS_CONFIGURE);
+        witness_configure.set_halign(gtk::Align::Start);
+        witness_form_box.append(&witness_configure);
+
+        // Not "off". The redaction still happens; it happens here, and the
+        // note beside the button is what says so.
+        let witness_clear = gtk::Button::with_label(copy::WITNESS_CLEAR);
+        witness_clear.add_css_class("tc-quiet");
+        witness_clear.set_halign(gtk::Align::Start);
+        witness_card.append(&witness_clear);
+        let witness_clear_note = gtk::Label::builder()
+            .label(copy::WITNESS_CLEAR_NOTE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        witness_clear_note.add_css_class("tc-caveat");
+        witness_card.append(&witness_clear_note);
+        let witness_applies = gtk::Label::builder()
+            .label(copy::WITNESS_APPLIES_AT_ONCE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        witness_applies.add_css_class("tc-caveat");
+        witness_card.append(&witness_applies);
+        content.append(&witness_card);
 
         content.append(&style::section("Projects"));
         let projects = style::card(gtk::Orientation::Vertical, space::M);
@@ -519,6 +635,13 @@ impl SettingsView {
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
             routing_discovered_port: std::cell::Cell::new(None),
+            witness_status,
+            witness_form,
+            witness_url,
+            witness_signing_address,
+            witness_measurements,
+            witness_configure,
+            witness_clear,
         }
     }
 }
@@ -615,6 +738,13 @@ pub fn wire(app: &Rc<App>) {
     app.settings
         .routing_look_again
         .connect_clicked(move |_| discover_routing(&a));
+
+    wire_witness(app);
+    // Painted immediately rather than waiting on `get_settings`: the
+    // witness is not a daemon setting, so no daemon answer is coming, and a
+    // card that stayed blank until one arrived would say nothing about the
+    // one state where nothing is being sent.
+    render_witness(app);
 
     render_autostart(app);
     render_public(app);
@@ -2595,6 +2725,997 @@ fn brand_link(text: &str, url: &str) -> gtk::Button {
     button
 }
 
+// --- The redaction witness ---------------------------------------------
+//
+// A witness is a sealed machine that redacts a session instead of this
+// machine doing it. Until this card existed it was reachable only by hand
+// editing `config.json` or setting three environment variables, so nobody
+// running the shipped app could see whether one was in use, let alone
+// choose one.
+//
+// ## The conflation this card is built to prevent
+//
+// There are two states a careless surface renders with the same words, and
+// they are opposites:
+//
+// - **No witness.** Local redaction runs, byte for byte as it always has.
+//   A supported, ordinary mode. Nothing is wrong.
+// - **A witness with nothing pinned.** EVERY SUBMISSION IS REFUSED, before
+//   any network call, because a client with no pin cannot judge any quote
+//   it receives. Nothing is uploaded at all.
+//
+// There is therefore no boolean on this card and there must never be one.
+// `WitnessTrustState` has one variant per condition and every branch below
+// is exhaustive over it; a wildcard arm here would collapse a future
+// refusal into "nothing to say", which is the exact failure this surface
+// exists to prevent.
+//
+// ## Why this card does not go through the daemon
+//
+// The witness lives in `ContributorConfig`, not in `DaemonSettings`, and
+// the IPC contract has no method for it. This shell links the core
+// directly -- the objection that keeps Swift and C# from writing the
+// contributor's config themselves does not apply to a caller that is
+// already Rust -- so it reads and writes the config through `ConfigStore`,
+// the same way `trace-commons-contributor-ffi` does for the other two
+// shells. `WITNESS_APPLIES_AT_ONCE` is true because the submission path
+// reloads the config; nothing here restarts anything.
+
+/// The witness configuration as this card reads it, total over every case.
+///
+/// `witness_status` is handed a config that already exists, so it can never
+/// answer `NotEnrolled` or `SettingsUnreadable`. Those are this function's
+/// two extra answers, and they are why the card has ONE state type: a
+/// second enum for "there is no config" would hand the view two
+/// vocabularies and let it decide for itself that one of them looks like
+/// `Absent`.
+fn witness_read(dir: &std::path::Path) -> WitnessStatus {
+    // Empty because the count is NOT KNOWN in this state, which is why
+    // `pinned_measurement_line` returns nothing for it: an unreadable
+    // configuration has no pins to report, and reporting zero would be a
+    // measurement of a file this shell could not open.
+    let unreadable = || WitnessStatus {
+        state: WitnessTrustState::SettingsUnreadable,
+        url: None,
+        signing_address: None,
+        pinned_measurement_count: 0,
+        pinned_measurements: Vec::new(),
+    };
+    let Ok(store) = ConfigStore::open(dir.to_path_buf()) else {
+        return unreadable();
+    };
+    match store.load_config() {
+        Ok(Some(cfg)) => trace_commons_contributor::witness::status::witness_status(&cfg),
+        Ok(None) => WitnessStatus {
+            state: WitnessTrustState::NotEnrolled,
+            url: None,
+            signing_address: None,
+            pinned_measurement_count: 0,
+            pinned_measurements: Vec::new(),
+        },
+        Err(_) => unreadable(),
+    }
+}
+
+/// The witness tone onto this shell's palette.
+///
+/// NOT A BRANCH TABLE HERE, for the reason `routing_tone` gives: which tone
+/// each state reads in is decided once, in `witness_copy`, beside the
+/// sentence it goes with. This only carries that answer onto `style::Tone`.
+///
+/// **No catch-all arm, deliberately.** A tone this shell has not been
+/// taught must fail to compile rather than fall through to `Neutral`, which
+/// would paint a refusal nobody has written yet as "nothing to say". The
+/// witness tone's ABI values are disjoint from the routing tone's for the
+/// same reason; this is that rule on the Rust side.
+fn witness_tone(tone: copy::WitnessTone) -> Tone {
+    match tone {
+        copy::WitnessTone::Neutral => Tone::Neutral,
+        copy::WitnessTone::Held => Tone::Held,
+        copy::WitnessTone::Clear => Tone::Clear,
+        copy::WitnessTone::Attention => Tone::Attention,
+        copy::WitnessTone::Refused => Tone::Refused,
+    }
+}
+
+/// What the card offers a contributor in a given state.
+///
+/// Split out of the render so the rule that matters can be asserted without
+/// a widget tree: **a refusal must have a way out.** A card that says
+/// nothing is being sent and offers nothing to press is a dead end, and the
+/// two refusing states a contributor can actually reach are both ended from
+/// here -- by correcting the pin, or by going back to local redaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WitnessActions {
+    /// "Use this witness" is pressable.
+    configure: bool,
+    /// "Stop using a witness" is pressable.
+    clear: bool,
+    /// The fields are unfolded rather than left behind a disclosure.
+    form_open: bool,
+}
+
+/// One entry per condition. Exhaustive on purpose; see the module note.
+fn witness_actions(state: WitnessTrustState) -> WitnessActions {
+    match state {
+        // There is no configuration file to write a witness into. The
+        // sentence says to join an instance first, and nothing on this card
+        // can do that, so nothing on it is offered.
+        WitnessTrustState::NotEnrolled => WitnessActions {
+            configure: false,
+            clear: false,
+            form_open: false,
+        },
+        // The ordinary arrangement. Nothing to clear, and the fields stay
+        // folded away: this is not a state anybody is being asked to fix.
+        WitnessTrustState::Absent => WitnessActions {
+            configure: true,
+            clear: false,
+            form_open: false,
+        },
+        WitnessTrustState::Pinned => WitnessActions {
+            configure: true,
+            clear: true,
+            form_open: false,
+        },
+        // Every way out, unfolded. `SettingsUnreadable` is in here too: the
+        // config could not be read, so neither action is certain to work,
+        // but a card that offers nothing at all is worse than one whose
+        // button may fail and say so.
+        WitnessTrustState::RefusingUnpinned
+        | WitnessTrustState::RefusingPinMalformed
+        | WitnessTrustState::RefusingInferenceReceiptsMissing
+        | WitnessTrustState::SettingsUnreadable => WitnessActions {
+            configure: true,
+            clear: true,
+            form_open: true,
+        },
+    }
+}
+
+/// One measurement per line.
+///
+/// A list rather than a value because an upgrade to the witness moves its
+/// measurement: the new one is added here before the fleet rolls, and a
+/// client holding only the old one refuses the upgraded witness. Blank
+/// lines are dropped rather than sent as empty pins.
+fn parse_measurements(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// What is stored, as the contents of the box.
+///
+/// The inverse of `parse_measurements` over anything this card can be handed
+/// back: `WitnessStatus::pinned_measurements` is the stored strings
+/// VERBATIM, so joining them and reading them again returns the same list,
+/// and the contributor who opened this card to change the address hands back
+/// exactly what was there. Nothing is re-serialised from a parsed
+/// `ExpectedMeasurements` -- a shell that reformats a pin is a shell that
+/// can reformat it wrongly, and it would do it to a measurement nobody
+/// touched.
+///
+/// A stored entry this build cannot parse is shown as it is stored, typo
+/// included. Hiding it would silently delete the contributor's work on the
+/// next save, and leaving it out of the box would leave them refusing every
+/// submission with nothing to look at. The read is permissive here; the
+/// write in `witness_write` is not.
+fn measurements_text(status: &WitnessStatus) -> String {
+    status.pinned_measurements.join("\n")
+}
+
+/// Fixed labels for a write that did not happen. Hash-only in spirit and
+/// deliberately not wording: they are the same spellings
+/// `trace-commons-contributor-ffi` reports for the other two shells, so a
+/// contributor greps one word rather than three.
+const WITNESS_NOT_ENROLLED: &str = "witness-not-enrolled";
+const WITNESS_CONFIG_UNREADABLE: &str = "witness-config-unreadable";
+const WITNESS_CONFIG_WRITE_FAILED: &str = "witness-config-write-failed";
+const WITNESS_URL_INVALID: &str = "witness-url-invalid";
+const WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
+const WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
+const WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
+
+/// Whether a typed address is one this client could hand a raw session to.
+///
+/// Shape only. It is not a reachability check and must not be mistaken for
+/// one: what makes a witness trustworthy is the pin, not the URL.
+fn witness_url_usable(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.contains(char::is_whitespace)
+}
+
+/// Write the witness, or refuse the input and leave the config untouched.
+///
+/// The pin is PARSED BEFORE IT IS SAVED. Writing a measurement this build
+/// cannot read would leave the client refusing every submission, with the
+/// mistake recorded on disk and reported later as a configuration problem
+/// rather than now as a rejected keystroke -- which is
+/// `RefusingPinMalformed`, a state a contributor should never be walked
+/// into by a button on this card.
+fn witness_write(
+    dir: &std::path::Path,
+    url: &str,
+    signing_address: &str,
+    measurements: &[String],
+) -> Result<(), &'static str> {
+    let url = if witness_url_usable(url) {
+        url.trim().to_string()
+    } else {
+        return Err(WITNESS_URL_INVALID);
+    };
+    let signing_address = signing_address.trim();
+    if signing_address.is_empty() {
+        return Err(WITNESS_SIGNING_ADDRESS_INVALID);
+    }
+    let measurements: Vec<String> = measurements
+        .iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if measurements.is_empty() {
+        return Err(WITNESS_PIN_REQUIRED);
+    }
+    let settings = WitnessSettings {
+        url,
+        signing_address: signing_address.to_string(),
+        expected_measurements: measurements,
+    };
+    match settings.trust() {
+        Ok(trust) if trust.is_pinned() => {}
+        _ => return Err(WITNESS_PIN_MALFORMED),
+    }
+
+    let store = ConfigStore::open(dir.to_path_buf()).map_err(|_| WITNESS_CONFIG_UNREADABLE)?;
+    let mut cfg = match store.load_config() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => return Err(WITNESS_NOT_ENROLLED),
+        Err(_) => return Err(WITNESS_CONFIG_UNREADABLE),
+    };
+    cfg.witness = Some(settings);
+    store
+        .save_config(&cfg)
+        .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)
+}
+
+/// Remove the witness. `Ok(true)` when one was removed, `Ok(false)` when
+/// there was none.
+///
+/// This returns the client to LOCAL REDACTION, which is a supported mode
+/// and not a broken one. It is still a real change -- submissions after it
+/// carry this app's own judgement of what was left rather than a
+/// certificate -- which is what `WITNESS_CLEAR_NOTE` says beside the
+/// button, and why the button does not say "off".
+fn witness_clear(dir: &std::path::Path) -> Result<bool, &'static str> {
+    let store = ConfigStore::open(dir.to_path_buf()).map_err(|_| WITNESS_CONFIG_UNREADABLE)?;
+    let mut cfg = match store.load_config() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => return Err(WITNESS_NOT_ENROLLED),
+        Err(_) => return Err(WITNESS_CONFIG_UNREADABLE),
+    };
+    if cfg.witness.is_none() {
+        return Ok(false);
+    }
+    cfg.witness = None;
+    store
+        .save_config(&cfg)
+        .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)?;
+    Ok(true)
+}
+
+/// Read the text of a multi-line field.
+fn text_of(view: &gtk::TextView) -> String {
+    let buffer = view.buffer();
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string()
+}
+
+/// Paint the card from the configuration on disk, and from what the last
+/// submission this process made actually did.
+///
+/// Both rows go through `tone_row`, so each carries a colour AND a glyph
+/// AND words -- §7.3 will not let a state be a colour on its own, and this
+/// is the card where that matters most: the difference between "redacted
+/// here" and "nothing left this machine" must survive a greyscale
+/// screenshot.
+pub fn render_witness(app: &Rc<App>) {
+    let status = witness_read(&app.worker.dir);
+    let state = status.state;
+    let actions = witness_actions(state);
+
+    let view = &app.settings.witness_status;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    view.append(&tone_row(
+        copy::witness_state_line(state),
+        witness_tone(copy::witness_state_tone(state)),
+        // The refusal label, shown apart from the sentence rather than in
+        // it. It is a fixed operator string, not wording, and a contributor
+        // reading "nothing is being sent" needs that before they need to
+        // know which check said so.
+        state.refusal_label(),
+    ));
+    let last = trace_commons_contributor::witness::status::last_result();
+    view.append(&tone_row(
+        &copy::witness_last_result_line(&last),
+        witness_tone(copy::witness_last_result_tone(&last)),
+        None,
+    ));
+
+    // How many are pinned, as a SENTENCE and only where there is a witness
+    // to count for. `pinned_measurement_line` owns both halves of that: the
+    // words, because a bare numeral on a privacy surface is this shell
+    // authoring wording by omission, and the `None`, because a count of the
+    // pins on a witness that does not exist is not a shorter sentence but a
+    // wrong one. Nothing is drawn in its place -- no placeholder, no dash.
+    if let Some(line) = status.pinned_measurement_line() {
+        let count = gtk::Label::builder()
+            .label(&line)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        count.add_css_class("tc-meta");
+        view.append(&count);
+    }
+
+    let settings = &app.settings;
+    if !settings.witness_url.has_focus() {
+        let url = status.url.clone().unwrap_or_default();
+        if settings.witness_url.text() != url {
+            settings.witness_url.set_text(&url);
+        }
+    }
+    if !settings.witness_signing_address.has_focus() {
+        let address = status.signing_address.clone().unwrap_or_default();
+        if settings.witness_signing_address.text() != address {
+            settings.witness_signing_address.set_text(&address);
+        }
+    }
+    // The pins, back in the box they were typed into. Without this the
+    // editor is write-only: reconfiguring a pinned witness would mean
+    // retyping every measurement from memory, and an empty box would be
+    // indistinguishable from a deliberately cleared one -- so this card
+    // would either refuse a contributor who only wanted to change the
+    // address, or grow a "keep what is there" mode that saves something
+    // nobody looked at. Neither exists, because this does.
+    //
+    // Guarded on focus and on equality for the same reason the two entries
+    // above are: a refresh runs on every daemon event, and one landing
+    // mid-edit must not take a half-typed measurement out from under
+    // whoever is typing it.
+    if !settings.witness_measurements.has_focus() {
+        let buffer = settings.witness_measurements.buffer();
+        let stored = measurements_text(&status);
+        if text_of(&settings.witness_measurements) != stored {
+            buffer.set_text(&stored);
+        }
+    }
+    settings.witness_configure.set_sensitive(actions.configure);
+    settings.witness_clear.set_sensitive(actions.clear);
+    settings.witness_url.set_sensitive(actions.configure);
+    settings
+        .witness_signing_address
+        .set_sensitive(actions.configure);
+    settings
+        .witness_measurements
+        .set_sensitive(actions.configure);
+    if actions.form_open {
+        settings.witness_form.set_expanded(true);
+    }
+}
+
+/// Wire the two actions. Both write the config directly and then repaint
+/// from what is on disk, never from what this window believes it wrote.
+fn wire_witness(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings.witness_configure.connect_clicked(move |_| {
+        let url = a.settings.witness_url.text().to_string();
+        let address = a.settings.witness_signing_address.text().to_string();
+        let pins = parse_measurements(&text_of(&a.settings.witness_measurements));
+        // The label is a fixed one by contract and is not a sentence
+        // anybody can act on. What matters, and what the toast says, is
+        // that nothing changed.
+        if witness_write(&a.worker.dir, &url, &address, &pins).is_err() {
+            a.toast(copy::KNOB_NOT_CHANGED);
+        }
+        render_witness(&a);
+    });
+    let a = Rc::clone(app);
+    app.settings.witness_clear.connect_clicked(move |_| {
+        if witness_clear(&a.worker.dir).is_err() {
+            a.toast(copy::KNOB_NOT_CHANGED);
+        }
+        render_witness(&a);
+    });
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::*;
+    use trace_commons_contributor::config::{ContributorConfig, WitnessSettings};
+    use trace_commons_contributor::witness::status::{
+        InferenceReceiptCount, WitnessLastResult, WitnessTrustState,
+    };
+
+    /// A scratch directory that removes itself. Hand-rolled for the reason
+    /// `backend.rs` gives: this crate is its own workspace with its own
+    /// lockfile, so a dev-dependency here is a real new package edge.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("tc-gtk-witness-{tag}-{unique}"));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Every state this card can be in. Listed rather than derived so that
+    /// a state added to the core shows up here as a missing entry.
+    const EVERY_STATE: [WitnessTrustState; 7] = [
+        WitnessTrustState::Absent,
+        WitnessTrustState::Pinned,
+        WitnessTrustState::RefusingUnpinned,
+        WitnessTrustState::RefusingPinMalformed,
+        WitnessTrustState::RefusingInferenceReceiptsMissing,
+        WitnessTrustState::NotEnrolled,
+        WitnessTrustState::SettingsUnreadable,
+    ];
+
+    /// A measurement in `ExpectedMeasurements`' own spelling.
+    fn a_pin() -> String {
+        format!("mrtd={}", "ab".repeat(48))
+    }
+
+    fn enrol(dir: &std::path::Path, witness: Option<WitnessSettings>) {
+        let store = ConfigStore::open(dir.to_path_buf()).unwrap();
+        store
+            .save_config(&ContributorConfig {
+                schema_version:
+                    trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.example".into(),
+                ingest_url: "https://ingest.example".into(),
+                audience: "trace-commons-ingest".into(),
+                tenant_id: "tenant".into(),
+                instance_id: "instance".into(),
+                user_subject: "subject".into(),
+                device_key_id: "device".into(),
+                consent_scopes: vec![],
+                pii_filter: None,
+                allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness,
+            })
+            .unwrap();
+    }
+
+    /// Everything the card paints for one state, in one value, so two
+    /// states can be compared as a whole rather than field by field.
+    fn painted(state: WitnessTrustState) -> (String, Tone, WitnessActions, Option<&'static str>) {
+        (
+            copy::witness_state_line(state).to_string(),
+            witness_tone(copy::witness_state_tone(state)),
+            witness_actions(state),
+            state.refusal_label(),
+        )
+    }
+
+    /// **The bug this whole card exists to prevent.** No witness at all and
+    /// a witness that refuses every submission are opposites, and nothing
+    /// this shell paints may be the same for both.
+    #[test]
+    fn absent_and_refusing_unpinned_cannot_render_alike() {
+        let absent = painted(WitnessTrustState::Absent);
+        let refusing = painted(WitnessTrustState::RefusingUnpinned);
+        assert_ne!(absent, refusing, "the two opposites paint identically");
+        assert_ne!(absent.0, refusing.0, "same sentence");
+        assert_ne!(absent.1, refusing.1, "same tone");
+        assert_eq!(
+            absent.1,
+            Tone::Neutral,
+            "local redaction is the ordinary arrangement, not a warning"
+        );
+        assert_eq!(
+            refusing.1,
+            Tone::Refused,
+            "a state where nothing is sent is painted refused"
+        );
+    }
+
+    /// A refusal is never softened into "needs attention", which reads as a
+    /// degraded but working setup, and never into "nothing to say".
+    #[test]
+    fn every_refusal_is_painted_refused() {
+        for state in EVERY_STATE {
+            let tone = witness_tone(copy::witness_state_tone(state));
+            if state.is_refusing() {
+                assert_eq!(tone, Tone::Refused, "{state:?} is a refusal");
+            } else {
+                assert_ne!(
+                    tone,
+                    Tone::Refused,
+                    "{state:?} refuses nothing and must not be painted as if it did"
+                );
+            }
+        }
+    }
+
+    /// A tone this shell has not been taught must fail to compile, not fall
+    /// through to neutral.
+    ///
+    /// Read from the source, because "this match has no catch-all" is not a
+    /// fact any value-level assertion can hold: a wildcard arm mapping a
+    /// future tone to `Neutral` would satisfy every other test on this page
+    /// while turning a refusal nobody has written yet into silence.
+    #[test]
+    fn the_tone_mapping_has_no_catch_all_arm() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn witness_tone(")
+            .expect("the tone mapping exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+        assert!(
+            !body.contains("_ =>"),
+            "witness_tone must be exhaustive, not defaulted:\n{body}"
+        );
+        // And every tone the core defines is actually named in it, so an
+        // exhaustive match is not achieved by matching on something else.
+        for tone in ["Neutral", "Held", "Clear", "Attention", "Refused"] {
+            assert!(body.contains(tone), "witness_tone never names {tone}");
+        }
+    }
+
+    /// A state whose refusal this build cannot name still reads as a
+    /// refusal, because the state itself carries that, not the label.
+    #[test]
+    fn a_reserved_refusal_is_not_neutral() {
+        let state = WitnessTrustState::RefusingInferenceReceiptsMissing;
+        assert_eq!(witness_tone(copy::witness_state_tone(state)), Tone::Refused);
+        assert_ne!(
+            painted(state),
+            painted(WitnessTrustState::Absent),
+            "a reserved refusal must not paint like no witness at all"
+        );
+    }
+
+    /// **A refusal must have a way out.** A card that says nothing is being
+    /// sent and offers no button is a dead end.
+    #[test]
+    fn every_refusal_offers_a_way_out() {
+        for state in EVERY_STATE {
+            if !state.is_refusing() {
+                continue;
+            }
+            let actions = witness_actions(state);
+            assert!(
+                actions.configure || actions.clear,
+                "{state:?} refuses every submission and offers nothing to press"
+            );
+            assert!(
+                actions.form_open,
+                "{state:?} must not fold the fields that end it out of sight"
+            );
+        }
+    }
+
+    /// Not enrolled is not a refusal and gets no controls: there is no
+    /// configuration file to write a witness into yet.
+    #[test]
+    fn not_enrolled_offers_nothing_and_accuses_nothing() {
+        let actions = witness_actions(WitnessTrustState::NotEnrolled);
+        assert!(!actions.configure);
+        assert!(!actions.clear);
+        assert_ne!(
+            witness_tone(copy::witness_state_tone(WitnessTrustState::NotEnrolled)),
+            Tone::Refused
+        );
+    }
+
+    /// One measurement per line, blanks dropped rather than sent as pins.
+    #[test]
+    fn measurements_are_read_one_per_line() {
+        let text = format!("  {}  \n\n{}\n   \n", a_pin(), a_pin());
+        assert_eq!(parse_measurements(&text), vec![a_pin(), a_pin()]);
+        assert!(parse_measurements("   \n\n").is_empty());
+    }
+
+    /// A device with no configuration is not enrolled, and is not "no
+    /// witness": those are different sentences and different controls.
+    #[test]
+    fn an_unenrolled_device_reads_as_not_enrolled() {
+        let dir = Scratch::new("unenrolled");
+        assert_eq!(
+            witness_read(dir.path()).state,
+            WitnessTrustState::NotEnrolled
+        );
+    }
+
+    /// An enrolled device with no witness is `Absent`, which is the
+    /// supported ordinary mode.
+    #[test]
+    fn an_enrolled_device_with_no_witness_is_absent() {
+        let dir = Scratch::new("absent");
+        enrol(dir.path(), None);
+        let status = witness_read(dir.path());
+        assert_eq!(status.state, WitnessTrustState::Absent);
+        assert_eq!(status.url, None);
+        assert_eq!(status.pinned_measurement_count, 0);
+    }
+
+    /// A witness with nothing pinned refuses, and the card says so rather
+    /// than reporting a configured witness.
+    #[test]
+    fn a_witness_with_no_pin_reads_as_refusing() {
+        let dir = Scratch::new("unpinned");
+        enrol(
+            dir.path(),
+            Some(WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0xabc".into(),
+                expected_measurements: vec![],
+            }),
+        );
+        assert_eq!(
+            witness_read(dir.path()).state,
+            WitnessTrustState::RefusingUnpinned
+        );
+    }
+
+    /// The whole round trip: write a witness, read it back pinned, clear it,
+    /// and land back on local redaction.
+    #[test]
+    fn a_written_witness_reads_back_pinned_and_clears_to_absent() {
+        let dir = Scratch::new("roundtrip");
+        enrol(dir.path(), None);
+        witness_write(
+            dir.path(),
+            " https://witness.example ",
+            " 0xabc ",
+            &[a_pin()],
+        )
+        .expect("a well-formed witness is accepted");
+        let status = witness_read(dir.path());
+        assert_eq!(status.state, WitnessTrustState::Pinned);
+        assert_eq!(status.url.as_deref(), Some("https://witness.example"));
+        assert_eq!(status.signing_address.as_deref(), Some("0xabc"));
+        assert_eq!(status.pinned_measurement_count, 1);
+
+        assert_eq!(witness_clear(dir.path()), Ok(true));
+        assert_eq!(witness_read(dir.path()).state, WitnessTrustState::Absent);
+        // Idempotent: clearing what is not there is not a failure.
+        assert_eq!(witness_clear(dir.path()), Ok(false));
+    }
+
+    /// A pin this build cannot read is refused as an input, not saved and
+    /// reported later as a broken configuration.
+    #[test]
+    fn a_bad_input_is_refused_before_anything_is_written() {
+        let dir = Scratch::new("refused");
+        enrol(dir.path(), None);
+        for (url, address, pins) in [
+            ("witness.example", "0xabc", vec![a_pin()]),
+            ("https://witness.example", "   ", vec![a_pin()]),
+            ("https://witness.example", "0xabc", vec![]),
+            ("https://witness.example", "0xabc", vec!["nonsense".into()]),
+        ] {
+            assert!(
+                witness_write(dir.path(), url, address, &pins).is_err(),
+                "accepted {url:?} {address:?} {pins:?}"
+            );
+            assert_eq!(
+                witness_read(dir.path()).state,
+                WitnessTrustState::Absent,
+                "a refused input still changed what is on disk"
+            );
+        }
+    }
+
+    /// Writing needs a configuration to write into.
+    #[test]
+    fn writing_without_enrolment_fails_and_creates_nothing() {
+        let dir = Scratch::new("nowrite");
+        assert!(witness_write(dir.path(), "https://witness.example", "0xabc", &[a_pin()]).is_err());
+        assert_eq!(
+            witness_read(dir.path()).state,
+            WitnessTrustState::NotEnrolled
+        );
+    }
+
+    /// The last-submission row is painted from the same mapping, so a
+    /// refused send is never softened either -- and local redaction, which
+    /// is the normal outcome, is never painted like a certified one.
+    #[test]
+    fn the_last_result_row_keeps_the_same_three_apart() {
+        let local = WitnessLastResult::LocalRedaction;
+        let certified = WitnessLastResult::Certified {
+            n_of_m: Some(InferenceReceiptCount { n: 3, m: 7 }),
+        };
+        let refused = WitnessLastResult::Refused {
+            label: "witness_expected_measurement".into(),
+            certificate_obtained: false,
+        };
+        let paint = |r: &WitnessLastResult| {
+            (
+                copy::witness_last_result_line(r),
+                witness_tone(copy::witness_last_result_tone(r)),
+            )
+        };
+        assert_ne!(paint(&local), paint(&certified));
+        assert_ne!(paint(&local), paint(&refused));
+        assert_eq!(paint(&refused).1, Tone::Refused);
+        assert_eq!(paint(&local).1, Tone::Neutral);
+        // The count is always the pair, and never the word.
+        assert!(paint(&certified).0.contains("3 of 7 model calls"));
+    }
+
+    /// **The editor is not write-only.** What is pinned comes back into the
+    /// box, and what comes back goes out again byte for byte.
+    ///
+    /// The round trip is the assertion that matters. A shell that reformats
+    /// a pin is a shell that can reformat it wrongly, and it would do it to
+    /// a contributor who opened this card to change the URL and touched no
+    /// measurement at all.
+    #[test]
+    fn pinned_measurements_round_trip_through_the_editor_untouched() {
+        let dir = Scratch::new("readback");
+        let stored = vec![a_pin(), format!("mrtd={}", "cd".repeat(48))];
+        enrol(
+            dir.path(),
+            Some(WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0xabc".into(),
+                expected_measurements: stored.clone(),
+            }),
+        );
+        let status = witness_read(dir.path());
+        assert_eq!(status.state, WitnessTrustState::Pinned);
+        assert_eq!(status.pinned_measurements, stored, "read back changed");
+        // Through the box and out the other side, unchanged.
+        assert_eq!(parse_measurements(&measurements_text(&status)), stored);
+        // And accepted on the way back, so the contributor who only wanted
+        // to change the address is not made to retype anything.
+        witness_write(
+            dir.path(),
+            "https://elsewhere.example",
+            "0xabc",
+            &parse_measurements(&measurements_text(&status)),
+        )
+        .expect("the read-back list is what the write path takes");
+        let after = witness_read(dir.path());
+        assert_eq!(after.pinned_measurements, stored);
+        assert_eq!(after.url.as_deref(), Some("https://elsewhere.example"));
+    }
+
+    /// A pin this build cannot parse comes back as it is stored, typo and
+    /// all, so the contributor can SEE it. The read is permissive; the write
+    /// is still not.
+    #[test]
+    fn a_malformed_pin_is_shown_rather_than_hidden() {
+        let dir = Scratch::new("malformed");
+        let stored = vec![a_pin(), "mrtd=not-hex".to_string()];
+        enrol(
+            dir.path(),
+            Some(WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0xabc".into(),
+                expected_measurements: stored.clone(),
+            }),
+        );
+        let status = witness_read(dir.path());
+        assert_eq!(status.state, WitnessTrustState::RefusingPinMalformed);
+        assert_eq!(
+            status.pinned_measurements, stored,
+            "the entry with the typo in it must be visible, not dropped"
+        );
+        assert_eq!(parse_measurements(&measurements_text(&status)), stored);
+        // Handing that same entry back is still refused.
+        assert_eq!(
+            witness_write(dir.path(), "https://witness.example", "0xabc", &stored),
+            Err(WITNESS_PIN_MALFORMED)
+        );
+    }
+
+    /// **An empty box means cleared, and is still refused.** Read-back is
+    /// what makes that honest: before it, an empty box meant "I did not
+    /// retype them" and refusing was hostile. There is no "keep what is
+    /// there" path, and nothing is written.
+    #[test]
+    fn an_emptied_box_is_refused_and_writes_nothing() {
+        let dir = Scratch::new("emptied");
+        let stored = vec![a_pin()];
+        enrol(
+            dir.path(),
+            Some(WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0xabc".into(),
+                expected_measurements: stored.clone(),
+            }),
+        );
+        assert_eq!(
+            witness_write(
+                dir.path(),
+                "https://witness.example",
+                "0xabc",
+                &parse_measurements("   \n\n")
+            ),
+            Err(WITNESS_PIN_REQUIRED)
+        );
+        let after = witness_read(dir.path());
+        assert_eq!(after.state, WitnessTrustState::Pinned);
+        assert_eq!(after.pinned_measurements, stored);
+    }
+
+    /// **No sentence at all where there is no witness to count for.** A
+    /// count of the pins on a witness that does not exist is not a shorter
+    /// sentence, it is a wrong one -- and a placeholder in its place would
+    /// be this shell authoring wording by omission.
+    #[test]
+    fn the_count_sentence_is_absent_where_there_is_nothing_to_count() {
+        for state in EVERY_STATE {
+            let status = WitnessStatus {
+                state,
+                url: None,
+                signing_address: None,
+                pinned_measurement_count: 2,
+                pinned_measurements: vec![a_pin(), a_pin()],
+            };
+            let line = status.pinned_measurement_line();
+            match state {
+                WitnessTrustState::Absent
+                | WitnessTrustState::NotEnrolled
+                | WitnessTrustState::SettingsUnreadable => {
+                    assert_eq!(line, None, "{state:?} has no witness to count for");
+                }
+                _ => {
+                    assert_eq!(
+                        line.as_deref(),
+                        Some(copy::witness_pinned_count_line(2).as_str()),
+                        "{state:?}"
+                    );
+                    // A sentence, never a bare numeral.
+                    assert_ne!(line.as_deref(), Some("2"));
+                }
+            }
+        }
+    }
+
+    /// **The `None` reaches the screen as nothing drawn.**
+    ///
+    /// The test above proves the core answers `None`; it says nothing about
+    /// what this view does with it, and the obvious wrong thing -- an
+    /// `unwrap_or` or an `.or(...)` onto a count of zero -- would satisfy it
+    /// while putting "No measurement is pinned." on a card that has just
+    /// said there is no witness. So the painter is read from the source: it
+    /// must ASK for the sentence and draw nothing when there is none, and it
+    /// must never assemble one itself.
+    #[test]
+    fn the_painter_draws_no_count_where_the_core_gives_none() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("pub fn render_witness(")
+            .expect("the painter exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+        assert!(
+            body.contains("if let Some(line) = status.pinned_measurement_line() {"),
+            "the count must be drawn only where there is one:\n{body}"
+        );
+        for defaulted in [
+            "pinned_measurement_line().unwrap",
+            "pinned_measurement_line().or",
+            "pinned_measurement_line().unwrap_or",
+        ] {
+            assert!(
+                !body.contains(defaulted),
+                "the absent count must stay absent, not become a placeholder: {defaulted}"
+            );
+        }
+        // And the sentence is asked for, never assembled here. A view that
+        // built it from the count would be free to build it for a state the
+        // core declined to answer for.
+        assert!(
+            !body.contains("witness_pinned_count_line"),
+            "the view must not write the count sentence itself:\n{body}"
+        );
+    }
+
+    /// **The painter actually fills the box.** `measurements_text` is the
+    /// tested seam, and it is worth nothing if the painter does not use it.
+    ///
+    /// A widget assertion needs a display this test suite does not have, so
+    /// the painter is read from the source instead -- the same technique the
+    /// count test uses, and for the same reason: "this function calls that
+    /// one" is a fact a later edit breaks silently.
+    #[test]
+    fn the_painter_fills_the_box_from_what_is_stored() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("pub fn render_witness(")
+            .expect("the painter exists");
+        let end = source[start..].find("\n}\n").expect("its body ends") + start;
+        let body = &source[start..end];
+        assert!(
+            body.contains("measurements_text(&status)"),
+            "the box must be filled from the stored list:\n{body}"
+        );
+        assert!(
+            body.contains("buffer.set_text(&stored)"),
+            "the stored list must reach the buffer:\n{body}"
+        );
+        // And never over somebody's typing: a refresh runs on every daemon
+        // event, so the fill is guarded on focus exactly as the two entry
+        // fields above it are.
+        assert!(
+            body.contains("if !settings.witness_measurements.has_focus()"),
+            "the fill must not take the box out from under whoever is typing:\n{body}"
+        );
+    }
+
+    /// Zero pinned says only that, and does not repeat the outage the state
+    /// sentence already leads with.
+    #[test]
+    fn the_zero_count_does_not_say_the_refusal_twice() {
+        let zero = copy::witness_pinned_count_line(0);
+        assert!(!zero.is_empty());
+        assert!(
+            !zero.contains("Nothing is being sent"),
+            "the state line already says that: {zero}"
+        );
+        assert_ne!(zero, copy::witness_pinned_count_line(1));
+    }
+
+    /// No sentence about the witness is authored in this view, and the two
+    /// words that would overclaim are not written here at all.
+    ///
+    /// The region is the card's own source, so this fails on a literal added
+    /// to it rather than on one anywhere in a 3,500-line file.
+    #[test]
+    fn this_view_authors_no_witness_wording() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("// --- The redaction witness")
+            .expect("the card's region is marked");
+        let end = source
+            .find("mod witness_tests")
+            .expect("the region ends at its tests");
+        let region = &source[start..end];
+        for forbidden in ["attested", "genuine", "verified clean"] {
+            assert!(
+                !region.to_lowercase().contains(forbidden),
+                "the witness card must never say {forbidden:?}"
+            );
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

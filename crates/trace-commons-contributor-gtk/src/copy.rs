@@ -2081,6 +2081,29 @@ pub use trace_commons_contributor::routing_copy::{
     ironwire_state_tone, ironwire_token_line, ironwire_unreachable_line, tool_tone, tool_word,
 };
 
+// --- The redaction witness ---------------------------------------------
+//
+// Same rule as the Tools block above, for the same reason. The witness
+// surface's words live in `trace_commons_contributor::witness_copy`,
+// because macOS and Windows render this same card across the C ABI and a
+// privacy claim kept in three places is three claims that have not diverged
+// yet. This shell re-exports the one definition.
+//
+// Two of these are the whole point of the module: `witness_state_line` and
+// `witness_state_tone` take the SAME input, so the sentence and the colour
+// cannot drift apart, and there is no boolean anywhere in the pair. "Is a
+// witness configured?" has two yes-answers that are opposites -- a pinned
+// witness certifies every submission, an unpinned one refuses every
+// submission before a single byte leaves -- and a shell that reduced them
+// to one bit would paint a total outage as "on".
+pub use trace_commons_contributor::witness_copy::{
+    WITNESS_APPLIES_AT_ONCE, WITNESS_CERTIFICATE_MEANS, WITNESS_CLEAR, WITNESS_CLEAR_NOTE,
+    WITNESS_CONFIGURE, WITNESS_HEADING, WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE,
+    WITNESS_MEASUREMENTS_TITLE, WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_URL_TITLE, WitnessTone,
+    witness_last_result_line, witness_last_result_tone, witness_pinned_count_line,
+    witness_state_line, witness_state_tone,
+};
+
 /// When the daemon last got an answer, or nothing.
 ///
 /// The sentence is [`trace_commons_contributor::routing_copy::last_checked_line`];
