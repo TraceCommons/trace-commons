@@ -327,8 +327,14 @@ pub(crate) fn ironwire_token_path_with(
     // The existence check races a daemon shutting down. Losing that race
     // costs a token read that fails, which is a state every caller here
     // already treats as "no proxy".
+    //
+    // `trustworthy_file` rather than `is_file`: this is the one branch whose
+    // path came out of a file anything on the machine can write, so the
+    // token it names must also be a regular file this user owns and nobody
+    // else can write. `read_pointer` has already confined the path to the
+    // token directory; this is the check on the file at the end of it.
     if let Some(from_pointer) = pointer.and_then(|p| p.token_path.as_ref())
-        && from_pointer.is_file()
+        && super::ironwire_pointer::trustworthy_file(from_pointer).is_some()
     {
         return Some(from_pointer.clone());
     }
@@ -415,7 +421,13 @@ pub fn ironwire_ledger_for(
 ) -> Option<std::sync::Arc<crate::routing::ironwire::IronWireLedger>> {
     let declaration = declaration?;
     let port = declaration.port()?;
-    let token = std::fs::read_to_string(ironwire_token_path(declaration.token_dir())?).ok()?;
+    let path = ironwire_token_path(declaration.token_dir())?;
+    // The token is a credential for an API that can rewrite the
+    // contributor's agent configuration, and this process is about to put it
+    // on the wire. A file another principal could have written is not one to
+    // send anywhere, whichever of the four resolution steps produced it.
+    super::ironwire_pointer::trustworthy_file(&path)?;
+    let token = std::fs::read_to_string(&path).ok()?;
     Some(std::sync::Arc::new(
         crate::routing::ironwire::IronWireLedger::new(port, token.trim().to_string()),
     ))
@@ -937,43 +949,7 @@ mod tests {
         );
     }
 
-    /// `IRONWIRE_HOME` for the life of the guard, restored on drop.
-    ///
-    /// Serialized on a mutex because the process environment is shared by
-    /// every test in this binary and the harness runs them on threads.
-    /// `set_var` is `unsafe` in edition 2024 for exactly that reason.
-    struct IronWireHomeEnv {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    static IRONWIRE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    impl IronWireHomeEnv {
-        fn set(value: &std::path::Path) -> Self {
-            // A poisoned lock means some other test panicked while holding
-            // it; the environment was still restored by its guard's drop,
-            // so there is nothing here to refuse over.
-            let lock = IRONWIRE_HOME_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous = std::env::var_os("IRONWIRE_HOME");
-            unsafe { std::env::set_var("IRONWIRE_HOME", value) };
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for IronWireHomeEnv {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(v) => unsafe { std::env::set_var("IRONWIRE_HOME", v) },
-                None => unsafe { std::env::remove_var("IRONWIRE_HOME") },
-            }
-        }
-    }
+    use super::super::ironwire_pointer::test_support::IronWireHomeAt as IronWireHomeEnv;
 
     /// A directory holding a `control.token` with exactly this text.
     fn token_dir_holding(token: &str) -> tempfile::TempDir {
@@ -1181,6 +1157,9 @@ mod tests {
     #[test]
     fn a_discovered_token_builds_a_reader_for_a_declaration_that_named_no_directory() {
         let d = tempfile::tempdir().expect("tempdir");
+        // The pointer may only name a token inside the token directory, so
+        // the fixture has to say which directory that is.
+        let _env = IronWireHomeEnv::set(d.path());
         let token = d.path().join("control.token");
         std::fs::write(&token, "token-from-pointer\n").expect("write token");
         let endpoint = d.path().join("endpoint.json");

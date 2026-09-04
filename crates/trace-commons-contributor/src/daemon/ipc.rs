@@ -7186,6 +7186,10 @@ mod tests {
     #[test]
     fn discovery_reports_what_a_running_proxy_published() {
         let dir = pointer_dir(9143, "a-secret-token");
+        // The pointer's directory IS the token directory here: a `token_path`
+        // outside it is refused, so a test that did not say so would be
+        // asserting the refusal rather than the discovery.
+        let _home = super::super::ironwire_pointer::test_support::IronWireHomeAt::set(dir.path());
         let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
             &dir.path().join("endpoint.json"),
         );
@@ -7196,9 +7200,16 @@ mod tests {
 
         assert_eq!(result["found"], serde_json::json!(true));
         assert_eq!(result["port"], serde_json::json!(9143));
+        // Canonicalized, because the confinement compares resolved paths and
+        // returns the resolved one -- on macOS a temp dir under `/var` is a
+        // symlink to `/private/var`.
         assert_eq!(
             result["token_path"],
-            serde_json::json!(dir.path().join("control.token").to_string_lossy()),
+            serde_json::json!(
+                std::fs::canonicalize(dir.path().join("control.token"))
+                    .expect("token canonicalises")
+                    .to_string_lossy()
+            ),
         );
     }
 
