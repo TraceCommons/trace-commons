@@ -723,6 +723,48 @@ mod tests {
         );
     }
 
+    /// The PUBLIC entry point refuses a certificate stamped long ago.
+    ///
+    /// Every other freshness test drives `verify_witness_certificate_at`,
+    /// which proves the predicate but not that production applies it. The
+    /// entry point reads the clock itself, and that read is the part a
+    /// regression removes: replacing `Utc::now()` with the certificate's own
+    /// timestamp makes every age zero and disables the window completely.
+    /// Nothing caught that, because the rest of this suite stamps `now` and
+    /// passes either way. This test does not -- 2020 is more than 24 hours
+    /// before any clock this will ever run on.
+    #[test]
+    fn the_public_entry_point_refuses_an_ancient_certificate() {
+        let (k, pin) = witness();
+        let cert = certificate_stamped(1_600_000_000);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
+            .expect_err("a certificate from 2020 must refuse against the real clock");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateExpired { .. }),
+            "the entry point is not applying the freshness window: {err}"
+        );
+    }
+
+    /// And the same entry point refuses one stamped past the tolerance ahead.
+    ///
+    /// Relative to the real clock rather than an absolute future instant, so
+    /// it cannot quietly stop being in the future.
+    #[test]
+    fn the_public_entry_point_refuses_a_future_dated_certificate() {
+        let (k, pin) = witness();
+        let cert = certificate_stamped(chrono::Utc::now().timestamp() + 86_400);
+        let signature = sign(&k, &cert);
+
+        let err = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT)
+            .expect_err("a certificate stamped tomorrow must refuse against the real clock");
+        assert!(
+            matches!(err, WitnessVerificationError::CertificateFutureDated { .. }),
+            "the entry point is not applying the forward tolerance: {err}"
+        );
+    }
+
     /// The boundary itself passes. A window that refused at exactly its own
     /// width would be one second narrower than it is documented to be.
     #[test]
