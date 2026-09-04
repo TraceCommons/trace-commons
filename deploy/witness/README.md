@@ -78,9 +78,13 @@ What reduces it, and none of these remove it:
   health route that reports state, no metrics, and nothing that lists anything.
   A witness that can be interrogated about its history is not one that holds
   nothing.
-- **`public_logs` and `public_sysinfo` are off** in `app-compose.json`. dstack
-  will serve container logs publicly if asked. Do not ask, on a deployment
-  carrying real traffic, for debugging or otherwise.
+- **`public_logs` and `public_sysinfo` are off in `app-compose.json`, and that
+  did not reach the deployment.** dstack will serve container logs publicly if
+  asked, and the first live CVM was deployed with both set to `true` -- because
+  `phala deploy` never read the manifest this repository generates. See
+  "The manifest we write is not the manifest that deploys" below. Setting them
+  here is necessary and is not sufficient; check the stored manifest after
+  every deploy.
 - **The contributor pins the measurement before sending.** A client that cannot
   verify must refuse to send, not warn and proceed.
 
@@ -170,11 +174,60 @@ open redaction service, and an open quote oracle.
 | `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. |
 
 `docker-compose.yml` is the source of truth and `app-compose.json` is derived.
-They are two copies of the same thing and only the second one deploys, so
-**run `./build-app-compose.sh` after every compose edit and commit both.**
+**Run `./build-app-compose.sh` after every compose edit and commit both.**
 `./build-app-compose.sh --check` answers "is the manifest I am about to upload
 the one this compose file describes" without modifying anything; run it before
 a deploy.
+
+### The manifest we write is not the manifest that deploys
+
+This section replaces an earlier claim that "only the second one deploys". It
+was wrong, and it was wrong in the direction that matters: it described the
+generated manifest as the thing with authority, when in fact `phala deploy`
+takes `docker-compose.yml` and **builds its own manifest**, never reading
+`app-compose.json` at all.
+
+Measured on 2026-09-04 against the live CVM. `phala cvms get <id> --json`
+reports `compose_file`, which is the manifest dstack actually stored. Compared
+against what this directory generates:
+
+| Field | We wrote | dstack stored |
+|---|---|---|
+| `public_logs` | `false` | **`true`** |
+| `public_sysinfo` | `false` | **`true`** |
+| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
+| `pre_launch_script` | `""` | **~17 KB of Phala boot script** |
+| `kms_enabled`, `local_key_provider_enabled`, `gateway_enabled`, `public_tcbinfo`, `no_instance_id` | as written | as written |
+
+Every field that constrains what the enclave exposes was overridden. The three
+that survived are the ones whose values happened to match Phala's defaults, so
+agreement here is coincidence rather than the manifest being honoured.
+
+Two of the overrides are worth stating plainly, because they change the threat
+model this README argues elsewhere:
+
+- **`public_logs: true`** on a service whose entire premise is that raw
+  transcripts do not leave it. Container logs are the most direct way for one
+  to escape, which is why the generated manifest sets it `false`.
+- **`DSTACK_AUTHORIZED_KEYS` in `allowed_envs`**, combined with a
+  `pre_launch_script` that writes that value to `/home/root/.ssh/
+  authorized_keys` and sets a root password. The generated manifest allows
+  exactly one injectable name and argues for it at length in
+  `build-app-compose.sh`; the deployed manifest allows a second one that grants
+  shell access. Nothing has been injected -- but the enclave's identity now
+  admits it, and an operator who reads only our manifest would not know.
+
+**This also resolves the open question in `build-app-compose.sh`.** That script
+warns that the SHA-256 it prints may not equal the `compose_hash` dstack
+derives, and notes nobody had run the comparison. It has now been run and they
+differ: local `a12e930e...` against deployed `c2511a8b...`, which is the value
+inside the live certificate's MRCONFIGID. **The hash to pin is the instance's,
+never this script's.**
+
+So the deploy procedure needs a step it does not yet have: after deploying,
+read back `compose_file` and diff it against the intended manifest, and pin
+`compose_hash` from the instance. Until that exists, treat every setting in
+`app-compose.json` as a statement of intent that has not been enforced.
 
 ---
 
@@ -413,6 +466,42 @@ verify in principle and does not verify in practice.
 
 ---
 
+## Which KMS, and why that is not a detail
+
+`phala deploy` takes `--kms-id`, and on a node that supports on-chain KMS it
+refuses without one. **This deployment uses `phala-usc1`**, on node `18`
+(`prod9`, US-WEST-1).
+
+The reasoning, so the next person inherits it rather than rediscovering it at
+the same prompt:
+
+- The signing address derives from the **KMS and the app id together**. Moving
+  to a different KMS later therefore rotates the signing address — which is a
+  **key rotation**, not an upgrade, and re-allowlisting a measurement does not
+  help, because it is not the measurement that moved. It has the same shape as
+  the `/v0` → `/v1` guest-API change described below, and the same cost: every
+  client that pinned the old address stops verifying.
+- So this is chosen once and is expensive to revisit. It is not a deployment
+  detail even though it looks like one on the command line.
+- `phala-usc1` is Phala-operated and regionally matched to `prod9`. The
+  alternatives offered were other `phala-*` instances and the on-chain
+  `kms-eth-*` / `kms-base-*` families, which put key-release policy under a
+  contract on Ethereum or Base respectively.
+- Neither on-chain family was chosen because **nothing in this project already
+  depends on those chains.** Credit settlement is on NEAR, so an Ethereum or
+  Base KMS would introduce a second chain into the trust path for no benefit
+  this deployment can name. That is a reason to revisit if the surrounding
+  architecture ever moves on-chain in a way that makes one of them the natural
+  home for key-release policy.
+
+What choosing a KMS does *not* change: `kms_enabled: true` and
+`local_key_provider_enabled: false` are settled and recorded in
+`build-app-compose.sh`. A local key provider seals to one host TPM and would
+tie the signing address to a single machine, losing the property that makes the
+upgrade path below work at all.
+
+---
+
 ## Upgrades — the order matters, and one case breaks it
 
 ### The ordinary case: a new image
@@ -595,6 +684,36 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 A malformed nonce is rejected rather than padded — `parse_hex` accepts exactly
 64 bare hex characters, no `0x` prefix — so a `400` here is usually your nonce,
 not the witness.
+
+---
+
+## The deployment that exists
+
+First deployed 2026-09-04. Recorded here because an app id is what a signing
+address derives from, and a CVM that nobody can name is one nobody can audit.
+
+| | |
+|---|---|
+| CVM ID | `fa62907e-209f-45cd-8b70-86e450a62399` |
+| App ID | `39cdd01fcb7bba691f07ee6951de147f7814f829` |
+| Node | `18` (`prod9`, US-WEST-1) |
+| KMS | `phala-usc1` |
+| dstack image | `dstack-0.5.9` |
+| Sizing | 4 vCPU, 8 GB |
+| Container image | `ghcr.io/tracecommons/trace-commons-witness@sha256:f1d4c00266656f0227292efe7239595d6ad0bd7b9083c750d610c0e11b2689bc` |
+| Manifest hash | `ee2a8af364272fae211fb5b7443d3c28de6153b300c781d75d06aaa9db547e2e` |
+
+The sizing is not a default. `phala deploy` defaults to 1 vCPU and 2048 MB, and
+the compose admits four concurrent witness requests at a 64 MiB body cap — on
+the order of a gigabyte of buffers at full occupancy before the runtime. On a
+public unauthenticated route an OOM kill is the denial of service the
+concurrency bound exists to prevent, so the memory is sized above the worst
+case rather than onto it.
+
+**Still to be read from the running instance, and not yet recorded here:** the
+signing address, the measurement, and the gateway hostname. Until those exist
+no client can be pinned, and until `tcb_info.compose_hash` has been compared
+against the manifest hash above, none of them should be.
 
 ---
 
