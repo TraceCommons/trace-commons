@@ -45,6 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
+ * THREE NAMED EXEMPTIONS, and no others: tc_discover_sources returns
+ * filesystem paths, tc_preview_body returns post-redaction trace content,
+ * and tc_witness_status_json returns the witness URL and signing address.
+ * Each is documented where it is declared, and each is a value the
+ * contributor is being asked to make a decision about -- a consent prompt
+ * that will not name what it is asking about is not a consent prompt.
+ *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
  * everywhere else. A contributor cannot consent to sending something they
@@ -543,6 +550,266 @@ char*       tc_source_check_line(const char* tool, const char* source_mode);
  * Returns NULL only on a caught panic.
  */
 char*       tc_scrub_detector_names(void);
+
+
+/* ---------------------------------------------------------------------------
+ * The redaction witness
+ * ---------------------------------------------------------------------------
+ *
+ * A redaction witness is an attested enclave that redacts a contributor's
+ * raw session on their behalf and returns a signed certificate over the
+ * result. Until these calls existed it was reachable only by hand-editing a
+ * config file or setting three environment variables, so nobody running a
+ * shipped app could turn it on, off, or even see whether it was on.
+ *
+ * THERE IS NO BOOLEAN HERE, AND THERE MUST NEVER BE ONE. "Is a witness
+ * configured?" has two yes-answers that are opposites:
+ *
+ *   - PINNED: every submission goes through the enclave and comes back
+ *     certified.
+ *   - CONFIGURED BUT UNPINNED: every submission is REFUSED, before any
+ *     network call, because a client with no pinned measurement cannot
+ *     judge any quote it receives. Nothing uploads at all.
+ *
+ * An unpinned witness is a total upload outage, and a shell that renders it
+ * the same as "no witness configured" tells a contributor everything is
+ * fine while nothing works. tc_witness_trust_state is the one answer, with
+ * one value per condition, and no other call in this header will collapse
+ * them for you.
+ *
+ * Having NO witness is a legitimate, supported mode: local redaction runs
+ * exactly as it does with this feature absent. It is not degraded and must
+ * not be presented as a warning.
+ */
+
+/* No witness configured. Local redaction runs. NOT a warning state. */
+#define TC_WITNESS_STATE_ABSENT                            0
+/* Configured and pinned. Submissions go through the witness. */
+#define TC_WITNESS_STATE_PINNED                            1
+/* Configured, nothing pinned. EVERY SUBMISSION IS REFUSED. */
+#define TC_WITNESS_STATE_REFUSING_UNPINNED                 2
+/* Configured, pins unparsable. Also a total refusal -- and a different
+ * mistake: a contributor who mistyped a measurement must not be told they
+ * pinned none. */
+#define TC_WITNESS_STATE_REFUSING_PIN_MALFORMED            3
+/* Configured and pinned, refusing because a trace's inferences did not
+ * carry verified receipts. RESERVED: no build returns it yet. It is
+ * defined now so the attested-inference work can start returning it
+ * without moving any other value, and so a shell written today already has
+ * a branch for it. Its instruction to a contributor is not "pin a
+ * measurement", which is why it is not folded into the value above. */
+#define TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING 4
+/* Not enrolled: there is no config to hold a witness. NOT "absent" --
+ * absent is a decision a contributor made. Not a refusal either: nothing
+ * about a witness is being declined, the device has no account yet. */
+#define TC_WITNESS_STATE_NOT_ENROLLED                     -1
+/* The config could not be read. NOT "absent": a client whose behaviour is
+ * unknown is not a client redacting locally, and nothing goes out from a
+ * client that cannot read its own settings. A refusal. */
+#define TC_WITNESS_STATE_UNREADABLE                       -2
+
+/* The tones the witness surface is painted in. DELIBERATELY DISJOINT FROM
+ * TC_ROUTING_TONE_*, which stops at ATTENTION = 3 and has no refused value.
+ * Its consumers spell out their arms and map anything else to NEUTRAL, so
+ * numbering a witness REFUSED as 4 would make a refusal render as "nothing
+ * to say" in any shell that cross-wired the two mappers -- exactly the
+ * failure this surface exists to prevent. A disjoint range makes that
+ * mistake wrong for every value instead of only for the dangerous one.
+ *
+ * A TONE THIS HEADER DOES NOT DEFINE MUST BE RENDERED AS
+ * TC_WITNESS_TONE_REFUSED, never as neutral. Every value added later is a
+ * condition this build has no words for, and on a surface about whether
+ * sessions leave the machine the safe reading of "I do not know" is "they
+ * are not".
+ */
+#define TC_WITNESS_TONE_NEUTRAL   10
+#define TC_WITNESS_TONE_HELD      11
+#define TC_WITNESS_TONE_CLEAR     12
+#define TC_WITNESS_TONE_ATTENTION 13
+#define TC_WITNESS_TONE_REFUSED   14
+
+/* What the witness is doing, as one of the TC_WITNESS_STATE_* values above.
+ *
+ * The one call to make before rendering anything about the witness.
+ *
+ * A VALUE THIS HEADER DOES NOT DEFINE MUST BE RENDERED AS "not usable",
+ * NEVER AS TC_WITNESS_STATE_ABSENT. A shell built against this header may
+ * run against a later library that has learned a new refusal, and
+ * defaulting an unknown state to "no witness, all is well" turns a future
+ * refusal into silence.
+ *
+ * Needs no handle: it reads the config file, and the screen that calls it
+ * is often the one deciding whether to start a daemon at all. Records a
+ * fixed tc_last_error label for the two negative values.
+ */
+int32_t     tc_witness_trust_state(const char* config_dir);
+
+/* The whole witness configuration, as an OWNED JSON object; free it with
+ * tc_string_free:
+ *
+ *   {"state":"refusing_unpinned","state_code":2,
+ *    "refusal":"witness_expected_measurement",
+ *    "url":"https://witness.example","signing_address":"0x...",
+ *    "pinned_measurement_count":0}
+ *
+ * state and state_code are the same answer tc_witness_trust_state gives.
+ * DO NOT DERIVE THE STATE FROM url BEING NON-NULL -- that is the boolean
+ * this surface refuses to hand you, spelled differently. refusal is null
+ * unless the state is a refusing one.
+ *
+ * THE URL AND SIGNING ADDRESS ARE RETURNED VERBATIM, one of the three
+ * exemptions named at the top of this header. They are the contributor's
+ * own configuration, not a value derived from a session, and a screen that
+ * will not show what it is asking a contributor to trust with their raw
+ * session is not a settings screen. Nothing else about the witness path --
+ * no quote, no signature, no certificate body -- crosses this boundary.
+ *
+ * Returns NULL and sets *err (owned; free with tc_string_free) when the
+ * device is not enrolled or the config cannot be read. A NULL return is
+ * never "no witness": that is state "absent" on a successful call.
+ */
+char*       tc_witness_status_json(const char* config_dir, char** err);
+
+/* Configure a witness. Returns 0 on success, -1 on failure with *err set
+ * (owned; free with tc_string_free).
+ *
+ * measurements_json is a JSON array of strings, each one measurement set in
+ * the spelling "mrtd=<hex>,mrconfigid=<hex>". It is a LIST because an image
+ * upgrade moves the measurement and leaves the signing address where it is:
+ * an operator adds the new measurement before the fleet rolls, and a client
+ * holding only the old one refuses the new deployment.
+ *
+ * THIS CALL WILL NOT WRITE AN UNPINNED WITNESS. An empty array is refused
+ * with "witness-pin-required" and an unparsable one with
+ * "witness-pin-malformed", because either produces a client that refuses
+ * every submission from the moment it is saved. The read side still reports
+ * both states, since a hand-edited file or the TRACE_COMMONS_WITNESS_*
+ * environment variables can still create them; this ABI simply declines to
+ * be the thing that does.
+ *
+ * Other fixed labels: "witness-not-enrolled", "witness-config-unreadable",
+ * "witness-url-invalid", "witness-signing-address-invalid",
+ * "witness-pins-invalid-json", "witness-config-write-failed".
+ *
+ * Takes effect on the next submission -- the upload path reloads the config
+ * per upload -- with no daemon restart. An entry already previewed and
+ * approved is re-offered rather than uploaded, because turning a witness on
+ * changes who builds the envelope and therefore what bytes a contributor is
+ * approving.
+ */
+int32_t     tc_witness_configure(const char* config_dir, const char* url,
+                                 const char* signing_address,
+                                 const char* measurements_json, char** err);
+
+/* Remove the configured witness. Returns 1 if one was removed, 0 if there
+ * was none, -1 on failure with *err set (owned; free with tc_string_free).
+ *
+ * Clearing returns the client to LOCAL REDACTION, a supported mode rather
+ * than a broken one. It is still a real change: later submissions carry a
+ * self-reported residual-risk verdict rather than a certified one, so say
+ * what is happening rather than presenting this as switching off a setting.
+ *
+ * Idempotent: clearing a witness that is not there is 0, not an error.
+ */
+int32_t     tc_witness_clear(const char* config_dir, char** err);
+
+/* What the last submission THIS PROCESS made did about the witness, as an
+ * OWNED JSON object; free it with tc_string_free:
+ *
+ *   {"outcome":"certified","certificate_obtained":true,
+ *    "certificate_verified":true,"refusal":null,"n_of_m":{"n":3,"m":7}}
+ *
+ * outcome is one of:
+ *   "not_observed"    -- this process has made no submission. Say nothing
+ *                        about the last one rather than guessing.
+ *   "local_redaction" -- built locally because no witness was configured.
+ *                        Expected; NOT a missing certificate.
+ *   "certified"       -- a certificate was obtained AND verified against
+ *                        the bytes the witness returned. There is no path
+ *                        to this value that skipped the verification.
+ *   "refused"         -- refusal carries the fixed label, and
+ *                        certificate_obtained separates a witness that
+ *                        answered with a certificate that does not hold
+ *                        from one that never answered.
+ *
+ * Every key is present in every outcome, so a shell never has to decide
+ * what an absent key meant.
+ *
+ * n_of_m is null unless the certificate carried a count of how many of a
+ * trace's inferences carried a verified receipt, out of how many the trace
+ * had. It is null on every certificate this build has seen; the field is
+ * here so the attested-inference work needs no ABI change. WHEN PRESENT,
+ * RENDER IT AS THE PAIR. There is no "attested" boolean to derive from it
+ * and one must not be invented: a certificate attests mechanics and a
+ * verdict, never that a trace is clean.
+ *
+ * PROCESS-LOCAL, DELIBERATELY. Nothing is written to disk, because a file
+ * would outlive a logout and show the next contributor to enroll on this
+ * machine the previous one's submission outcome. A freshly started shell
+ * reports "not_observed" until it makes a submission.
+ *
+ * Needs no handle. Returns NULL only on a caught panic.
+ */
+char*       tc_witness_last_result_json(void);
+
+/* Every fixed word on the witness surface, in one call. Returns an OWNED
+ * JSON object whose keys are heading, intro, certificate_means,
+ * measurements_note, url_title, signing_address_title, measurements_title,
+ * configure, clear, clear_note, applies_at_once; free with tc_string_free.
+ *
+ * ONE CALL, NOT ONE PER STRING, and NOT A WORD OF YOUR OWN. A shell handed
+ * the words one at a time takes some of them and writes the rest, and a
+ * hand-written word here is a privacy claim that stops matching what the
+ * other shells print. Every string on this surface comes from the Rust core,
+ * which is also where GTK -- which does not use this ABI at all -- reads
+ * them from.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_witness_copy(void);
+
+/* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
+ * Returns an OWNED string; free with tc_string_free.
+ *
+ * Returns NULL, recording the fixed tc_last_error label
+ * "witness-state-unknown", for a value this build cannot name. A shell that
+ * gets NULL must render NO witness sentence rather than one of its own, and
+ * should pair that with tc_witness_state_tone, which fails closed to
+ * TC_WITNESS_TONE_REFUSED on the same input.
+ */
+char*       tc_witness_state_line(int32_t state_code);
+
+/* The tone tc_witness_state_line's sentence is painted in, as a
+ * TC_WITNESS_TONE_* value.
+ *
+ * ONE BRANCH TABLE, NOT TWO: this takes what the sentence takes. Do not
+ * recover the tone by comparing the rendered sentence against anything.
+ *
+ * A state this build cannot name is TC_WITNESS_TONE_REFUSED, NOT neutral --
+ * the fail-closed direction, deliberately.
+ */
+int32_t     tc_witness_state_tone(int32_t state_code);
+
+/* The sentence for what the last submission THIS PROCESS made did about the
+ * witness. Returns an OWNED string; free with tc_string_free.
+ *
+ * The prose form of tc_witness_last_result_json, and THE ONLY FORM A SHELL
+ * MAY PRINT: that call's "refusal" is a fixed operator label rather than
+ * wording, and its n_of_m is a pair a shell must not phrase itself. When a
+ * certificate carried a count this sentence already contains it, as "3 of 7
+ * model calls carried a receipt." -- never the word "attested", and never a
+ * claim that a session is clean.
+ *
+ * Returns NULL only on a caught panic.
+ */
+char*       tc_witness_last_result_line(void);
+
+/* The tone tc_witness_last_result_line's sentence is painted in, as a
+ * TC_WITNESS_TONE_* value. A refused send is TC_WITNESS_TONE_REFUSED and
+ * never ATTENTION: nothing was sent at all, which is not a
+ * degraded-but-working state.
+ */
+int32_t     tc_witness_last_result_tone(void);
 
 
 /* Stop the daemon loop. Idempotent, and safe to call from any thread --

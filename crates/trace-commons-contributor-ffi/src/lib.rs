@@ -2226,3 +2226,606 @@ pub extern "C" fn tc_scrub_detector_names() -> *mut c_char {
         std::ptr::null_mut()
     })
 }
+
+// ---------------------------------------------------------------------------
+// The redaction witness
+// ---------------------------------------------------------------------------
+//
+// The witness was reachable only by hand-editing a config file or setting
+// three environment variables, so nobody running a shipped app could turn it
+// on, off, or even see whether it was on. These five calls are that surface.
+//
+// THERE IS NO BOOLEAN HERE, AND THERE MUST NEVER BE ONE. "Is a witness
+// configured?" has two yes-answers that are opposites: a pinned witness
+// certifies every submission, and an unpinned one REFUSES every submission
+// before it touches the network. A shell rendering those the same shows
+// "witness: on" through a total upload outage. `tc_witness_trust_state` is
+// the only answer, and it has one value per condition.
+
+/// No witness is configured. Local redaction runs, exactly as it does with
+/// this feature absent. **Not degraded, not an error, not something to warn
+/// about.**
+pub const TC_WITNESS_STATE_ABSENT: i32 = 0;
+/// A witness is configured and pinned. Submissions go through it.
+pub const TC_WITNESS_STATE_PINNED: i32 = 1;
+/// A witness is configured and nothing is pinned. **Every submission is
+/// refused**, before any network call. This is an outage, and it looks
+/// nothing like `TC_WITNESS_STATE_ABSENT`.
+pub const TC_WITNESS_STATE_REFUSING_UNPINNED: i32 = 2;
+/// A witness is configured and its pins could not be parsed. Also a total
+/// refusal, and a different mistake: a contributor who mistyped a
+/// measurement must not be told they pinned none.
+pub const TC_WITNESS_STATE_REFUSING_PIN_MALFORMED: i32 = 3;
+/// A witness is configured and pinned, and refuses because a trace's
+/// inferences did not carry verified receipts. **Reserved**: no path returns
+/// it in this build. It is declared now so the attested-inference work can
+/// start returning it without moving any other value, and so a shell written
+/// today already has a branch for it.
+pub const TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING: i32 = 4;
+/// This device is not enrolled, so there is no config to hold a witness.
+/// **Not `ABSENT`** -- absent is a decision a contributor made, this is a
+/// device that cannot make it yet.
+pub const TC_WITNESS_STATE_NOT_ENROLLED: i32 = -1;
+/// The config could not be read. **Not `ABSENT`**: an unreadable config is
+/// not a client redacting locally, it is a client whose behaviour is
+/// unknown, and rendering it as "no witness" is the same conflation this
+/// whole surface exists to prevent.
+pub const TC_WITNESS_STATE_UNREADABLE: i32 = -2;
+
+const ERR_WITNESS_NOT_ENROLLED: &str = "witness-not-enrolled";
+const ERR_WITNESS_CONFIG_UNREADABLE: &str = "witness-config-unreadable";
+const ERR_WITNESS_CONFIG_WRITE_FAILED: &str = "witness-config-write-failed";
+const ERR_WITNESS_URL_INVALID: &str = "witness-url-invalid";
+const ERR_WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
+const ERR_WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
+const ERR_WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
+const ERR_WITNESS_PINS_INVALID_JSON: &str = "witness-pins-invalid-json";
+
+/// Open the store at `config_dir` and load the contributor config.
+///
+/// `Err(label)` is a fixed label; `Ok(None)` means this device is not
+/// enrolled. The two are kept apart here rather than at each call site
+/// because collapsing them is precisely the conflation this surface exists
+/// to prevent.
+///
+/// # Safety
+/// `config_dir`, if non-null, must be a valid NUL-terminated UTF-8 C string.
+type WitnessConfigAt = (
+    ConfigStore,
+    trace_commons_contributor::config::ContributorConfig,
+);
+
+unsafe fn witness_config_at(
+    config_dir: *const c_char,
+) -> Result<Option<WitnessConfigAt>, &'static str> {
+    let dir = unsafe { borrow_str(config_dir) }.map_err(|_| ERR_WITNESS_CONFIG_UNREADABLE)?;
+    let store = ConfigStore::open(std::path::PathBuf::from(dir))
+        .map_err(|_| ERR_WITNESS_CONFIG_UNREADABLE)?;
+    match store.load_config() {
+        Ok(Some(cfg)) => Ok(Some((store, cfg))),
+        Ok(None) => Ok(None),
+        Err(_) => Err(ERR_WITNESS_CONFIG_UNREADABLE),
+    }
+}
+
+/// Record `label` as this thread's last error, write it to `*err` when the
+/// caller asked for it, and return the null pointer the caller reports.
+fn witness_fail(label: &'static str, err: *mut *mut c_char) -> *mut c_char {
+    set_last_error(label);
+    if !err.is_null() {
+        unsafe { *err = to_owned_cstring(label) };
+    }
+    std::ptr::null_mut()
+}
+
+/// What the witness is doing, as one of the `TC_WITNESS_STATE_*` values.
+///
+/// The ONE call a shell must make before rendering anything about the
+/// witness. Read the constants above: `ABSENT` and `REFUSING_UNPINNED` are
+/// opposites, and no other call in this ABI will tell them apart for you,
+/// because no other call in this ABI is allowed to reduce them to a boolean.
+///
+/// A VALUE THIS HEADER DOES NOT DEFINE MUST BE RENDERED AS "not usable",
+/// NEVER AS `ABSENT`. A shell built against this header may be running
+/// against a later library that has learned a new refusal, and defaulting an
+/// unknown state to "no witness, all is well" turns a future refusal into
+/// silence.
+///
+/// Needs no handle: it reads the config file, and the screen that calls it
+/// is often the one deciding whether to start a daemon at all.
+///
+/// Records a fixed label via [`tc_last_error`] for the two negative values.
+///
+/// # Safety
+/// `config_dir` must be a valid, NUL-terminated UTF-8 C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_trust_state(config_dir: *const c_char) -> i32 {
+    guard(|| {
+        Ok(match unsafe { witness_config_at(config_dir) } {
+            Ok(Some((_, cfg))) => trace_commons_contributor::witness::status::witness_status(&cfg)
+                .state
+                .abi_code(),
+            Ok(None) => {
+                set_last_error(ERR_WITNESS_NOT_ENROLLED);
+                TC_WITNESS_STATE_NOT_ENROLLED
+            }
+            Err(label) => {
+                set_last_error(label);
+                TC_WITNESS_STATE_UNREADABLE
+            }
+        })
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        TC_WITNESS_STATE_UNREADABLE
+    })
+}
+
+/// The whole witness configuration, as an owned JSON object; free it with
+/// [`tc_string_free`].
+///
+/// ```json
+/// {"state":"refusing_unpinned","state_code":2,"refusal":"witness_expected_measurement",
+///  "url":"https://witness.example","signing_address":"0x...",
+///  "pinned_measurement_count":0}
+/// ```
+///
+/// `state` and `state_code` are the same answer [`tc_witness_trust_state`]
+/// gives, carried here so a shell that already has the JSON does not make a
+/// second call and does not re-derive the state from the other fields. **Do
+/// not derive it from `url` being non-null** -- that is the boolean this
+/// surface refuses to hand you, spelled differently. `refusal` is null
+/// unless the state is a refusing one.
+///
+/// THE URL AND SIGNING ADDRESS ARE RETURNED VERBATIM, and are a deliberate,
+/// narrow exception to this library's rule that no URL crosses this
+/// boundary. They are the contributor's own configuration, not a value
+/// derived from a session, and a screen that will not show what it is asking
+/// a contributor to trust with their raw session is not a settings screen.
+/// Nothing else about the witness path -- no quote, no signature, no
+/// certificate body -- crosses.
+///
+/// Returns NULL and sets `*err` (owned; free with [`tc_string_free`]) when
+/// the device is not enrolled or the config cannot be read. A NULL return is
+/// never "no witness": that is `state: "absent"` on a successful call.
+///
+/// # Safety
+/// `config_dir` must be a valid, NUL-terminated UTF-8 C string. `err`, if
+/// non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_status_json(
+    config_dir: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    guard(|| {
+        let loaded = match unsafe { witness_config_at(config_dir) } {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => return Ok(witness_fail(ERR_WITNESS_NOT_ENROLLED, err)),
+            Err(label) => return Ok(witness_fail(label, err)),
+        };
+        let status = trace_commons_contributor::witness::status::witness_status(&loaded.1);
+        let json = serde_json::json!({
+            "state": status.state,
+            "state_code": status.state.abi_code(),
+            "refusal": status.state.refusal_label(),
+            "url": status.url,
+            "signing_address": status.signing_address,
+            "pinned_measurement_count": status.pinned_measurement_count,
+        });
+        Ok(to_owned_cstring(&json.to_string()))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        if !err.is_null() {
+            unsafe { *err = to_owned_cstring("panic") };
+        }
+        std::ptr::null_mut()
+    })
+}
+
+/// Whether a string is shaped like a witness base URL.
+///
+/// Deliberately shallow: a scheme and a host. The real check is the
+/// contributor's host allowlist, applied at submission time before any
+/// request is made, and duplicating a URL parser here would create a second,
+/// weaker opinion about what is reachable.
+fn witness_url_usable(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.contains(char::is_whitespace)
+}
+
+/// Configure a witness. Returns 0 on success, -1 on failure with `*err` set
+/// (owned; free with [`tc_string_free`]).
+///
+/// `measurements_json` is a JSON array of strings, each one measurement set
+/// in `ExpectedMeasurements`' spelling
+/// (`"mrtd=<hex>,mrconfigid=<hex>"`). It is a LIST because an image upgrade
+/// moves the measurement and leaves the signing address where it is: an
+/// operator adds the new measurement here before the fleet rolls, and a
+/// client holding only the old one refuses the new deployment.
+///
+/// THIS CALL WILL NOT WRITE AN UNPINNED WITNESS. An empty array is refused
+/// with `witness-pin-required`, and an array this build cannot parse is
+/// refused with `witness-pin-malformed`, because either one produces a
+/// client that refuses every submission from the moment it is saved. The
+/// read side still reports both states, since a hand-edited file or the
+/// `TRACE_COMMONS_WITNESS_*` environment variables can still create them --
+/// this ABI simply declines to be the thing that does.
+///
+/// Takes effect on the next submission: the upload path reloads the config
+/// per upload, so no daemon restart is needed. An entry already previewed
+/// and approved is re-offered rather than uploaded, because turning a
+/// witness on changes who builds the envelope and therefore what bytes a
+/// contributor is approving.
+///
+/// # Safety
+/// Every pointer argument must be a valid, NUL-terminated UTF-8 C string.
+/// `err`, if non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_configure(
+    config_dir: *const c_char,
+    url: *const c_char,
+    signing_address: *const c_char,
+    measurements_json: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let outcome = guard(|| {
+        let (store, mut cfg) = match unsafe { witness_config_at(config_dir) } {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                witness_fail(ERR_WITNESS_NOT_ENROLLED, err);
+                return Ok(-1);
+            }
+            Err(label) => {
+                witness_fail(label, err);
+                return Ok(-1);
+            }
+        };
+
+        let url = match unsafe { borrow_str(url) } {
+            Ok(url) if witness_url_usable(url) => url.trim().to_string(),
+            _ => {
+                witness_fail(ERR_WITNESS_URL_INVALID, err);
+                return Ok(-1);
+            }
+        };
+        let signing_address = match unsafe { borrow_str(signing_address) } {
+            Ok(address) if !address.trim().is_empty() => address.trim().to_string(),
+            _ => {
+                witness_fail(ERR_WITNESS_SIGNING_ADDRESS_INVALID, err);
+                return Ok(-1);
+            }
+        };
+        let measurements: Vec<String> = match unsafe { borrow_str(measurements_json) }
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        {
+            Some(entries) => entries
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect(),
+            None => {
+                witness_fail(ERR_WITNESS_PINS_INVALID_JSON, err);
+                return Ok(-1);
+            }
+        };
+
+        if measurements.is_empty() {
+            witness_fail(ERR_WITNESS_PIN_REQUIRED, err);
+            return Ok(-1);
+        }
+
+        let settings = trace_commons_contributor::config::WitnessSettings {
+            url,
+            signing_address,
+            expected_measurements: measurements,
+        };
+        // Parsed BEFORE it is saved. Writing a pin this build cannot read
+        // would leave a client refusing every submission, with the mistake
+        // recorded on disk and reported later as a config problem rather
+        // than now as a rejected input.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => {}
+            _ => {
+                witness_fail(ERR_WITNESS_PIN_MALFORMED, err);
+                return Ok(-1);
+            }
+        }
+
+        cfg.witness = Some(settings);
+        if store.save_config(&cfg).is_err() {
+            witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
+            return Ok(-1);
+        }
+        Ok(0)
+    });
+    outcome.unwrap_or_else(|_| {
+        set_last_error("panic");
+        if !err.is_null() {
+            unsafe { *err = to_owned_cstring("panic") };
+        }
+        -1
+    })
+}
+
+/// Remove the configured witness. Returns 1 if one was removed, 0 if there
+/// was none to remove, and -1 on failure with `*err` set (owned; free with
+/// [`tc_string_free`]).
+///
+/// Clearing returns the client to LOCAL REDACTION, which is a supported
+/// mode, not a broken one. It is still a real change: submissions after this
+/// carry a self-reported residual-risk verdict rather than a certified one,
+/// so a shell should say what it is doing rather than presenting this as
+/// switching off a setting.
+///
+/// Idempotent. Clearing a witness that is not there is 0 and not an error.
+///
+/// # Safety
+/// `config_dir` must be a valid, NUL-terminated UTF-8 C string. `err`, if
+/// non-null, must point to writable `*mut c_char` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_clear(config_dir: *const c_char, err: *mut *mut c_char) -> i32 {
+    let outcome = guard(|| {
+        let (store, mut cfg) = match unsafe { witness_config_at(config_dir) } {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => {
+                witness_fail(ERR_WITNESS_NOT_ENROLLED, err);
+                return Ok(-1);
+            }
+            Err(label) => {
+                witness_fail(label, err);
+                return Ok(-1);
+            }
+        };
+        if cfg.witness.is_none() {
+            return Ok(0);
+        }
+        cfg.witness = None;
+        if store.save_config(&cfg).is_err() {
+            witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
+            return Ok(-1);
+        }
+        Ok(1)
+    });
+    outcome.unwrap_or_else(|_| {
+        set_last_error("panic");
+        if !err.is_null() {
+            unsafe { *err = to_owned_cstring("panic") };
+        }
+        -1
+    })
+}
+
+/// What the last submission THIS PROCESS made did about the witness, as an
+/// owned JSON object; free it with [`tc_string_free`].
+///
+/// ```json
+/// {"outcome":"certified","certificate_obtained":true,"certificate_verified":true,
+///  "refusal":null,"n_of_m":{"n":3,"m":7}}
+/// ```
+///
+/// `outcome` is one of:
+///
+/// - `"not_observed"` -- this process has made no submission. A shell that
+///   has just started must say nothing about the last one rather than
+///   guessing.
+/// - `"local_redaction"` -- the submission was built locally because no
+///   witness was configured. Expected; not a missing certificate.
+/// - `"certified"` -- a certificate was obtained AND verified against the
+///   bytes the witness returned. There is no path to this value that skipped
+///   the verification.
+/// - `"refused"` -- `refusal` carries the fixed label.
+///   `certificate_obtained` separates a witness that answered with a
+///   certificate that does not hold from one that never answered.
+///
+/// Every key is present in every outcome, so a shell never has to decide
+/// what an absent key meant.
+///
+/// `n_of_m` is null unless the certificate carried a count of how many of a
+/// trace's inferences carried a verified receipt, out of how many the trace
+/// had. It is null on every certificate this build has seen; the field is
+/// here so the attested-inference work needs no ABI change. WHEN IT IS
+/// PRESENT, RENDER IT AS THE PAIR. There is no "attested" boolean to derive
+/// from it and one must not be invented: a certificate attests mechanics and
+/// a verdict, never that a trace is clean.
+///
+/// PROCESS-LOCAL, DELIBERATELY. Nothing is written to disk, because a file
+/// would outlive a logout and show the next contributor to enroll on this
+/// machine the previous one's submission outcome.
+///
+/// Needs no handle. Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_last_result_json() -> *mut c_char {
+    guard(|| {
+        let json = trace_commons_contributor::witness::status::last_result().to_json();
+        Ok(to_owned_cstring(&json.to_string()))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The witness surface's words and tones
+// ---------------------------------------------------------------------------
+//
+// A THIN PROJECTION, NOT A SECOND HOME. Every string and every tone below
+// comes from `trace_commons_contributor::witness_copy`. The GTK shell does
+// not go through this ABI at all -- it depends on the contributor crate
+// directly -- so a word that existed only here would be a word GTK could not
+// print, and the three shells would drift. Nothing in this file may invent a
+// sentence, and a shell must not either: the Windows shell's interop tests
+// (`NoWordingIsAuthoredInThisShell`) fail on a hand-authored literal, which
+// is the same rule enforced from the other end.
+
+/// The witness tones. **Deliberately disjoint from `TC_ROUTING_TONE_*`.**
+///
+/// The routing tone stops at `ATTENTION = 3` and has no refused value, and
+/// its consumers (Windows' `RoutingSurface.FromAbiTone`, for one) spell out
+/// their arms and map anything else to *neutral*. Numbering a witness
+/// `REFUSED` as 4 would therefore make a refusal render as "nothing to say"
+/// in any shell that cross-wired the two mappers -- exactly the failure this
+/// surface exists to prevent. A disjoint range makes that mistake wrong for
+/// every value instead of only for the dangerous one.
+///
+/// A TONE THIS HEADER DOES NOT DEFINE MUST BE RENDERED AS
+/// `TC_WITNESS_TONE_REFUSED`, not as neutral. Every value added later is a
+/// condition this build has no words for, and on this surface the safe
+/// reading of "I do not know" is "nothing is going out", not "all is well".
+pub const TC_WITNESS_TONE_NEUTRAL: i32 = 10;
+/// Configured, and no answer has arrived yet.
+pub const TC_WITNESS_TONE_HELD: i32 = 11;
+/// Configured, pinned, and working.
+pub const TC_WITNESS_TONE_CLEAR: i32 = 12;
+/// Something needs fixing, but sessions still go out.
+pub const TC_WITNESS_TONE_ATTENTION: i32 = 13;
+/// Nothing is going out at all until this is resolved.
+pub const TC_WITNESS_TONE_REFUSED: i32 = 14;
+
+const ERR_WITNESS_STATE_UNKNOWN: &str = "witness-state-unknown";
+
+/// Every fixed word on the witness surface, in one call.
+///
+/// Returns an owned JSON object whose keys are `WitnessCopy`'s fields; free
+/// it with [`tc_string_free`].
+///
+/// ONE CALL, NOT ONE PER STRING, for the reason [`tc_routing_copy`] gives:
+/// a shell handed the words one at a time takes some of them and writes the
+/// rest, and a hand-written word on this surface is a privacy claim that
+/// stops matching what the other shells print.
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_copy() -> *mut c_char {
+    guard(|| {
+        let copy = trace_commons_contributor::witness_copy::witness_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The sentence for a witness state, given one of the `TC_WITNESS_STATE_*`
+/// values [`tc_witness_trust_state`] returned.
+///
+/// Returns an owned string; free it with [`tc_string_free`].
+///
+/// Returns NULL, and records the fixed label `"witness-state-unknown"` for
+/// [`tc_last_error`], for a value this build cannot name. A shell that gets
+/// NULL must render NO witness sentence rather than one of its own -- there
+/// is no wording here it is allowed to substitute -- and should pair that
+/// with [`tc_witness_state_tone`], which fails closed to
+/// `TC_WITNESS_TONE_REFUSED` on the same input.
+///
+/// # Safety
+/// This function is safe; it is `extern "C"` only.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_state_line(state_code: i32) -> *mut c_char {
+    guard(|| {
+        let Some(state) =
+            trace_commons_contributor::witness::status::WitnessTrustState::from_abi_code(
+                state_code,
+            )
+        else {
+            set_last_error(ERR_WITNESS_STATE_UNKNOWN);
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::witness_copy::witness_state_line(state),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The tone [`tc_witness_state_line`]'s sentence is painted in, as one of
+/// the `TC_WITNESS_TONE_*` values.
+///
+/// ONE BRANCH TABLE, NOT TWO: this takes what the sentence takes, so a shell
+/// must not recover the tone by comparing the rendered sentence against
+/// anything.
+///
+/// A state this build cannot name is `TC_WITNESS_TONE_REFUSED`, NOT neutral.
+/// That is the fail-closed direction and it is deliberate: every state added
+/// later is a condition this build has no sentence for, and the honest
+/// reading of an unnameable state on a surface about whether sessions leave
+/// the machine is "they are not".
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_state_tone(state_code: i32) -> i32 {
+    guard(|| {
+        let Some(state) =
+            trace_commons_contributor::witness::status::WitnessTrustState::from_abi_code(
+                state_code,
+            )
+        else {
+            set_last_error(ERR_WITNESS_STATE_UNKNOWN);
+            return Ok(TC_WITNESS_TONE_REFUSED);
+        };
+        Ok(trace_commons_contributor::witness_copy::witness_state_tone(state).abi_code())
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        TC_WITNESS_TONE_REFUSED
+    })
+}
+
+/// The sentence for what the last submission this process made did about the
+/// witness. Returns an owned string; free it with [`tc_string_free`].
+///
+/// The prose form of [`tc_witness_last_result_json`], and the only form a
+/// shell may print: the JSON's `refusal` is a fixed operator label, not
+/// wording, and `n_of_m` is a pair a shell must not phrase itself. When a
+/// certificate carried a count, this sentence already contains it, as
+/// `"3 of 7 model calls carried a receipt."` -- never as the word
+/// "attested", and never as a claim that a session is clean.
+///
+/// Process-local, exactly like [`tc_witness_last_result_json`]: a shell that
+/// has just started gets the sentence for "nothing sent yet".
+///
+/// Returns NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_last_result_line() -> *mut c_char {
+    guard(|| {
+        let result = trace_commons_contributor::witness::status::last_result();
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::witness_copy::witness_last_result_line(&result),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// The tone [`tc_witness_last_result_line`]'s sentence is painted in, as one
+/// of the `TC_WITNESS_TONE_*` values.
+///
+/// A refused send is `TC_WITNESS_TONE_REFUSED` and never `ATTENTION`:
+/// nothing was sent at all, which is not a degraded-but-working state.
+/// Returns `TC_WITNESS_TONE_REFUSED` on a caught panic, for the same
+/// fail-closed reason.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_witness_last_result_tone() -> i32 {
+    guard(|| {
+        let result = trace_commons_contributor::witness::status::last_result();
+        Ok(trace_commons_contributor::witness_copy::witness_last_result_tone(&result).abi_code())
+    })
+    .unwrap_or_else(|_| {
+        set_last_error("panic");
+        TC_WITNESS_TONE_REFUSED
+    })
+}
