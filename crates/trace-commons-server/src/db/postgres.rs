@@ -813,6 +813,40 @@ const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mo
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn acquire_admission_processing_lock(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AdmissionProcessingGuard>, DatabaseError> {
+        self.lock_admission(tenant, submission).await
+    }
+    async fn issue_admission_challenge(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        challenge: &str,
+        expires: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        self.insert_admission_challenge(tenant, anchor, challenge, expires)
+            .await
+    }
+    async fn reserve_submission_admission(
+        &self,
+        request: &crate::admission_ledger::AdmissionReservation,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        self.reserve_admission(request).await
+    }
+    async fn transition_submission_admission(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+        lease: uuid::Uuid,
+        next: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.transition_admission(tenant, submission, lease, next)
+            .await
+    }
+
     async fn try_acquire_near_credit_submit_lock(
         &self,
         tenant_id: &str,
@@ -2087,6 +2121,26 @@ impl Database for PgBackend {
                 .execute(
                     "INSERT INTO _trace_commons_migrations (version, name) VALUES ($1, $2)",
                     &[&57_i32, &"trace_gate_decision_dedup_signal_version"],
+                )
+                .await?;
+        }
+        let applied = client
+            .query_opt(
+                "SELECT 1 FROM _trace_commons_migrations WHERE version=$1",
+                &[&59_i32],
+            )
+            .await?
+            .is_some();
+        if !applied {
+            client
+                .batch_execute(include_str!(
+                    "../../../../migrations/V59__trace_admission_ledger.sql"
+                ))
+                .await?;
+            client
+                .execute(
+                    "INSERT INTO _trace_commons_migrations(version,name) VALUES($1,$2)",
+                    &[&59_i32, &"trace_admission_ledger"],
                 )
                 .await?;
         }

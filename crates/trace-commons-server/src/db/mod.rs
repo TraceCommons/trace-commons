@@ -184,6 +184,45 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn get_near_provisioned_anchor(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+    async fn acquire_admission_processing_lock(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AdmissionProcessingGuard>, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn issue_admission_challenge(
+        &self,
+        _tenant: &str,
+        _anchor: &str,
+        _challenge: &str,
+        _expires: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn reserve_submission_admission(
+        &self,
+        _request: &crate::admission_ledger::AdmissionReservation,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn transition_submission_admission(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+        _lease: uuid::Uuid,
+        _next: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
 
     /// Try to acquire the per-tenant NEAR settlement submit advisory lock without

@@ -543,7 +543,7 @@ pub const STREAM_RESTARTED_MARKER: &str = "stream_restarted";
 /// Absent means "not declared", never "did not happen". The witness has no
 /// view of the stream and cannot check this claim; what it can do is refuse
 /// under an accurate name when the claim is made.
-fn stream_was_restarted(event: &RawTraceContributionEvent) -> bool {
+pub(crate) fn stream_was_restarted(event: &RawTraceContributionEvent) -> bool {
     event
         .structured_payload
         .get("response")
@@ -561,7 +561,7 @@ fn stream_was_restarted(event: &RawTraceContributionEvent) -> bool {
 /// all, so a contribution that withheld payloads cannot satisfy an
 /// attestation requirement. That is a real cost of turning the requirement on,
 /// and it is a refusal by name rather than a silent pass.
-fn exchange_bodies(event: &RawTraceContributionEvent) -> Option<(&str, &str)> {
+pub(crate) fn exchange_bodies(event: &RawTraceContributionEvent) -> Option<(&str, &str)> {
     let request = event
         .structured_payload
         .get("request")?

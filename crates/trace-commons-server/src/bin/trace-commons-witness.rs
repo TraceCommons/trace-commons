@@ -284,7 +284,10 @@ async fn main() -> Result<()> {
     // Resolved before the listener binds, like the signing identity above: a
     // witness that cannot build the pipeline it was told to run must fail to
     // start, not fail per request.
-    let redactor: Arc<dyn TranscriptRedactor> = if args.redaction == FULL_PIPELINE {
+    let (redactor, contribution_redactor): (
+        Arc<dyn TranscriptRedactor>,
+        Arc<dyn trace_commons_server::witness_service::ContributionRedactor>,
+    ) = if args.redaction == FULL_PIPELINE {
         let (adapter, backend) =
             trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
                 .context("could not build the configured privacy-filter backend")?
@@ -298,13 +301,11 @@ async fn main() -> Result<()> {
             redaction_pipeline = %trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend),
             "witness redaction pipeline"
         );
-        Arc::new(FullPipelineRedaction::new(
-            known_path_prefixes,
-            adapter,
-            backend,
-        ))
+        (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
+         Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::with_privacy_filter(known_path_prefixes, adapter, backend)))
     } else {
-        Arc::new(DeterministicRedaction::new(known_path_prefixes))
+        (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
+         Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))
     };
 
     // Resolved before the listener binds, like everything else here: a
@@ -333,15 +334,22 @@ async fn main() -> Result<()> {
         InferenceAttestationPolicy::not_required()
     };
 
-    let service = Arc::new(
-        WitnessService::new(
-            redactor,
-            enclave.clone() as Arc<dyn Signer>,
-            enclave as Arc<dyn Enclave>,
-            args.max_request_bytes,
+    let mut service = WitnessService::new(
+        redactor,
+        enclave.clone() as Arc<dyn Signer>,
+        enclave as Arc<dyn Enclave>,
+        args.max_request_bytes,
+    )
+    .requiring_attested_inference(inference_policy)
+    .with_contribution_redactor(contribution_redactor);
+    if let Ok(signers) = std::env::var("TRACE_COMMONS_WITNESS_ADMISSION_PROVIDER_SIGNERS") {
+        let trust = trace_commons_server::admission_evidence::AdmissionProviderTrust::new(
+            signers.split(',').map(str::trim).map(str::to_string),
         )
-        .requiring_attested_inference(inference_policy),
-    );
+        .map_err(|_| anyhow::anyhow!("admission_provider_trust_invalid"))?;
+        service = service.with_admission_provider_trust(trust);
+    }
+    let service = Arc::new(service);
 
     let listener = TcpListener::bind(&args.bind)
         .await

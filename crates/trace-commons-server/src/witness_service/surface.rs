@@ -166,6 +166,7 @@ pub struct WitnessService {
     /// could not have chosen, and one assembled per request would be one the
     /// environment could change under a running witness.
     inference_policy: InferenceAttestationPolicy,
+    admission_provider_trust: Option<crate::admission_evidence::AdmissionProviderTrust>,
 }
 
 impl WitnessService {
@@ -190,6 +191,7 @@ impl WitnessService {
             enclave,
             max_request_bytes,
             inference_policy: InferenceAttestationPolicy::not_required(),
+            admission_provider_trust: None,
         }
     }
 
@@ -264,6 +266,54 @@ impl WitnessService {
             self.enclave.as_ref(),
         )
         .await)
+    }
+
+    pub fn with_admission_provider_trust(
+        mut self,
+        trust: crate::admission_evidence::AdmissionProviderTrust,
+    ) -> Self {
+        self.admission_provider_trust = Some(trust);
+        self
+    }
+
+    pub async fn witness_admission_contribution(
+        &self,
+        request: WitnessContributionRequest,
+    ) -> Result<
+        (
+            WitnessContributionResponse,
+            trace_commons_protocol::admission::AdmissionEvidence,
+            String,
+        ),
+        crate::admission_evidence::AdmissionEvidenceError,
+    > {
+        use crate::admission_evidence::{AdmissionEvidenceError, verify_admission_call};
+        let trust = self
+            .admission_provider_trust
+            .as_ref()
+            .ok_or(AdmissionEvidenceError)?;
+        let receipt = request
+            .offered_receipt
+            .as_ref()
+            .ok_or(AdmissionEvidenceError)?;
+        let call = verify_admission_call(
+            &request.raw_contribution,
+            receipt,
+            trust,
+            chrono::Utc::now().timestamp(),
+            self.inference_policy.max_body_bytes(),
+        )?;
+        let response = self
+            .witness_contribution(request)
+            .await
+            .map_err(|_| AdmissionEvidenceError)?
+            .map_err(|_| AdmissionEvidenceError)?;
+        let (evidence, signature) = call.certify(
+            &response,
+            self.signer.as_ref(),
+            chrono::Utc::now().timestamp(),
+        )?;
+        Ok((response, evidence, signature))
     }
 
     /// A quote bound to `nonce` and to this witness's signing address.

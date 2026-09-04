@@ -8,6 +8,8 @@ pub mod account_near;
 pub mod account_onboarding;
 pub mod account_passkey;
 pub mod account_session;
+pub mod admission_evidence;
+pub mod admission_ledger;
 pub mod audit_chain;
 pub mod celestine_sloth_claim;
 pub mod config;
