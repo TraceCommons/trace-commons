@@ -856,6 +856,54 @@ mod tests {
         );
     }
 
+    /// What the DAEMON CORE does when the contributor has declared nothing.
+    ///
+    /// Not a fail-closed path, and deliberately so: `roots_declared` gates
+    /// the three application shells, never `daemon run`. So this is the
+    /// exposure that remains, and it is worth pinning as a fact rather than
+    /// leaving as a property somebody has to re-derive from `Undeclared`:
+    /// a daemon started from the CLI (which on Linux is the systemd user
+    /// unit `daemon install` writes) with a fresh `daemon-settings.json`
+    /// constructs claude and codex adapters over the contributor's real
+    /// `~/.claude/projects` and `~/.codex/sessions`.
+    ///
+    /// Gemini is absent from the same settings and constructs nothing,
+    /// which is the contrast that makes the first two a choice rather than
+    /// an accident. See `crate::source::Undeclared`.
+    ///
+    /// Documenting, not aspirational. If the CLI's undeclared fallback is
+    /// ever closed, this test is what should be changed, alongside the
+    /// `Undeclared::Conventional` rows it mirrors.
+    #[test]
+    fn an_undeclared_daemon_still_builds_the_conventional_claude_and_codex_adapters() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::default();
+        assert!(
+            !roots_declared(&s),
+            "a fresh settings file must not read as declared"
+        );
+
+        let names: Vec<&str> = crate::source::all_sources(&s.source_roots(&store))
+            .iter()
+            .map(|s| s.name())
+            .collect();
+        let home = dirs::home_dir().unwrap_or_default();
+        assert!(
+            names.contains(&crate::source::SOURCE_CLAUDE_CODE),
+            "an undeclared claude source still reaches {}; got {names:?}",
+            home.join(".claude/projects").display()
+        );
+        assert!(
+            names.contains(&crate::source::SOURCE_CODEX),
+            "an undeclared codex source still reaches {}; got {names:?}",
+            home.join(".codex/sessions").display()
+        );
+        assert!(
+            !names.contains(&crate::source::SOURCE_GEMINI_CLI),
+            "but an undeclared gemini source constructs nothing; got {names:?}"
+        );
+    }
+
     /// And ONLY the staging directory. The working-directory half of
     /// `TrajectorySelection::Auto` stays off, which is what the original
     /// exclusion was actually about: a daemon's working directory is
