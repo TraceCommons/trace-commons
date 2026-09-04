@@ -4228,12 +4228,12 @@ impl DeterministicTraceRedactor {
 
     fn redact_json_value(
         &self,
-        tool_name: Option<&str>,
+        context: ToolPayloadContext<'_>,
         value: &Value,
         state: &mut RedactionState,
     ) -> (Value, RedactionReport) {
         let mut report = RedactionReport::default();
-        let tool_redacted = redact_tool_specific_payload(tool_name, value, &mut report);
+        let tool_redacted = redact_tool_specific_payload(context, value, &mut report);
         let keyed_redaction = redact_sensitive_json(&tool_redacted);
         count_sensitive_field_redactions(&tool_redacted, &keyed_redaction, &mut report);
         let redacted = self.redact_json_strings(keyed_redaction, state, &mut report);
@@ -4386,7 +4386,7 @@ impl TraceRedactor for DeterministicTraceRedactor {
             };
 
             let (structured_payload, payload_report) = self.redact_json_value(
-                raw_event.tool_name.as_deref(),
+                ToolPayloadContext::Tool(raw_event.tool_name.as_deref()),
                 &raw_event.structured_payload,
                 &mut state,
             );
@@ -4526,7 +4526,7 @@ pub fn rescrub_trace_envelope_with(
 
         if !event.structured_payload.is_null() {
             let (redacted_payload, child_report) = redactor.redact_json_value(
-                event.tool_name.as_deref(),
+                ToolPayloadContext::Tool(event.tool_name.as_deref()),
                 &event.structured_payload,
                 &mut state,
             );
@@ -5150,7 +5150,8 @@ fn redact_envelope_side_channels(
         }
     }
     for assertion in &mut envelope.replay.expected_assertions {
-        let (redacted, child_report) = redactor.redact_json_value(None, assertion, state);
+        let (redacted, child_report) =
+            redactor.redact_json_value(ToolPayloadContext::NonTool, assertion, state);
         report.merge(child_report);
         *assertion = redacted;
     }
@@ -6659,14 +6660,38 @@ fn redaction_hash(events: &[TraceContributionEvent], counts: &BTreeMap<String, u
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// What a `Value` handed to the redactor actually is, and therefore whether a
+/// tool payload profile applies to it.
+///
+/// This used to be a bare `Option<&str>` tool name, and `None` meant "no
+/// profile" -- which conflated "this is not a tool payload" with "this tool
+/// payload recorded no name". The second of those is a payload nobody has
+/// judged, and it has to fall closed. Making the distinction a type stops the
+/// two ever collapsing back into one again.
+#[derive(Debug, Clone, Copy)]
+enum ToolPayloadContext<'a> {
+    /// A tool payload. `Some` is the name the capture recorded; `None` is a
+    /// payload whose emitter recorded none, which is the weakest case of all
+    /// and falls closed exactly like an unrecognised name.
+    Tool(Option<&'a str>),
+    /// Not a tool payload. Replay assertions are the only case: they are
+    /// checkable expectations authored for a replay, not captured output, and
+    /// a profile that replaced their text would destroy the thing being
+    /// asserted. The general deterministic passes still run over them.
+    NonTool,
+}
+
 fn redact_tool_specific_payload(
-    tool_name: Option<&str>,
+    context: ToolPayloadContext<'_>,
     value: &Value,
     report: &mut RedactionReport,
 ) -> Value {
-    let Some(profile) = tool_name.and_then(tool_payload_profile) else {
+    let ToolPayloadContext::Tool(tool_name) = context else {
         return value.clone();
     };
+    // Fail closed: an unrecognised or absent name gets the most restrictive
+    // profile, never no profile at all.
+    let profile = tool_name.map_or(ToolPayloadProfile::Unrecognized, tool_payload_profile);
     redact_tool_specific_value(value, profile, None, report)
 }
 
@@ -6705,8 +6730,36 @@ fn redact_tool_specific_value(
                 .map(|child| redact_tool_specific_value(child, profile, None, report))
                 .collect(),
         ),
+        // The structural backstop, and the reason the fallback does not rest
+        // on a field-name list any more than it rests on a tool-name list.
+        Value::String(text) if is_unjudged_free_text(profile, text) => {
+            report.increment("tool_sensitive_field");
+            report.increment("tool_sensitive_field:unrecognized_tool_free_text");
+            report.add_pii_label("unrecognized_tool_free_text");
+            Value::String(redacted_marker("unrecognized_tool_free_text"))
+        }
         other => other.clone(),
     }
+}
+
+/// Length, in codepoints, above which a string leaf under the unrecognised
+/// profile is treated as free text.
+///
+/// Chosen so that nothing structural reaches it: a UUID is 36, a SHA-256 hex
+/// digest 64, a model name, a status, a tool-call id, an error code and a
+/// short flag all far less. Prose reaches it in a sentence or two. Codepoints
+/// rather than bytes, for the same reason the privacy-filter offsets are
+/// codepoints -- a byte length would make the control depend on the script
+/// the prose was written in.
+///
+/// It is a threshold, not a proof: a two-line prompt below it under a field
+/// name no rule lists still survives. The named rules below are what cover
+/// the fields prose actually arrives in; this bounds the rest.
+const UNRECOGNIZED_FREE_TEXT_LIMIT: usize = 160;
+
+fn is_unjudged_free_text(profile: ToolPayloadProfile, text: &str) -> bool {
+    matches!(profile, ToolPayloadProfile::Unrecognized)
+        && text.chars().count() > UNRECOGNIZED_FREE_TEXT_LIMIT
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6718,20 +6771,35 @@ enum ToolPayloadProfile {
     Filesystem,
     IssueTracker,
     Messaging,
+    /// No arm below recognised the name. See `UNRECOGNIZED_RULES`.
+    Unrecognized,
 }
 
-fn tool_payload_profile(tool_name: &str) -> Option<ToolPayloadProfile> {
+/// Select the profile for a tool name.
+///
+/// Total, deliberately. It used to return `Option`, and `None` meant no
+/// structural rules ran at all -- so an unrecognised tool was *less*
+/// protected than a recognised one, and whether a wholesale field replacement
+/// applied came down to a substring test against a string a capture chose.
+/// A capture that named its inference exchanges `inference` rather than
+/// `http` shipped raw prompts and a live `Authorization` header through a
+/// pass whose whole purpose is to remove them.
+///
+/// Every arm here is judgement about a family of tools, and that is where
+/// judgement belongs. A tool whose payload is worth keeping in full gets an
+/// arm, with a reason. It does not get bought back by widening the fallback.
+fn tool_payload_profile(tool_name: &str) -> ToolPayloadProfile {
     let lower = tool_name.to_ascii_lowercase();
     if lower.contains("email") || lower.contains("gmail") {
-        Some(ToolPayloadProfile::Email)
+        ToolPayloadProfile::Email
     } else if lower.contains("calendar") {
-        Some(ToolPayloadProfile::Calendar)
+        ToolPayloadProfile::Calendar
     } else if lower.contains("slack")
         || lower.contains("telegram")
         || lower.contains("signal")
         || lower.contains("discord")
     {
-        Some(ToolPayloadProfile::Messaging)
+        ToolPayloadProfile::Messaging
     } else if lower.contains("github")
         || lower.contains("gitlab")
         || lower.contains("linear")
@@ -6739,14 +6807,14 @@ fn tool_payload_profile(tool_name: &str) -> Option<ToolPayloadProfile> {
         || lower.contains("pull_request")
         || lower.contains("pr_")
     {
-        Some(ToolPayloadProfile::IssueTracker)
+        ToolPayloadProfile::IssueTracker
     } else if lower.contains("browser")
         || lower.contains("http")
         || lower.contains("fetch")
         || lower.contains("url")
         || lower.contains("web")
     {
-        Some(ToolPayloadProfile::Browser)
+        ToolPayloadProfile::Browser
     } else if lower.contains("sql")
         || lower.contains("db")
         || lower.contains("database")
@@ -6754,16 +6822,29 @@ fn tool_payload_profile(tool_name: &str) -> Option<ToolPayloadProfile> {
         || lower.contains("libsql")
         || lower.contains("mysql")
     {
-        Some(ToolPayloadProfile::Database)
+        ToolPayloadProfile::Database
     } else if lower.contains("file")
         || lower.contains("fs")
         || lower.contains("workspace")
+        // The command-runner names, added with the fallback. `shell` is
+        // Codex's; `Bash` is Claude Code's and matched nothing at all, so the
+        // single tool whose output a coding corpus most needs was the one
+        // running with no structural rules. These are on the allowlist on
+        // purpose: a command, its stdout, its stderr and its diff are the
+        // replayable part of a coding trace, and the filesystem profile
+        // preserves them while the general passes still strip the secrets
+        // and absolute paths inside.
         || lower.contains("shell")
         || lower.contains("exec")
+        || lower.contains("bash")
+        || lower.contains("zsh")
+        || lower.contains("terminal")
+        || lower.contains("command")
+        || lower.contains("run_")
     {
-        Some(ToolPayloadProfile::Filesystem)
+        ToolPayloadProfile::Filesystem
     } else {
-        None
+        ToolPayloadProfile::Unrecognized
     }
 }
 
@@ -7030,6 +7111,97 @@ const FILESYSTEM_RULES: &[ToolSensitiveFieldRule] = &[
     },
 ];
 
+/// The fallback profile: a tool nobody has judged.
+///
+/// The profiles above each name a family of tools and say what that family
+/// carries. A name matching none of them is a payload of unknown shape from
+/// an unknown source, and the honest default for one is the restrictive
+/// treatment -- an unrecognised tool must never be less protected than a
+/// recognised one.
+///
+/// # What this costs
+///
+/// Prose under a listed field name, and any string leaf over
+/// `UNRECOGNIZED_FREE_TEXT_LIMIT` codepoints, become markers. That is a real
+/// loss and not a free win: a corpus of unrecognised-tool payloads keeps its
+/// structure -- keys, ids, counts, statuses, numbers, booleans, short scalars
+/// and every field not named here, all with their JSON types intact -- and
+/// loses the free text. For a tool whose free text is the valuable part, that
+/// is the difference between a usable trace and a shape.
+///
+/// # Where to buy it back
+///
+/// On the allowlist in `tool_payload_profile`, by naming the tool and giving
+/// a reason, which is what was done for the command runners. Not by widening
+/// this table: a wider fallback silently un-protects every capture that has
+/// not been looked at, which is the failure this replaced.
+///
+/// # What is deliberately absent
+///
+/// `request`, `response`, `arguments`, `params`, `result` and `data` are
+/// containers, not leaves. Replacing one wholesale would take the method, the
+/// URL and the status down with the body. The walk descends into them and the
+/// rules fire on the leaves inside, which removes the body and the header map
+/// and keeps the exchange legible.
+const UNRECOGNIZED_RULES: &[ToolSensitiveFieldRule] = &[
+    // Sensitive regardless of what they contain, exactly as in
+    // `BROWSER_RULES`. An inference request carries its credential in
+    // `Authorization`, and this repository has measured that opaque bearer
+    // tokens are NOT matched by the deterministic detector -- so for these
+    // fields the general passes are not a backstop at all.
+    ToolSensitiveFieldRule {
+        matcher: ToolFieldMatcher::Exact(&[
+            "headers",
+            "header",
+            "cookies",
+            "cookie",
+            "auth",
+            "authorization",
+            "credentials",
+            "env",
+            "environment",
+        ]),
+        action: ToolRedactionAction::RedactObjectValues("unrecognized_tool_header"),
+    },
+    ToolSensitiveFieldRule {
+        matcher: ToolFieldMatcher::Exact(&[
+            "url",
+            "uri",
+            "href",
+            "endpoint",
+            "referrer",
+            "referer",
+            "current_url",
+        ]),
+        action: ToolRedactionAction::SanitizeUrl("private_url"),
+    },
+    // The names free text actually arrives under. The length backstop in
+    // `redact_tool_specific_value` covers the ones it arrives under instead;
+    // these cover the short prose the backstop is too coarse to see.
+    ToolSensitiveFieldRule {
+        matcher: ToolFieldMatcher::Exact(&[
+            "body",
+            "content",
+            "contents",
+            "text",
+            "html",
+            "dom",
+            "prompt",
+            "prompts",
+            "completion",
+            "completions",
+            "message",
+            "messages",
+            "raw",
+            "snippet",
+            "transcript",
+            "conversation",
+            "history",
+        ]),
+        action: ToolRedactionAction::Replace("unrecognized_tool_content"),
+    },
+];
+
 fn tool_redaction_action(
     profile: ToolPayloadProfile,
     field_name: &str,
@@ -7051,6 +7223,7 @@ fn profile_rules(profile: ToolPayloadProfile) -> &'static [ToolSensitiveFieldRul
         ToolPayloadProfile::Browser => BROWSER_RULES,
         ToolPayloadProfile::Database => DATABASE_RULES,
         ToolPayloadProfile::Filesystem => FILESYSTEM_RULES,
+        ToolPayloadProfile::Unrecognized => UNRECOGNIZED_RULES,
     }
 }
 
@@ -13323,7 +13496,11 @@ mod tests {
         use super::*;
         let payload = serde_json::json!({"command": "cargo test -p foo --lib"});
         let mut report = RedactionReport::default();
-        let out = redact_tool_specific_payload(Some("shell"), &payload, &mut report);
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("shell")),
+            &payload,
+            &mut report,
+        );
         assert!(
             out.to_string().contains("cargo test"),
             "the command is the replayable part: {out}"
@@ -13344,7 +13521,11 @@ mod tests {
             "contents": "fn other() {}",
         });
         let mut report = RedactionReport::default();
-        let out = redact_tool_specific_payload(Some("edit_file"), &payload, &mut report);
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("edit_file")),
+            &payload,
+            &mut report,
+        );
         let rendered = out.to_string();
         for expected in [
             "411 passed",
@@ -13383,7 +13564,11 @@ mod tests {
         use super::*;
         let payload = serde_json::json!({"file_count": 3, "profile": "release"});
         let mut report = RedactionReport::default();
-        let out = redact_tool_specific_payload(Some("read_file"), &payload, &mut report);
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("read_file")),
+            &payload,
+            &mut report,
+        );
         assert_eq!(out["file_count"], serde_json::json!(3), "{out}");
         assert_eq!(out["profile"], serde_json::json!("release"), "{out}");
     }
@@ -13397,7 +13582,11 @@ mod tests {
             "cookies": {"session": "s3cr3t"},
         });
         let mut report = RedactionReport::default();
-        let out = redact_tool_specific_payload(Some("browser_fetch"), &payload, &mut report);
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("browser_fetch")),
+            &payload,
+            &mut report,
+        );
         let rendered = out.to_string();
         assert!(!rendered.contains("abc123"), "{rendered}");
         assert!(!rendered.contains("s3cr3t"), "{rendered}");
@@ -13417,7 +13606,11 @@ mod tests {
             "cwd": "/Users/example/code/project",
         });
         let mut state = RedactionState::default();
-        let (out, _report) = redactor.redact_json_value(Some("shell"), &payload, &mut state);
+        let (out, _report) = redactor.redact_json_value(
+            ToolPayloadContext::Tool(Some("shell")),
+            &payload,
+            &mut state,
+        );
         let rendered = out.to_string();
         assert!(
             !rendered.contains("sk-proj-AbCdEfGhIjKlMnOpQrStUvWx"),
@@ -13435,6 +13628,254 @@ mod tests {
             rendered.contains("cargo run"),
             "the shape of the command must survive: {rendered}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Fail-closed fallback for an unrecognised tool name.
+    //
+    // `tool_payload_profile` used to return `Option`, and a name it did not
+    // recognise meant NO structural rules ran at all -- only the general
+    // deterministic passes. Those passes catch SHAPED secrets: keys, tokens,
+    // emails, absolute paths, PEM blocks. Nothing in them removes raw prose.
+    // The only thing that ever removed a raw prompt or a conversation prefix
+    // was a wholesale field replacement, and whether it applied was decided
+    // by a substring test against a string a capture chose. One rename and
+    // the control stopped applying, silently.
+    //
+    // An unrecognised tool must never be LESS protected than a recognised
+    // one, so the fallback is now the most restrictive profile.
+    // ------------------------------------------------------------------
+
+    /// Raw prose carrying NO shaped secret at all -- no key, no token, no
+    /// path, no email. The deterministic passes cannot touch it, so a test
+    /// built on it asserts the structural fallback and nothing else. A
+    /// fixture whose prose contained a credential would pass vacuously.
+    const UNSHAPED_PROSE: &str = "Human: my sister was admitted on Tuesday and \
+         the school still has not been told, so before anything else I need a \
+         short note to her form tutor explaining why she has been absent all \
+         week and asking what work she has missed.";
+
+    #[test]
+    fn an_unrecognised_tool_name_does_not_carry_raw_prose() {
+        use super::*;
+        // `inference` matches no arm of `tool_payload_profile`.
+        assert!(
+            matches!(
+                tool_payload_profile("inference"),
+                ToolPayloadProfile::Unrecognized
+            ),
+            "the fixture must exercise the fallback, not a recognised profile"
+        );
+        let payload = serde_json::json!({
+            "request": {
+                "body": {"prompt": UNSHAPED_PROSE},
+                "headers": {"authorization": "Bearer opaque-token-value"},
+            },
+            "messages": [{"role": "user", "content": UNSHAPED_PROSE}],
+        });
+        let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
+        let mut state = RedactionState::default();
+        let (out, _report) = redactor.redact_json_value(
+            ToolPayloadContext::Tool(Some("inference")),
+            &payload,
+            &mut state,
+        );
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("admitted on Tuesday"),
+            "raw prose must not survive an unrecognised tool payload: {rendered}"
+        );
+        assert!(
+            !rendered.contains("form tutor"),
+            "raw prose must not survive an unrecognised tool payload: {rendered}"
+        );
+        assert!(
+            !rendered.contains("opaque-token-value"),
+            "an auth header must not survive an unrecognised tool payload: {rendered}"
+        );
+    }
+
+    /// The same prose, all the way through a real envelope. This is the
+    /// assertion the reported finding needed: a stored envelope must not
+    /// carry it.
+    #[test]
+    fn raw_prose_under_an_unrecognised_tool_never_reaches_the_envelope() {
+        use super::*;
+        let mut envelope = scoring_envelope(ResidualPiiRisk::Low);
+        envelope.events = vec![replay_event(
+            TraceContributionEventType::HttpExchange,
+            Some("inference"),
+            None,
+            None,
+            serde_json::json!({
+                "request": {
+                    "method": "POST",
+                    "body": {"messages": [{"role": "user", "content": UNSHAPED_PROSE}]},
+                },
+            }),
+        )];
+        let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
+        rescrub_trace_envelope_with(&redactor, &mut envelope);
+        let rendered = serde_json::to_string(&envelope).expect("envelope serialises");
+        assert!(
+            !rendered.contains("admitted on Tuesday"),
+            "raw prose reached the envelope: {rendered}"
+        );
+    }
+
+    /// The fallback does not depend on the field NAME either. A capture that
+    /// puts its prose under a name nobody listed is the same bug one level
+    /// down, so any long free-text leaf goes.
+    #[test]
+    fn a_long_free_text_leaf_goes_whatever_its_field_is_called() {
+        use super::*;
+        let payload = serde_json::json!({"xyzzy": UNSHAPED_PROSE});
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("inference")),
+            &payload,
+            &mut report,
+        );
+        assert!(
+            !out.to_string().contains("form tutor"),
+            "a long leaf under an unlisted name must not survive: {out}"
+        );
+    }
+
+    /// The length backstop is too coarse to see a short prompt, so the named
+    /// content fields have to carry it. This prose is 63 codepoints -- well
+    /// under `UNRECOGNIZED_FREE_TEXT_LIMIT` -- and contains nothing shaped,
+    /// so neither the backstop nor the general passes can remove it. Only
+    /// `UNRECOGNIZED_RULES` can.
+    #[test]
+    fn short_prose_under_a_content_field_still_goes() {
+        use super::*;
+        const SHORT: &str = "Tell my landlord I am moving out of the flat on the third.";
+        assert!(
+            SHORT.chars().count() < UNRECOGNIZED_FREE_TEXT_LIMIT,
+            "the fixture must be below the backstop or it proves the wrong thing"
+        );
+        for field in ["prompt", "body", "content", "text", "message"] {
+            let payload = serde_json::json!({ field: SHORT });
+            let mut report = RedactionReport::default();
+            let out = redact_tool_specific_payload(
+                ToolPayloadContext::Tool(Some("inference")),
+                &payload,
+                &mut report,
+            );
+            assert!(
+                !out.to_string().contains("landlord"),
+                "short prose survived under `{field}`: {out}"
+            );
+        }
+    }
+
+    /// A payload with no tool name at all is the weakest case of the same
+    /// bug, and falls closed the same way.
+    #[test]
+    fn a_payload_with_no_tool_name_falls_closed() {
+        use super::*;
+        let payload = serde_json::json!({"prompt": UNSHAPED_PROSE});
+        let mut report = RedactionReport::default();
+        let out =
+            redact_tool_specific_payload(ToolPayloadContext::Tool(None), &payload, &mut report);
+        assert!(
+            !out.to_string().contains("form tutor"),
+            "an unnamed tool payload must not carry raw prose: {out}"
+        );
+    }
+
+    /// Parity with the recognised browser profile, which has always kept the
+    /// host and replaced the path. A URL path and query carry as much under
+    /// an unrecognised tool as under a recognised one.
+    #[test]
+    fn an_unrecognised_tool_url_keeps_its_host_and_loses_its_path() {
+        use super::*;
+        let payload =
+            serde_json::json!({"url": "https://api.example.invalid/v1/users/42?token=abc"});
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("inference")),
+            &payload,
+            &mut report,
+        );
+        let rendered = out.to_string();
+        assert!(
+            rendered.contains("api.example.invalid"),
+            "the host is ordinary trace content: {rendered}"
+        );
+        assert!(!rendered.contains("users/42"), "{rendered}");
+        assert!(!rendered.contains("token=abc"), "{rendered}");
+    }
+
+    /// Over-redaction is the cost of this control, so bound it. The
+    /// restrictive fallback keeps everything that is not free text: ids,
+    /// statuses, counts, flags, model names, short scalars, and their JSON
+    /// types. A payload of nothing but markers is worthless to a consumer.
+    #[test]
+    fn the_restrictive_fallback_keeps_short_structured_values() {
+        use super::*;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "attempts": 3,
+            "cached": true,
+            "served_model": "qwen3.6-27b-fp8",
+            "tool_call_id": "call_01H8XYZ",
+            "duration_ms": 1240,
+        });
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("inference")),
+            &payload,
+            &mut report,
+        );
+        assert_eq!(
+            out, payload,
+            "the fallback gutted structural metadata: {out}"
+        );
+    }
+
+    /// Replay assertions are checkable expectations, not captured tool
+    /// output. They are not a tool payload and no profile applies to them;
+    /// the general passes still do.
+    #[test]
+    fn replay_assertions_are_not_a_tool_payload() {
+        use super::*;
+        let assertion = serde_json::json!({"expects": UNSHAPED_PROSE});
+        let mut report = RedactionReport::default();
+        let out =
+            redact_tool_specific_payload(ToolPayloadContext::NonTool, &assertion, &mut report);
+        assert_eq!(out, assertion, "an assertion must survive intact: {out}");
+    }
+
+    /// The judgement belongs on the allowlist, not in the fallback. Claude
+    /// Code names its command tool `Bash`, which matched no profile at all
+    /// -- so the tool whose output a coding corpus most needs was the one
+    /// running with no structural rules. Naming it selects the permissive
+    /// filesystem profile deliberately, with a reason, rather than leaving
+    /// it to fall through.
+    #[test]
+    fn a_shell_tool_named_bash_selects_the_permissive_profile() {
+        use super::*;
+        assert!(matches!(
+            tool_payload_profile("Bash"),
+            ToolPayloadProfile::Filesystem
+        ));
+        let payload = serde_json::json!({
+            "command": "cargo test -p trace-commons-protocol --lib",
+            "stdout": "test result: FAILED. 411 passed; 1 failed; 0 ignored; \
+                       finished in 92.14s, and the failing case is the one that \
+                       asserts the redaction hash is stable across a rebuild.",
+        });
+        let mut report = RedactionReport::default();
+        let out = redact_tool_specific_payload(
+            ToolPayloadContext::Tool(Some("Bash")),
+            &payload,
+            &mut report,
+        );
+        let rendered = out.to_string();
+        assert!(rendered.contains("cargo test"), "{rendered}");
+        assert!(rendered.contains("411 passed"), "{rendered}");
     }
 
     // ------------------------------------------------------------------
