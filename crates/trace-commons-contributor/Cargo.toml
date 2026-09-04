@@ -45,7 +45,7 @@ sha2 = "0.10"
 # same way the file-reading source it replaces used to.
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "net", "sync", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "net", "sync", "signal", "process"] }
 tracing = "0.1"
 # Reads the Antigravity language server's command line to find its CSRF
 # token. Pinned to 0.36 to match the version already in this workspace's

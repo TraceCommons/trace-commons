@@ -12,9 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::ConfigStore;
 
 mod controller;
+mod live;
+mod process;
+pub mod worker_protocol;
 pub use controller::{
     ComputeCommand, ComputeController, ComputeCopy, ComputeSnapshot, ComputeState,
 };
+pub use process::{LocalWorkerConfig, StopOutcome};
 
 const SETTINGS_FILE: &str = "settings.json";
 const SETTINGS_SCHEMA: &str = "trace_commons.compute_settings.v1";

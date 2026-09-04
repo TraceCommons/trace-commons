@@ -43,6 +43,17 @@ authenticated supervisor adapter, telemetry freshness, serialized async launch
 and drain, cross-process ownership, bounded worker deadlines, and real worker
 verification remain required before the pilot capability can become available.
 
+### Explicit local adapter slice
+
+The subsequent native adapter implements the pinned authenticated IPC contract,
+exclusive process ownership, asynchronous readiness/status/drain, telemetry
+freshness, durable priority stop intent, and terminal shutdown. The normal app
+constructor stays unavailable. Only an explicit Unix debug development
+constructor and local harness can launch a hash-checked worker against a
+loopback coordinator. See `docs/compute-local-adapter.md` for the contract pin,
+dependency decision, invocation, lifecycle guarantees, and remaining release
+gates. A local adapter is not authorization to enable production compute.
+
 ## Outcome and scope
 
 Trace Commons users can independently opt into contributing compute to Holonear,
