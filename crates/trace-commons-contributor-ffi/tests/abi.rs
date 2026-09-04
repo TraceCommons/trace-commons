@@ -9,13 +9,20 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use trace_commons_contributor_ffi::{
+    TC_WITNESS_STATE_ABSENT, TC_WITNESS_STATE_NOT_ENROLLED, TC_WITNESS_STATE_PINNED,
+    TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+    TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
+    TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
     tc_call, tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_preview, tc_preview_body,
     tc_preview_open, tc_preview_search, tc_preview_summary_json, tc_preview_turns_json,
     tc_routing_copy, tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original, tc_source_check_line,
-    tc_string_free, tc_subscribe, tc_unsubscribe,
+    tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
+    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
+    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
+    tc_witness_status_json, tc_witness_trust_state,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -2462,4 +2469,788 @@ fn tc_unsubscribe_refuses_a_freed_handle_even_with_a_zero_token() {
             .unwrap_or(false),
         "a zero token must not skip the liveness refusal"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The redaction witness
+// ---------------------------------------------------------------------------
+
+/// Write an enrolled contributor config into `dir`, with `witness` as given.
+///
+/// The witness calls all read and write the contributor config, so a test
+/// needs one on disk. Nothing here starts a daemon.
+fn write_enrolled_config(
+    dir: &Path,
+    witness: Option<trace_commons_contributor::config::WitnessSettings>,
+) {
+    let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
+    let cfg = trace_commons_contributor::config::ContributorConfig {
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
+            .to_string(),
+        issuer_url: "https://issuer.example".into(),
+        ingest_url: "https://ingest.example".into(),
+        audience: "trace-commons-ingest".into(),
+        tenant_id: "tenant".into(),
+        instance_id: "instance".into(),
+        user_subject: "subject".into(),
+        device_key_id: "device".into(),
+        consent_scopes: vec![],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+        witness,
+    };
+    store.save_config(&cfg).unwrap();
+}
+
+/// One measurement set in `ExpectedMeasurements`' own spelling.
+fn a_pin() -> String {
+    format!("mrtd={}", "ab".repeat(48))
+}
+
+fn witness_settings(
+    measurements: Vec<String>,
+) -> trace_commons_contributor::config::WitnessSettings {
+    trace_commons_contributor::config::WitnessSettings {
+        url: "https://witness.example".into(),
+        signing_address: "0xfeed".into(),
+        expected_measurements: measurements,
+    }
+}
+
+fn witness_status_json(dir: &Path) -> serde_json::Value {
+    let path = cstr(dir);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let raw = unsafe { tc_witness_status_json(path.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "status json failed: {:?}", last_error());
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(raw) };
+    serde_json::from_str(&text).unwrap()
+}
+
+fn last_result_json() -> serde_json::Value {
+    let raw = tc_witness_last_result_json();
+    assert!(!raw.is_null());
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(raw) };
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The header's `#define`s must be the numbers the library returns.
+///
+/// The two are hand-synced -- the header is written by hand -- so a value
+/// changed on one side and not the other is a shipped app rendering the
+/// wrong state with no build failure anywhere. This parses the header rather
+/// than restating the numbers, so it cannot pass by agreeing with itself.
+#[test]
+fn the_headers_witness_state_defines_match_the_library() {
+    let expected = [
+        ("TC_WITNESS_STATE_ABSENT", TC_WITNESS_STATE_ABSENT),
+        ("TC_WITNESS_STATE_PINNED", TC_WITNESS_STATE_PINNED),
+        (
+            "TC_WITNESS_STATE_REFUSING_UNPINNED",
+            TC_WITNESS_STATE_REFUSING_UNPINNED,
+        ),
+        (
+            "TC_WITNESS_STATE_REFUSING_PIN_MALFORMED",
+            TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+        ),
+        (
+            "TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING",
+            TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
+        ),
+        (
+            "TC_WITNESS_STATE_NOT_ENROLLED",
+            TC_WITNESS_STATE_NOT_ENROLLED,
+        ),
+        ("TC_WITNESS_STATE_UNREADABLE", TC_WITNESS_STATE_UNREADABLE),
+    ];
+
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/include/trace_commons.h"
+    ))
+    .unwrap();
+
+    let mut found = 0usize;
+    for (name, value) in expected {
+        let mut hit = None;
+        for line in header.lines() {
+            let Some(rest) = line.strip_prefix("#define ") else {
+                continue;
+            };
+            let mut parts = rest.split_whitespace();
+            if parts.next() == Some(name) {
+                hit = parts.next().map(|v| v.parse::<i32>().unwrap());
+                break;
+            }
+        }
+        let hit = hit.unwrap_or_else(|| panic!("{name} is not #defined in the header"));
+        assert_eq!(
+            hit, value,
+            "{name} disagrees between the header and the ABI"
+        );
+        found += 1;
+    }
+    assert_eq!(
+        found, 7,
+        "the header scan matched nothing and passed anyway"
+    );
+}
+
+/// The bug this whole surface exists to prevent, asserted directly.
+#[test]
+fn no_witness_and_an_unpinned_witness_are_different_states() {
+    let absent = tempfile::tempdir().unwrap();
+    write_enrolled_config(absent.path(), None);
+    let unpinned = tempfile::tempdir().unwrap();
+    write_enrolled_config(unpinned.path(), Some(witness_settings(vec![])));
+
+    let absent_path = cstr(absent.path());
+    let unpinned_path = cstr(unpinned.path());
+    let absent_state = unsafe { tc_witness_trust_state(absent_path.as_ptr()) };
+    let unpinned_state = unsafe { tc_witness_trust_state(unpinned_path.as_ptr()) };
+
+    assert_eq!(absent_state, TC_WITNESS_STATE_ABSENT);
+    assert_eq!(unpinned_state, TC_WITNESS_STATE_REFUSING_UNPINNED);
+    assert_ne!(
+        absent_state, unpinned_state,
+        "a client with no witness redacts locally and works; a client with an \
+         unpinned witness refuses every submission. Rendering them the same shows \
+         'all fine' through a total upload outage."
+    );
+
+    // And the JSON says so too, without a shell having to infer it from the
+    // url field being present.
+    let absent_json = witness_status_json(absent.path());
+    let unpinned_json = witness_status_json(unpinned.path());
+    assert_eq!(absent_json["state"], serde_json::json!("absent"));
+    assert_eq!(absent_json["refusal"], serde_json::Value::Null);
+    assert_eq!(
+        unpinned_json["state"],
+        serde_json::json!("refusing_unpinned")
+    );
+    assert_eq!(
+        unpinned_json["refusal"],
+        serde_json::json!("witness_expected_measurement")
+    );
+}
+
+#[test]
+fn a_malformed_pin_is_not_the_unpinned_state() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(
+        dir.path(),
+        Some(witness_settings(vec!["mrtd=not-hex".into()])),
+    );
+    let path = cstr(dir.path());
+    assert_eq!(
+        unsafe { tc_witness_trust_state(path.as_ptr()) },
+        TC_WITNESS_STATE_REFUSING_PIN_MALFORMED
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(json["state"], serde_json::json!("refusing_pin_malformed"));
+    assert_eq!(
+        json["pinned_measurement_count"],
+        serde_json::json!(1),
+        "the contributor wrote one pin; reporting zero would read as the unpinned refusal"
+    );
+}
+
+#[test]
+fn an_unenrolled_and_an_unreadable_directory_are_neither_absent() {
+    let empty = tempfile::tempdir().unwrap();
+    let empty_path = cstr(empty.path());
+    assert_eq!(
+        unsafe { tc_witness_trust_state(empty_path.as_ptr()) },
+        TC_WITNESS_STATE_NOT_ENROLLED
+    );
+    assert_eq!(last_error().as_deref(), Some("witness-not-enrolled"));
+
+    let broken = tempfile::tempdir().unwrap();
+    std::fs::write(broken.path().join("contributor.json"), "{ not json").unwrap();
+    let broken_path = cstr(broken.path());
+    let state = unsafe { tc_witness_trust_state(broken_path.as_ptr()) };
+    assert_eq!(state, TC_WITNESS_STATE_UNREADABLE);
+    assert_ne!(
+        state, TC_WITNESS_STATE_ABSENT,
+        "a config that cannot be read is a client whose behaviour is unknown, \
+         not a client redacting locally"
+    );
+}
+
+#[test]
+fn configuring_a_witness_round_trips_and_clearing_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(dir.path(), None);
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+    let pins = cstr_str(&serde_json::to_string(&[a_pin()]).unwrap());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = unsafe {
+        tc_witness_configure(
+            path.as_ptr(),
+            url.as_ptr(),
+            address.as_ptr(),
+            pins.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(rc, 0, "configure failed: {:?}", last_error());
+    assert!(err.is_null());
+
+    assert_eq!(
+        unsafe { tc_witness_trust_state(path.as_ptr()) },
+        TC_WITNESS_STATE_PINNED
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(json["state"], serde_json::json!("pinned"));
+    assert_eq!(
+        json["state_code"],
+        serde_json::json!(TC_WITNESS_STATE_PINNED)
+    );
+    assert_eq!(json["url"], serde_json::json!("https://witness.example"));
+    assert_eq!(json["signing_address"], serde_json::json!("0xfeed"));
+    assert_eq!(json["pinned_measurement_count"], serde_json::json!(1));
+
+    // Clearing is 1 the first time and 0 the second: idempotent, and the
+    // return distinguishes "removed one" from "there was none".
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(unsafe { tc_witness_clear(path.as_ptr(), &mut err) }, 1);
+    assert_eq!(unsafe { tc_witness_clear(path.as_ptr(), &mut err) }, 0);
+    assert!(err.is_null());
+    assert_eq!(
+        unsafe { tc_witness_trust_state(path.as_ptr()) },
+        TC_WITNESS_STATE_ABSENT
+    );
+}
+
+/// The ABI refuses to create the refusing state it can report.
+#[test]
+fn configure_will_not_write_a_witness_that_refuses_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(dir.path(), None);
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+
+    for (pins, expected) in [
+        ("[]", "witness-pin-required"),
+        (r#"["mrtd=not-hex"]"#, "witness-pin-malformed"),
+        (r#"["   "]"#, "witness-pin-required"),
+        ("not json", "witness-pins-invalid-json"),
+        (r#"{"a":1}"#, "witness-pins-invalid-json"),
+    ] {
+        let pins_c = cstr_str(pins);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins_c.as_ptr(),
+                &mut err,
+            )
+        };
+        assert_eq!(rc, -1, "{pins} was accepted");
+        assert!(!err.is_null(), "{pins} set no error");
+        let label = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { tc_string_free(err) };
+        assert_eq!(label, expected, "wrong label for {pins}");
+        assert_eq!(
+            unsafe { tc_witness_trust_state(path.as_ptr()) },
+            TC_WITNESS_STATE_ABSENT,
+            "{pins} was rejected but still changed the config"
+        );
+    }
+}
+
+#[test]
+fn configure_rejects_a_url_without_a_scheme_and_an_empty_signer() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(dir.path(), None);
+    let path = cstr(dir.path());
+    let pins = cstr_str(&serde_json::to_string(&[a_pin()]).unwrap());
+
+    for (url, address, expected) in [
+        ("witness.example", "0xfeed", "witness-url-invalid"),
+        ("https://", "0xfeed", "witness-url-invalid"),
+        ("file:///etc/passwd", "0xfeed", "witness-url-invalid"),
+        (
+            "https://witness.example",
+            "   ",
+            "witness-signing-address-invalid",
+        ),
+    ] {
+        let url_c = cstr_str(url);
+        let address_c = cstr_str(address);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url_c.as_ptr(),
+                address_c.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        };
+        assert_eq!(rc, -1, "{url} / {address:?} was accepted");
+        let label = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { tc_string_free(err) };
+        assert_eq!(label, expected);
+    }
+}
+
+#[test]
+fn witness_calls_refuse_null_and_unenrolled_without_crashing() {
+    assert_eq!(
+        unsafe { tc_witness_trust_state(std::ptr::null()) },
+        TC_WITNESS_STATE_UNREADABLE
+    );
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert!(unsafe { tc_witness_status_json(std::ptr::null(), &mut err) }.is_null());
+    assert!(!err.is_null());
+    unsafe { tc_string_free(err) };
+
+    // Not enrolled: configure and clear both refuse by name rather than
+    // creating a config file out of nowhere.
+    let dir = tempfile::tempdir().unwrap();
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+    let pins = cstr_str(&serde_json::to_string(&[a_pin()]).unwrap());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        },
+        -1
+    );
+    unsafe { tc_string_free(err) };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(unsafe { tc_witness_clear(path.as_ptr(), &mut err) }, -1);
+    unsafe { tc_string_free(err) };
+
+    // A NULL err out-param is not a crash on any of them.
+    assert!(unsafe { tc_witness_status_json(path.as_ptr(), std::ptr::null_mut()) }.is_null());
+    assert_eq!(
+        unsafe { tc_witness_clear(path.as_ptr(), std::ptr::null_mut()) },
+        -1
+    );
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        },
+        -1
+    );
+}
+
+/// A shell that has just started must not claim anything about a submission
+/// it did not see, and every key must be present so it never has to guess.
+#[test]
+fn the_last_result_is_total_and_starts_unobserved() {
+    let json = last_result_json();
+    for key in [
+        "outcome",
+        "certificate_obtained",
+        "certificate_verified",
+        "refusal",
+        "n_of_m",
+    ] {
+        assert!(json.get(key).is_some(), "{key} missing from {json}");
+    }
+    // This test binary makes no submission, so the only two values that can
+    // appear here are "not_observed" and -- if another test in this binary
+    // ever starts submitting -- one of the observed ones. Asserting the
+    // shape rather than pinning the value keeps this from becoming an
+    // order-dependent failure, while still proving the outcome is one of the
+    // four the header documents.
+    let outcome = json["outcome"].as_str().unwrap();
+    assert!(
+        ["not_observed", "local_redaction", "certified", "refused"].contains(&outcome),
+        "undocumented outcome {outcome}"
+    );
+    assert_eq!(
+        outcome, "not_observed",
+        "no submission has been made in this process"
+    );
+    assert_eq!(json["certificate_obtained"], serde_json::json!(false));
+    assert_eq!(json["n_of_m"], serde_json::Value::Null);
+}
+
+/// Read every `#define NAME <int>` in this crate's header copy.
+fn header_defines() -> std::collections::BTreeMap<String, i32> {
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/include/trace_commons.h"
+    ))
+    .unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    for line in header.lines() {
+        let Some(rest) = line.strip_prefix("#define ") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(name), Some(value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if let Ok(value) = value.parse::<i32>() {
+            out.insert(name.to_string(), value);
+        }
+    }
+    out
+}
+
+/// The witness tone values must share nothing with the routing tone values.
+///
+/// The routing tone has no refused case and its consumers map anything they
+/// do not recognise to neutral, so an overlapping witness numbering would
+/// let a cross-wired shell render "nothing is being sent" as "nothing to
+/// say". Parsed out of the header rather than restated, so it cannot pass by
+/// agreeing with itself.
+#[test]
+fn the_witness_tones_never_collide_with_the_routing_tones() {
+    let defines = header_defines();
+    let witness: Vec<(&String, &i32)> = defines
+        .iter()
+        .filter(|(name, _)| name.starts_with("TC_WITNESS_TONE_"))
+        .collect();
+    let routing: Vec<(&String, &i32)> = defines
+        .iter()
+        .filter(|(name, _)| name.starts_with("TC_ROUTING_TONE_"))
+        .collect();
+    assert_eq!(witness.len(), 5, "the witness tone scan found nothing");
+    assert_eq!(routing.len(), 4, "the routing tone scan found nothing");
+
+    for (wname, wvalue) in &witness {
+        for (rname, rvalue) in &routing {
+            assert_ne!(
+                wvalue, rvalue,
+                "{wname} and {rname} share a value, so a shell that cross-wires the two \
+                 tone mappers renders a refusal as something else"
+            );
+        }
+    }
+
+    // And the header's numbers are the library's numbers.
+    assert_eq!(defines["TC_WITNESS_TONE_NEUTRAL"], TC_WITNESS_TONE_NEUTRAL);
+    assert_eq!(defines["TC_WITNESS_TONE_HELD"], TC_WITNESS_TONE_HELD);
+    assert_eq!(defines["TC_WITNESS_TONE_CLEAR"], TC_WITNESS_TONE_CLEAR);
+    assert_eq!(
+        defines["TC_WITNESS_TONE_ATTENTION"],
+        TC_WITNESS_TONE_ATTENTION
+    );
+    assert_eq!(defines["TC_WITNESS_TONE_REFUSED"], TC_WITNESS_TONE_REFUSED);
+}
+
+/// A refusing state must cross the ABI as a refusal, not as attention.
+#[test]
+fn every_refusing_state_crosses_the_abi_as_refused() {
+    for (code, refusing) in [
+        (TC_WITNESS_STATE_ABSENT, false),
+        (TC_WITNESS_STATE_PINNED, false),
+        (TC_WITNESS_STATE_REFUSING_UNPINNED, true),
+        (TC_WITNESS_STATE_REFUSING_PIN_MALFORMED, true),
+        (TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, true),
+        (TC_WITNESS_STATE_NOT_ENROLLED, false),
+        (TC_WITNESS_STATE_UNREADABLE, true),
+    ] {
+        let tone = tc_witness_state_tone(code);
+        if refusing {
+            assert_eq!(
+                tone, TC_WITNESS_TONE_REFUSED,
+                "state {code} sends nothing at all and must not be painted as attention"
+            );
+        } else {
+            assert_ne!(
+                tone, TC_WITNESS_TONE_REFUSED,
+                "state {code} is not a refusal"
+            );
+        }
+    }
+    assert_eq!(
+        tc_witness_state_tone(TC_WITNESS_STATE_ABSENT),
+        TC_WITNESS_TONE_NEUTRAL
+    );
+    assert_eq!(
+        tc_witness_state_tone(TC_WITNESS_STATE_PINNED),
+        TC_WITNESS_TONE_CLEAR
+    );
+}
+
+/// A state this build cannot name fails closed.
+#[test]
+fn an_unnameable_state_has_no_sentence_and_a_refused_tone() {
+    for code in [5, 99, -3, i32::MIN, i32::MAX] {
+        let line = tc_witness_state_line(code);
+        assert!(
+            line.is_null(),
+            "state {code} was given a sentence this build cannot have"
+        );
+        assert_eq!(last_error().as_deref(), Some("witness-state-unknown"));
+        assert_eq!(
+            tc_witness_state_tone(code),
+            TC_WITNESS_TONE_REFUSED,
+            "an unnameable state painted as anything but refused reads as 'all is well' \
+             on a surface about whether sessions leave the machine"
+        );
+    }
+}
+
+/// Every state a shell can be handed has its own sentence, from the core.
+#[test]
+fn every_state_crosses_the_abi_with_its_own_sentence() {
+    let mut seen: Vec<String> = Vec::new();
+    for code in [
+        TC_WITNESS_STATE_ABSENT,
+        TC_WITNESS_STATE_PINNED,
+        TC_WITNESS_STATE_REFUSING_UNPINNED,
+        TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
+        TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING,
+        TC_WITNESS_STATE_NOT_ENROLLED,
+        TC_WITNESS_STATE_UNREADABLE,
+    ] {
+        let raw = tc_witness_state_line(code);
+        assert!(!raw.is_null(), "state {code} has no sentence");
+        let line = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+        unsafe { tc_string_free(raw) };
+        assert!(!line.is_empty());
+        assert!(
+            !seen.contains(&line),
+            "state {code} reuses another sentence"
+        );
+        // The two states a shell would otherwise conflate must not read
+        // alike, and only the refusal announces the outage.
+        if code == TC_WITNESS_STATE_REFUSING_UNPINNED {
+            assert!(line.starts_with("Nothing is being sent."), "{line}");
+        }
+        if code == TC_WITNESS_STATE_ABSENT {
+            assert!(!line.contains("Nothing is being sent"), "{line}");
+        }
+        seen.push(line);
+    }
+}
+
+/// The words come from the core, and a shell is handed all of them at once.
+#[test]
+fn the_witness_copy_call_carries_the_whole_card() {
+    let raw = tc_witness_copy();
+    assert!(!raw.is_null());
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(raw) };
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let object = json.as_object().unwrap();
+    for key in [
+        "heading",
+        "intro",
+        "certificate_means",
+        "measurements_note",
+        "url_title",
+        "signing_address_title",
+        "measurements_title",
+        "configure",
+        "clear",
+        "clear_note",
+        "applies_at_once",
+    ] {
+        let value = object
+            .get(key)
+            .unwrap_or_else(|| panic!("{key} is missing, so a shell writes it itself"));
+        assert!(!value.as_str().unwrap().is_empty(), "{key} is empty");
+    }
+    // The one sentence that must be here verbatim: everything else on this
+    // card is wording, but this is the limit of what a certificate claims.
+    assert!(
+        object["certificate_means"]
+            .as_str()
+            .unwrap()
+            .contains("not a statement that a session is clean")
+    );
+}
+
+/// The prose form of the last result is a sentence, not a label, and never
+/// the word a certificate does not earn.
+#[test]
+fn the_last_result_line_is_prose_and_never_says_attested() {
+    let raw = tc_witness_last_result_line();
+    assert!(!raw.is_null());
+    let line = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(raw) };
+    assert!(!line.is_empty());
+    let lowered = line.to_lowercase();
+    assert!(!lowered.contains("attested"));
+    assert!(
+        !lowered.contains("_"),
+        "an operator label is not wording: {line}"
+    );
+    // No submission has been made in this process, so the tone is the
+    // waiting one and emphatically not the reassuring one.
+    assert_eq!(tc_witness_last_result_tone(), TC_WITNESS_TONE_HELD);
+    assert_ne!(tc_witness_last_result_tone(), TC_WITNESS_TONE_CLEAR);
+}
+
+/// The pinned entries must go back through `tc_witness_configure` unchanged.
+///
+/// This is the whole point of returning them: a shell pre-fills its editor
+/// from `pinned_measurements` and hands that array straight back. If the
+/// round trip were not exact, a contributor who opened the settings screen
+/// and pressed save without touching the box would have silently rewritten
+/// their own pins.
+#[test]
+fn the_pinned_measurements_round_trip_through_configure_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(dir.path(), None);
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+
+    let original = vec![
+        format!("mrtd={},mrconfigid={}", "ab".repeat(48), "cd".repeat(48)),
+        format!("mrtd={}", "ef".repeat(48)),
+    ];
+    let pins = cstr_str(&serde_json::to_string(&original).unwrap());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        },
+        0,
+        "configure failed: {:?}",
+        last_error()
+    );
+
+    let first = witness_status_json(dir.path());
+    let read_back: Vec<String> =
+        serde_json::from_value(first["pinned_measurements"].clone()).unwrap();
+    assert_eq!(
+        read_back, original,
+        "what came back is not what was stored, so an editor pre-filled from it \
+         would save something else"
+    );
+
+    // Hand exactly what was read straight back, the way a shell will.
+    let again = cstr_str(&serde_json::to_string(&read_back).unwrap());
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                again.as_ptr(),
+                &mut err,
+            )
+        },
+        0,
+        "the entries this ABI returned were rejected by the call that takes them"
+    );
+    let second = witness_status_json(dir.path());
+    assert_eq!(
+        first, second,
+        "a save that changed nothing changed the stored configuration"
+    );
+}
+
+/// The count and the list are one answer, and the list is what the editor
+/// shows.
+#[test]
+fn the_status_payload_carries_the_entries_and_a_sentence_for_the_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = format!("mrtd={}", "ab".repeat(48));
+    write_enrolled_config(
+        dir.path(),
+        Some(witness_settings(vec![pin.clone(), pin.clone()])),
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(
+        json["pinned_measurements"],
+        serde_json::json!([pin, pin]),
+        "the editor has nothing to pre-fill from"
+    );
+    assert_eq!(
+        json["pinned_measurements"].as_array().unwrap().len(),
+        json["pinned_measurement_count"].as_u64().unwrap() as usize,
+        "the count and the list are two different answers"
+    );
+    assert_eq!(
+        json["pinned_measurement_line"],
+        serde_json::json!("2 measurements are pinned."),
+        "a bare numeral makes a shell write the words itself"
+    );
+
+    // No witness: an empty list, and no sentence to print about a count of
+    // pins on something that does not exist.
+    let absent = tempfile::tempdir().unwrap();
+    write_enrolled_config(absent.path(), None);
+    let json = witness_status_json(absent.path());
+    assert_eq!(json["pinned_measurements"], serde_json::json!([]));
+    assert_eq!(json["pinned_measurement_line"], serde_json::Value::Null);
+}
+
+/// A stored entry this build cannot parse is still shown, so it can be fixed.
+#[test]
+fn a_malformed_pin_is_readable_so_a_contributor_can_repair_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_enrolled_config(
+        dir.path(),
+        Some(witness_settings(vec!["mrtd=not-hex".into()])),
+    );
+    let json = witness_status_json(dir.path());
+    assert_eq!(json["state"], serde_json::json!("refusing_pin_malformed"));
+    assert_eq!(
+        json["pinned_measurements"],
+        serde_json::json!(["mrtd=not-hex"]),
+        "the unreadable entry is the one a contributor most needs to see; hiding it \
+         deletes their work on the next save"
+    );
+    assert_eq!(
+        json["pinned_measurement_line"],
+        serde_json::json!("One measurement is pinned.")
+    );
+
+    // And handing that entry back is still refused: the read is permissive,
+    // the write is not.
+    let path = cstr(dir.path());
+    let url = cstr_str("https://witness.example");
+    let address = cstr_str("0xfeed");
+    let pins = cstr_str(r#"["mrtd=not-hex"]"#);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            tc_witness_configure(
+                path.as_ptr(),
+                url.as_ptr(),
+                address.as_ptr(),
+                pins.as_ptr(),
+                &mut err,
+            )
+        },
+        -1
+    );
+    let label = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+    unsafe { tc_string_free(err) };
+    assert_eq!(label, "witness-pin-malformed");
 }

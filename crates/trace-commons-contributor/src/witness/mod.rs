@@ -41,6 +41,7 @@
 //! image is not reproducibly buildable and has never been reproduced. No text
 //! in this module may say "verifiable against source".
 
+pub mod status;
 pub mod transport;
 pub mod verify;
 
