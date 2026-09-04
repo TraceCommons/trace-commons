@@ -8,6 +8,16 @@ crates/trace-commons-contributor-gtk/target/
 /.env.*
 !/.env.example
 
+# Deploy-time env files, anywhere in the tree. The rules above are anchored at
+# the root and require a leading dot, so a file like `witness.env` matched
+# neither -- and that one holds a live NEAR AI key handed to `phala deploy`.
+# `*.env.template` and `*.env.example` are deliberately not matched: the
+# committed templates say which names a deployment needs without carrying a
+# value for any of them.
+*.env
+!*.env.template
+!*.env.example
+
 # Local git worktrees for parallel feature work
 .worktrees/
 
