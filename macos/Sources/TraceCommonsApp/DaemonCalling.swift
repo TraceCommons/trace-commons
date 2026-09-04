@@ -18,6 +18,10 @@ import TCBridge
 protocol DaemonCalling: AnyObject {
     func call(_ method: String, params paramsJSON: String) -> String
     func openPreview(entryID: String) throws -> TCPreview
+    /// A COUNT of `needle` in the PRE-redaction session, never content.
+    /// `nil` when it could not be checked -- which is not the same as zero,
+    /// and must never be rendered as one.
+    func searchOriginal(entryID: String, needle: String) -> Int?
 }
 
 extension TCDaemon: DaemonCalling {}

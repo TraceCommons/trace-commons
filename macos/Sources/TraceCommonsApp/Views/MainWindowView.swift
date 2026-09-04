@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 
 struct MainWindowView: View {
     @EnvironmentObject private var model: AppModel
@@ -159,6 +160,16 @@ struct MainWindowView: View {
     private func navRow(_ item: Section) -> some View {
         let selected = (section ?? .queue) == item
         let count = item == .queue ? model.decisionsOwed : 0
+        // Beside the count, never instead of it: an icon meaning "some" is a
+        // downgrade at exactly the scale that prompted the request. See
+        // `QueueShieldState`.
+        let shield: QueueShieldState = item == .queue
+            ? QueueShieldState.state(
+                waiting: model.decisionsOwed,
+                nothingMatched: model.nothingMatchedCount,
+                trimmed: model.awaitingDecision.filter(\.wasTrimmed).count
+            )
+            : .clear
         return Button {
             section = item
         } label: {
@@ -166,7 +177,7 @@ struct MainWindowView: View {
                 MacGlyph(
                     glyph: item.glyph,
                     size: 13,
-                    color: selected ? TC.greenText : TC.inkSecondary
+                    color: Self.navGlyphColor(shield: shield, selected: selected)
                 )
                 Text(item.rawValue)
                     .font(.system(size: 13, weight: selected ? .medium : .regular))
@@ -190,7 +201,24 @@ struct MainWindowView: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityLabel(count > 0 ? "\(item.rawValue), \(count) waiting" : item.rawValue)
+        .accessibilityLabel(Self.navLabel(item.rawValue, count: count, shield: shield))
+    }
+
+    /// The nav glyph's colour, with the shield's state taking precedence
+    /// over selection: an item worth a second look says so whether or not it
+    /// is the one on screen.
+    private static func navGlyphColor(shield: QueueShieldState, selected: Bool) -> Color {
+        switch shield {
+        case .attention: return TC.goldText
+        case .waiting: return TC.greenText
+        case .clear: return selected ? TC.greenText : TC.inkSecondary
+        }
+    }
+
+    private static func navLabel(_ name: String, count: Int, shield: QueueShieldState) -> String {
+        guard count > 0 else { return name }
+        let waiting = "\(name), \(count) waiting"
+        return shield == .attention ? waiting + ", some worth a second look" : waiting
     }
 
     // MARK: - Content header
