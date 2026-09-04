@@ -199,6 +199,9 @@ impl WitnessReviewArtifact {
             .witness
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("witness-review-stale"))?;
+        if settings.admission_evidence && self.response.admission.is_none() {
+            bail!("witness-review-stale");
+        }
         if !settings
             .trust()
             .map_err(|_| anyhow::anyhow!("witness-review-stale"))?

@@ -141,6 +141,9 @@ pub struct ContributorConfig {
 /// an uncertified submission from someone enrolled as certified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WitnessSettings {
+    /// Explicit account-bound admission profile; legacy invited devices stay false.
+    #[serde(default)]
+    pub admission_evidence: bool,
     /// Base URL of the witness, e.g. `https://witness.example`.
     pub url: String,
     /// The address whose signature this client accepts on a certificate, and
@@ -201,6 +204,7 @@ pub fn witness_settings_from_env() -> Option<WitnessSettings> {
     let signing_address = std::env::var(TRACE_COMMONS_WITNESS_SIGNING_ADDRESS).ok()?;
     let expected = std::env::var(TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS).ok()?;
     Some(WitnessSettings {
+        admission_evidence: false,
         url,
         signing_address,
         expected_measurements: expected

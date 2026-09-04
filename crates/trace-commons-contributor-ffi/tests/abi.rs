@@ -2544,6 +2544,7 @@ fn witness_settings(
     measurements: Vec<String>,
 ) -> trace_commons_contributor::config::WitnessSettings {
     trace_commons_contributor::config::WitnessSettings {
+        admission_evidence: false,
         url: "https://witness.example".into(),
         signing_address: "0xfeed".into(),
         expected_measurements: measurements,

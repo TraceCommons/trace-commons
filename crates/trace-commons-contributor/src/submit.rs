@@ -648,7 +648,8 @@ impl<'a> SubmitContext<'a> {
             std::sync::Arc::new(allowlist_for(self.cfg.allowed_hosts.as_deref())),
             std::time::Duration::from_secs(120),
         )
-        .map_err(|e| e.refusal_label())?;
+        .map_err(|e| e.refusal_label())?
+        .with_admission_evidence(settings.admission_evidence);
 
         // Fetched before the witness sequence starts, and never allowed to
         // fail it. See `inference_receipt_for`.
@@ -1711,30 +1712,43 @@ async fn upload_with_retry(
             // the re-encoded bytes still parse as the same envelope, so the
             // failure would only surface at the server's verification and
             // would look like tampering.
-            Some(witnessed) => client
-                .call_bytes(
-                    Method::POST,
-                    "/v1/traces",
-                    &[],
-                    &witnessed.envelope_bytes,
-                    &[
-                        (
-                            WITNESS_CERTIFICATE_HEADER,
-                            witnessed.certificate_json.as_str(),
-                        ),
-                        (WITNESS_SIGNATURE_HEADER, witnessed.signature_hex.as_str()),
-                    ],
-                )
-                .await
-                .and_then(|body| {
-                    serde_json::from_str::<TraceSubmissionReceipt>(&body).map_err(|source| {
-                        OcError::MalformedResponse {
-                            url: cfg.ingest_url.clone(),
-                            body,
-                            source,
-                        }
+            Some(witnessed) => {
+                let mut headers = vec![
+                    (
+                        WITNESS_CERTIFICATE_HEADER,
+                        witnessed.certificate_json.as_str(),
+                    ),
+                    (WITNESS_SIGNATURE_HEADER, witnessed.signature_hex.as_str()),
+                ];
+                if let Some(admission) = &witnessed.admission {
+                    headers.push((
+                        trace_commons_protocol::admission::EVIDENCE_HEADER,
+                        admission.evidence_json.as_str(),
+                    ));
+                    headers.push((
+                        trace_commons_protocol::admission::SIGNATURE_HEADER,
+                        admission.signature_hex.as_str(),
+                    ));
+                }
+                client
+                    .call_bytes(
+                        Method::POST,
+                        "/v1/traces",
+                        &[],
+                        &witnessed.envelope_bytes,
+                        &headers,
+                    )
+                    .await
+                    .and_then(|body| {
+                        serde_json::from_str::<TraceSubmissionReceipt>(&body).map_err(|source| {
+                            OcError::MalformedResponse {
+                                url: cfg.ingest_url.clone(),
+                                body,
+                                source,
+                            }
+                        })
                     })
-                }),
+            }
             None => {
                 client
                     .call_json::<TraceContributionEnvelope, TraceSubmissionReceipt>(
@@ -1836,6 +1850,7 @@ mod tests {
             serde_json::to_vec_pretty(&envelope).unwrap(),
         );
         cfg.witness = Some(WitnessSettings {
+            admission_evidence: false,
             url: "https://no-repeat-witness.invalid".into(),
             signing_address: signer,
             expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
@@ -4028,6 +4043,7 @@ mod tests {
 
     fn pinned_witness() -> WitnessSettings {
         WitnessSettings {
+            admission_evidence: false,
             url: "http://witness.invalid".into(),
             signing_address: WITNESS_ADDRESS.into(),
             expected_measurements: vec![format!(
@@ -4040,6 +4056,7 @@ mod tests {
 
     fn unpinned_witness() -> WitnessSettings {
         WitnessSettings {
+            admission_evidence: false,
             expected_measurements: Vec::new(),
             ..pinned_witness()
         }
@@ -4304,6 +4321,7 @@ mod tests {
     #[test]
     fn witness_settings_parse_every_pinned_set_and_refuse_a_bad_one() {
         let settings = WitnessSettings {
+            admission_evidence: false,
             expected_measurements: vec![
                 format!("mrtd={},mrconfigid={}", "aa".repeat(48), "bb".repeat(48)),
                 format!("mrtd={},mrconfigid={}", "aa".repeat(48), "cc".repeat(48)),
@@ -4427,6 +4445,7 @@ mod tests {
     /// Verification is `witness::transport`'s job and is tested there.
     fn witnessed_over(bytes: &[u8]) -> WitnessedEnvelope {
         WitnessedEnvelope {
+            admission: None,
             envelope_bytes: bytes.to_vec(),
             certificate_json: serde_json::json!({
                 "redacted_sha256": hex::encode(sha2::Sha256::digest(bytes)),
@@ -4561,6 +4580,31 @@ mod tests {
             round_tripped, UNCANONICAL_ENVELOPE,
             "the fixture cannot detect a re-serialisation"
         );
+    }
+
+    #[tokio::test]
+    async fn admission_headers_and_bytes_survive_compatible_retry_verbatim() {
+        let mut witnessed = witnessed_over(UNCANONICAL_ENVELOPE);
+        witnessed.admission = Some(crate::witness::transport::AdmissionHeaders {
+            evidence_json: "{ \"profile\": \"transport-test\" }".into(),
+            signature_hex: format!("0x{}", "cd".repeat(65)),
+        });
+        let (result, captured) =
+            upload_once_with_compatible_grant(Some(&witnessed), 401, true).await;
+        result.unwrap();
+        assert_eq!(captured.bodies.len(), 2);
+        for (body, headers) in captured.bodies.iter().zip(&captured.headers) {
+            assert_eq!(body, &witnessed.envelope_bytes);
+            let admission = witnessed.admission.as_ref().unwrap();
+            assert_eq!(
+                headers[trace_commons_protocol::admission::EVIDENCE_HEADER],
+                admission.evidence_json
+            );
+            assert_eq!(
+                headers[trace_commons_protocol::admission::SIGNATURE_HEADER],
+                admission.signature_hex
+            );
+        }
     }
 
     #[tokio::test]

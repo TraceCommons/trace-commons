@@ -1118,6 +1118,7 @@ mod tests {
         let (_dir, store) = crate::config::tests_support::temp_store();
         let mut cfg = sample_cfg(&store);
         cfg.witness = Some(crate::config::WitnessSettings {
+            admission_evidence: false,
             url: "https://witness.invalid".into(),
             signing_address: "invalid".into(),
             expected_measurements: vec![],

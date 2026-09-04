@@ -114,6 +114,16 @@ pub struct WitnessedEnvelope {
     pub certificate_json: String,
     /// The signature, `0x`-prefixed hex.
     pub signature_hex: String,
+    /// Exact distinct admission headers, when this explicit profile was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionHeaders>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionHeaders {
+    pub evidence_json: String,
+    pub signature_hex: String,
 }
 
 fn serialize_envelope_bytes<S: serde::Serializer>(
@@ -475,6 +485,34 @@ pub fn verify_certificate(
     if recovered != expected {
         return Err(WitnessTrustError::WitnessCertificateUnverified);
     }
+    if let Some(headers) = &response.admission {
+        let evidence: trace_commons_protocol::admission::AdmissionEvidence =
+            serde_json::from_str(&headers.evidence_json)
+                .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        let signing_bytes = evidence
+            .signing_bytes()
+            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if evidence.artifact_sha256 != actual
+            || certificate
+                .get("witness_measurement")
+                .and_then(|v| v.as_str())
+                != Some(evidence.witness_measurement.as_str())
+            || certificate
+                .get("redaction_policy_version")
+                .and_then(|v| v.as_str())
+                != Some(evidence.redaction_policy_version.as_str())
+        {
+            return Err(WitnessTrustError::WitnessCertificateMismatched);
+        }
+        let signer = trace_commons_attestation::eip191::recover_eip191_signer(
+            &signing_bytes,
+            &headers.signature_hex,
+        )
+        .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
+        if signer != expected {
+            return Err(WitnessTrustError::WitnessCertificateUnverified);
+        }
+    }
     Ok(())
 }
 
@@ -537,6 +575,7 @@ pub struct HttpWitnessTransport {
     witness_url: String,
     collateral_url: String,
     allowlist: Arc<HostAllowlist>,
+    admission_evidence: bool,
 }
 
 impl HttpWitnessTransport {
@@ -558,7 +597,14 @@ impl HttpWitnessTransport {
             witness_url: witness_url.into(),
             collateral_url: collateral_url.into(),
             allowlist,
+            admission_evidence: false,
         })
+    }
+
+    /// Select the distinct evidence route only for an explicitly configured profile.
+    pub fn with_admission_evidence(mut self, enabled: bool) -> Self {
+        self.admission_evidence = enabled;
+        self
     }
 
     /// The allowlist gate, applied **before** a request is built.
@@ -642,7 +688,11 @@ impl WitnessTransport for HttpWitnessTransport {
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
         let base = self.allowed(witness.url())?;
         let url = base
-            .join("/v1/witness")
+            .join(if self.admission_evidence {
+                "/v1/witness/admission"
+            } else {
+                "/v1/witness"
+            })
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
         let response = self
             .http
@@ -665,6 +715,14 @@ impl WitnessTransport for HttpWitnessTransport {
         };
         let certificate_json = read(WITNESS_CERTIFICATE_HEADER)?;
         let signature_hex = read(WITNESS_SIGNATURE_HEADER)?;
+        let admission = if self.admission_evidence {
+            Some(AdmissionHeaders {
+                evidence_json: read(trace_commons_protocol::admission::EVIDENCE_HEADER)?,
+                signature_hex: read(trace_commons_protocol::admission::SIGNATURE_HEADER)?,
+            })
+        } else {
+            None
+        };
         // `bytes()`, never `json()`: the certificate covers these exact bytes
         // and a parse-then-reserialise here would break the digest before the
         // client ever checked it.
@@ -677,6 +735,7 @@ impl WitnessTransport for HttpWitnessTransport {
             envelope_bytes,
             certificate_json,
             signature_hex,
+            admission,
         })
     }
 }
@@ -1061,11 +1120,52 @@ mod tests {
         (
             WitnessedEnvelope {
                 envelope_bytes: bytes,
+                admission: None,
                 certificate_json,
                 signature_hex,
             },
             address_of(&key),
         )
+    }
+
+    #[test]
+    fn admission_evidence_is_bound_to_artifact_policy_and_pinned_witness() {
+        use trace_commons_protocol::admission::{AdmissionEvidence, EVIDENCE_DOMAIN, hash_hex};
+        let (mut response, pinned) = signed_fixture(envelope_bytes());
+        let key = test_signer("witness-review-test-only");
+        let evidence = AdmissionEvidence {
+            profile: EVIDENCE_DOMAIN.into(),
+            account_anchor_sha256: "11".repeat(32),
+            challenge_sha256: "22".repeat(32),
+            provider_signer: format!("0x{}", "33".repeat(20)),
+            request_sha256: "44".repeat(32),
+            response_sha256: "55".repeat(32),
+            receipt_sha256: "66".repeat(32),
+            artifact_sha256: hash_hex(&response.envelope_bytes),
+            witness_measurement: "aa".repeat(48),
+            redaction_policy_version: "deterministic-v1".into(),
+            issued_at: 1,
+            expires_at: 2,
+        };
+        let headers_for =
+            |evidence: &AdmissionEvidence, signer: &k256::ecdsa::SigningKey| AdmissionHeaders {
+                evidence_json: serde_json::to_string(evidence).unwrap(),
+                signature_hex: sign_eip191(signer, &evidence.signing_bytes().unwrap()),
+            };
+        response.admission = Some(headers_for(&evidence, &key));
+        verify_certificate(&response, &pinned).unwrap();
+        response.admission = Some(headers_for(&evidence, &test_signer("untrusted")));
+        assert!(verify_certificate(&response, &pinned).is_err());
+        for field in ["artifact", "policy", "measurement"] {
+            let mut altered = evidence.clone();
+            match field {
+                "artifact" => altered.artifact_sha256 = "77".repeat(32),
+                "policy" => altered.redaction_policy_version = "other".into(),
+                _ => altered.witness_measurement = "other".into(),
+            }
+            response.admission = Some(headers_for(&altered, &key));
+            assert!(verify_certificate(&response, &pinned).is_err());
+        }
     }
 
     fn test_signer(seed: &str) -> k256::ecdsa::SigningKey {

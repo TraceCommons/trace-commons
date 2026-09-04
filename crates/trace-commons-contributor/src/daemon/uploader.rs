@@ -1239,6 +1239,7 @@ mod tests {
         let (_d, store) = temp_store();
         let mut cfg = fixture_cfg(&store);
         cfg.witness = Some(crate::config::WitnessSettings {
+            admission_evidence: false,
             url: "http://witness.invalid".into(),
             signing_address: "0x1111111111111111111111111111111111111111".into(),
             expected_measurements: vec![format!(
