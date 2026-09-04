@@ -13,7 +13,7 @@ public admission and inference funding are not enabled by this branch.
 Design: [Native inference onboarding](../specs/2026-09-04-native-inference-onboarding-design.md).
 Admission: [Invite or attested inference](../specs/2026-09-04-admission-invite-or-attestation-design.md).
 
-## Delegated work and ownership
+## Completed slice 1 delegation
 
 | Worker | Bounded task | Owned files |
 |---|---|---|
@@ -25,6 +25,70 @@ Admission: [Invite or attested inference](../specs/2026-09-04-admission-invite-o
 No agent changes deployed services or enables admission, capture, or public
 sponsorship. Shared copy is settled before native integration. Review checks
 that no shell authors a different privacy claim.
+
+## Remaining work: seven subagent assignments
+
+Each assignment is a bounded handoff with its own deliverable. There are
+three worker slots alongside the primary coordinator; these are seven
+successive assignments, not seven simultaneous processes. The detailed
+briefs specify files, implementation steps, negative tests, and exit criteria.
+
+| ID / subagent | Deliverable | Prerequisites | Brief |
+|---|---|---|---|
+| A `witness-preview` | Scoped-claim native witness review; upload exactly the approved bytes | Existing invited path; local fixtures can start now | [Native tasks](2026-09-04-onboarding-native-agent-tasks.md) |
+| B `near-account-bootstrap` | Explicit NEAR signup and authenticated native device linkage | Freeze canonical account/network and browser-return contracts first | [Admission tasks](2026-09-04-onboarding-admission-agent-tasks.md) |
+| C `inference-funding` | Verified provider funding/provisioning contract, then balance and redemption integration | Confirm real provider APIs and economic terms; do not infer spendability from points | [Funding tasks](2026-09-04-onboarding-funding-agent-tasks.md) |
+| D `receipt-binding` | Provider-hashed account challenge and signed admission evidence | B's identity contract; coordinated IronWire changes outside this repo | [Admission tasks](2026-09-04-onboarding-admission-agent-tasks.md) |
+| E `admission-ledger` | Atomic receipt dedup, submission entitlement, retries, account/global budgets | B's identity contract and D's verified-evidence contract | [Admission tasks](2026-09-04-onboarding-admission-agent-tasks.md) |
+| F `native-onboarding` | Capability-driven first-run flow and persistent activation progress in all shells | Coordinator-owned capability contract; actions require deployed B/C/E support | [Native tasks](2026-09-04-onboarding-native-agent-tasks.md) |
+| G `integration-validation` | Local adversarial integration suite and separately recorded pilot evidence | Harness can start early; full loop requires A-F and configured live dependencies | [Funding tasks](2026-09-04-onboarding-funding-agent-tasks.md) |
+
+### Dispatch order
+
+1. Start A, B, and C. A can implement against the existing invited path.
+   B first resolves identity/bootstrap contracts; C first establishes actual
+   provider support. Neither needs to wait for the native screen changes.
+2. As slots free, start D after the identity contract is fixed, and E after
+   the evidence contract is fixed. Contract agreement is the dependency;
+   the preceding agent's entire implementation need not be complete. Start
+   G's local test harness in the next available slot.
+3. Start F when the capability/status contract is integrated. It may show
+   unavailable paths honestly, but must not expose working signup, funding,
+   or admission actions without their backends. G validates the integrated
+   invited loop before the funded and self-service loops.
+
+A successful invited witness loop is the first useful milestone. The next
+is actual earned credit funding another call. Public self-service is the
+last milestone, after identity, receipt binding, quotas, and funding all
+work together. A contract brief or isolated mock does not complete a live
+milestone.
+
+### Coordinator ownership and integration rules
+
+The primary coordinator owns shared protocol DTO integration, capability
+schema and route wiring, `trace-commons-ingest.rs` dispatch/test-module
+integration, contributor daemon `ipc.rs` dispatch, module exports, and
+migration numbering/registration. Worker briefs identify the required
+changes to these files; workers do not edit them concurrently.
+
+Before implementation, create one child branch/worktree per active worker
+from the integrated onboarding branch. Keep code edits within the assigned
+files; return a focused commit, test results, and a shared-file integration
+patch for the coordinator. The current decomposition pass only writes
+separate task briefs in the existing onboarding worktree.
+
+The coordinator lands shared contracts before their consumers, reserves
+migration numbers immediately before authoring migrations, and integrates
+each worker's changes with a focused review. Parallel builds use separate
+target directories; a reused shared Cargo target has one validation lane.
+Do not copy a build cache while another process is writing it.
+
+No task may enable raw capture, change consent defaults, grant starter
+funds, or deploy public admission as an incidental implementation step.
+New dependencies still need the repository's explicit human approval.
+Permissive client code must not depend on an AGPL crate. Live validation
+uses an identified test account and approved test traffic; it does not
+silently use the contributor's real sessions.
 
 ## Slice 1: explicit native consent (this worktree)
 
