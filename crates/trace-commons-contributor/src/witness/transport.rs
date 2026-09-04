@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use trace_commons_attestation::quote::{Collateral, parse_collateral};
+use trace_commons_attestation::receipt::ReceiptPayload;
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, RawTraceContribution, TraceAllowedUse, TraceContributionEnvelope,
@@ -149,6 +150,39 @@ pub trait WitnessTransport: Send + Sync {
     ) -> Result<WitnessedEnvelope, WitnessTrustError>;
 }
 
+/// One session's attested inference call, and the receipt offered for it.
+///
+/// The two travel together because a receipt without bodies attests nothing:
+/// the witness verifies a receipt against the exchange it picks out of the
+/// session, so a receipt with no exchange to verify against is a value that
+/// can only be refused. Bundling them makes that state unrepresentable rather
+/// than merely wrong.
+///
+/// The reverse is a real state and stays expressible: `receipt: None` is a
+/// call whose bodies are carried and whose receipt could not be obtained --
+/// an honestly unattested submission. See
+/// [`crate::submit`]'s `inference_receipt_for` for why that is not a refusal.
+#[derive(Clone, Copy)]
+pub struct AttestedInference<'a> {
+    /// The final call's verbatim bodies.
+    pub call: &'a crate::routing::attested::AttestedCall,
+    /// The provider's signature over the two body digests, when one was
+    /// obtained. Forwarded verbatim; nothing in this crate reads it.
+    pub receipt: Option<&'a ReceiptPayload>,
+}
+
+impl std::fmt::Debug for AttestedInference<'_> {
+    /// Neither half is renderable. `AttestedCall` withholds its bodies and a
+    /// receipt is caller data, so this says only whether one is present.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AttestedInference")
+            .field("call", &self.call)
+            .field("receipt", &self.receipt.is_some())
+            .finish()
+    }
+}
+
 /// The consent grant a claim carried, applied by the witness *inside* the
 /// certified bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -192,11 +226,32 @@ pub struct GrantedConsent {
 /// courtesy: a witness that returned the bodies would have turned a private
 /// prompt into a submitted one, and the client is the only party that can
 /// still tell.
+///
+/// # The receipt travels beside the bodies, and binds no model
+///
+/// `attested.receipt` is the provider's signature over
+/// `<sha256 of the request as sent>:<sha256 of the response as received>`,
+/// fetched by [`crate::routing::receipt`]. It is forwarded as
+/// `inference_receipt` and nothing here reads it: the witness picks the
+/// exchange to verify against -- the last one the trace declares -- and this
+/// function names no exchange, because a caller that could nominate one
+/// would nominate whichever body suited it.
+///
+/// `None` is a first-class case, not a degraded one. A submission with the
+/// bodies and no receipt is honestly unattested; a witness configured to
+/// require attestation refuses it by name rather than certifying it as
+/// attested. Nothing on this path may treat an absent receipt as a reason to
+/// abandon a submission.
+///
+/// The provider's receipt endpoint takes the model as an **unsigned query
+/// parameter** and signs a two-part text with no model in it, so a verified
+/// receipt establishes nothing about which model served. No caller, comment
+/// or surface may say otherwise.
 pub async fn witness_contribution(
     transport: &dyn WitnessTransport,
     witness: &VerifiedWitness,
     raw: RawTraceContribution,
-    attested: Option<&crate::routing::attested::AttestedCall>,
+    attested: Option<AttestedInference<'_>>,
     granted: &GrantedConsent,
 ) -> Result<WitnessedEnvelope, WitnessTrustError> {
     // Refused locally, before anything is offered. The client already refuses
@@ -208,7 +263,8 @@ pub async fn witness_contribution(
     // The in-transit copy. `raw` itself is left alone so a caller that keeps
     // it -- for a retry, for a local fallback -- never finds bodies in it.
     let mut offered = raw;
-    if let Some(call) = attested {
+    if let Some(attested) = attested {
+        let call = attested.call;
         // Strictly last. A witness attests the LAST `HttpExchange` event a
         // trace declares, so an exchange that is not in the final position is
         // a claim about a call that was not the final one. Nothing may be
@@ -218,12 +274,11 @@ pub async fn witness_contribution(
             .push(crate::routing::attested::attested_exchange_event(call));
     }
 
-    let body = serde_json::to_vec(&serde_json::json!({
-        "raw_contribution": offered,
-        "granted_scopes": granted.scopes,
-        "granted_uses": granted.uses,
-    }))
-    .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    let body = witness_request_body(
+        &offered,
+        granted,
+        attested.and_then(|attested| attested.receipt),
+    )?;
     // Bounded again after the bodies were added: `raw_contribution_size_ok`
     // above judged the session without them, and the witness has its own
     // request limit. Refused here rather than discovered as a transport
@@ -246,14 +301,63 @@ pub async fn witness_contribution(
     // raw bodies is a privacy failure whatever its signature says, and a
     // valid certificate over it is worse than an invalid one -- it would be
     // submitted.
-    if let Some(call) = attested {
-        if artifact_still_carries(&response.envelope_bytes, call) {
+    if let Some(attested) = attested {
+        if artifact_still_carries(&response.envelope_bytes, attested.call) {
             return Err(WitnessTrustError::WitnessBodyNotStripped);
         }
     }
 
     verify_certificate(&response, witness.signing_address())?;
     Ok(response)
+}
+
+/// The `POST /v1/witness` request document.
+///
+/// Split out of [`witness_contribution`] so that the AGPL crate's
+/// `witness_certificate_cross_implementation` test can drive the server's real
+/// router with bytes this function produced. The witness deserialises this
+/// with `deny_unknown_fields`, so the field names here are a second
+/// implementation of a wire format whose first implementation is unreachable
+/// from this crate -- exactly the shape that has drifted silently before.
+/// Nothing else in this crate may spell that document.
+///
+/// `inference_receipt` is **omitted** when there is none, never sent as
+/// `null` or as an object of empty strings. Absent is a shape the witness
+/// names ("this submission carried no receipt"); an empty receipt is one it
+/// would have to refuse as unverifiable, which reads as tampering rather than
+/// as an absence.
+///
+/// # Errors
+///
+/// [`WitnessTrustError::WitnessResponseMalformed`] if the contribution does
+/// not serialise.
+pub fn witness_request_body(
+    offered: &RawTraceContribution,
+    granted: &GrantedConsent,
+    receipt: Option<&ReceiptPayload>,
+) -> Result<Vec<u8>, WitnessTrustError> {
+    let mut document = serde_json::Map::new();
+    document.insert(
+        "raw_contribution".to_string(),
+        serde_json::to_value(offered).map_err(|_| WitnessTrustError::WitnessResponseMalformed)?,
+    );
+    document.insert(
+        "granted_scopes".to_string(),
+        serde_json::json!(granted.scopes),
+    );
+    document.insert("granted_uses".to_string(), serde_json::json!(granted.uses));
+    if let Some(receipt) = receipt {
+        document.insert(
+            "inference_receipt".to_string(),
+            serde_json::json!({
+                "text": receipt.text,
+                "signature": receipt.signature,
+                "signing_address": receipt.signing_address,
+            }),
+        );
+    }
+    serde_json::to_vec(&serde_json::Value::Object(document))
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)
 }
 
 /// How large the witnessed request may be once the bodies are in it.
@@ -1319,7 +1423,10 @@ mod tests {
             &transport,
             &witness,
             raw_with_secret(),
-            Some(&call),
+            Some(AttestedInference {
+                call: &call,
+                receipt: None,
+            }),
             &granted(),
         )
         .await
@@ -1366,6 +1473,124 @@ mod tests {
             last["structured_payload"]["response"]["stream_restarted"],
             serde_json::json!(false),
             "the marker the witness reads must be written"
+        );
+    }
+
+    /// A receipt for the fixture call. Not verifiable -- these tests are
+    /// about the wire, and the enclave-side verification is exercised in
+    /// `trace-commons-server`'s cross-implementation suite -- but shaped
+    /// exactly like one, with three distinct values so a field that arrives
+    /// under the wrong name is visible rather than accidentally equal.
+    fn offered_receipt() -> ReceiptPayload {
+        ReceiptPayload {
+            text: "aaaa1111:bbbb2222".to_string(),
+            signature: "0xcccc3333".to_string(),
+            signing_address: "0xdddd444444444444444444444444444444444444".to_string(),
+        }
+    }
+
+    /// The receipt reaches the witness, in the field the witness reads, with
+    /// its three strings unchanged.
+    ///
+    /// The field name is the whole test. `WitnessRequestBody` is
+    /// `deny_unknown_fields`, so a misspelling here does not degrade to an
+    /// unattested submission -- it makes every witnessed submission a 400,
+    /// and this side would report it as an unreachable witness.
+    #[tokio::test]
+    async fn the_offered_receipt_reaches_the_witness_in_the_field_it_reads() {
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+        let (call, _dir) = attestable_call();
+        let receipt = offered_receipt();
+
+        witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            Some(AttestedInference {
+                call: &call,
+                receipt: Some(&receipt),
+            }),
+            &granted(),
+        )
+        .await
+        .expect("a witnessed submission carrying a receipt succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&sent).expect("the request is JSON");
+        let offered = &document["inference_receipt"];
+        assert_eq!(
+            offered["text"].as_str(),
+            Some(receipt.text.as_str()),
+            "the signed text must reach the enclave verbatim; it is what the \
+             two body digests are compared against"
+        );
+        assert_eq!(
+            offered["signature"].as_str(),
+            Some(receipt.signature.as_str())
+        );
+        assert_eq!(
+            offered["signing_address"].as_str(),
+            Some(receipt.signing_address.as_str())
+        );
+    }
+
+    /// And a submission with no receipt omits the key rather than sending an
+    /// empty one.
+    ///
+    /// `null` or three empty strings would be a receipt the witness has to
+    /// try to verify and refuse as unverifiable -- which an operator reads as
+    /// tampering. Absent is the shape that means "carried none", and it is
+    /// the one a requiring witness names.
+    #[tokio::test]
+    async fn no_receipt_means_no_field_rather_than_an_empty_one() {
+        let signer = test_signer("witness");
+        let server = local_witness(Answers {
+            witness: Some(signed_answer(&signer, &envelope_bytes())),
+            ..Answers::default()
+        })
+        .await;
+        let transport = transport_for(&server.base, permissive());
+        let witness =
+            crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
+        let (call, _dir) = attestable_call();
+
+        witness_contribution(
+            &transport,
+            &witness,
+            raw_with_secret(),
+            Some(AttestedInference {
+                call: &call,
+                receipt: None,
+            }),
+            &granted(),
+        )
+        .await
+        .expect("an unattested submission carrying bodies still succeeds");
+
+        let sent = server
+            .witness_bodies()
+            .into_iter()
+            .next()
+            .expect("the witness was contacted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&sent).expect("the request is JSON");
+        assert!(
+            document.get("inference_receipt").is_none(),
+            "an absent receipt must be an absent key, never a null or an \
+             empty object"
         );
     }
 
@@ -1436,7 +1661,10 @@ mod tests {
             &transport,
             &witness,
             raw_with_secret(),
-            Some(&call),
+            Some(AttestedInference {
+                call: &call,
+                receipt: None,
+            }),
             &granted(),
         )
         .await
@@ -1476,7 +1704,10 @@ mod tests {
             &transport,
             &witness,
             raw_with_secret(),
-            Some(&call),
+            Some(AttestedInference {
+                call: &call,
+                receipt: None,
+            }),
             &granted(),
         )
         .await

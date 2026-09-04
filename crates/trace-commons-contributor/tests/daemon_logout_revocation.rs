@@ -30,6 +30,7 @@ fn enrolled_store(dir: &std::path::Path) -> ConfigStore {
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     store
         .save_config(&ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example.ai".into(),
             ingest_url: "https://ingest.example.ai".into(),

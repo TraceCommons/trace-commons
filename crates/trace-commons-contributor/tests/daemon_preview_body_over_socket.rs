@@ -81,6 +81,7 @@ impl Harness {
 
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
                 .into(),
             issuer_url: "http://issuer.invalid".into(),

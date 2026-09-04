@@ -80,6 +80,7 @@ impl Harness {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         store
             .save_config(&ContributorConfig {
+                inference_receipt_endpoint: None,
                 schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                 issuer_url: issuer,
                 ingest_url: ingest,

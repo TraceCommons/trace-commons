@@ -22,6 +22,20 @@
 //!   over two hashes. Fetching it on the contributor's machine leaks nothing
 //!   the contributor does not already hold.
 //!
+//! # What the fetch itself discloses
+//!
+//! The receipt's *contents* leak nothing. The **request** does: a `GET` for a
+//! `chat_id` tells the provider that this client is preparing to submit that
+//! specific exchange somewhere, at this moment, from this address. That is a
+//! disclosure the inference call alone did not make -- the provider already
+//! knew the call happened, and now learns it is being contributed.
+//!
+//! Nothing here can avoid it while the receipt has to arrive with the
+//! submission, and the disclosure goes to the party that already served the
+//! call rather than to a new one. It is recorded because a contributor
+//! choosing to enable attested submission should be told what the choice
+//! costs, not because it is mitigated.
+//!
 //! The alternative -- the witness fetching it -- fails on the first point and
 //! adds an egress dependency to an enclave whose whole design is that it
 //! talks to as little as possible.
@@ -49,6 +63,9 @@
 use std::time::Duration;
 
 use trace_commons_attestation::receipt::ReceiptPayload;
+use trace_commons_operator_client::host_allowlist::HostAllowlist;
+
+use super::attested::AttestedCall;
 
 /// How long a fetch may take.
 ///
@@ -71,6 +88,13 @@ pub enum ReceiptFetchError {
     /// The identifier is not a shape that can go in a path segment.
     #[error("the exchange identifier is not a usable path segment")]
     IdentifierMalformed,
+    /// The endpoint's host is outside the allowlist this client enforces.
+    #[error("the receipt endpoint is not an allowed host")]
+    EndpointNotAllowed,
+    /// This deployment configured no receipt endpoint, or the proxy recorded
+    /// no served model to name on the query the endpoint requires.
+    #[error("no receipt endpoint is configured for this call")]
+    NotConfigured,
     /// The provider was unreachable, slow, or answered with an error status.
     #[error("the receipt endpoint did not answer")]
     Unreachable,
@@ -165,11 +189,19 @@ pub fn receipt_url(base: &str, chat_id: &str, model: &str) -> Result<url::Url, R
 /// "no receipt" and submits unattested.
 pub async fn fetch_receipt(
     client: &reqwest::Client,
+    allowlist: &HostAllowlist,
     base: &str,
     chat_id: &str,
     model: &str,
 ) -> Result<ReceiptPayload, ReceiptFetchError> {
     let url = receipt_url(base, chat_id, model)?;
+    // Before the request, not after: the same gate the issuer, ingest and
+    // witness URLs pass. An operator who narrowed this client's egress did
+    // not thereby agree to a new third-party host, and the check belongs here
+    // rather than at the call site so a second call site cannot omit it.
+    allowlist
+        .check(&url)
+        .map_err(|_| ReceiptFetchError::EndpointNotAllowed)?;
     let response = client
         .get(url)
         .timeout(FETCH_TIMEOUT)
@@ -197,11 +229,153 @@ pub async fn fetch_receipt(
     parse_receipt_response(&body)
 }
 
+/// The receipt for one attested call, or none.
+///
+/// The single entry point the submission path uses. Every failure -- no
+/// configured endpoint, a proxy that recorded no served model, a host outside
+/// the allowlist, a provider that timed out, an answer that is not a receipt
+/// -- resolves to `Err`, and the caller submits unattested. Nothing here can
+/// fail a submission, which is the rule the rest of `routing` runs under.
+///
+/// `endpoint` is a configured base URL rather than something read off the
+/// ledger row: the proxy records no upstream URL, so a base derived from a
+/// row would be one this client invented. A deployment routing through more
+/// than one provider slug therefore has one base configured and the others
+/// unattestable, which is a limit of the ledger's shape rather than a choice
+/// made here.
+///
+/// # Errors
+///
+/// [`ReceiptFetchError`] for every reason no receipt was obtained.
+pub async fn receipt_for_attested_call(
+    endpoint: Option<&str>,
+    allowlist: &HostAllowlist,
+    call: &AttestedCall,
+) -> Result<ReceiptPayload, ReceiptFetchError> {
+    let endpoint = endpoint.ok_or(ReceiptFetchError::NotConfigured)?;
+    // The endpoint requires a model and the proxy does not always record one.
+    // Refused rather than guessed: a model this client chose is a parameter
+    // the provider looks the receipt up by, and a wrong one produces "no such
+    // receipt" rather than anything an operator could read.
+    let model = call
+        .served_model()
+        .ok_or(ReceiptFetchError::NotConfigured)?;
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .map_err(|_| ReceiptFetchError::Unreachable)?;
+    // One attempt, no retry. A retry loop on the submission path multiplies a
+    // provider outage into a stalled uploader; the cost of not retrying is one
+    // unattested submission.
+    fetch_receipt(&client, allowlist, endpoint, call.upstream_id(), model).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BASE: &str = "https://qwen3-6-27b.completions.near.ai/v1";
+
+    /// An attestable call, built through the real reader so its identifier
+    /// and model are the ones a fetch would actually use.
+    fn attestable_call(served_model: Option<&str>) -> (AttestedCall, tempfile::TempDir) {
+        use sha2::Digest as _;
+
+        const REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\"}";
+        const RESPONSE: &str = "data: [DONE]\n\n";
+
+        let dir = tempfile::tempdir().expect("a temporary body store");
+        let reference = "00000000000000000009-000000";
+        std::fs::write(dir.path().join(format!("{reference}.req")), REQUEST).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
+
+        let row = crate::routing::RoutedExchange {
+            id: Some(9),
+            started_at: chrono::Utc::now(),
+            client_session_id: Some("session".to_string()),
+            total_ms: Some(10),
+            facade: "openai".to_string(),
+            backend: "nearai".to_string(),
+            requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            served_model: served_model.map(str::to_string),
+            upstream_id: Some("chatcmpl-abc123".to_string()),
+            request_sha256: Some(hex::encode(sha2::Sha256::digest(REQUEST.as_bytes()))),
+            response_sha256: Some(hex::encode(sha2::Sha256::digest(RESPONSE.as_bytes()))),
+            body_ref: Some(reference.to_string()),
+            rung: "full".to_string(),
+            attempts: 1,
+            input_tokens: Some(1),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(1),
+            cost_usd: Some(0.0),
+            status: 200,
+        };
+        let call = super::super::attested::attested_final_call(&[row], dir.path())
+            .expect("the fixture must be attestable, or these tests prove nothing");
+        (call, dir)
+    }
+
+    /// No configured endpoint is "no receipt", and it must not reach the
+    /// network to find that out.
+    #[tokio::test]
+    async fn an_unconfigured_endpoint_fetches_nothing() {
+        let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
+        assert_eq!(
+            receipt_for_attested_call(None, &HostAllowlist::permissive(), &call)
+                .await
+                .unwrap_err(),
+            ReceiptFetchError::NotConfigured
+        );
+    }
+
+    /// A row with no served model cannot name the query parameter the
+    /// endpoint requires, and a model this client invented would be looked up
+    /// against and produce a receipt for nothing.
+    #[tokio::test]
+    async fn a_call_with_no_served_model_is_not_fetched_for() {
+        let (call, _dir) = attestable_call(None);
+        assert_eq!(
+            receipt_for_attested_call(Some(BASE), &HostAllowlist::permissive(), &call)
+                .await
+                .unwrap_err(),
+            ReceiptFetchError::NotConfigured
+        );
+    }
+
+    /// The allowlist an operator set applies to this host too.
+    ///
+    /// The receipt endpoint is a third party, and an operator who narrowed
+    /// this client's egress to their own issuer and ingest did not thereby
+    /// admit a new one.
+    #[tokio::test]
+    async fn an_endpoint_outside_the_allowlist_is_refused() {
+        let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
+        let allowlist = HostAllowlist::from_csv("issuer.example,ingest.example");
+        assert_eq!(
+            receipt_for_attested_call(Some(BASE), &allowlist, &call)
+                .await
+                .unwrap_err(),
+            ReceiptFetchError::EndpointNotAllowed
+        );
+    }
+
+    /// A plaintext endpoint is refused before the allowlist is consulted, so
+    /// an operator who allowlisted a host has not thereby allowed http to it.
+    #[tokio::test]
+    async fn a_plaintext_endpoint_is_refused_even_when_allowlisted() {
+        let (call, _dir) = attestable_call(Some("Qwen/Qwen3.6-27B-FP8"));
+        assert_eq!(
+            receipt_for_attested_call(
+                Some("http://qwen3-6-27b.completions.near.ai/v1"),
+                &HostAllowlist::permissive(),
+                &call,
+            )
+            .await
+            .unwrap_err(),
+            ReceiptFetchError::EndpointNotHttps
+        );
+    }
 
     #[test]
     fn the_url_is_the_endpoint_the_provider_documents() {

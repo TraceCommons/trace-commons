@@ -507,6 +507,54 @@ impl<'a> SubmitContext<'a> {
     /// the operator would otherwise see an uncertified submission from someone
     /// enrolled as certified, which is the downgrade this design exists to
     /// make noisy.
+    /// The provider's receipt for the attested call, or none.
+    ///
+    /// # Why an unfetchable receipt is not a refusal
+    ///
+    /// This is the one place on the submission path that calls a **third
+    /// party this project does not run**, over a network the contributor does
+    /// not control, for an artifact that is not a credential and not a
+    /// secret. Every other fail-closed refusal in this client guards against
+    /// sending something -- raw bytes to an unverified enclave, an
+    /// uncertified envelope from someone enrolled as certified. Failing a
+    /// submission here would guard against nothing: the bodies still travel,
+    /// the witness still redacts and certifies, and the only difference is
+    /// that a contribution the operator would have accepted is silently lost
+    /// to somebody else's five-second outage.
+    ///
+    /// And the fail-closed property this path actually needs is enforced
+    /// where it belongs -- on the witness. A deployment that requires attested
+    /// inference refuses an absent receipt **by name** -- `403
+    /// witness_inference_attestation_missing`, the label
+    /// `witness_certificate_cross_implementation` pins -- inside the enclave,
+    /// over the bodies it holds. A client-side refusal would be a second,
+    /// weaker copy
+    /// of a control that already exists on the party that can enforce it, and
+    /// a contributor can patch this binary anyway, so a bound only the client
+    /// applies is not a bound.
+    ///
+    /// So: no receipt means an unattested submission, which is an honest
+    /// description of what happened, and the witness decides whether that is
+    /// acceptable. Nothing here retries, and nothing here is logged -- the
+    /// endpoint, the identifier, the model and the receipt are all caller
+    /// data.
+    async fn inference_receipt_for(
+        &self,
+        call: &crate::routing::attested::AttestedCall,
+    ) -> Option<trace_commons_attestation::receipt::ReceiptPayload> {
+        crate::routing::receipt::receipt_for_attested_call(
+            // `effective_cfg`, which is `cfg` with the flag-level overrides
+            // applied, so a future `--no-attest` lands in one place.
+            self.effective_cfg.inference_receipt_endpoint.as_deref(),
+            // The allowlist comes from the stored config, which is where
+            // every other outbound call in this file reads it from.
+            &allowlist_for(self.cfg.allowed_hosts.as_deref()),
+            call,
+        )
+        .await
+        .ok()
+    }
+
     async fn witness_envelope(
         &self,
         settings: &WitnessSettings,
@@ -529,6 +577,17 @@ impl<'a> SubmitContext<'a> {
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?;
+
+        // Fetched before the witness sequence starts, and never allowed to
+        // fail it. See `inference_receipt_for`.
+        let receipt = match attested {
+            Some(call) => self.inference_receipt_for(call).await,
+            None => None,
+        };
+        let attested = attested.map(|call| crate::witness::transport::AttestedInference {
+            call,
+            receipt: receipt.as_ref(),
+        });
 
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
         let response = witness_session(
@@ -1775,6 +1834,7 @@ mod tests {
         device_key_id: &str,
     ) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: issuer.into(),
             ingest_url: ingest.into(),
@@ -1822,6 +1882,7 @@ mod tests {
     async fn unenrolled_and_enrolled_previews_have_full_outcome_parity() {
         let preview_cfg = crate::commands::unenrolled_preview_config();
         let enrolled_cfg = crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example".into(),
             ingest_url: "https://ingest.example".into(),
@@ -3644,6 +3705,110 @@ mod tests {
             SubmitOutcome::Failed { reason_label } => reason_label.clone(),
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// An attestable call, built through the real reader.
+    fn receipt_fixture_call() -> (crate::routing::attested::AttestedCall, tempfile::TempDir) {
+        use sha2::Digest as _;
+
+        const REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\"}";
+        const RESPONSE: &str = "data: [DONE]\n\n";
+
+        let dir = tempfile::tempdir().expect("a temporary body store");
+        let reference = "00000000000000000011-000000";
+        std::fs::write(dir.path().join(format!("{reference}.req")), REQUEST).expect("req");
+        std::fs::write(dir.path().join(format!("{reference}.res")), RESPONSE).expect("res");
+
+        let row = crate::routing::RoutedExchange {
+            id: Some(11),
+            started_at: chrono::Utc::now(),
+            client_session_id: Some("session".to_string()),
+            total_ms: Some(10),
+            facade: "openai".to_string(),
+            backend: "nearai".to_string(),
+            requested_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            served_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            upstream_id: Some("chatcmpl-abc123".to_string()),
+            request_sha256: Some(hex::encode(sha2::Sha256::digest(REQUEST.as_bytes()))),
+            response_sha256: Some(hex::encode(sha2::Sha256::digest(RESPONSE.as_bytes()))),
+            body_ref: Some(reference.to_string()),
+            rung: "full".to_string(),
+            attempts: 1,
+            input_tokens: Some(1),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(1),
+            cost_usd: Some(0.0),
+            status: 200,
+        };
+        let call = crate::routing::attested::attested_final_call(&[row], dir.path())
+            .expect("the fixture must be attestable, or these tests prove nothing");
+        (call, dir)
+    }
+
+    /// Nothing is fetched when no endpoint is configured, and the answer is
+    /// an absent receipt rather than an error.
+    #[tokio::test]
+    async fn no_configured_endpoint_yields_no_receipt() {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (call, _dir) = receipt_fixture_call();
+
+        assert!(
+            ctx.inference_receipt_for(&call).await.is_none(),
+            "an unconfigured endpoint must not produce a receipt"
+        );
+    }
+
+    /// And an endpoint the operator's allowlist excludes is an absent receipt
+    /// too -- never a refusal, and never a panic.
+    ///
+    /// This is the behaviour the whole design turns on: a receipt that cannot
+    /// be obtained makes a submission unattested, and the witness decides
+    /// whether unattested is acceptable. A client-side refusal here would
+    /// throw away a contribution over somebody else's outage.
+    #[tokio::test]
+    async fn an_unfetchable_receipt_is_an_absent_one_and_not_a_failure() {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(
+            "http://issuer.invalid",
+            "http://ingest.invalid",
+            &device.device_key_id,
+        );
+        cfg.inference_receipt_endpoint = Some("https://receipts.invalid/v1".to_string());
+        cfg.allowed_hosts = Some("issuer.invalid,ingest.invalid".to_string());
+        let opts = SubmitOptions {
+            dry_run: true,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let (call, _dir) = receipt_fixture_call();
+
+        assert!(
+            ctx.inference_receipt_for(&call).await.is_none(),
+            "an unreachable or disallowed endpoint must yield no receipt, not an error"
+        );
     }
 
     #[tokio::test]

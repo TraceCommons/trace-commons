@@ -445,6 +445,7 @@ mod tests {
         let s = shared();
         s.store
             .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
                 ingest_url: "https://ingest.invalid".to_string(),

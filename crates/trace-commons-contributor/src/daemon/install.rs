@@ -112,6 +112,7 @@ mod tests {
 
     fn cfg_with_filter(filter: Option<&str>) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example.ai".into(),
             ingest_url: "https://ingest.example.ai".into(),

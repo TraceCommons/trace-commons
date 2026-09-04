@@ -73,6 +73,10 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // variables does not get a preview that refuses for a reason they
         // did not ask for.
         witness: None,
+        // And nothing to attest: the preview never reaches a witness, so a
+        // receipt fetch would disclose an exchange to the provider for a
+        // submission that is not going to happen.
+        inference_receipt_endpoint: None,
     }
 }
 
@@ -180,6 +184,10 @@ pub(crate) async fn enroll_core(
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
         witness: crate::config::witness_settings_from_env(),
+        // Same rule, same reason: the receipt endpoint is opt-in from the
+        // environment or the config file, and never something enrollment
+        // hands a contributor.
+        inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
     };
     store
         .save_config(&cfg)
@@ -1983,6 +1991,7 @@ mod tests {
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
             ingest_url: "https://ingest.original.invalid".to_string(),
@@ -2126,6 +2135,7 @@ mod tests {
     /// A config with a public handle already claimed on this machine.
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
+            inference_receipt_endpoint: None,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
             ingest_url: "https://ingest.original.invalid".to_string(),
@@ -2640,6 +2650,10 @@ async fn enroll_with_invite_core(
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
         witness: crate::config::witness_settings_from_env(),
+        // Same rule, same reason: the receipt endpoint is opt-in from the
+        // environment or the config file, and never something enrollment
+        // hands a contributor.
+        inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
     };
     store
         .save_config(&cfg)

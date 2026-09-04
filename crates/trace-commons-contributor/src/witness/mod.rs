@@ -263,6 +263,13 @@ impl WitnessTrustError {
 ///    [`verify::VerifiedWitness`].
 /// 5. **Send**, and check what comes back.
 ///
+/// `attested`'s receipt is carried through untouched. It is fetched before
+/// this function is called, deliberately: a receipt fetch is a third-party
+/// call, and putting it inside the verify-then-send sequence would let a
+/// provider outage delay -- or, misread, abort -- a submission whose
+/// correctness does not depend on it. An absent receipt is an unattested
+/// submission, never a failed one.
+///
 /// Steps 1 and 2 are the reason this returns before `transport` is touched in
 /// the refusal cases, which `a_witness_url_without_a_pin_never_reaches_the_network`
 /// asserts against a recording transport.
@@ -272,7 +279,7 @@ pub async fn witness_session(
     trust: &WitnessTrust,
     now_unix: u64,
     raw: trace_commons_protocol::trace_contribution::RawTraceContribution,
-    attested: Option<&crate::routing::attested::AttestedCall>,
+    attested: Option<transport::AttestedInference<'_>>,
     granted: &transport::GrantedConsent,
 ) -> Result<transport::WitnessedEnvelope, WitnessTrustError> {
     if !trust.is_pinned() {
