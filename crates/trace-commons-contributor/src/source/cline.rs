@@ -461,10 +461,14 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         .started_at
         .or_else(|| messages.first().and_then(|m| timestamp_millis(m.get("ts"))));
     // The document's own id, which is what the store addresses it by; the
-    // directory name merely repeats it.
+    // directory name merely repeats it. Empty is not an id: `Some("")` would
+    // suppress the directory-name fallback and then join, by equality, to
+    // every ledger row that also names no session. Filtered here the same
+    // way `read_manifest`'s own `string` helper filters its fields.
     let conversation_id = document
         .get("sessionId")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
         .or_else(|| {
             session_dir
@@ -767,6 +771,33 @@ mod tests {
             .unwrap();
         let err = s.load(&r).unwrap_err().to_string();
         assert_eq!(err, "malformed_cline_session");
+    }
+
+    #[test]
+    fn an_empty_session_id_falls_back_to_the_directory_name() {
+        // `Some("")` is not an id. It would suppress this fallback and then
+        // join, by equality, to every routing ledger row that also names no
+        // session -- putting another session's cost on this trace.
+        for spelling in ["\"\"", "\"   \"", "null"] {
+            let dir = tempfile::tempdir().unwrap();
+            let session = dir.path().join("1756900400000_empty");
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::write(
+                session.join("1756900400000_empty.messages.json"),
+                format!(
+                    "{{\"version\":1,\"sessionId\":{spelling},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}"
+                ),
+            )
+            .unwrap();
+            let s = ClineSource::new(dir.path().to_path_buf());
+            let r = s.discover().unwrap().into_iter().next().unwrap();
+            let t = s.load(&r).unwrap();
+            assert_eq!(
+                t.conversation_id.as_deref(),
+                Some("1756900400000_empty"),
+                "sessionId {spelling} did not fall back to the directory name"
+            );
+        }
     }
 
     #[test]

@@ -98,6 +98,17 @@ impl TraceSource for RoutingEnrichedSource {
 /// discovery, the queue and the envelope already use, and moving it would move
 /// identity for every Codex session ever recorded.
 fn names_the_same_session(row_id: &str, conversation_id: &str) -> bool {
+    // Neither side may be empty. A client that always sets its session
+    // header and leaves it blank records `client_session_id: ""` -- IronWire
+    // keys its precedence on the header being *present* -- and an adapter
+    // that read an empty id from a session document would hold `Some("")`.
+    // Either alone is harmless; together the equality arm below would join
+    // them and attribute one session's routing rows and cost to another.
+    // The producers are each fixed at their own end, and this is the last
+    // line of defence, which should not depend on all of them staying fixed.
+    if row_id.is_empty() || conversation_id.is_empty() {
+        return false;
+    }
     if row_id == conversation_id {
         return true;
     }
@@ -232,6 +243,31 @@ mod tests {
             std::sync::Arc::new(ledger),
         );
         assert!(source.load(&a_ref()).expect("loads").routing.is_empty());
+    }
+
+    #[test]
+    fn a_row_naming_an_empty_session_is_never_attached() {
+        // An empty `client_session_id` is not "no session": it is `Some("")`,
+        // and it reaches the join by equality against any transcript whose
+        // own id is also empty. Both halves are reachable from real
+        // producers -- IronWire's session-id precedence is keyed on the
+        // header being present, so a client that always sends it and leaves
+        // it blank records an empty id. Joining them would put another
+        // session's routing rows and cost on this trace.
+        for id in ["", "s-1"] {
+            let ledger = FixedLedger::new(vec![row(Some(""), 0), row(Some("  "), 10)]);
+            let source = RoutingEnrichedSource::new(
+                Box::new(StubSource {
+                    conversation_id: Some(id.into()),
+                }),
+                std::sync::Arc::new(ledger),
+            );
+            let t = source.load(&a_ref()).expect("loads");
+            assert!(
+                t.routing.is_empty(),
+                "an empty ledger session id joined a transcript with id {id:?}"
+            );
+        }
     }
 
     #[test]
