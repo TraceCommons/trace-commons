@@ -3,6 +3,13 @@
 Companion to `2026-09-04-holonear-compute-contribution.md`. This records source
 inspection of the macOS shell at `5cf13a27`; it does not declare a working pilot.
 
+Preparation delivered: `TCBridge/TCCompute.swift` owns the new controller ABI
+handle and serializes status, commands, and close. Five real-dylib Swift tests
+cover unavailable enable without persisted consent, restore-paused/revoke,
+idempotent close, concurrent command/close, and embedded-NUL directory rejection.
+The app target builds with the bridge. No Compute destination, power adapter,
+worker packaging, or running worker is included yet.
+
 ## Navigation and ownership
 
 `macos/Sources/TraceCommonsApp/Views/MainWindowView.swift` currently renders its
