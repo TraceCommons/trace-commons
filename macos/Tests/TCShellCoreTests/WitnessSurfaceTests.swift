@@ -240,16 +240,14 @@ final class WitnessSurfaceTests: XCTestCase {
     /// status this shell could not read seeds an empty form rather than
     /// carrying the previous witness's address forward.
     func testFormSeedsFromTheStatusAndFromNothingElse() {
-        let status = WitnessStatus(
-            stateCode: 1, refusal: nil, url: "https://w.example",
-            signingAddress: "0xabc", pinnedMeasurementCount: 2)
-        let form = WitnessForm.fromStatus(status)
+        let form = WitnessForm.fromStatus(
+            Self.status(pinned: ["mrtd=aa,mrconfigid=bb", "mrtd=cc"]))
         XCTAssertEqual(form.url, "https://w.example")
         XCTAssertEqual(form.signingAddress, "0xabc")
-        // The status carries a COUNT, never the measurements themselves, so
-        // there is nothing to seed the list with and this shell must not
-        // invent placeholder lines for it.
-        XCTAssertEqual(form.measurements, "")
+        // Pre-filled, one entry per line. A write-only box means retyping
+        // every pin to change a URL, and an empty box that meant "keep what
+        // is there" would save a pin nobody looked at.
+        XCTAssertEqual(form.measurements, "mrtd=aa,mrconfigid=bb\nmrtd=cc")
 
         let empty = WitnessForm.fromStatus(nil)
         XCTAssertEqual(empty.url, "")
@@ -257,14 +255,114 @@ final class WitnessSurfaceTests: XCTestCase {
         XCTAssertEqual(empty.measurements, "")
     }
 
+    /// A witness with nothing pinned pre-fills an EMPTY box, not a
+    /// placeholder line. The box is the contributor's answer, and a line
+    /// this shell put there would be a pin nobody typed.
+    func testAnUnpinnedWitnessSeedsAnEmptyBox() {
+        let form = WitnessForm.fromStatus(Self.status(pinned: [], stateCode: 2))
+        XCTAssertEqual(form.measurements, "")
+        XCTAssertFalse(form.canConfigure)
+    }
+
+    /// The entries go back out exactly as they came in.
+    ///
+    /// `pinned_measurements` is what `tc_witness_configure` takes, so the
+    /// round trip through this editor must be the identity. A shell that
+    /// reformats a pin is a shell that can reformat it wrongly, and the
+    /// contributor would never see which one changed.
+    func testPinnedMeasurementsRoundTripUnchanged() throws {
+        let stored = [
+            "mrtd=aabb,mrconfigid=ccdd",
+            // A malformed entry comes back as it is stored so the typo can
+            // be seen and repaired. It must survive the trip unrepaired:
+            // this shell is not the thing that decides what a measurement is.
+            "mrtd=nothexatall",
+            // Whitespace inside an entry is part of the entry. Trimming it
+            // here would be this shell rewriting a pin nobody touched.
+            "  mrtd=ee,mrconfigid=ff  ",
+            "mrtd=\"quoted\",mrconfigid=back\\slash",
+        ]
+        let form = WitnessForm.fromStatus(Self.status(pinned: stored))
+        let json = try XCTUnwrap(form.measurementsJSON)
+        let decoded = try JSONDecoder().decode(
+            [String].self, from: XCTUnwrap(json.data(using: .utf8)))
+        XCTAssertEqual(decoded, stored, "an entry was rewritten on the way back out")
+    }
+
+    /// Order is part of the value: the ABI returns the entries in stored
+    /// order and takes them back the same way.
+    func testPinnedMeasurementsKeepTheirOrder() {
+        let stored = ["mrtd=01", "mrtd=02", "mrtd=03"]
+        let form = WitnessForm.fromStatus(Self.status(pinned: stored))
+        XCTAssertEqual(form.measurementLines, stored)
+    }
+
+    /// The blank lines an editor makes from pressing return are not
+    /// entries, and are the one thing dropped on the way out.
+    func testBlankEditorLinesAreNotEntries() {
+        let form = WitnessForm(
+            url: "https://w.example", signingAddress: "0xabc",
+            measurements: "\nmrtd=aa\n\n\nmrtd=bb\n")
+        XCTAssertEqual(form.measurementLines, ["mrtd=aa", "mrtd=bb"])
+    }
+
     // MARK: - Decoding what the ABI answers
+
+    /// A status as the ABI answers one, with every field distinguishable.
+    private static func status(
+        pinned: [String], stateCode: Int32 = 1
+    ) -> WitnessStatus {
+        WitnessStatus(
+            stateCode: stateCode,
+            refusal: nil,
+            url: "https://w.example",
+            signingAddress: "0xabc",
+            pinnedMeasurementCount: pinned.count,
+            pinnedMeasurementLine: "L-COUNT",
+            pinnedMeasurements: pinned
+        )
+    }
+
+    /// The count and the list are one answer. A card that showed a count
+    /// from one and a box from the other would disagree with itself.
+    func testTheCountIsAlwaysTheLengthOfTheList() throws {
+        let json = """
+            {"state":"pinned","state_code":1,"refusal":null,
+             "url":"https://w.example","signing_address":"0xabc",
+             "pinned_measurement_count":2,
+             "pinned_measurement_line":"2 measurements are pinned.",
+             "pinned_measurements":["mrtd=aa","mrtd=bb"]}
+            """
+        let status = try XCTUnwrap(WitnessStatus.decode(fromJSON: json))
+        XCTAssertEqual(status.pinnedMeasurementCount, status.pinnedMeasurements.count)
+    }
+
+    /// The count sentence is null where there is no witness to count for --
+    /// a count of the pins on a witness that does not exist is not a
+    /// shorter sentence, it is a wrong one.
+    func testANullCountLineDecodesAsNilAndNotAsAnEmptyString() throws {
+        let json = """
+            {"state":"absent","state_code":0,"refusal":null,
+             "url":null,"signing_address":null,
+             "pinned_measurement_count":0,
+             "pinned_measurement_line":null,
+             "pinned_measurements":[]}
+            """
+        let status = try XCTUnwrap(WitnessStatus.decode(fromJSON: json))
+        XCTAssertNil(status.pinnedMeasurementLine)
+        XCTAssertEqual(status.pinnedMeasurements, [])
+        // And nothing is invented to stand in for it.
+        XCTAssertNotEqual(status.pinnedMeasurementLine, "")
+    }
 
     func testStatusDecodesTheAbiPayload() throws {
         let json = """
             {"state":"refusing_unpinned","state_code":2,
              "refusal":"witness_expected_measurement",
              "url":"https://witness.example","signing_address":"0xabc",
-             "pinned_measurement_count":0}
+             "pinned_measurement_count":0,
+             "pinned_measurement_line":"No measurement is pinned.",
+             "pinned_measurements":[]}
             """
         let status = try XCTUnwrap(WitnessStatus.decode(fromJSON: json))
         XCTAssertEqual(status.stateCode, 2)
@@ -272,6 +370,8 @@ final class WitnessSurfaceTests: XCTestCase {
         XCTAssertEqual(status.url, "https://witness.example")
         XCTAssertEqual(status.signingAddress, "0xabc")
         XCTAssertEqual(status.pinnedMeasurementCount, 0)
+        XCTAssertEqual(status.pinnedMeasurementLine, "No measurement is pinned.")
+        XCTAssertEqual(status.pinnedMeasurements, [])
     }
 
     /// The state is read from `state_code`, never re-derived from `url`
@@ -281,7 +381,9 @@ final class WitnessSurfaceTests: XCTestCase {
         let json = """
             {"state":"refusing_unpinned","state_code":2,"refusal":"x",
              "url":"https://witness.example","signing_address":"0xabc",
-             "pinned_measurement_count":0}
+             "pinned_measurement_count":0,
+             "pinned_measurement_line":"No measurement is pinned.",
+             "pinned_measurements":[]}
             """
         let status = try XCTUnwrap(WitnessStatus.decode(fromJSON: json))
         XCTAssertNotNil(status.url)
