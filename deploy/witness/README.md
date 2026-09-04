@@ -78,9 +78,13 @@ What reduces it, and none of these remove it:
   health route that reports state, no metrics, and nothing that lists anything.
   A witness that can be interrogated about its history is not one that holds
   nothing.
-- **`public_logs` and `public_sysinfo` are off** in `app-compose.json`. dstack
-  will serve container logs publicly if asked. Do not ask, on a deployment
-  carrying real traffic, for debugging or otherwise.
+- **`public_logs` and `public_sysinfo` are off in `app-compose.json`, and that
+  did not reach the deployment.** dstack will serve container logs publicly if
+  asked, and the first live CVM was deployed with both set to `true` -- because
+  `phala deploy` never read the manifest this repository generates. See
+  "The manifest we write is not the manifest that deploys" below. Setting them
+  here is necessary and is not sufficient; check the stored manifest after
+  every deploy.
 - **The contributor pins the measurement before sending.** A client that cannot
   verify must refuse to send, not warn and proceed.
 
@@ -170,11 +174,60 @@ open redaction service, and an open quote oracle.
 | `build-app-compose.sh` | Regenerates the manifest, and `--check` fails if it has drifted. |
 
 `docker-compose.yml` is the source of truth and `app-compose.json` is derived.
-They are two copies of the same thing and only the second one deploys, so
-**run `./build-app-compose.sh` after every compose edit and commit both.**
+**Run `./build-app-compose.sh` after every compose edit and commit both.**
 `./build-app-compose.sh --check` answers "is the manifest I am about to upload
 the one this compose file describes" without modifying anything; run it before
 a deploy.
+
+### The manifest we write is not the manifest that deploys
+
+This section replaces an earlier claim that "only the second one deploys". It
+was wrong, and it was wrong in the direction that matters: it described the
+generated manifest as the thing with authority, when in fact `phala deploy`
+takes `docker-compose.yml` and **builds its own manifest**, never reading
+`app-compose.json` at all.
+
+Measured on 2026-09-04 against the live CVM. `phala cvms get <id> --json`
+reports `compose_file`, which is the manifest dstack actually stored. Compared
+against what this directory generates:
+
+| Field | We wrote | dstack stored |
+|---|---|---|
+| `public_logs` | `false` | **`true`** |
+| `public_sysinfo` | `false` | **`true`** |
+| `allowed_envs` | `[TRACE_NEAR_AI_PRIVACY_API_KEY]` | **`+ DSTACK_AUTHORIZED_KEYS`** |
+| `pre_launch_script` | `""` | **~17 KB of Phala boot script** |
+| `kms_enabled`, `local_key_provider_enabled`, `gateway_enabled`, `public_tcbinfo`, `no_instance_id` | as written | as written |
+
+Every field that constrains what the enclave exposes was overridden. The three
+that survived are the ones whose values happened to match Phala's defaults, so
+agreement here is coincidence rather than the manifest being honoured.
+
+Two of the overrides are worth stating plainly, because they change the threat
+model this README argues elsewhere:
+
+- **`public_logs: true`** on a service whose entire premise is that raw
+  transcripts do not leave it. Container logs are the most direct way for one
+  to escape, which is why the generated manifest sets it `false`.
+- **`DSTACK_AUTHORIZED_KEYS` in `allowed_envs`**, combined with a
+  `pre_launch_script` that writes that value to `/home/root/.ssh/
+  authorized_keys` and sets a root password. The generated manifest allows
+  exactly one injectable name and argues for it at length in
+  `build-app-compose.sh`; the deployed manifest allows a second one that grants
+  shell access. Nothing has been injected -- but the enclave's identity now
+  admits it, and an operator who reads only our manifest would not know.
+
+**This also resolves the open question in `build-app-compose.sh`.** That script
+warns that the SHA-256 it prints may not equal the `compose_hash` dstack
+derives, and notes nobody had run the comparison. It has now been run and they
+differ: local `a12e930e...` against deployed `c2511a8b...`, which is the value
+inside the live certificate's MRCONFIGID. **The hash to pin is the instance's,
+never this script's.**
+
+So the deploy procedure needs a step it does not yet have: after deploying,
+read back `compose_file` and diff it against the intended manifest, and pin
+`compose_hash` from the instance. Until that exists, treat every setting in
+`app-compose.json` as a statement of intent that has not been enforced.
 
 ---
 

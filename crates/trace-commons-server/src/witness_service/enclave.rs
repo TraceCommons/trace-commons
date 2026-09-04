@@ -102,9 +102,9 @@
 //! reading the runbook needs to know that moving them to v1 is a key
 //! rotation, not a version bump.
 //!
-//! Those constants name the v0 surface by its unversioned path, because that
-//! is the one a real agent serves -- see [`GET_KEY_PATH`]. Switching between
-//! the two v0 spellings is not a rotation; only v1 is.
+//! Those constants name the v0 surface by its versioned path, which a live
+//! 0.5.9 agent does serve -- see [`GET_KEY_PATH`]. Switching between the two
+//! v0 spellings would not be a rotation; only v1 is.
 
 use super::{Enclave, SeamUnavailable, Signer};
 use async_trait::async_trait;
@@ -118,28 +118,39 @@ pub const DSTACK_SOCKET_PATH: &str = "/var/run/dstack.sock";
 
 /// The pinned `GetKey` surface.
 ///
-/// Unversioned, and that is the deliberate spelling rather than the lazy one.
-/// This was `/v0/GetKey` on the reasoning that naming the version explicitly
-/// beat relying on an alias that could later be repointed. A real dstack
-/// 0.5.9 guest agent answers that path with **HTTP 404**: the witness could
-/// not derive a signing identity and crash-looped on a live CVM until the
-/// refusal carried its status code.
+/// Versioned, and the spelling is load-bearing enough to have been changed
+/// once on a wrong diagnosis and changed back on evidence.
 ///
-/// dstack documents the legacy methods as reachable at `/v0/<Method>` **and**
-/// at the unversioned `/<Method>` path "it has always had", and every example
-/// in its API reference uses the unversioned form. On 0.5.9 only the
-/// unversioned one is actually served.
+/// A deployment did crash-loop unable to derive a signing identity, and this
+/// path was blamed for it: dstack documents the legacy methods at `/v0/
+/// <Method>` **and** at an unversioned `/<Method>`, every example in its API
+/// reference uses the unversioned form, and a 404 in the logs made "only the
+/// unversioned one is served" look obvious. It is not what happened. The
+/// image now running on a live CVM -- built from the tree that carries this
+/// constant as `/v0/GetKey` -- derives its key and answers `/v1/attestation`
+/// with a signing address and a TDX quote. A 0.5.9 agent serves this path.
 ///
-/// This is NOT a key rotation. Both spellings name the same v0 surface and
-/// derive the same material; only the v1 surface derives differently, and
-/// moving to it would change the signing address of every deployment. That
-/// remains true and is why this constant still names a surface rather than
-/// letting a caller pass one.
-pub const GET_KEY_PATH: &str = "/GetKey";
+/// The unversioned form was never deployed and remains untested here, so the
+/// versioned one stays: it is the spelling with a working deployment behind
+/// it, and it is the one that cannot be silently repointed.
+///
+/// Whatever produced that 404 is therefore still undiagnosed. That is the
+/// honest state, and it is why [`SeamUnavailable::AgentRefused`] carries the
+/// status code -- the original refusal did not, which is what allowed one
+/// plausible cause to be adopted without being checked against a running
+/// agent.
+///
+/// Changing this to the other v0 spelling would NOT be a key rotation: both
+/// name the same surface and derive the same material. Only the v1 surface
+/// derives differently, and moving to it would change the signing address of
+/// every deployment at once. That is why this is a constant rather than
+/// something a caller passes.
+pub const GET_KEY_PATH: &str = "/v0/GetKey";
 
 /// The pinned `GetQuote` surface. See [`GET_KEY_PATH`]: same surface, same
-/// reason for the unversioned spelling, same 404 if it is versioned.
-pub const GET_QUOTE_PATH: &str = "/GetQuote";
+/// reason for the versioned spelling, and the same live deployment behind it
+/// -- the quote in that attestation response came through this path.
+pub const GET_QUOTE_PATH: &str = "/v0/GetQuote";
 
 /// `GetKey`'s HKDF info string. `Sign` uses this same value internally, which
 /// is what makes the in-process signature and an agent signature the same key.
