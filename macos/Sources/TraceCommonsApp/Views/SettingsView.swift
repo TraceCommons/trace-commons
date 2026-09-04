@@ -73,6 +73,16 @@ struct SettingsContent: View {
     /// opens or closes it is obeyed from then on.
     @State private var routingOverrideOpen: Bool?
 
+    /// The witness card's three fields, held here rather than bound to what
+    /// the ABI answered.
+    ///
+    /// Seeded from the status on first edit, for the reason `routingDraft`
+    /// is: a refresh landing mid-edit would otherwise replace a half-typed
+    /// address. `nil` means nothing has been edited, and the fields read
+    /// what came back from the last write -- which is what lets a
+    /// configuration written by the CLI reach these fields at all.
+    @State private var witnessDraft: WitnessForm?
+
     /// The project a contributor has asked to arm, held while the
     /// confirmation is on screen. Nil means no sheet. It is the row and not
     /// a bool because the sheet names the project, and a bool would leave
@@ -96,6 +106,7 @@ struct SettingsContent: View {
             publicProfile
             watching
             routing
+            witness
             projects
             audit
         }
@@ -960,6 +971,257 @@ struct SettingsContent: View {
         panel.canCreateDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
+    }
+
+    // MARK: - The redaction witness
+
+    /// Whether a sealed machine redacts a session before it is sent, and
+    /// what happened to the last one.
+    ///
+    /// Every string on this card comes from
+    /// `trace_commons_contributor::witness_copy` through `WitnessCopy` and
+    /// the two sentence calls -- none is written here, and the same rule the
+    /// routing card lives under applies with more force, because several of
+    /// these sentences are privacy claims. The card renders nothing at all
+    /// if the payload did not arrive.
+    ///
+    /// # There is no switch on this card
+    ///
+    /// A toggle would have to answer "is a witness configured?", and that
+    /// question has two yes-answers that are opposites: a pinned witness
+    /// certifies every submission, a configured-but-unpinned one refuses
+    /// every submission before any network call. `WitnessTrustState` has one
+    /// case per condition and this card renders the case, so `absent` --
+    /// local redaction, a supported mode and not a warning -- and
+    /// `refusing_unpinned` -- a total upload outage -- cannot come out
+    /// looking alike.
+    @ViewBuilder
+    private var witness: some View {
+        if let copy = model.witnessCopy {
+            let state = model.witnessState
+            VStack(alignment: .leading, spacing: TC.Space.sm) {
+                TCSectionHeader(title: copy.heading)
+
+                // What the witness is doing comes first, because it is what
+                // somebody opened this card to read.
+                if let code = model.witnessStateCode {
+                    witnessState(code)
+                }
+
+                Text(copy.intro)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(copy.certificateMeans)
+                    .font(TC.Font_.body)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // What the last submission did, in the Rust's sentence. It
+                // is process-local: a freshly started app says nothing has
+                // been sent since it started, rather than guessing.
+                if let line = WitnessSurface.lastResultLine(calls: model.witnessCalls) {
+                    let resultTone = witnessTone(
+                        WitnessSurface.lastResultTone(calls: model.witnessCalls))
+                    HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
+                        Image(systemName: resultTone.symbol).imageScale(.small)
+                        Text(line).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(resultTone.textColor)
+                    .accessibilityElement(children: .combine)
+                }
+
+                if let state, WitnessSurface.offersConfigure(state) {
+                    witnessFields(copy: copy)
+                }
+
+                // The way out. A refusal that offered nothing to do about
+                // itself would be the trap `AppModel.Startup.needsRoots`
+                // exists to avoid, so this is offered on EVERY refusing
+                // state -- including one this build cannot name -- and not
+                // only on the tidy ones.
+                if let state, WitnessSurface.offersClear(state) {
+                    Button(copy.clear) { model.clearWitness() }
+                        .buttonStyle(.borderless)
+                        .disabled(model.witnessBusy)
+                    Text(copy.clearNote)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text(copy.appliesAtOnce)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                // Asked every time the card appears: the config is a file,
+                // and the CLI writes to it too.
+                model.refreshWitness()
+            }
+        }
+    }
+
+    /// What the witness is doing, in the Rust's sentence and the Rust's tone.
+    ///
+    /// The tone comes from the state code, never from the sentence it
+    /// produced -- a text comparison here would be a comparison against a
+    /// privacy claim. A state this build cannot name produces NO sentence
+    /// (`stateLine` answers nil) and this renders none of its own; the tone
+    /// still answers, and fails closed to refused.
+    ///
+    /// The glyph rides beside the words rather than inside a `TCTag`: a tag
+    /// is a short state token, and the only short token this surface has is
+    /// the ABI's fixed refusal label, which is rendered as one below. The
+    /// state itself is a sentence, so it is set as one -- with the tone's
+    /// symbol in front of it, which is what keeps a refusal legible in
+    /// greyscale and in a black-and-white screenshot.
+    @ViewBuilder
+    private func witnessState(_ code: Int32) -> some View {
+        let stateTone = witnessTone(WitnessSurface.tone(forState: code, calls: model.witnessCalls))
+        VStack(alignment: .leading, spacing: TC.Space.xxs) {
+            if let line = WitnessSurface.stateLine(code, calls: model.witnessCalls) {
+                HStack(alignment: .firstTextBaseline, spacing: TC.Space.xs) {
+                    Image(systemName: stateTone.symbol).imageScale(.small)
+                    Text(line).fixedSize(horizontal: false, vertical: true)
+                }
+                .font(TC.Font_.body)
+                .foregroundStyle(stateTone.textColor)
+                .accessibilityElement(children: .combine)
+            }
+            // The ABI's fixed operator label, shown verbatim and with no
+            // sentence built around it. It is not wording -- a sentence
+            // written here would exist in this shell alone -- and it carries
+            // no path, no token and no trace content. It is shown because a
+            // refusal a contributor cannot name is a refusal they cannot get
+            // help with.
+            if let label = model.witnessStatus?.refusal ?? model.witnessLabel {
+                TCTag(text: label, tone: stateTone)
+            }
+        }
+    }
+
+    /// The three things a contributor types, and the one button that writes
+    /// them.
+    ///
+    /// The draft is held in the view for the reason the routing form and the
+    /// profile fields are: a background refresh landing mid-edit would
+    /// otherwise replace what is being typed. Nil means nothing has been
+    /// edited, and the fields read what came back from the last write.
+    @ViewBuilder
+    private func witnessFields(copy: WitnessCopy) -> some View {
+        let form = witnessDraft ?? WitnessForm.fromStatus(model.witnessStatus)
+        VStack(alignment: .leading, spacing: TC.Space.sm) {
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                TCFieldLabel(copy.urlTitle)
+                TextField("", text: Binding(
+                    get: { form.url },
+                    set: { value in
+                        var next = form
+                        next.url = value
+                        witnessDraft = next
+                    }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(copy.urlTitle)
+            }
+
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                TCFieldLabel(copy.signingAddressTitle)
+                TextField("", text: Binding(
+                    get: { form.signingAddress },
+                    set: { value in
+                        var next = form
+                        next.signingAddress = value
+                        witnessDraft = next
+                    }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(copy.signingAddressTitle)
+            }
+
+            VStack(alignment: .leading, spacing: TC.Space.xs) {
+                TCFieldLabel(copy.measurementsTitle)
+                // The count as the Rust's sentence, never as a bare numeral:
+                // a number with no words around it on a privacy surface is
+                // this shell authoring wording by omission.
+                //
+                // Nil where there is no witness to count for -- absent, not
+                // enrolled, unreadable -- and then NOTHING is rendered. A
+                // count of the pins on a witness that does not exist is not
+                // a shorter sentence, it is a wrong one, and there is no
+                // `else` here for exactly that reason.
+                if let line = model.witnessStatus?.pinnedMeasurementLine {
+                    Text(line)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // One measurement set per line, pre-filled from what the ABI
+                // returned and handed straight back. A list, not a value: an
+                // upgrade moves the witness's measurement and leaves its
+                // signing address where it is, so the new one is added
+                // before the fleet rolls.
+                //
+                // The box is the whole answer. Emptying it and saving is a
+                // contributor clearing their pins, which the ABI refuses
+                // with `witness-pin-required`; there is no keep-what-is-there
+                // mode, because that would save a pin nobody looked at.
+                TextEditor(text: Binding(
+                    get: { form.measurements },
+                    set: { value in
+                        var next = form
+                        next.measurements = value
+                        witnessDraft = next
+                    }
+                ))
+                .font(TC.Font_.monoChip)
+                .scrollContentBackground(.hidden)
+                .background(TC.surface)
+                .frame(minHeight: 64)
+                .overlay {
+                    RoundedRectangle(cornerRadius: TC.Radius.card)
+                        .strokeBorder(TC.Tone.neutral.color.opacity(0.35),
+                                      lineWidth: TC.Space.hairline)
+                }
+                .accessibilityLabel(copy.measurementsTitle)
+                Text(copy.measurementsNote)
+                    .font(TC.Font_.meta)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Disabled until there is something pinnable to write. The ABI
+            // refuses an empty pin list, and it is right to: writing one
+            // produces a client that refuses every submission from the
+            // moment it is saved. This card does not offer the button that
+            // would ask for that.
+            Button(copy.configure) {
+                model.configureWitness(form)
+                witnessDraft = nil
+            }
+            .buttonStyle(.bordered)
+            .disabled(!form.canConfigure || model.witnessBusy)
+        }
+    }
+
+    /// `WitnessTone` -> the design system's tone.
+    ///
+    /// A refusal is `.refused` and NEVER `.attention`: attention is caution,
+    /// not alarm -- the tone of a setup that is degraded but still working
+    /// -- and a refusing witness is sending nothing at all.
+    ///
+    /// Deliberately not the routing bridge below. The two ABI tone ranges
+    /// are disjoint so that a cross-wired mapper is wrong for every value
+    /// rather than only for the dangerous one; two functions here is what
+    /// keeps them from being cross-wired in the first place.
+    private func witnessTone(_ tone: WitnessTone) -> TC.Tone {
+        switch tone {
+        case .neutral: return .neutral
+        case .held: return .held
+        case .clear: return .clear
+        case .attention: return .attention
+        case .refused: return .refused
+        }
     }
 
     private func tone(_ tone: RoutingTone) -> TC.Tone {
