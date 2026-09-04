@@ -1,5 +1,10 @@
 # Oversized traces: what the ceilings actually are, and what a contributor sees
 
+Status: findings record, written 2026-08-21 against `main` of that day. The
+measurements here are the source of the 3.4:1 raw-to-envelope ratio and the
+7% oversized-session figure cited by the 2026-09-02 witness docs. The design
+options were never decided; they are kept as written, not as a proposal.
+
 Investigation findings for the question "can we flag in the UI traces that are
 too big to upload?". No code was written. Every claim below carries a
 `file:line` from the tree at branch `oversize-trace-findings`.
