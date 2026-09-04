@@ -162,7 +162,7 @@ impl WitnessTrustState {
             Self::Absent | Self::Pinned => None,
             Self::RefusingUnpinned => Some(WITNESS_EXPECTED_MEASUREMENT_CONTROL),
             Self::RefusingPinMalformed => Some("witness_expected_measurement_malformed"),
-            Self::RefusingInferenceReceiptsMissing => Some("witness_inference_receipts_missing"),
+            Self::RefusingInferenceReceiptsMissing => Some("witness_inference_attestation_missing"),
             Self::NotEnrolled => None,
             Self::SettingsUnreadable => Some("witness_settings_unreadable"),
         }
@@ -705,6 +705,20 @@ mod tests {
         assert_ne!(receipts.abi_code(), unpinned.abi_code());
         assert_ne!(receipts.refusal_label(), unpinned.refusal_label());
         assert!(receipts.is_refusing() && unpinned.is_refusing());
+    }
+
+    /// The client's refusal label must be the one the server actually emits.
+    ///
+    /// `witness_service/http.rs` answers `witness_inference_attestation_missing`
+    /// when a requiring witness gets no receipt. A client reporting a different
+    /// spelling sends a contributor grepping for a string that appears nowhere
+    /// in any server response.
+    #[test]
+    fn the_attestation_refusal_label_is_the_one_the_server_emits() {
+        assert_eq!(
+            WitnessTrustState::RefusingInferenceReceiptsMissing.refusal_label(),
+            Some("witness_inference_attestation_missing"),
+        );
     }
 
     #[test]
