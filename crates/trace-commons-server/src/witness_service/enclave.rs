@@ -96,11 +96,15 @@
 //!
 //! That guarantee holds for an image upgrade **and not for a surface
 //! migration**. dstack's v1 guest API derives different key material by
-//! design, with no compatibility mode: moving off `/v0/` would change the
+//! design, with no compatibility mode: moving to `/v1/` would change the
 //! signing address for every deployment at once. This module therefore pins
-//! the surface explicitly in [`GET_KEY_PATH`] and [`GET_QUOTE_PATH`], and an
-//! operator reading the runbook needs to know that changing them is a key
+//! the surface in [`GET_KEY_PATH`] and [`GET_QUOTE_PATH`], and an operator
+//! reading the runbook needs to know that moving them to v1 is a key
 //! rotation, not a version bump.
+//!
+//! Those constants name the v0 surface by its unversioned path, because that
+//! is the one a real agent serves -- see [`GET_KEY_PATH`]. Switching between
+//! the two v0 spellings is not a rotation; only v1 is.
 
 use super::{Enclave, SeamUnavailable, Signer};
 use async_trait::async_trait;
@@ -112,13 +116,30 @@ use zeroize::Zeroizing;
 /// witness proxies it.
 pub const DSTACK_SOCKET_PATH: &str = "/var/run/dstack.sock";
 
-/// The pinned `GetKey` surface. Changing the `v0` here changes the derived
-/// key, and therefore the signing address of every deployment.
-pub const GET_KEY_PATH: &str = "/v0/GetKey";
+/// The pinned `GetKey` surface.
+///
+/// Unversioned, and that is the deliberate spelling rather than the lazy one.
+/// This was `/v0/GetKey` on the reasoning that naming the version explicitly
+/// beat relying on an alias that could later be repointed. A real dstack
+/// 0.5.9 guest agent answers that path with **HTTP 404**: the witness could
+/// not derive a signing identity and crash-looped on a live CVM until the
+/// refusal carried its status code.
+///
+/// dstack documents the legacy methods as reachable at `/v0/<Method>` **and**
+/// at the unversioned `/<Method>` path "it has always had", and every example
+/// in its API reference uses the unversioned form. On 0.5.9 only the
+/// unversioned one is actually served.
+///
+/// This is NOT a key rotation. Both spellings name the same v0 surface and
+/// derive the same material; only the v1 surface derives differently, and
+/// moving to it would change the signing address of every deployment. That
+/// remains true and is why this constant still names a surface rather than
+/// letting a caller pass one.
+pub const GET_KEY_PATH: &str = "/GetKey";
 
-/// The pinned `GetQuote` surface. See [`GET_KEY_PATH`] on why the version is
-/// spelled out rather than left to the agent's unversioned alias.
-pub const GET_QUOTE_PATH: &str = "/v0/GetQuote";
+/// The pinned `GetQuote` surface. See [`GET_KEY_PATH`]: same surface, same
+/// reason for the unversioned spelling, same 404 if it is versioned.
+pub const GET_QUOTE_PATH: &str = "/GetQuote";
 
 /// `GetKey`'s HKDF info string. `Sign` uses this same value internally, which
 /// is what makes the in-process signature and an agent signature the same key.
