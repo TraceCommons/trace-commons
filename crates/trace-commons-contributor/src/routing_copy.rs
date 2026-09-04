@@ -235,6 +235,20 @@ pub const IRONWIRE_CHECKING: &str = "Checking...";
 pub const IRONWIRE_CHECK_UNAVAILABLE: &str =
     "That check couldn't be run just now. Nothing changed.";
 
+/// The clause both token-file failures end with, as a literal.
+///
+/// A macro and not a `const` because `concat!` takes literals: the state
+/// sentence below and [`ironwire_token_line`] have to end with the same
+/// instruction, and a second copy of it is a second thing to edit. It is
+/// also the reason a contributor can act on either sentence -- both send
+/// them to the one field on this card that takes an answer.
+macro_rules! ironwire_point_at_the_folder {
+    () => {
+        "Either it is not there, or it is no longer valid. Point the folder below at where the \
+         record is kept."
+    };
+}
+
 pub const IRONWIRE_PROBE_REACHABLE: &str =
     concat!(crate::app_name!(), " can read the local record.");
 
@@ -252,6 +266,27 @@ pub const IRONWIRE_STATE_READING: &str = concat!(
     "On, and ",
     crate::app_name!(),
     " is reading the local record."
+);
+
+/// Declared, switched on, and the reader could not be built at all.
+///
+/// The fourth daemon situation, and the one that had no words. A declared
+/// proxy whose `control.token` cannot be read yields no ledger -- see
+/// `daemon::settings::ironwire_ledger_for` -- and the status block used to
+/// report that as `not_declared`, so a contributor looking at their own
+/// switch in the on position was told the feature was off. It is neither
+/// off nor fine: it is the one state on this card that is asking for
+/// something.
+///
+/// The instruction is [`ironwire_token_line`]'s, from the one literal, so
+/// the sentence a card shows without a probe and the sentence a probe
+/// returns send a contributor to the same field. It names no file, because
+/// the status block carries no path -- a path is what the probe adds.
+pub const IRONWIRE_STATE_TOKEN_UNREADABLE: &str = concat!(
+    "On, but ",
+    crate::app_name!(),
+    " could not use the file it needs in order to read the local record. ",
+    ironwire_point_at_the_folder!()
 );
 
 /// What IronWire answered about one tool, as far as this page may use it.
@@ -346,8 +381,8 @@ pub fn ironwire_token_line(token_path: Option<&str>) -> String {
         Some(path) => format!(
             concat!(
                 crate::app_name!(),
-                " could not use the file at {path}. Either it is not there, or it is no longer \
-                 valid. Point the folder below at where the record is kept."
+                " could not use the file at {path}. ",
+                ironwire_point_at_the_folder!()
             ),
             path = path
         ),
@@ -404,13 +439,19 @@ pub fn ironwire_discovery_line(port: Option<u16>) -> String {
     }
 }
 
-/// The daemon's three states, in words. A state this build does not know
+/// The daemon's four states, in words. A state this build does not know
 /// says what the off state says: it claims nothing.
+///
+/// Four and not three. "Declared, and the reader could not be built" used
+/// to arrive here as the catch-all and read as off, which told a
+/// contributor with the switch on that the feature was off -- a sentence
+/// contradicted by the switch immediately above it.
 #[must_use]
 pub fn ironwire_state_line(state: &str) -> &'static str {
     match state {
         "awaiting_rows" => IRONWIRE_STATE_WAITING,
         "rows_seen" => IRONWIRE_STATE_READING,
+        "token_unreadable" => IRONWIRE_STATE_TOKEN_UNREADABLE,
         _ => IRONWIRE_STATE_OFF,
     }
 }
@@ -431,6 +472,12 @@ pub enum StateTone {
     Held,
     /// Declared, and answers are arriving.
     Clear,
+    /// Declared, and something on this machine needs fixing before
+    /// anything can be read. The only tone here that asks for an action,
+    /// and the reason this enum is not three values: a state meaning
+    /// "cannot read" painted as [`StateTone::Neutral`] reads as off, and
+    /// painted as [`StateTone::Held`] reads as normal. It is neither.
+    Attention,
 }
 
 /// The tone [`ironwire_state_line`]'s sentence is painted in.
@@ -447,6 +494,7 @@ pub fn ironwire_state_tone(state: &str) -> StateTone {
     match state {
         "awaiting_rows" => StateTone::Held,
         "rows_seen" => StateTone::Clear,
+        "token_unreadable" => StateTone::Attention,
         _ => StateTone::Neutral,
     }
 }
@@ -463,7 +511,15 @@ pub fn ironwire_state_tone(state: &str) -> StateTone {
 /// silently disagree with the three shells about the stamp.
 #[must_use]
 pub fn ironwire_shows_last_checked(state: &str) -> bool {
-    ironwire_state_tone(state) != StateTone::Neutral
+    // Still one table: the states that have had an answer are exactly the
+    // two tones that mean a reader exists. `Attention` is the state where
+    // the reader could not be built at all, so there has been no check to
+    // stamp -- a "last checked" under that sentence would be a time
+    // attached to something that never happened.
+    matches!(
+        ironwire_state_tone(state),
+        StateTone::Held | StateTone::Clear
+    )
 }
 
 /// When the daemon last got an answer.
@@ -528,6 +584,7 @@ pub struct RoutingCopy {
     pub state_off: &'static str,
     pub state_waiting: &'static str,
     pub state_reading: &'static str,
+    pub state_token_unreadable: &'static str,
 }
 
 /// The payload, built from the constants above -- and, for the folder note
@@ -564,6 +621,7 @@ pub fn routing_copy() -> RoutingCopy {
         state_off: IRONWIRE_STATE_OFF,
         state_waiting: IRONWIRE_STATE_WAITING,
         state_reading: IRONWIRE_STATE_READING,
+        state_token_unreadable: IRONWIRE_STATE_TOKEN_UNREADABLE,
     }
 }
 
@@ -674,6 +732,7 @@ mod tests {
             "not_declared",
             "awaiting_rows",
             "rows_seen",
+            "token_unreadable",
             "",
             "ROWS_SEEN",
             "a_state_from_a_later_daemon",
@@ -683,13 +742,15 @@ mod tests {
             let expected = match line {
                 IRONWIRE_STATE_WAITING => StateTone::Held,
                 IRONWIRE_STATE_READING => StateTone::Clear,
+                IRONWIRE_STATE_TOKEN_UNREADABLE => StateTone::Attention,
                 _ => StateTone::Neutral,
             };
             assert_eq!(tone, expected, "{state:?} reads {line:?} as {tone:?}");
-            // The stamp is shown exactly where the state has had an answer.
+            // The stamp is shown exactly where the state has had an answer,
+            // which is neither of the two states without a reader.
             assert_eq!(
                 ironwire_shows_last_checked(state),
-                tone != StateTone::Neutral,
+                matches!(tone, StateTone::Held | StateTone::Clear),
                 "{state:?}"
             );
         }
@@ -1021,7 +1082,13 @@ mod tests {
         strings.push(ironwire_discovery_line(Some(8463)));
         strings.push(ironwire_discovery_line(None));
         strings.push(last_checked_line("an hour ago"));
-        for state in ["not_declared", "awaiting_rows", "rows_seen", "unknown"] {
+        for state in [
+            "not_declared",
+            "awaiting_rows",
+            "rows_seen",
+            "token_unreadable",
+            "unknown",
+        ] {
             strings.push(ironwire_state_line(state).to_string());
         }
         for word in [
@@ -1063,6 +1130,7 @@ mod tests {
             IRONWIRE_PROBE_REACHABLE,
             IRONWIRE_STATE_OFF,
             IRONWIRE_STATE_READING,
+            IRONWIRE_STATE_TOKEN_UNREADABLE,
         ] {
             assert!(text.contains(name), "{name:?} is not in: {text}");
         }
@@ -1155,6 +1223,7 @@ mod tests {
         assert_eq!(copy.state_off, IRONWIRE_STATE_OFF);
         assert_eq!(copy.state_waiting, IRONWIRE_STATE_WAITING);
         assert_eq!(copy.state_reading, IRONWIRE_STATE_READING);
+        assert_eq!(copy.state_token_unreadable, IRONWIRE_STATE_TOKEN_UNREADABLE);
 
         // And the JSON a shell actually reads carries those same values --
         // every field a string, none of them empty. An empty word would
@@ -1181,5 +1250,59 @@ mod tests {
         assert_eq!(ironwire_state_line("awaiting_rows"), copy.state_waiting);
         assert_eq!(ironwire_state_line("rows_seen"), copy.state_reading);
         assert_eq!(ironwire_state_line("not_declared"), copy.state_off);
+        assert_eq!(
+            ironwire_state_line("token_unreadable"),
+            copy.state_token_unreadable
+        );
+    }
+
+    /// The defect this state exists to remove: the switch says on and the
+    /// sentence under it said off.
+    ///
+    /// A declared proxy whose token file cannot be read is the ordinary way
+    /// this happens -- the proxy is not running, or the record is kept
+    /// somewhere else -- and `ironwire_ledger_for` answers `None` for it,
+    /// exactly as it does for a contributor who declared nothing. The two
+    /// are now different states with different sentences, and this pins
+    /// that they cannot collapse back into one.
+    #[test]
+    fn a_declared_reader_that_could_not_be_built_does_not_read_as_off() {
+        let line = ironwire_state_line("token_unreadable");
+        assert_ne!(line, IRONWIRE_STATE_OFF);
+        assert_ne!(line, IRONWIRE_STATE_WAITING);
+        assert_ne!(line, IRONWIRE_STATE_READING);
+        let lower = line.to_lowercase();
+        assert!(!lower.starts_with("off"), "{line}");
+
+        // Not the all-clear tone and not the calm one: this is the single
+        // state on this card asking somebody to do something.
+        let tone = ironwire_state_tone("token_unreadable");
+        assert_eq!(tone, StateTone::Attention);
+        assert_ne!(tone, StateTone::Clear);
+        assert_ne!(tone, StateTone::Held);
+        assert_ne!(tone, StateTone::Neutral);
+
+        // Nothing was ever checked, so no stamp is offered under it.
+        assert!(!ironwire_shows_last_checked("token_unreadable"));
+    }
+
+    /// The state sentence and the probe sentence send a contributor to the
+    /// same place, because there is one literal.
+    ///
+    /// The card can show this state with no probe run at all, so the two
+    /// sentences appear on the same screen minutes apart. Two hand-written
+    /// instructions would be free to name different fields.
+    #[test]
+    fn the_state_sentence_carries_the_probe_sentence_instruction() {
+        let probe = ironwire_token_line(Some("/home/x/.config/control.token"));
+        let tail = ironwire_point_at_the_folder!();
+        assert!(probe.ends_with(tail), "{probe}");
+        assert!(
+            IRONWIRE_STATE_TOKEN_UNREADABLE.ends_with(tail),
+            "{IRONWIRE_STATE_TOKEN_UNREADABLE}"
+        );
+        // The status block carries no path, so this sentence must not
+        // pretend to one.
+        assert!(!IRONWIRE_STATE_TOKEN_UNREADABLE.contains('/'));
     }
 }

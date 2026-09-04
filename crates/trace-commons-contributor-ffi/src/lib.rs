@@ -1837,6 +1837,12 @@ const TC_TOOL_WIRING_NOT_WIRED: i32 = 1;
 const TC_ROUTING_TONE_NEUTRAL: i32 = 0;
 const TC_ROUTING_TONE_HELD: i32 = 1;
 const TC_ROUTING_TONE_CLEAR: i32 = 2;
+/// Reachable only from [`tc_routing_state_tone`], and only for the state
+/// that is asking somebody to change something on this machine. Added
+/// rather than folded into `NEUTRAL` because neutral is what the off
+/// sentence is painted in, and "cannot read" painted like "off" is the
+/// defect this value exists to remove.
+const TC_ROUTING_TONE_ATTENTION: i32 = 3;
 
 /// One tool's word, from what the contributor said about that tool's
 /// sessions and what IronWire said about that tool.
@@ -1927,7 +1933,7 @@ pub unsafe extern "C" fn tc_routing_tool_tone(source_mode: *const c_char, wiring
 ///
 /// A state this build has never heard of -- and a NULL or non-UTF-8 `state`
 /// -- reads as the off line, which claims nothing. It never falls through
-/// to either "on" sentence.
+/// to any of the three "on" sentences.
 ///
 /// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
 /// caught panic.
@@ -1955,17 +1961,22 @@ pub unsafe extern "C" fn tc_routing_state_line(state: *const c_char) -> *mut c_c
 }
 
 /// How firmly the sentence [`tc_routing_state_line`] returned reads:
-/// `TC_ROUTING_TONE_NEUTRAL`, `_HELD` or `_CLEAR`.
+/// `TC_ROUTING_TONE_NEUTRAL`, `_HELD`, `_CLEAR` or `_ATTENTION`.
 ///
 /// Exported for the reason the sentence is. This was the last routing branch
 /// table still written out natively in all three shells -- `routing_tone` in
 /// GTK, `tone(forState:)` in Swift, `StateTone` in C# -- three copies of one
 /// decision that agreed today and could drift apart in silence tomorrow.
 ///
-/// None of the three states is a fault, and none of them can reach a fault
-/// tone through here: `awaiting_rows` is `HELD` and never an error, because a
-/// reader built a moment ago starts empty by construction and that is the
-/// state a contributor sees immediately after touching anything on this card.
+/// `awaiting_rows` is `HELD` and never an error, because a reader built a
+/// moment ago starts empty by construction and that is the state a
+/// contributor sees immediately after touching anything on this card.
+///
+/// `token_unreadable` is `ATTENTION`, and it is the only state that reaches
+/// that value. It is a fact about this machine -- the reader could not be
+/// built -- and not a verdict about anything remote, which is why it does
+/// not read as an alarm; but it is not `NEUTRAL` either, because neutral is
+/// the off sentence's tone and this state's switch is on.
 ///
 /// Answers `TC_ROUTING_TONE_NEUTRAL` -- the tone that claims nothing -- for a
 /// state this build has never heard of, for a NULL or non-UTF-8 `state`, and
@@ -1991,6 +2002,7 @@ pub unsafe extern "C" fn tc_routing_state_tone(state: *const c_char) -> i32 {
                 StateTone::Neutral => TC_ROUTING_TONE_NEUTRAL,
                 StateTone::Held => TC_ROUTING_TONE_HELD,
                 StateTone::Clear => TC_ROUTING_TONE_CLEAR,
+                StateTone::Attention => TC_ROUTING_TONE_ATTENTION,
             },
         )
     })

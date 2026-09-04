@@ -35,10 +35,38 @@ const PAGE_LIMIT: usize = 1000;
 const MAX_REFRESH_PAGES: usize = 50;
 
 /// The proxy's log response. Only the fields we use.
+///
+/// `exchanges` is held as raw JSON values, not as `Vec<RoutedExchange>`, so
+/// that one unreadable row cannot take the page down with it. See
+/// [`IronWireLedger::parse_page`].
 #[derive(Debug, Deserialize)]
 struct LogView {
     #[serde(default)]
-    exchanges: Vec<RoutedExchange>,
+    exchanges: Vec<serde_json::Value>,
+}
+
+/// One page of the proxy's log, as this client read it.
+#[derive(Debug, Default)]
+struct Page {
+    /// The rows that deserialized.
+    rows: Vec<RoutedExchange>,
+    /// How many rows the proxy sent on this page that did not.
+    ///
+    /// A count, never the rows: a row carries a model name, a session id and
+    /// a price, and this crate's rule is that operational surfaces are
+    /// hash-only or label-only.
+    unreadable: usize,
+}
+
+impl Page {
+    /// How many rows the proxy put on this page, readable or not.
+    ///
+    /// The short-page test has to use this rather than `rows.len()`, or a
+    /// full page carrying one bad row reads as short and paging stops with
+    /// the rest of the window unread.
+    fn served(&self) -> usize {
+        self.rows.len() + self.unreadable
+    }
 }
 
 /// A [`RoutingLedger`] backed by a local IronWire daemon.
@@ -60,6 +88,15 @@ pub struct IronWireLedger {
     /// truth is the second. So it is written in exactly one place: beside
     /// the snapshot write at the end of a completed refresh.
     last_refresh_at: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// How many rows the last completed refresh could not read.
+    ///
+    /// Committed beside the snapshot, so it describes the window the
+    /// snapshot holds rather than accumulating across refreshes. A count
+    /// only -- the rows themselves never leave `parse_page`. Reported in the
+    /// daemon's routing status so a contributor whose proxy serves rows this
+    /// client cannot read has somewhere to see it, instead of enrichment
+    /// that silently thins out.
+    unreadable_rows: Arc<RwLock<usize>>,
     /// Built once at construction, not per `refresh()` call. A fresh
     /// `reqwest::Client` builds its own TLS config and connection pool, which
     /// is wasted work on every poll tick for a client that only ever talks to
@@ -118,6 +155,7 @@ impl IronWireLedger {
             token,
             snapshot: Arc::new(RwLock::new(Vec::new())),
             last_refresh_at: Arc::new(RwLock::new(None)),
+            unreadable_rows: Arc::new(RwLock::new(0)),
             client: reqwest::Client::builder().build().ok(),
         }
     }
@@ -139,6 +177,7 @@ impl IronWireLedger {
         let since = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         let mut rows: Vec<RoutedExchange> = Vec::new();
+        let mut unreadable = 0usize;
         let mut cursor: Option<i64> = None;
 
         for _ in 0..MAX_REFRESH_PAGES {
@@ -176,9 +215,12 @@ impl IronWireLedger {
                 return;
             };
 
-            let short = page.len() < PAGE_LIMIT;
-            let next = page.last().and_then(|row| row.id);
-            rows.extend(page);
+            // Against what the proxy served, not what we could read: a full
+            // page carrying a bad row must not read as the last one.
+            let short = page.served() < PAGE_LIMIT;
+            let next = page.rows.last().and_then(|row| row.id);
+            unreadable += page.unreadable;
+            rows.extend(page.rows);
 
             if short {
                 break;
@@ -194,8 +236,16 @@ impl IronWireLedger {
             }
         }
 
+        if unreadable > 0 {
+            // A count and nothing else. The rows carry model names, session
+            // ids and prices; none of that reaches a log line.
+            tracing::debug!(unreadable, "routing ledger rows this client cannot read");
+        }
         if let Ok(mut snapshot) = self.snapshot.write() {
             *snapshot = rows;
+        }
+        if let Ok(mut count) = self.unreadable_rows.write() {
+            *count = unreadable;
         }
         if let Ok(mut at) = self.last_refresh_at.write() {
             *at = Some(Utc::now());
@@ -209,6 +259,10 @@ impl IronWireLedger {
     /// one refresh stale beats enrichment that vanishes because a proxy served
     /// an error page once.
     ///
+    /// Within a body that parses, rows are read one at a time and a row that
+    /// does not deserialize is dropped and counted, never fatal. One
+    /// malformed row must not blank a 24-hour window.
+    ///
     /// A body that DOES parse is taken at its word, even down to empty,
     /// including one carrying no `exchanges` key at all (`#[serde(default)]`
     /// makes that an empty `Vec`, not a parse failure) -- a proxy answering
@@ -217,10 +271,30 @@ impl IronWireLedger {
     /// hold what that window has, not accumulate rows the proxy no longer
     /// reports. If the last good window had rows and this one honestly does
     /// not, empty is the right answer.
-    fn parse_page(body: &[u8]) -> Option<Vec<RoutedExchange>> {
-        serde_json::from_slice::<LogView>(body)
-            .ok()
-            .map(|view| view.exchanges)
+    fn parse_page(body: &[u8]) -> Option<Page> {
+        let view = serde_json::from_slice::<LogView>(body).ok()?;
+        let mut page = Page {
+            rows: Vec::with_capacity(view.exchanges.len()),
+            unreadable: 0,
+        };
+        for row in view.exchanges {
+            // Deliberately row by row. Deserializing `exchanges` as a unit
+            // means a single row missing a required field -- `started_at`,
+            // `facade`, `backend`, `rung`, `attempts`, `status` -- fails the
+            // whole page, `refresh` returns without committing, and the
+            // entire window disappears for as long as that row is in range.
+            // The module's rule is the opposite: a missing field degrades a
+            // row rather than dropping the window.
+            //
+            // The error is discarded rather than logged: serde's message
+            // quotes the offending value, and these rows carry model names,
+            // session ids and prices.
+            match serde_json::from_value::<RoutedExchange>(row) {
+                Ok(row) => page.rows.push(row),
+                Err(_) => page.unreadable += 1,
+            }
+        }
+        Some(page)
     }
 
     /// Whether the last refresh produced any rows.
@@ -232,6 +306,16 @@ impl IronWireLedger {
     #[must_use]
     pub fn has_rows(&self) -> bool {
         self.snapshot.read().is_ok_and(|rows| !rows.is_empty())
+    }
+
+    /// How many rows the last completed refresh could not read.
+    ///
+    /// Zero on every healthy machine. Non-zero says the proxy is serving a
+    /// row shape this client does not understand -- the situation that used
+    /// to blank the whole window silently.
+    #[must_use]
+    pub fn unreadable_rows(&self) -> usize {
+        self.unreadable_rows.read().map_or(0, |count| *count)
     }
 
     /// When a refresh last reached the proxy, or `None` if none ever has.
@@ -277,6 +361,7 @@ mod tests {
             token: "t".to_string(),
             snapshot: Arc::new(RwLock::new(Vec::new())),
             last_refresh_at: Arc::new(RwLock::new(None)),
+            unreadable_rows: Arc::new(RwLock::new(0)),
             client: None,
         };
         ledger.refresh().await;
@@ -312,6 +397,75 @@ mod tests {
 
     const ONE_ROW: &[u8] = br#"{"enabled":true,"exchanges":[{"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200,"client_session_id":"s-1"}]}"#;
 
+    /// The defect this shape exists to stop.
+    ///
+    /// The proxy's ledger is one table; a row written by a version that
+    /// omits a column, or by a bug, arrives on the same page as every good
+    /// row in the window. Deserializing the page as a unit made that one row
+    /// fail the whole page, and `refresh` then returned without committing
+    /// -- so a machine with a working proxy looked exactly like a machine
+    /// with none, silently, and for as long as the bad row stayed inside the
+    /// 24-hour window.
+    #[test]
+    fn one_malformed_row_does_not_take_the_page_down_with_it() {
+        // Row two is missing `status`, which has no default and never can
+        // have one: inventing a 200 for a row whose outcome we do not know
+        // would put a fabricated success into corpus metadata.
+        let body = br#"{"exchanges":[
+            {"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200},
+            {"id":2,"started_at":"2026-09-01T00:00:01Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1},
+            {"id":3,"started_at":"2026-09-01T00:00:02Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":429}
+        ]}"#;
+
+        let page = IronWireLedger::parse_page(body).expect("the page still reads");
+        assert_eq!(
+            page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![Some(1), Some(3)],
+            "the good rows arrive"
+        );
+        assert_eq!(page.unreadable, 1, "and the bad one is counted, not hidden");
+        assert_eq!(page.served(), 3, "paging counts what the proxy sent");
+    }
+
+    /// The same defect one level up: the count reaches the daemon's routing
+    /// status, and the good rows reach the snapshot, rather than a refresh
+    /// that returns having committed nothing.
+    #[tokio::test]
+    async fn a_page_with_a_bad_row_still_commits_its_good_rows() {
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(|| async {
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"enabled":true,"exchanges":[
+                            {"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200},
+                            {"id":2,"started_at":"2026-09-01T00:00:01Z","facade":"anthropic","attempts":1}
+                        ]}"#,
+                    ))
+                    .expect("response builds")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let ledger = IronWireLedger::new(port, "t".to_string());
+        ledger.refresh().await;
+
+        assert_eq!(
+            ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH).len(),
+            1,
+            "the readable row is committed"
+        );
+        assert!(ledger.has_rows(), "the window is not blanked");
+        assert_eq!(ledger.unreadable_rows(), 1, "and the loss is reported");
+    }
+
     #[test]
     fn a_body_we_cannot_parse_aborts_the_refresh() {
         // An error page, truncated output, a byte stream that is not JSON.
@@ -323,8 +477,13 @@ mod tests {
     #[test]
     fn a_readable_body_is_taken_at_its_word() {
         let page = IronWireLedger::parse_page(ONE_ROW).expect("readable");
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].id, Some(1), "the cursor comes back with the row");
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.unreadable, 0);
+        assert_eq!(
+            page.rows[0].id,
+            Some(1),
+            "the cursor comes back with the row"
+        );
     }
 
     /// Valid JSON carrying no `exchanges` key -- a proxy answering
@@ -336,7 +495,7 @@ mod tests {
     fn a_valid_body_with_no_exchanges_key_is_an_empty_page_not_a_failure() {
         let page =
             IronWireLedger::parse_page(br#"{"enabled":false}"#).expect("valid JSON is readable");
-        assert!(page.is_empty());
+        assert!(page.rows.is_empty());
     }
 
     #[test]
@@ -347,8 +506,8 @@ mod tests {
             br#"{"exchanges":[{"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200}]}"#,
         )
         .expect("readable");
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].id, None);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, None);
     }
 
     /// The whole reason this client pages.
@@ -496,18 +655,19 @@ mod tests {
     fn the_page_a_real_proxy_serves_parses_with_its_cursor_and_session_ids() {
         let body = include_bytes!("../../tests/fixtures/ironwire/log-page-2026-09-03.json");
         let page = IronWireLedger::parse_page(body).expect("parses");
-        assert_eq!(page.len(), 2);
-        assert_eq!(page[0].id, Some(1));
-        assert_eq!(page[1].id, Some(2));
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.unreadable, 0, "a real page has nothing unreadable");
+        assert_eq!(page.rows[0].id, Some(1));
+        assert_eq!(page.rows[1].id, Some(2));
         assert_eq!(
-            page[0].client_session_id.as_deref(),
+            page.rows[0].client_session_id.as_deref(),
             Some("79f2f947-522e-4780-8518-33155a18152e")
         );
         assert_eq!(
-            page[1].client_session_id.as_deref(),
+            page.rows[1].client_session_id.as_deref(),
             Some("019921c3-6a5c-7d4e-9f00-aaaaaaaaaaaa")
         );
-        assert_eq!(page[0].backend, "fake-local");
-        assert_eq!(page[0].status, 200);
+        assert_eq!(page.rows[0].backend, "fake-local");
+        assert_eq!(page.rows[0].status, 200);
     }
 }

@@ -505,13 +505,22 @@ newer daemon behaves exactly as it did before, which is the rule this
 document's "additive" status already states.
 
 Whether the IronWire proxy overlay is declared and whether it is producing
-anything. **Three states, not two.**
+anything. **Four states, not two.**
 
 | `state` | meaning |
 | --- | --- |
 | `not_declared` | no proxy declared; the daemon holds no ledger and reads nothing |
 | `awaiting_rows` | declared, and the daemon holds a ledger, but no row has arrived yet |
 | `rows_seen` | declared, and the last refresh window had rows |
+| `token_unreadable` | declared, and no ledger could be built: `control.token` could not be read |
+
+`token_unreadable` is what a declared proxy that is not running looks like,
+and it is the one state a contributor has to act on. It was reported as
+`not_declared` before it existed, which made a shell print "off" under a
+switch the contributor could see was on. It is not `awaiting_rows` either:
+that state says a reader exists and has seen nothing, and this one says no
+reader exists. `last_refresh_at` is always `null` under it — nothing was
+built, so nothing was ever checked.
 
 `awaiting_rows` is **not an error** and a client must not render it as one.
 A machine whose proxy was installed this morning reports it, and so does one

@@ -269,10 +269,14 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// this row from the same three states since it was written; this is
     /// that parity.
     ///
-    /// None of the three states is a fault, so this never reaches a fault
-    /// colour: <c>awaiting_rows</c> is held and not broken -- a reader built
-    /// a moment ago starts cold by construction, and that is the state a
-    /// contributor sees immediately after touching anything on this card.
+    /// <c>awaiting_rows</c> is held and not broken -- a reader built a moment
+    /// ago starts cold by construction, and that is the state a contributor
+    /// sees immediately after touching anything on this card.
+    ///
+    /// <c>token_unreadable</c> is the one state that reads as attention. It
+    /// is a fact about this machine and not an alarm about anything remote,
+    /// but it is not neutral either: neutral is the off sentence's reading,
+    /// and this state's switch is on.
     ///
     /// From the state, never from <see cref="RoutingStateText"/>. The word
     /// half of this surface used to recover its tone by comparing a rendered
@@ -292,6 +296,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             Raise(nameof(RoutingStateTone));
             Raise(nameof(RoutingStateIsClear));
             Raise(nameof(RoutingStateIsHeld));
+            Raise(nameof(RoutingStateIsAttention));
             Raise(nameof(RoutingStateIsNeutral));
         }
     }
@@ -299,7 +304,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// <summary>
     /// The XAML projection of <see cref="RoutingStateTone"/>, and only that.
     ///
-    /// Three visibilities rather than one bound brush because the tone
+    /// Four visibilities rather than one bound brush because the tone
     /// colours live in a theme dictionary and only <c>ThemeResource</c>
     /// resolves those correctly in both themes. All three read the enum;
     /// none reads the sentence.
@@ -309,9 +314,18 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// <summary>The held reading. Normal, never a fault.</summary>
     public bool RoutingStateIsHeld => RoutingStateTone == RoutingTone.Held;
 
+    /// <summary>
+    /// The one reading that asks for something: declared, and no reader
+    /// could be built. Painted apart from the other three because neutral
+    /// reads as off and held reads as normal, and this state is neither.
+    /// </summary>
+    public bool RoutingStateIsAttention => RoutingStateTone == RoutingTone.Attention;
+
     /// <summary>Says nothing either way, and is the default.</summary>
     public bool RoutingStateIsNeutral =>
-        RoutingStateTone != RoutingTone.Clear && RoutingStateTone != RoutingTone.Held;
+        RoutingStateTone != RoutingTone.Clear
+        && RoutingStateTone != RoutingTone.Held
+        && RoutingStateTone != RoutingTone.Attention;
 
     /// <summary>
     /// When the daemon last got an answer.

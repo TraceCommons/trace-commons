@@ -353,12 +353,18 @@ public class RoutingSurfaceTests
     // --- What the daemon is seeing ---------------------------------------
 
     [Fact]
-    public void TheDaemonsThreeStatesEachGetTheirOwnSentence()
+    public void TheDaemonsFourStatesEachGetTheirOwnSentence()
     {
         RoutingCopy copy = Copy();
         Assert.Equal(copy.StateWaiting, RoutingTools.StateLine(copy, RoutingTools.AwaitingRows));
         Assert.Equal(copy.StateReading, RoutingTools.StateLine(copy, RoutingTools.RowsSeen));
         Assert.Equal(copy.StateOff, RoutingTools.StateLine(copy, RoutingTools.NotDeclared));
+        Assert.Equal(
+            copy.StateTokenUnreadable,
+            RoutingTools.StateLine(copy, RoutingTools.TokenUnreadable));
+        // The defect this state exists to remove: the switch is on, so the
+        // card must not print the off sentence.
+        Assert.NotEqual(copy.StateOff, RoutingTools.StateLine(copy, RoutingTools.TokenUnreadable));
         // A state this build has never heard of says what the off state says:
         // it claims nothing.
         Assert.Equal(copy.StateOff, RoutingTools.StateLine(copy, "brand-new-state"));
@@ -882,6 +888,7 @@ public class RoutingSurfaceTests
         foreach (string field in new[]
                  {
                      "WordPrivate", "WordDirect", "WordNotUsed", "StateWaiting", "StateReading",
+                     "StateTokenUnreadable",
                  })
         {
             Assert.False(
@@ -992,6 +999,41 @@ public class RoutingSurfaceTests
         Assert.Equal(copy.StateOff, RoutingSurface.StateLine(null));
         Assert.Equal(copy.StateWaiting, RoutingSurface.StateLine(RoutingTools.AwaitingRows));
         Assert.Equal(copy.StateReading, RoutingSurface.StateLine(RoutingTools.RowsSeen));
+        Assert.Equal(
+            copy.StateTokenUnreadable,
+            RoutingSurface.StateLine(RoutingTools.TokenUnreadable));
+        Assert.NotEqual(copy.StateOff, RoutingSurface.StateLine(RoutingTools.TokenUnreadable));
+    }
+
+    /// <summary>
+    /// Declared, and no reader could be built: neither the calm reading nor
+    /// the all-clear one, across the ABI.
+    /// </summary>
+    /// <remarks>
+    /// Neutral is what the off sentence is painted in, so a state meaning
+    /// "cannot read" painted neutral reads as off -- which is the defect.
+    /// Held reads as normal, which is the same defect with a different
+    /// colour. And no stamp goes under it: no reader was built, so nothing
+    /// was ever checked.
+    /// </remarks>
+    [Fact]
+    public void ADeclaredReaderThatCouldNotBeBuiltIsNotPaintedAsOffOrAsFine()
+    {
+        RoutingCopy copy = Copy();
+        RoutingTone tone = RoutingTools.StateTone(RoutingTools.TokenUnreadable);
+        Assert.Equal(RoutingTone.Attention, tone);
+        Assert.NotEqual(RoutingTone.Neutral, tone);
+        Assert.NotEqual(RoutingTone.Held, tone);
+        Assert.NotEqual(RoutingTone.Clear, tone);
+
+        RoutingStatusLine line = RoutingTools.StatusLine(
+            copy,
+            RoutingTools.TokenUnreadable,
+            null,
+            DateTimeOffset.UnixEpoch);
+        Assert.Equal(copy.StateTokenUnreadable, line.Text);
+        Assert.Equal(RoutingTone.Attention, line.Tone);
+        Assert.Null(line.LastChecked);
     }
 
     /// <summary>
@@ -1024,25 +1066,35 @@ public class RoutingSurfaceTests
         foreach (string binding in new[]
                  {
                      "Settings.RoutingStateIsNeutral", "Settings.RoutingStateIsHeld",
-                     "Settings.RoutingStateIsClear",
+                     "Settings.RoutingStateIsClear", "Settings.RoutingStateIsAttention",
                  })
         {
             Assert.Contains(binding, xaml, StringComparison.Ordinal);
         }
 
-        // None of the three states is a fault, so none of them may reach a
-        // fault colour. awaiting_rows is what a contributor sees immediately
-        // after touching anything on this card; painting it as broken would
-        // accuse a working proxy at exactly that moment.
+        Assert.Contains(
+            "RoutingStateTone == RoutingTone.Attention", viewModel, StringComparison.Ordinal);
+
+        // None of the states is a *fault*. awaiting_rows is what a
+        // contributor sees immediately after touching anything on this card;
+        // painting it as broken would accuse a working proxy at exactly that
+        // moment.
         Assert.NotEqual(RoutingTone.Clear, RoutingTools.StateTone(RoutingTools.AwaitingRows));
         Assert.Equal(RoutingTone.Held, RoutingTools.StateTone(RoutingTools.AwaitingRows));
-        foreach (string alarming in new[]
-                 {
-                     "TcGoldTextBrush", "TcGoldBrandBrush", "TcCoralTextBrush", "TcCoralBrandBrush",
-                 })
+        Assert.NotEqual(RoutingTone.Attention, RoutingTools.StateTone(RoutingTools.AwaitingRows));
+        Assert.NotEqual(RoutingTone.Attention, RoutingTools.StateTone(RoutingTools.RowsSeen));
+        Assert.NotEqual(RoutingTone.Attention, RoutingTools.StateTone(RoutingTools.NotDeclared));
+
+        // The refusal colours stay off this card entirely. The attention one
+        // does not: exactly one state reaches it -- declared, and no reader
+        // could be built -- and it is the row that stops "cannot read" being
+        // painted like "off".
+        foreach (string alarming in new[] { "TcCoralTextBrush", "TcCoralBrandBrush" })
         {
             Assert.DoesNotContain(alarming, RoutingCardMarkup(xaml), StringComparison.Ordinal);
         }
+        Assert.Contains(
+            "TcGoldTextBrush", RoutingCardMarkup(xaml), StringComparison.Ordinal);
     }
 
     /// <summary>

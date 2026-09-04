@@ -966,6 +966,7 @@ struct SettingsContent: View {
         switch tone {
         case .clear: return .clear
         case .held: return .held
+        case .attention: return .attention
         case .neutral: return .neutral
         }
     }

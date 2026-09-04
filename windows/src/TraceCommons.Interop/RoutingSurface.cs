@@ -110,11 +110,13 @@ public static class RoutingSurface
     {
         AbiToneHeld => RoutingTone.Held,
         AbiToneClear => RoutingTone.Clear,
+        AbiToneAttention => RoutingTone.Attention,
         _ => RoutingTone.Neutral,
     };
 
     private const int AbiToneHeld = 1;
     private const int AbiToneClear = 2;
+    private const int AbiToneAttention = 3;
 
     /// <summary>
     /// The daemon's routing state, in words, decided by the shared branch
