@@ -576,8 +576,18 @@ mod tests {
         assert_eq!(read_pointer(), None);
     }
 
+    /// The positive case, and only the positive case.
+    ///
+    /// This was `a_pointer_on_disk_is_read`, and it asserted that a
+    /// `token_path` naming `/t/control.token` -- an absolute path to a file
+    /// that did not exist -- came back verbatim. That property was the
+    /// defect: it said an arbitrary absolute path passes through unchecked.
+    /// It is now asserted inverted, by
+    /// `a_token_path_outside_the_token_directory_is_refused` and its `..`
+    /// and symlink siblings. What is left here is what the name says: a
+    /// token inside the token directory is read back, exactly.
     #[test]
-    fn a_pointer_on_disk_is_read() {
+    fn a_token_path_inside_the_token_directory_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         // The token has to be inside the token directory now, and has to
         // exist: `confine_token_path` canonicalizes before comparing.
