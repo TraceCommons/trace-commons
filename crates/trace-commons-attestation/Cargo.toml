@@ -38,9 +38,11 @@ thiserror = "2"
 
 [features]
 default = []
-# NEAR AI inference-receipt parsing. The hosted server turns it on; a
-# contributor client does not, because it makes no inference calls and holds
-# no receipts.
+# NEAR AI inference-receipt parsing. The hosted server turns it on, and so
+# does `trace-commons-contributor` now that it fetches receipts for the
+# attested-inference path. This comment previously said a contributor client
+# does not enable it "because it makes no inference calls and holds no
+# receipts"; that stopped being true when that path was built.
 #
 # This feature saves NO packages and is not meant to. `k256` and `sha3` are
 # unconditional above, because the EIP-191 signer recovery in `eip191` is what
