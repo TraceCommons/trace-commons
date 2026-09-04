@@ -228,6 +228,15 @@ pub enum WitnessError {
     /// requirement in principle rather than having failed to.
     #[error("this contribution declares no inference call")]
     InferenceCallAbsent,
+    /// The last declared inference call declares that its stream was
+    /// restarted, so no receipt for it exists or ever will.
+    ///
+    /// IronWire's resilience guard restarts a stalled stream and records no
+    /// digest for it. Named separately from a missing receipt because the
+    /// contributor could not have supplied one: reporting it as missing would
+    /// send an operator looking for a client bug.
+    #[error("the attested inference call was restarted mid-stream and cannot be attested")]
+    InferenceCallUnattestable,
     /// The last declared inference call carries no request or response body.
     ///
     /// In practice: the contribution withheld tool payloads, so the conversion
@@ -245,15 +254,6 @@ pub enum WitnessError {
     /// [`ReceiptError`]: crate::near_attestation::receipt::ReceiptError
     #[error("the offered inference receipt did not verify against these bodies")]
     InferenceReceiptUnverified,
-    /// The offered receipt was the two-part form, which binds no model.
-    #[error("the offered inference receipt binds no model")]
-    InferenceReceiptModelUnbound,
-    /// The offered receipt bound a model this deployment does not admit.
-    #[error("the offered inference receipt binds a model this witness does not admit")]
-    InferenceModelInadmissible,
-    /// A request or response body was not readable as an inference body.
-    #[error("an attested inference body could not be read")]
-    InferenceBodyUnreadable,
     /// An attested body was larger than this witness will hash.
     #[error("an attested inference body is larger than this witness will hash")]
     InferenceReceiptTooLarge,

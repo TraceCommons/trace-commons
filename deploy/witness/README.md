@@ -559,30 +559,61 @@ in the session the witness was handed. The witness — not the contributor —
 decides which exchange that is: it takes the last `HttpExchange` event in the
 trace's own order.
 
-### What the requirement establishes
+### What the requirement establishes — and read this before writing any surface
 
-Exactly this: at witness time, an attested NEAR AI enclave had produced that
-response for that request, and both bodies were inside the session that was
-certified.
+At witness time, an attested NEAR AI enclave had produced that response for
+that request, and both bodies were inside the session that was certified.
 
-It does **not** establish that the session made the call — a contributor
-holding a receipt and its bodies can paste them into a trace they wrote. It
-says nothing about any other turn, tool result or file edit. And it says
-nothing about the conversation history: the reason one body pair is worth
-having is that a chat-completions request body repeats the whole conversation
-prefix, but a session that compacted or truncated its context sends a summary
-instead, and the witness cannot tell which it got.
+**The attested bytes are not the bytes the agent sent.** The receipt binds what
+the *upstream provider* received and returned. On an IronWire route the request
+is rewritten before forwarding — a policy model swap re-serialises it, the
+privacy filter re-serialises it wholesale, and a cross-family route synthesises
+a different document entirely, so the attested request on a NEAR AI route may
+be a Chat Completions document built from an Anthropic one, carrying substituted
+models and privacy-filter placeholders where the original held real values. The
+attested response is the provider's own raw event stream, not the frames the
+client saw.
+
+So the claim is *these are the bytes the provider hashed*. It is never "this is
+the request the agent made", and no wording may let a reader assume it is.
+
+One consequence runs in our favour: capture sits downstream of the privacy
+filter, so the attested bytes are already filtered.
+
+It also does **not** establish that the session made the call — a contributor
+holding a receipt and its bodies can paste them into a trace they wrote. It says
+nothing about any other turn, tool result or file edit. And it says nothing
+about the conversation history: the reason one body pair is worth having is that
+a chat-completions request body repeats the whole conversation prefix, but a
+session that compacted or truncated its context sends a summary instead, and the
+witness cannot tell which it got.
 
 Render the count `n_of_m` — one verified receipt over a trace declaring three
 calls is `1_of_3`. Never "attested", never "genuine".
 
+### The model is not bound, and we cannot make it so
+
+`verify_receipt` supports a three-part receipt whose leading part is the model,
+and an earlier draft of this control refused anything else. That was wrong about
+the provider: NEAR AI signs the **two-part** form — `<requestHash>:<responseHash>`,
+no model prefix — and supplies the model as a query parameter on retrieval
+(`GET /v1/signature/{chat_id}?model=...`). A query parameter is not signed and is
+chosen by whoever fetches the receipt, so it establishes nothing. Refusing the
+two-part form would refuse every real receipt, and a model allowlist checked
+against it would be a control that cannot fail.
+
+There is therefore no model policy and no allowlist variable. That is a
+**limitation of the provider's current API**, not a decision this deployment
+made. Note what it costs: a policy model swap substitutes the model that served,
+and a bound model is exactly what would have caught it.
+
 ### Verification happens once and cannot be repeated
 
 The receipt binds the raw bodies; the witness publishes a redacted artifact.
-Redaction destroys the attested bytes, so **nothing downstream can re-check
-the receipt**. The witness is the only party that ever holds both, which is
-why it is the only party that can verify at all. Do not build a surface that
-implies a server or a consumer re-verified anything.
+Redaction destroys the attested bytes, so **nothing downstream can re-check the
+receipt**. The witness is the only party that ever holds both, which is why it
+is the only party that can verify at all. Do not build a surface that implies a
+server or a consumer re-verified anything.
 
 Note also what the certificate does **not** carry: there is no
 attested-inference field on it. A certificate proves the requirement held only
@@ -603,11 +634,9 @@ certificate at all.
 | `witness_inference_attestation_missing` | required, and no receipt was offered |
 | `witness_inference_attestation_unavailable` | offered on `POST /v1/witness`'s **text** shape, which carries no event order and so cannot say which call was last |
 | `witness_inference_call_absent` | the contribution declares no inference call at all |
+| `witness_inference_call_unattestable` | the final call declares a restarted stream, for which no receipt exists or ever will |
 | `witness_inference_body_not_in_session` | the last call carries no bodies — in practice, the contribution withheld tool payloads |
 | `witness_inference_receipt_unverified` | the receipt did not verify against those bytes |
-| `witness_inference_receipt_model_unbound` | the two-part receipt form, which binds no model |
-| `witness_inference_model_inadmissible` | the bound model is not in `TRACE_COMMONS_WITNESS_ADMISSIBLE_INFERENCE_MODELS` |
-| `witness_inference_body_unreadable` | the request body is not JSON naming a `model` |
 | `witness_inference_body_too_large` | a body exceeds `TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES` |
 
 `witness_inference_receipt_unverified` is the one to read carefully. SHA-256
@@ -615,6 +644,20 @@ answers one bit, so a capture that pretty-printed a body, reordered its keys or
 re-serialised it from a parsed form produces **exactly** the same failure as a
 receipt lifted from somewhere else. The witness cannot tell them apart and does
 not pretend to. On an honest deployment, suspect the capture first.
+
+### The restarted-stream hole
+
+IronWire's resilience guard restarts a stalled stream, and a restarted stream
+records no digest — so no receipt exists for it. Because the requirement attests
+the **final** call, a trace whose last call was restarted mid-stream can never
+satisfy it. That is a coverage hole, not a rare edge.
+
+It has its own label so an operator is not sent looking for a client bug, but
+the witness can only use that label when the capture side *declares* the
+restart, at `structured_payload["response"]["stream_restarted"]`. **Nothing
+writes that field today**; it is a contract IronWire must honour. Until it does,
+a restarted final call surfaces as `witness_inference_attestation_missing` —
+fail-closed, but less informative.
 
 ### Who this excludes, before you turn it on
 
@@ -624,6 +667,7 @@ not pretend to. On an honest deployment, suspect the capture first.
   `HttpExchange` event's `structured_payload["request"]["body"]` and `content`,
   and both are written only under `include_tool_payloads`. That flag has
   historically been off everywhere.
+- **Every trace whose final call was a restarted stream**, per above.
 - **Every trace on the text shape of `POST /v1/witness`**, including the smoke
   tests in this document. The requirement is enforceable only on the structured
   `raw_contribution` shape.
@@ -631,11 +675,13 @@ not pretend to. On an honest deployment, suspect the capture first.
   `with_contribution_redactor`, so the structured route is unavailable and
   answers `witness_contribution_path_unavailable`. Turning the requirement on
   against this binary therefore refuses every submission by one label or the
-  other. Wiring the structured seam into the binary is a prerequisite, and it
-  is not part of this change.
+  other. Wiring the structured seam into the binary is a prerequisite, and it is
+  not part of this change.
 
-That is a large exclusion. It is the product decision the flag exists to make
-explicit.
+Nothing fetches a receipt today, either: `upstream_id` in IronWire's ledger *is*
+the receipt `chat_id`, and the ledger already persists it with both digests and
+the served model, but no code anywhere calls `GET /v1/signature/{chat_id}`. That
+call belongs downstream of the ledger and does not exist yet.
 
 ## First boot
 

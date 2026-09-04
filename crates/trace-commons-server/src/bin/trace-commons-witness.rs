@@ -209,16 +209,6 @@ struct Args {
     #[arg(long, env = "TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE")]
     require_attested_inference: bool,
 
-    /// Comma-separated model names the requirement admits. Empty admits any
-    /// model the receipt *binds* -- a receipt still has to bind one, which the
-    /// two-part receipt form cannot do.
-    #[arg(
-        long,
-        env = "TRACE_COMMONS_WITNESS_ADMISSIBLE_INFERENCE_MODELS",
-        default_value = ""
-    )]
-    admissible_inference_models: String,
-
     /// Largest attested request or response body the witness will hash.
     #[arg(
         long,
@@ -322,29 +312,20 @@ async fn main() -> Result<()> {
     // require nothing must fail to start rather than serve a requirement that
     // is not one.
     let inference_policy = if args.require_attested_inference {
-        let admissible: Vec<String> = args
-            .admissible_inference_models
-            .split(',')
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string)
-            .collect();
-        let admissible_count = admissible.len();
         let policy =
-            InferenceAttestationPolicy::required(admissible, args.max_inference_body_bytes)
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES must be greater \
-                         than zero when attested inference is required"
-                    )
-                })?;
+            InferenceAttestationPolicy::required(args.max_inference_body_bytes).map_err(|_| {
+                anyhow::anyhow!(
+                    "TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES must be greater \
+                     than zero when attested inference is required"
+                )
+            })?;
         // Label-only, and it is what an operator needs to see to know which
         // policy this process is actually running: the certificate does not
         // carry it, and the measurement covers the image rather than the
         // environment.
         tracing::info!(
             require_attested_inference = true,
-            admissible_inference_models = admissible_count,
+            max_inference_body_bytes = args.max_inference_body_bytes,
             "witness attested-inference requirement"
         );
         policy

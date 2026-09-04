@@ -100,6 +100,33 @@
 //!   holds nothing between requests by design. Dedup on the receipt signature
 //!   belongs to ingest, which has state.
 //!
+//! # The attested bytes are not the bytes the harness sent
+//!
+//! The single most important sentence for anyone writing a surface on top of
+//! this. The receipt binds **what the upstream provider received and
+//! returned**, and on an IronWire route that is not the agent's own request:
+//!
+//! - a policy model swap re-serialises the request;
+//! - the privacy filter re-serialises it wholesale, so the attested body holds
+//!   filter **placeholders** where the original held real values;
+//! - a cross-family route synthesises a different document entirely -- the
+//!   attested request on a NEAR AI route may be a Chat Completions document
+//!   built from an Anthropic one.
+//!
+//! And the attested response is the provider's own raw stream, not the frames
+//! the client saw. Streaming is the normal case: NEAR AI's reference verifier
+//! hashes the entire raw concatenated SSE text, so the response body here is
+//! an event-stream document and **must not be parsed** -- reassembled content
+//! would never hash to the same digest. Nothing in this module reads it; it is
+//! bytes to be hashed.
+//!
+//! So the honest claim is *these are the bytes the provider hashed*, never
+//! "this is the request the agent made". No wording anywhere may let a reader
+//! assume otherwise.
+//!
+//! One consequence runs in our favour: because capture sits downstream of the
+//! privacy filter, the attested bytes are already filtered.
+//!
 //! # Capture must be byte-verbatim, and a bad capture is indistinguishable
 //! # from a forgery
 //!
@@ -116,15 +143,44 @@
 //! any conclusion about why. On an honest deployment a capture bug is the
 //! likelier cause, and an operator must read it that way.
 //!
-//! # Two-part receipts are refused
+//! # A restarted stream is unattestable
 //!
-//! `ReceiptVerdict.model` is `None` for the two-part form, which binds no
-//! model at all. A deployment that requires attested inference is requiring a
-//! statement about which program served it, so the two-part form is refused by
-//! name rather than admitted as a weaker pass. The model the receipt binds is
-//! compared against the model named in the request body -- itself hash-bound by
-//! the receipt, so the caller cannot choose it after the fact -- and then
-//! against the deployment's allowlist.
+//! IronWire's resilience guard restarts a stalled stream, and a restarted
+//! stream records no digest -- so no receipt exists for it, and none ever
+//! will. Combined with attesting the final call, a trace whose **last** call
+//! was restarted mid-stream can never satisfy the requirement. That is a
+//! coverage hole rather than an edge case, and it gets its own name,
+//! [`WitnessError::InferenceCallUnattestable`], so an operator is not left
+//! reading it as a contributor who withheld a receipt.
+//!
+//! The witness recognises it from [`STREAM_RESTARTED_MARKER`] on the exchange.
+//! That marker is a **contract the capture side must write**, not something
+//! IronWire emits today; until it does, a restarted final call reaches an
+//! operator as [`WitnessError::InferenceAttestationMissing`], which is
+//! fail-closed but less informative.
+//!
+//! # The model is not bound, and this witness cannot make it so
+//!
+//! `verify_receipt` supports a three-part receipt text whose leading part is
+//! the model, and an earlier version of this module refused anything else.
+//! That was wrong about the provider. The current NEAR AI API signs the
+//! **two-part** form -- `<requestHash>:<responseHash>`, no model prefix -- and
+//! supplies the model as a query parameter on retrieval
+//! (`GET /v1/signature/{chat_id}?model=...`). A query parameter is not signed
+//! and is chosen by whoever fetches the receipt, so it establishes nothing. A
+//! policy refusing the two-part form would therefore refuse every real
+//! receipt, and a model allowlist checked against it would be a control that
+//! cannot fail.
+//!
+//! So there is no model policy here, and its absence is a **limitation of the
+//! provider API**, not a decision this deployment made. The model named in the
+//! attested request body is hash-bound and can be read, but it is the model
+//! IronWire asked for rather than the model that served -- and on a policy
+//! swap those differ, which is exactly the substitution a bound model would
+//! have caught. When a three-part receipt does arrive, `verify_receipt`
+//! compares its bound model against the request body's `model` and a mismatch
+//! surfaces as [`WitnessError::InferenceReceiptUnverified`]; nothing more is
+//! enforced until the provider signs one.
 //!
 //! # Nothing here is logged
 //!
@@ -161,7 +217,6 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceAttestationPolicy {
     required: bool,
-    admissible_models: Vec<String>,
     max_body_bytes: usize,
 }
 
@@ -179,7 +234,6 @@ impl InferenceAttestationPolicy {
     pub fn not_required() -> Self {
         Self {
             required: false,
-            admissible_models: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
     }
@@ -187,19 +241,16 @@ impl InferenceAttestationPolicy {
     /// Refuse any contribution whose last declared inference call does not
     /// carry a verified receipt.
     ///
-    /// An empty `admissible_models` means any model the receipt binds is
-    /// admissible -- the model is still required to be *bound*, which is the
-    /// part the two-part form cannot do.
-    pub fn required(
-        admissible_models: Vec<String>,
-        max_body_bytes: usize,
-    ) -> Result<Self, PolicyMisconfigured> {
+    /// There is no model parameter, and its absence is the provider's doing
+    /// rather than this deployment's: the receipts NEAR AI signs today bind no
+    /// model, so an allowlist checked against one would be a control that
+    /// cannot fail. See the module docs.
+    pub fn required(max_body_bytes: usize) -> Result<Self, PolicyMisconfigured> {
         if max_body_bytes == 0 {
             return Err(PolicyMisconfigured);
         }
         Ok(Self {
             required: true,
-            admissible_models,
             max_body_bytes,
         })
     }
@@ -313,6 +364,13 @@ pub fn check_inference_attestation(
         return Err(WitnessError::InferenceCallAbsent);
     };
 
+    // Before the bodies: a restarted stream has no digest and therefore no
+    // receipt, and saying so is more useful to an operator than reporting the
+    // receipt they could not have obtained as missing.
+    if stream_was_restarted(final_call) {
+        return Err(WitnessError::InferenceCallUnattestable);
+    }
+
     let (request_body, response_body) =
         exchange_bodies(final_call).ok_or(WitnessError::InferenceBodyNotInSession)?;
 
@@ -320,44 +378,63 @@ pub fn check_inference_attestation(
         return Err(WitnessError::InferenceReceiptTooLarge);
     }
 
-    // The model the receipt is checked against comes out of the request body,
-    // which the receipt's own request hash commits to. Taking it from a field
-    // beside the receipt would let the caller name whatever the receipt says
-    // and turn `verify_receipt`'s model check into a tautology.
-    let request: Value =
-        serde_json::from_str(request_body).map_err(|_| WitnessError::InferenceBodyUnreadable)?;
-    let requested_model = request
-        .get("model")
+    // Best-effort, and unused by every receipt the provider signs today: the
+    // two-part form binds no model, so `verify_receipt` ignores this. It is
+    // read out of the hash-bound request body rather than from a field beside
+    // the receipt so that if a three-part receipt ever does arrive, the model
+    // it is checked against is one the receipt itself commits to instead of
+    // one the caller typed. An unparseable body is not a refusal of its own:
+    // the hashes are what matter, and they are checked next either way.
+    let requested_model = serde_json::from_str::<Value>(request_body)
+        .ok()
+        .as_ref()
+        .and_then(|request| request.get("model"))
         .and_then(Value::as_str)
-        .ok_or(WitnessError::InferenceBodyUnreadable)?;
+        .unwrap_or_default()
+        .to_string();
 
     // One label for every `ReceiptError`; see the module's note on why a
     // re-serialised capture is indistinguishable from a forgery here.
-    let verdict = verify_receipt(
+    // The verdict is discarded rather than inspected. Its `model` is `None`
+    // for every receipt the provider signs today, its hashes are the ones just
+    // checked, and its `signing_address` is the inference enclave's key --
+    // which this witness does not pin, because it has no attested value to pin
+    // it against and a self-reported one would prove nothing.
+    verify_receipt(
         receipt,
         request_body.as_bytes(),
         response_body.as_bytes(),
-        requested_model,
+        &requested_model,
     )
     .map_err(|_| WitnessError::InferenceReceiptUnverified)?;
-
-    // The two-part form binds no model. See the module docs.
-    let Some(bound_model) = verdict.model.as_deref() else {
-        return Err(WitnessError::InferenceReceiptModelUnbound);
-    };
-    if !policy.admissible_models.is_empty()
-        && !policy
-            .admissible_models
-            .iter()
-            .any(|admissible| admissible == bound_model)
-    {
-        return Err(WitnessError::InferenceModelInadmissible);
-    }
 
     Ok(InferenceAttestationOutcome {
         verified: 1,
         declared_calls,
     })
+}
+
+/// The flag a capture sets on an exchange whose stream was restarted.
+///
+/// Read at `structured_payload["response"][STREAM_RESTARTED_MARKER]`, as a
+/// boolean. **A contract, not an observation**: nothing writes it today, and
+/// this module cannot detect a restart any other way -- a restarted stream
+/// looks like a stream. Until the capture side sets it, a restarted final call
+/// is refused as a missing receipt rather than as an unattestable one.
+pub const STREAM_RESTARTED_MARKER: &str = "stream_restarted";
+
+/// Whether the exchange declares that its stream was restarted.
+///
+/// Absent means "not declared", never "did not happen". The witness has no
+/// view of the stream and cannot check this claim; what it can do is refuse
+/// under an accurate name when the claim is made.
+fn stream_was_restarted(event: &RawTraceContributionEvent) -> bool {
+    event
+        .structured_payload
+        .get("response")
+        .and_then(|response| response.get(STREAM_RESTARTED_MARKER))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The two raw bodies an `HttpExchange` event carries, in the one place
@@ -528,8 +605,7 @@ mod tests {
     }
 
     fn required() -> InferenceAttestationPolicy {
-        InferenceAttestationPolicy::required(Vec::new(), DEFAULT_MAX_BODY_BYTES)
-            .expect("a well formed policy")
+        InferenceAttestationPolicy::required(DEFAULT_MAX_BODY_BYTES).expect("a well formed policy")
     }
 
     fn check(
@@ -597,44 +673,90 @@ mod tests {
         );
     }
 
+    /// The form the provider actually signs. An earlier version of this
+    /// module refused it; refusing it would refuse every real receipt.
     #[test]
-    fn a_two_part_receipt_binds_no_model_and_is_refused() {
+    fn a_two_part_receipt_is_the_normal_form_and_is_admitted() {
         let request = request_body(MODEL, "hello");
         let response = response_body("hi");
         let raw = contribution(&[(request.clone(), response.clone())]);
+        let outcome = check(
+            &required(),
+            Some(&two_part_receipt(&request, &response)),
+            &raw,
+        )
+        .expect("the two-part form is what NEAR AI signs today");
+        assert_eq!(outcome.verified, 1);
+    }
+
+    /// A request body that is not JSON at all still verifies on its hashes.
+    /// The model read out of it is best-effort and unused by a two-part
+    /// receipt, so an unparseable body must not be a refusal of its own.
+    #[test]
+    fn an_unparseable_request_body_still_verifies_on_its_hashes() {
+        let request = "not json at all, but these are the bytes that were sent";
+        let response = response_body("hi");
+        let raw = contribution(&[(request.to_string(), response.clone())]);
         assert_eq!(
             check(
                 &required(),
-                Some(&two_part_receipt(&request, &response)),
+                Some(&two_part_receipt(request, &response)),
                 &raw
-            ),
-            Err(WitnessError::InferenceReceiptModelUnbound)
+            )
+            .expect("the hashes are what matter")
+            .verified,
+            1
         );
     }
 
+    /// A streamed response is a raw SSE document, not JSON, and the receipt
+    /// binds the whole concatenated text. Nothing here may parse it.
     #[test]
-    fn a_model_outside_the_allowlist_is_refused() {
+    fn a_raw_event_stream_response_verifies_as_the_bytes_it_is() {
+        let request = request_body(MODEL, "hello");
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let raw = contribution(&[(request.clone(), stream.to_string())]);
+        assert_eq!(
+            check(&required(), Some(&two_part_receipt(&request, stream)), &raw)
+                .expect("a stream is bytes like any other")
+                .verified,
+            1
+        );
+    }
+
+    /// A restarted stream has no digest and so no receipt, ever. It gets its
+    /// own name rather than reading as a contributor who withheld one.
+    #[test]
+    fn a_restarted_final_stream_is_unattestable_by_a_name_of_its_own() {
         let request = request_body(MODEL, "hello");
         let response = response_body("hi");
-        let raw = contribution(&[(request.clone(), response.clone())]);
-        let policy =
-            InferenceAttestationPolicy::required(vec![MODEL.to_string()], DEFAULT_MAX_BODY_BYTES)
-                .expect("policy");
-        assert!(
-            check(&policy, Some(&receipt(MODEL, &request, &response)), &raw).is_ok(),
-            "the admitted model must pass"
-        );
+        let mut raw = contribution(&[(request.clone(), response.clone())]);
+        let last = raw.events.last_mut().expect("the exchange");
+        last.structured_payload["response"][STREAM_RESTARTED_MARKER] = serde_json::json!(true);
 
-        let other = "some-other/model";
-        let other_request = request_body(other, "hello");
-        let other_raw = contribution(&[(other_request.clone(), response.clone())]);
         assert_eq!(
             check(
-                &policy,
-                Some(&receipt(other, &other_request, &response)),
-                &other_raw
+                &required(),
+                Some(&receipt(MODEL, &request, &response)),
+                &raw
             ),
-            Err(WitnessError::InferenceModelInadmissible)
+            Err(WitnessError::InferenceCallUnattestable),
+            "a restarted stream must not be reported as a missing receipt"
+        );
+        // Without the marker the same exchange verifies, so the refusal is the
+        // marker and not the fixture.
+        let clean = contribution(&[(request.clone(), response.clone())]);
+        assert!(
+            check(
+                &required(),
+                Some(&receipt(MODEL, &request, &response)),
+                &clean
+            )
+            .is_ok()
         );
     }
 
@@ -779,7 +901,7 @@ mod tests {
         let request = request_body(MODEL, "hello");
         let response = response_body("hi");
         let raw = contribution(&[(request.clone(), response.clone())]);
-        let tight = InferenceAttestationPolicy::required(Vec::new(), 8).expect("policy");
+        let tight = InferenceAttestationPolicy::required(8).expect("policy");
         assert_eq!(
             check(&tight, Some(&receipt(MODEL, &request, &response)), &raw),
             Err(WitnessError::InferenceReceiptTooLarge)
@@ -810,7 +932,7 @@ mod tests {
     #[test]
     fn a_policy_that_would_require_nothing_is_refused() {
         assert_eq!(
-            InferenceAttestationPolicy::required(Vec::new(), 0),
+            InferenceAttestationPolicy::required(0),
             Err(PolicyMisconfigured)
         );
     }

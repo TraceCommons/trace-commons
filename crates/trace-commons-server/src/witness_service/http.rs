@@ -452,6 +452,9 @@ fn refusal_for(error: WitnessError) -> Refusal {
         WitnessError::InferenceCallAbsent => {
             Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_absent")
         }
+        WitnessError::InferenceCallUnattestable => {
+            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_unattestable")
+        }
         WitnessError::InferenceBodyNotInSession => Refusal::new(
             StatusCode::FORBIDDEN,
             "witness_inference_body_not_in_session",
@@ -460,17 +463,6 @@ fn refusal_for(error: WitnessError) -> Refusal {
             StatusCode::FORBIDDEN,
             "witness_inference_receipt_unverified",
         ),
-        WitnessError::InferenceReceiptModelUnbound => Refusal::new(
-            StatusCode::FORBIDDEN,
-            "witness_inference_receipt_model_unbound",
-        ),
-        WitnessError::InferenceModelInadmissible => Refusal::new(
-            StatusCode::FORBIDDEN,
-            "witness_inference_model_inadmissible",
-        ),
-        WitnessError::InferenceBodyUnreadable => {
-            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_body_unreadable")
-        }
         WitnessError::InferenceReceiptTooLarge => {
             Refusal::new(StatusCode::FORBIDDEN, "witness_inference_body_too_large")
         }
@@ -1700,7 +1692,6 @@ mod tests {
             ))
             .requiring_attested_inference(
                 super::super::inference::InferenceAttestationPolicy::required(
-                    Vec::new(),
                     super::super::inference::DEFAULT_MAX_BODY_BYTES,
                 )
                 .expect("a well formed policy"),
