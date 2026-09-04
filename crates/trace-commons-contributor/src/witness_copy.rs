@@ -90,8 +90,8 @@ pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
 );
 pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "This permission does not connect an agent to NEAR AI, fund inference, or prove a ",
-    "receipt was verified. Witness-backed review is not yet available in the desktop ",
-    "app. Setting this permission does not make a blocked submission ready to send."
+    "receipt was verified. A supported desktop app asks separately before sending a ",
+    "session for witness review. This permission alone does not make it ready to send."
 );
 pub const WITNESS_INFERENCE_ENABLE: &str = "Review permission";
 pub const WITNESS_INFERENCE_DISABLE: &str = "Stop including inference bodies";
@@ -318,6 +318,29 @@ pub fn witness_last_result_tone(result: &WitnessLastResult) -> WitnessTone {
     }
 }
 
+/// Explicit remote review disclosure, shared by every native shell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WitnessReviewCopy {
+    pub heading: &'static str,
+    pub disclosure: &'static str,
+    pub action: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+    pub working: &'static str,
+    pub failed: &'static str,
+    pub immutable: &'static str,
+}
+
+/// Persistent next steps, without inferring acceptance or funding from local setup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FirstContributionCopy {
+    pub heading: &'static str,
+    pub start: &'static str,
+    pub review: &'static str,
+    pub follow_up: &'static str,
+    pub agent_setup: &'static str,
+}
+
 /// Every fixed word on the witness surface, in one value.
 ///
 /// ONE CALL, NOT ONE PER STRING, for the reason [`crate::routing_copy`]
@@ -348,6 +371,8 @@ pub struct WitnessCopy {
     pub inference_enabled: &'static str,
     pub inference_disabled: &'static str,
     pub inference_save_failed: &'static str,
+    pub review: WitnessReviewCopy,
+    pub onboarding: FirstContributionCopy,
 }
 
 /// The witness surface's fixed words.
@@ -376,6 +401,23 @@ pub fn witness_copy() -> WitnessCopy {
         inference_enabled: WITNESS_INFERENCE_ENABLED,
         inference_disabled: WITNESS_INFERENCE_DISABLED,
         inference_save_failed: WITNESS_INFERENCE_SAVE_FAILED,
+        review: WitnessReviewCopy {
+            heading: "Review with your configured witness",
+            disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
+            action: "Prepare witness review",
+            confirm: "Send this session for review",
+            cancel: "Not now",
+            working: "Preparing your witness review. The session may already have left this device.",
+            failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
+            immutable: "This certified review is fixed. To change an outcome or correction, close it and request a new witness review before approving.",
+        },
+        onboarding: FirstContributionCopy {
+            heading: "Your first contribution",
+            start: "Choose a supported agent and a project you can share. Complete a small task, then return here to review the session. Setup alone does not prove inference ran or that a contribution was accepted.",
+            review: "Open a waiting session with Look inside. Check what would be sent, then choose whether to contribute. A configured witness asks separately before the session leaves this device for review.",
+            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
+            agent_setup: "For an existing funded NEAR AI account, configure the selected agent using your own provider credentials and model settings. Choose its session folder in Settings. IronWire capture and sending captured bodies each require separate setup. This app does not create a funded provider account.",
+        },
     }
 }
 
@@ -633,13 +675,16 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            22,
+            24,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
         for (key, value) in object {
             assert!(
-                !value.as_str().unwrap().is_empty(),
+                value.as_str().is_some_and(|text| !text.is_empty())
+                    || value.as_object().is_some_and(|fields| fields
+                        .values()
+                        .all(|text| text.as_str().is_some_and(|text| !text.is_empty()))),
                 "{key} is empty, so a shell renders a blank and writes its own"
             );
         }
