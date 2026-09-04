@@ -206,7 +206,14 @@ pub async fn witness_contribution(
 ///
 /// Split out so it is testable without a transport, and so the two checks it
 /// makes are visible in one place.
-fn verify_certificate(
+///
+/// `pub` so the AGPL server crate's
+/// `tests/witness_certificate_cross_implementation.rs` can drive the witness's
+/// own router and require THIS function to accept what it produced. That test
+/// is the only reason the preimage encoder below can be trusted, and it can
+/// only live on the server side: the licence boundary lets the AGPL crate
+/// depend on this one and never the reverse.
+pub fn verify_certificate(
     response: &WitnessedEnvelope,
     pinned_address: &str,
 ) -> Result<(), WitnessTrustError> {

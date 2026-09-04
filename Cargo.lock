@@ -7968,6 +7968,7 @@ dependencies = [
  "tower-http",
  "trace-commons-attestation",
  "trace-commons-build-info",
+ "trace-commons-contributor",
  "trace-commons-gate-enclave",
  "trace-commons-operator-client",
  "trace-commons-protocol",

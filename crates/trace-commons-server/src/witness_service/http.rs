@@ -359,7 +359,13 @@ fn contribution_response(response: WitnessContributionResponse) -> Response {
 /// One function so the two routes cannot drift into two spellings of the same
 /// certificate, which is the kind of difference a client only discovers in
 /// production.
-fn certificate_json(
+///
+/// `pub` so that the cross-implementation test can render a certificate
+/// through the REAL producer rather than a fixture spelled the same way by
+/// hand. A hand-spelled fixture agrees with whatever the test author believed,
+/// which is exactly how the field names here went unchecked against both
+/// consumers.
+pub fn certificate_json(
     certificate: &WitnessCertificate,
     verdict: ResidualPiiRisk,
 ) -> serde_json::Value {
@@ -377,7 +383,9 @@ fn certificate_json(
 /// Written here rather than derived from `Serialize` so that the strings a
 /// server compares against are visible in one place, and exhaustive so a new
 /// tier cannot silently serialize as something a consumer treats as unknown.
-fn verdict_label(verdict: ResidualPiiRisk) -> &'static str {
+///
+/// `pub` for the same reason [`certificate_json`] is.
+pub fn verdict_label(verdict: ResidualPiiRisk) -> &'static str {
     match verdict {
         ResidualPiiRisk::Low => "low",
         ResidualPiiRisk::Medium => "medium",

@@ -177,6 +177,16 @@ path = "src/bin/trace-commons-witness.rs"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The contributor crate, for `tests/witness_certificate_cross_implementation.rs`
+# ONLY: that test drives this crate's witness router and requires the CLIENT's
+# own certificate verifier to accept what it produced. The two sides encode the
+# signing preimage twice, and nothing else compares them.
+#
+# This is the legal direction across the licence boundary -- AGPL may depend on
+# MIT OR Apache-2.0, never the reverse -- which is why the test lives here and
+# not in the contributor crate. It is a [dev-dependencies] entry and MUST NOT be
+# promoted to a normal dependency.
+trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
 # Test-only software WebAuthn authenticator (SoftPasskey) used to drive the
 # passkey enrollment/login ceremonies end-to-end. Pinned to =0.5.5 because that
