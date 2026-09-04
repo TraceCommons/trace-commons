@@ -46,8 +46,26 @@ steps:
         export TRACE_COMMONS_BUILD_COMMIT="${_TAG}"
         [ "$$TRACE_COMMONS_BUILD_COMMIT" = "manual" ] \
           && export TRACE_COMMONS_BUILD_COMMIT="${BUILD_ID}"
+        # near-attestation-collateral compiles the Intel DCAP collateral
+        # client. Without it POST /v1/admin/near-attestation-drill still runs
+        # and still refuses, at its collateral step, with
+        # missing_control:near_ai_attestation_collateral_client -- a drill the
+        # pilot holds that can never pass, and no contributor able to verify
+        # the enclave through /v1/attestation-collateral.
+        #
+        # It costs a second async HTTP stack: dcap-qvl's `report` feature pulls
+        # reqwest 0.13 and futures, and nothing else in this workspace compiles
+        # reqwest 0.13. That cost is why the feature is off by default, and it
+        # is accepted here rather than avoided.
+        #
+        # Two rustls crypto providers are then compiled in -- ring through our
+        # reqwest, aws-lc-rs through dcap-qvl's -- and feature unification means
+        # neither can be de-selected. rustls refuses to guess between them and
+        # panics at the first TLS use. main() installs ring explicitly for this
+        # reason; see the install_default call near the top of
+        # trace-commons-ingest.rs and the guard that warns if it is absent.
         cargo build --release --bin trace-commons-ingest \
-          --features gcs-client,gcp-kms,near-ai-scorer
+          --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
         # Reuses the deps compiled above; the issuer takes no features.
         cargo build --release --bin trace-commons-upload-claim-issuer
         mkdir -p /workspace/out
