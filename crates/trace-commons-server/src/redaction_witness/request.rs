@@ -448,6 +448,31 @@ mod tests {
         assert_eq!(err, WitnessHeaderError::HeaderNotAscii, "{err}");
     }
 
+    /// The timestamp is a security control now -- `verify_witness_certificate`
+    /// refuses a certificate outside its freshness window -- so a certificate
+    /// that carries no usable one must refuse HERE, before verification is
+    /// reached. Absent, null, a string, or a float would each otherwise arrive
+    /// as a value the window has no opinion about.
+    #[test]
+    fn a_timestamp_that_is_not_an_integer_refuses_by_name() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("1788000000"),
+            serde_json::json!(1.5),
+            serde_json::json!([]),
+        ] {
+            let mut json = certificate_json();
+            json["timestamp"] = value.clone();
+            let headers = headers_with(Some(&encoded(&json)), Some("0x00"));
+            let err = witness_headers(&headers).expect_err("a non-integer timestamp must refuse");
+            assert_eq!(
+                err,
+                WitnessHeaderError::CertificateFieldMalformed { field: "timestamp" },
+                "{value} was accepted: {err}"
+            );
+        }
+    }
+
     #[test]
     fn the_header_names_are_the_ones_the_operator_doc_states() {
         assert_eq!(CERTIFICATE_HEADER, "x-trace-witness-certificate");

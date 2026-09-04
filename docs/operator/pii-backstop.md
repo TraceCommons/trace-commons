@@ -261,7 +261,8 @@ place but is not is worse than a server that will not start.
 
 The recommended sequence:
 
-1. Set the three pin variables with the switch still `false` or absent. The
+1. Set the three pin variables (and, optionally, the age window) with the
+   switch still `false` or absent. The
    binary boots normally and ignores certificates; nothing changes.
 2. Confirm the measurement matches a real witness deployment's
    `/v1/attestation` output.
@@ -273,6 +274,30 @@ The recommended sequence:
 | `TRACE_COMMONS_WITNESS_SIGNING_ADDRESS` | `witness_signing_address` |
 | `TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` | `witness_expected_measurement` |
 | `TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS` | `witness_allowed_policy_versions` |
+| `TRACE_COMMONS_WITNESS_CERTIFICATE_MAX_AGE_SECONDS` | (optional; defaults to 86400. A value that is not a positive integer is a boot refusal, never a silent fallback) |
+
+### How long a certificate stays usable
+
+A certificate names no submitter and carries no nonce, so the pair of
+(envelope bytes, certificate) is a **bearer token**: whoever holds one can
+submit those bytes under any account and get the bypass. The only thing that
+bounds this is the age window.
+
+`TRACE_COMMONS_WITNESS_CERTIFICATE_MAX_AGE_SECONDS` sets it, defaulting to
+24 hours. Certificates stamped more than five minutes ahead of this host's
+clock are refused as future-dated — a separate refusal from expiry, because
+it points at the witness's clock rather than at the submission. Keep both
+hosts on NTP.
+
+Narrowing the window narrows the replay exposure proportionally. The honest
+path takes seconds, so a much smaller value is usually safe; the default is
+generous only so that a contributor who loses connectivity after witnessing
+does not have to send the raw session a second time.
+
+**This does not bind a certificate to a submitter.** Inside the window it is
+still replayable by anyone holding it. Making one single-use requires a nonce
+or a submission identifier inside the signed preimage, which is a protocol
+change on both the witness and the client and is not implemented.
 
 ### A malformed certificate never rejects a submission
 

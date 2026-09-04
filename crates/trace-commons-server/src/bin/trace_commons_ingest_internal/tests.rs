@@ -89563,7 +89563,11 @@ mod witness_bypass {
                 residual_risk_verdict: verdict,
                 redaction_policy_version: policy_version.to_string(),
                 witness_measurement: MEASUREMENT.to_string(),
-                timestamp: 1_788_000_000,
+                // Stamped now: `verify_witness_certificate` bounds a
+                // certificate's age, and a fixed past instant would make
+                // every one of these fail on the window rather than on the
+                // thing it is about.
+                timestamp: chrono::Utc::now().timestamp(),
             },
         );
         let signature = sign(&certificate);
@@ -89591,6 +89595,8 @@ mod witness_bypass {
             Some(&signing_address()),
             Some(MEASUREMENT),
             Some(&aliases.join(",")),
+            // The default freshness window: these fixtures stamp `now`.
+            None,
         )
         .expect("the bypass configures")
         .expect("the switch is on")
@@ -89859,7 +89865,7 @@ mod witness_receipt {
             "residual_risk_verdict": verdict,
             "redaction_policy_version": ALIAS,
             "witness_measurement": MEASUREMENT,
-            "timestamp": 1_788_000_000i64,
+            "timestamp": chrono::Utc::now().timestamp(),
         });
         let encoded = serde_json::to_string(&json).expect("the certificate serialises");
 
@@ -89902,6 +89908,7 @@ mod witness_receipt {
                 Some(&signing_address()),
                 Some(MEASUREMENT),
                 Some(ALIAS),
+                None,
             )
             .expect("the bypass configures")
             .expect("the switch is on"),

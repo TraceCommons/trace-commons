@@ -44,7 +44,10 @@
 
 use std::collections::BTreeSet;
 
-use super::verification::{EXPECTED_MEASUREMENT_CONTROL, WitnessPin, WitnessPinError};
+use super::verification::{
+    DEFAULT_CERTIFICATE_MAX_AGE_SECONDS, EXPECTED_MEASUREMENT_CONTROL, WitnessFreshness,
+    WitnessFreshnessError, WitnessPin, WitnessPinError,
+};
 
 /// Environment variable holding the master switch. Absent or anything other
 /// than an affirmative value means the bypass is off.
@@ -59,6 +62,19 @@ pub const EXPECTED_MEASUREMENTS_ENV: &str = "TRACE_COMMONS_WITNESS_EXPECTED_MEAS
 /// Environment variable holding the comma-separated redaction-policy alias
 /// allowlist.
 pub const ALLOWED_POLICY_VERSIONS_ENV: &str = "TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS";
+
+/// Environment variable holding how many seconds a certificate stays
+/// acceptable.
+///
+/// Unset means [`DEFAULT_CERTIFICATE_MAX_AGE_SECONDS`], not "no window". This
+/// is the one control here that defaults to a value rather than to a refusal,
+/// and deliberately: every other control names something only the operator
+/// can know, while a replay window has a defensible default and an operator
+/// who sets nothing should get it rather than an unbounded one. A value that
+/// is present and unparseable is still a refusal -- an operator who typed
+/// something meant something, and silently falling back to the default would
+/// hide a window they believe they narrowed.
+pub const CERTIFICATE_MAX_AGE_ENV: &str = "TRACE_COMMONS_WITNESS_CERTIFICATE_MAX_AGE_SECONDS";
 
 /// Missing-control name reported when the bypass is enabled with no pinned
 /// signing address.
@@ -88,6 +104,19 @@ pub enum WitnessBypassConfigError {
     /// second opinion here could only disagree with it.
     #[error("witness bypass refused: {0}")]
     Pin(#[source] WitnessPinError),
+    /// The certificate max age is set to something that is not a positive
+    /// number of seconds.
+    ///
+    /// Carries no value. The operator's own configuration string is not
+    /// contributor content, but it is not needed either: there is exactly one
+    /// variable and one shape it has to take.
+    #[error(
+        "witness bypass refused: {CERTIFICATE_MAX_AGE_ENV} is not a positive number of seconds"
+    )]
+    CertificateMaxAgeMalformed,
+    /// The certificate max age validates as a number but not as a window.
+    #[error("witness bypass refused: {0}")]
+    Freshness(#[source] WitnessFreshnessError),
 }
 
 impl std::fmt::Debug for WitnessBypassConfigError {
@@ -150,6 +179,7 @@ pub fn witness_bypass_config_from_env()
         std::env::var(SIGNING_ADDRESS_ENV).ok().as_deref(),
         std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref(),
         std::env::var(ALLOWED_POLICY_VERSIONS_ENV).ok().as_deref(),
+        std::env::var(CERTIFICATE_MAX_AGE_ENV).ok().as_deref(),
     )
 }
 
@@ -168,6 +198,7 @@ pub fn witness_bypass_config_from_values(
     signing_address: Option<&str>,
     measurements: Option<&str>,
     allowed_policy_versions: Option<&str>,
+    certificate_max_age: Option<&str>,
 ) -> Result<Option<WitnessBypassConfig>, WitnessBypassConfigError> {
     if !affirmative(enabled) {
         return Ok(None);
@@ -198,8 +229,21 @@ pub fn witness_bypass_config_from_values(
     // The pin validates the address and the measurement set. This module
     // composes rather than re-checking: a second opinion on what a well-formed
     // address is could only disagree with the one verification actually uses.
+    // Absent or blank keeps the default window; present-and-unparseable is a
+    // refusal. See `CERTIFICATE_MAX_AGE_ENV` for why this one control has a
+    // default at all.
+    let max_age_seconds = match non_blank(certificate_max_age) {
+        None => DEFAULT_CERTIFICATE_MAX_AGE_SECONDS,
+        Some(raw) => raw
+            .parse::<i64>()
+            .map_err(|_| WitnessBypassConfigError::CertificateMaxAgeMalformed)?,
+    };
+    let freshness =
+        WitnessFreshness::new(max_age_seconds).map_err(WitnessBypassConfigError::Freshness)?;
+
     let pin = WitnessPin::new(signing_address, measurements.iter().cloned())
-        .map_err(WitnessBypassConfigError::Pin)?;
+        .map_err(WitnessBypassConfigError::Pin)?
+        .with_freshness(freshness);
 
     Ok(Some(WitnessBypassConfig {
         pin,
@@ -245,15 +289,37 @@ fn comma_separated(value: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The four controls these tests are about, with the freshness window
+    /// left unset.
+    ///
+    /// Unset is the interesting default here: it is the one control that
+    /// falls back to a value rather than to a refusal, so every test that
+    /// does not name it is also asserting that the fallback keeps working.
+    /// The tests that ARE about the window call
+    /// `witness_bypass_config_from_values` directly.
+    fn from_values(
+        enabled: Option<&str>,
+        signing_address: Option<&str>,
+        measurements: Option<&str>,
+        allowed_policy_versions: Option<&str>,
+    ) -> Result<Option<WitnessBypassConfig>, WitnessBypassConfigError> {
+        witness_bypass_config_from_values(
+            enabled,
+            signing_address,
+            measurements,
+            allowed_policy_versions,
+            None,
+        )
+    }
+
     const ADDRESS: &str = "0x00112233445566778899aabbccddeeff00112233";
     const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
     const ALIAS: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
 
     #[test]
     fn the_switch_off_yields_no_config_and_no_error() {
-        let config =
-            witness_bypass_config_from_values(None, Some(ADDRESS), Some(MEASUREMENT), Some(ALIAS))
-                .expect("an absent switch is not an error");
+        let config = from_values(None, Some(ADDRESS), Some(MEASUREMENT), Some(ALIAS))
+            .expect("an absent switch is not an error");
         assert!(config.is_none(), "the bypass must be off by default");
     }
 
@@ -262,7 +328,7 @@ mod tests {
         // "off by default" has to survive an operator writing the default down
         // explicitly, which is what the env template invites them to do.
         for spelling in ["false", "0", "no", "", "  ", "maybe"] {
-            let config = witness_bypass_config_from_values(
+            let config = from_values(
                 Some(spelling),
                 Some(ADDRESS),
                 Some(MEASUREMENT),
@@ -276,7 +342,7 @@ mod tests {
     #[test]
     fn every_affirmative_spelling_enables_the_bypass() {
         for spelling in ["1", "true", "TRUE", " yes "] {
-            let config = witness_bypass_config_from_values(
+            let config = from_values(
                 Some(spelling),
                 Some(ADDRESS),
                 Some(MEASUREMENT),
@@ -289,9 +355,8 @@ mod tests {
 
     #[test]
     fn enabled_without_a_signing_address_refuses_by_control_name() {
-        let err =
-            witness_bypass_config_from_values(Some("true"), None, Some(MEASUREMENT), Some(ALIAS))
-                .expect_err("an enabled bypass with no address must refuse");
+        let err = from_values(Some("true"), None, Some(MEASUREMENT), Some(ALIAS))
+            .expect_err("an enabled bypass with no address must refuse");
         assert_eq!(
             err,
             WitnessBypassConfigError::MissingControl {
@@ -303,7 +368,7 @@ mod tests {
 
     #[test]
     fn enabled_without_measurements_refuses_under_the_existing_control_name() {
-        let err = witness_bypass_config_from_values(Some("true"), Some(ADDRESS), None, Some(ALIAS))
+        let err = from_values(Some("true"), Some(ADDRESS), None, Some(ALIAS))
             .expect_err("an enabled bypass with no measurements must refuse");
         assert_eq!(
             err,
@@ -320,7 +385,7 @@ mod tests {
 
     #[test]
     fn enabled_with_an_empty_policy_allowlist_refuses_by_control_name() {
-        let err = witness_bypass_config_from_values(
+        let err = from_values(
             Some("true"),
             Some(ADDRESS),
             Some(MEASUREMENT),
@@ -352,7 +417,7 @@ mod tests {
 
     #[test]
     fn a_malformed_signing_address_surfaces_the_pins_own_variant() {
-        let err = witness_bypass_config_from_values(
+        let err = from_values(
             Some("true"),
             Some("0xnothex"),
             Some(MEASUREMENT),
@@ -368,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_configured_bypass_admits_exactly_the_aliases_it_was_given() {
-        let config = witness_bypass_config_from_values(
+        let config = from_values(
             Some("true"),
             Some(ADDRESS),
             Some(MEASUREMENT),
@@ -389,7 +454,7 @@ mod tests {
 
     #[test]
     fn the_pin_carries_every_measurement_that_was_configured() {
-        let config = witness_bypass_config_from_values(
+        let config = from_values(
             Some("true"),
             Some(ADDRESS),
             Some(" aaaa , bbbb "),
@@ -405,7 +470,7 @@ mod tests {
         // Hash-only discipline. An operator's config is not contributor
         // content, but a signing address in a log line is exactly what this
         // repo's rule forbids, and the refusal path is the one that logs.
-        let err = witness_bypass_config_from_values(
+        let err = from_values(
             Some("true"),
             Some("0xSECRETMARKER"),
             Some("MEASUREMENTMARKER"),
@@ -433,5 +498,96 @@ mod tests {
             ALLOWED_POLICY_VERSIONS_ENV,
             "TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS"
         );
+        assert_eq!(
+            CERTIFICATE_MAX_AGE_ENV,
+            "TRACE_COMMONS_WITNESS_CERTIFICATE_MAX_AGE_SECONDS"
+        );
+    }
+
+    /// An operator who sets nothing gets the default window, not no window.
+    #[test]
+    fn an_unset_max_age_leaves_the_default_window() {
+        for raw in [None, Some(""), Some("   ")] {
+            let config = witness_bypass_config_from_values(
+                Some("true"),
+                Some(ADDRESS),
+                Some(MEASUREMENT),
+                Some(ALIAS),
+                raw,
+            )
+            .expect("the bypass configures")
+            .expect("the switch is on");
+            assert_eq!(
+                config.pin().freshness().max_age_seconds(),
+                DEFAULT_CERTIFICATE_MAX_AGE_SECONDS,
+                "{raw:?} did not leave the default window"
+            );
+        }
+    }
+
+    /// And an operator who sets one gets theirs.
+    #[test]
+    fn a_configured_max_age_reaches_the_pin() {
+        let config = witness_bypass_config_from_values(
+            Some("true"),
+            Some(ADDRESS),
+            Some(MEASUREMENT),
+            Some(ALIAS),
+            Some(" 900 "),
+        )
+        .expect("the bypass configures")
+        .expect("the switch is on");
+        assert_eq!(config.pin().freshness().max_age_seconds(), 900);
+    }
+
+    /// A value that is present and unusable is a refusal, never a silent
+    /// fallback to the default. An operator who typed something meant
+    /// something, and widening their window back to 24h without saying so is
+    /// the failure this whole module is shaped against.
+    #[test]
+    fn an_unusable_max_age_refuses_rather_than_defaulting() {
+        for raw in ["not-a-number", "12.5", "1e3", "9999999999999999999999"] {
+            let err = witness_bypass_config_from_values(
+                Some("true"),
+                Some(ADDRESS),
+                Some(MEASUREMENT),
+                Some(ALIAS),
+                Some(raw),
+            )
+            .expect_err("an unusable window must refuse");
+            assert_eq!(
+                err,
+                WitnessBypassConfigError::CertificateMaxAgeMalformed,
+                "{raw} was accepted: {err}"
+            );
+        }
+
+        for raw in ["0", "-1"] {
+            let err = witness_bypass_config_from_values(
+                Some("true"),
+                Some(ADDRESS),
+                Some(MEASUREMENT),
+                Some(ALIAS),
+                Some(raw),
+            )
+            .expect_err("a non-positive window must refuse");
+            assert_eq!(
+                err,
+                WitnessBypassConfigError::Freshness(WitnessFreshnessError::MaxAgeNotPositive),
+                "{raw} was accepted: {err}"
+            );
+        }
+    }
+
+    /// The refusals name the variable and carry nothing the operator typed.
+    #[test]
+    fn the_max_age_refusals_render_safely() {
+        for err in [
+            WitnessBypassConfigError::CertificateMaxAgeMalformed,
+            WitnessBypassConfigError::Freshness(WitnessFreshnessError::MaxAgeNotPositive),
+        ] {
+            let rendered = format!("{err} {err:?}");
+            assert!(rendered.starts_with("witness bypass refused"), "{rendered}");
+        }
     }
 }
