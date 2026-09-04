@@ -38,6 +38,9 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use trace_commons_server::witness_service::enclave::{DSTACK_SOCKET_PATH, DstackSocketAgent};
 use trace_commons_server::witness_service::http::{WitnessLoadBound, witness_router};
+use trace_commons_server::witness_service::inference::{
+    DEFAULT_MAX_BODY_BYTES, InferenceAttestationPolicy,
+};
 use trace_commons_server::witness_service::surface::WitnessService;
 use trace_commons_server::witness_service::{
     DeterministicRedaction, Enclave, FullPipelineRedaction, Signer, TranscriptRedactor,
@@ -188,6 +191,41 @@ struct Args {
         default_value = ""
     )]
     known_path_prefixes: String,
+
+    /// Refuse any contribution whose last declared inference call does not
+    /// carry a verified NEAR AI receipt.
+    ///
+    /// Off by default, and that default is the honest one rather than the
+    /// lax one: turning it on refuses every trace from Claude Code, Codex,
+    /// Gemini and Cline -- a receipt exists only for inference that went
+    /// through NEAR AI -- and every trace that withheld tool payloads, since
+    /// the bodies the receipt binds are carried under that consent flag. That
+    /// is a product decision, and a witness must not make it by inheriting a
+    /// security control's default.
+    ///
+    /// When it is on the witness is fail-closed: a submission it cannot
+    /// verify is refused by a name of its own, and there is no configuration
+    /// under which it certifies an unattested trace instead.
+    #[arg(long, env = "TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE")]
+    require_attested_inference: bool,
+
+    /// Comma-separated model names the requirement admits. Empty admits any
+    /// model the receipt *binds* -- a receipt still has to bind one, which the
+    /// two-part receipt form cannot do.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_ADMISSIBLE_INFERENCE_MODELS",
+        default_value = ""
+    )]
+    admissible_inference_models: String,
+
+    /// Largest attested request or response body the witness will hash.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES",
+        default_value_t = DEFAULT_MAX_BODY_BYTES
+    )]
+    max_inference_body_bytes: usize,
 }
 
 #[tokio::main]
@@ -279,12 +317,50 @@ async fn main() -> Result<()> {
         Arc::new(DeterministicRedaction::new(known_path_prefixes))
     };
 
-    let service = Arc::new(WitnessService::new(
-        redactor,
-        enclave.clone() as Arc<dyn Signer>,
-        enclave as Arc<dyn Enclave>,
-        args.max_request_bytes,
-    ));
+    // Resolved before the listener binds, like everything else here: a
+    // witness told to require attested inference under a policy that would
+    // require nothing must fail to start rather than serve a requirement that
+    // is not one.
+    let inference_policy = if args.require_attested_inference {
+        let admissible: Vec<String> = args
+            .admissible_inference_models
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .collect();
+        let admissible_count = admissible.len();
+        let policy =
+            InferenceAttestationPolicy::required(admissible, args.max_inference_body_bytes)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES must be greater \
+                         than zero when attested inference is required"
+                    )
+                })?;
+        // Label-only, and it is what an operator needs to see to know which
+        // policy this process is actually running: the certificate does not
+        // carry it, and the measurement covers the image rather than the
+        // environment.
+        tracing::info!(
+            require_attested_inference = true,
+            admissible_inference_models = admissible_count,
+            "witness attested-inference requirement"
+        );
+        policy
+    } else {
+        InferenceAttestationPolicy::not_required()
+    };
+
+    let service = Arc::new(
+        WitnessService::new(
+            redactor,
+            enclave.clone() as Arc<dyn Signer>,
+            enclave as Arc<dyn Enclave>,
+            args.max_request_bytes,
+        )
+        .requiring_attested_inference(inference_policy),
+    );
 
     let listener = TcpListener::bind(&args.bind)
         .await

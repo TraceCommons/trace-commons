@@ -34,6 +34,7 @@
 use std::sync::Arc;
 
 use super::enclave::WITNESS_NONCE_LEN;
+use super::inference::InferenceAttestationPolicy;
 use super::{
     ContributionRedactor, Enclave, SeamUnavailable, Signer, TranscriptRedactor,
     WitnessContributionRequest, WitnessContributionResponse, WitnessError, WitnessRequest,
@@ -155,6 +156,16 @@ pub struct WitnessService {
     signer: Arc<dyn Signer>,
     enclave: Arc<dyn Enclave>,
     max_request_bytes: usize,
+    /// Whether this deployment refuses a contribution that carries no verified
+    /// attested inference, and what it will admit when it does not.
+    ///
+    /// Held here rather than read per request, and defaulted to
+    /// [`InferenceAttestationPolicy::not_required`] by [`Self::new`] with
+    /// [`Self::requiring_attested_inference`] as the only way to turn it on:
+    /// a security control whose default is "on" would be one an operator
+    /// could not have chosen, and one assembled per request would be one the
+    /// environment could change under a running witness.
+    inference_policy: InferenceAttestationPolicy,
 }
 
 impl WitnessService {
@@ -178,7 +189,26 @@ impl WitnessService {
             signer,
             enclave,
             max_request_bytes,
+            inference_policy: InferenceAttestationPolicy::not_required(),
         }
+    }
+
+    /// Refuse anything this policy does not admit.
+    ///
+    /// Additive like [`Self::with_contribution_redactor`], and fail-closed in
+    /// the direction that matters: a witness built without this call requires
+    /// nothing and says so, rather than a witness built with a policy it
+    /// silently ignores. A receipt offered to a witness with no requirement is
+    /// still verified and still has to project exactly -- see
+    /// [`InferenceAttestationPolicy::not_required`].
+    pub fn requiring_attested_inference(mut self, policy: InferenceAttestationPolicy) -> Self {
+        self.inference_policy = policy;
+        self
+    }
+
+    /// The attested-inference policy this witness enforces.
+    pub fn inference_policy(&self) -> &InferenceAttestationPolicy {
+        &self.inference_policy
     }
 
     /// Attach the structured seam, enabling the `raw_contribution` request
@@ -201,6 +231,7 @@ impl WitnessService {
     pub async fn witness(&self, request: WitnessRequest) -> Result<WitnessResponse, WitnessError> {
         witness(
             request,
+            &self.inference_policy,
             self.redactor.as_ref(),
             self.signer.as_ref(),
             self.enclave.as_ref(),
@@ -227,6 +258,7 @@ impl WitnessService {
         };
         Ok(witness_contribution(
             request,
+            &self.inference_policy,
             redactor.as_ref(),
             self.signer.as_ref(),
             self.enclave.as_ref(),

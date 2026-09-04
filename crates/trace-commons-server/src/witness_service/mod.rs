@@ -67,6 +67,7 @@
 
 pub mod enclave;
 pub mod http;
+pub mod inference;
 pub mod surface;
 
 use async_trait::async_trait;
@@ -80,8 +81,12 @@ use trace_commons_protocol::trace_contribution::{
     residual_risk_basis,
 };
 
+use crate::near_attestation::receipt::ReceiptPayload;
 use crate::redaction_witness::certificate::{CertificateDetails, WitnessCertificate};
 use crate::redaction_witness::correspondence::check_correspondence;
+use crate::witness_service::inference::{
+    InferenceAttestationPolicy, WitnessedSession, check_inference_attestation,
+};
 
 /// What the contributor sends: the raw transcript and the consent flags that
 /// declare what it carries.
@@ -96,6 +101,15 @@ pub struct WitnessRequest {
     /// The contributor's declared consent flags, as they will be declared on
     /// the envelope.
     pub consent: ConsentMetadata,
+    /// The receipt the contributor offers for this session's last inference
+    /// call.
+    ///
+    /// `None` is legal only where the deployment's
+    /// [`InferenceAttestationPolicy`] does not require attestation. On this
+    /// route a receipt is refused outright: a transcript carries no event
+    /// order, so nothing here can establish which call was last. See
+    /// [`WitnessedSession::Transcript`].
+    pub offered_receipt: Option<ReceiptPayload>,
 }
 
 impl std::fmt::Debug for WitnessRequest {
@@ -107,6 +121,7 @@ impl std::fmt::Debug for WitnessRequest {
             .debug_struct("WitnessRequest")
             .field("raw_transcript", &"<withheld>")
             .field("consent", &"<withheld>")
+            .field("offered_receipt", &"<withheld>")
             .finish()
     }
 }
@@ -188,6 +203,60 @@ pub enum WitnessError {
     /// The signer refused or was unavailable.
     #[error("the witness could not sign the certificate")]
     SigningUnavailable,
+    /// This deployment requires attested inference and the submission carried
+    /// no receipt.
+    ///
+    /// The missing-control name for the fail-closed arm of the requirement.
+    /// There is no variant meaning "certified without attestation": a witness
+    /// configured to require it and unable to verify it refuses, and never
+    /// downgrades to certifying an unattested trace.
+    #[error("the witness requires attested inference and this submission carried none")]
+    InferenceAttestationMissing,
+    /// Attested inference was required or offered on a route that cannot
+    /// establish which inference call was last.
+    ///
+    /// The text route. A transcript is opaque, so the only way to attest one
+    /// would be to let the caller nominate the exchange -- which is a claim
+    /// about the caller's choice, not about the session.
+    #[error("this route cannot establish which inference call a receipt attests")]
+    InferenceAttestationUnavailable,
+    /// The contribution declares no inference call at all, so there is nothing
+    /// a receipt could attest.
+    ///
+    /// Named separately from a missing receipt because an operator does
+    /// something different about it: this contribution cannot satisfy the
+    /// requirement in principle rather than having failed to.
+    #[error("this contribution declares no inference call")]
+    InferenceCallAbsent,
+    /// The last declared inference call carries no request or response body.
+    ///
+    /// In practice: the contribution withheld tool payloads, so the conversion
+    /// wrote method and status and no bodies. A requirement cannot be
+    /// satisfied without the bytes the receipt binds.
+    #[error("the attested inference call carries no bodies in this session")]
+    InferenceBodyNotInSession,
+    /// The offered receipt did not verify against the bodies in the session.
+    ///
+    /// One label for every [`ReceiptError`], deliberately, and named for what
+    /// was observed rather than for a conclusion about why: a capture that
+    /// re-serialised a body is indistinguishable from a forged receipt, and on
+    /// an honest deployment the capture bug is likelier.
+    ///
+    /// [`ReceiptError`]: crate::near_attestation::receipt::ReceiptError
+    #[error("the offered inference receipt did not verify against these bodies")]
+    InferenceReceiptUnverified,
+    /// The offered receipt was the two-part form, which binds no model.
+    #[error("the offered inference receipt binds no model")]
+    InferenceReceiptModelUnbound,
+    /// The offered receipt bound a model this deployment does not admit.
+    #[error("the offered inference receipt binds a model this witness does not admit")]
+    InferenceModelInadmissible,
+    /// A request or response body was not readable as an inference body.
+    #[error("an attested inference body could not be read")]
+    InferenceBodyUnreadable,
+    /// An attested body was larger than this witness will hash.
+    #[error("an attested inference body is larger than this witness will hash")]
+    InferenceReceiptTooLarge,
 }
 
 impl std::fmt::Debug for WitnessError {
@@ -477,10 +546,23 @@ fn verdict_from_basis(basis: &[ResidualRiskCondition]) -> ResidualPiiRisk {
 /// [`CorrespondenceProof`]: crate::redaction_witness::correspondence::CorrespondenceProof
 pub async fn witness(
     request: WitnessRequest,
+    policy: &InferenceAttestationPolicy,
     redactor: &dyn TranscriptRedactor,
     signer: &dyn Signer,
     enclave: &dyn Enclave,
 ) -> Result<WitnessResponse, WitnessError> {
+    // First, and before the redaction pass: a submission that will be refused
+    // must not first spend a metered classifier, and the projection is onto
+    // the raw transcript rather than the redacted artifact -- a completion
+    // carrying a secret comes back from the pass as a placeholder, so
+    // projecting after redaction would refuse exactly the honest submissions
+    // that most needed redacting.
+    check_inference_attestation(
+        policy,
+        request.offered_receipt.as_ref(),
+        &WitnessedSession::Transcript,
+    )?;
+
     let RedactedTranscript {
         redacted,
         report,
@@ -563,6 +645,14 @@ pub struct WitnessContributionRequest {
     pub raw_contribution: RawTraceContribution,
     /// What the contributor's claim granted.
     pub granted: GrantedConsent,
+    /// The receipt the contributor offers for this contribution's last
+    /// declared inference call.
+    ///
+    /// Which call that is, is decided by the witness and not by this field:
+    /// the receipt is verified against the last `HttpExchange` event in the
+    /// contribution's own order. `None` is legal only where the deployment's
+    /// [`InferenceAttestationPolicy`] does not require attestation.
+    pub offered_receipt: Option<ReceiptPayload>,
 }
 
 impl std::fmt::Debug for WitnessContributionRequest {
@@ -577,6 +667,7 @@ impl std::fmt::Debug for WitnessContributionRequest {
             .debug_struct("WitnessContributionRequest")
             .field("raw_contribution", &"<withheld>")
             .field("granted", &"<withheld>")
+            .field("offered_receipt", &"<withheld>")
             .finish()
     }
 }
@@ -759,10 +850,19 @@ impl ContributionRedactor for PipelineContributionRedaction {
 /// [`CorrespondenceProof`]: crate::redaction_witness::correspondence::CorrespondenceProof
 pub async fn witness_contribution(
     request: WitnessContributionRequest,
+    policy: &InferenceAttestationPolicy,
     redactor: &dyn ContributionRedactor,
     signer: &dyn Signer,
     enclave: &dyn Enclave,
 ) -> Result<WitnessContributionResponse, WitnessError> {
+    // Before the redaction pass, and onto the raw contribution, for the
+    // reasons `witness` gives above.
+    check_inference_attestation(
+        policy,
+        request.offered_receipt.as_ref(),
+        &WitnessedSession::Contribution(&request.raw_contribution),
+    )?;
+
     let RedactedContribution {
         mut envelope,
         policy_version,
@@ -872,7 +972,51 @@ mod tests {
         WitnessRequest {
             raw_transcript: raw.to_string(),
             consent: consent(message_text_included),
+            offered_receipt: None,
         }
+    }
+
+    /// The two service functions, pinned to a witness that requires no
+    /// attested inference.
+    ///
+    /// These shadow `super::witness` and `super::witness_contribution` inside
+    /// the test module on purpose. Every test below this line was written
+    /// about redaction, verdicts and certificates, and adding a policy
+    /// parameter to their call sites would have said nothing about any of
+    /// them. The attested-inference behaviour is exercised by tests that call
+    /// the real functions with a real policy -- see `inference_requirement`
+    /// below and `witness_service::inference` -- so this shadowing narrows
+    /// what the old tests say rather than weakening what anything checks.
+    async fn witness(
+        request: WitnessRequest,
+        redactor: &dyn TranscriptRedactor,
+        signer: &dyn Signer,
+        enclave: &dyn Enclave,
+    ) -> Result<WitnessResponse, WitnessError> {
+        super::witness(
+            request,
+            &InferenceAttestationPolicy::not_required(),
+            redactor,
+            signer,
+            enclave,
+        )
+        .await
+    }
+
+    async fn witness_contribution(
+        request: WitnessContributionRequest,
+        redactor: &dyn ContributionRedactor,
+        signer: &dyn Signer,
+        enclave: &dyn Enclave,
+    ) -> Result<WitnessContributionResponse, WitnessError> {
+        super::witness_contribution(
+            request,
+            &InferenceAttestationPolicy::not_required(),
+            redactor,
+            signer,
+            enclave,
+        )
+        .await
     }
 
     /// The production redaction seam, with no known path prefixes so that
@@ -1449,6 +1593,7 @@ mod tests {
         WitnessContributionRequest {
             raw_contribution: raw_contribution(text),
             granted: granted(),
+            offered_receipt: None,
         }
     }
 

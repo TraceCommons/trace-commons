@@ -546,6 +546,97 @@ Changing the mode changes the measurement. See "The configuration is measured".
 
 ---
 
+## Requiring attested inference
+
+`TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE` is **off by default**, and
+the default is deliberate rather than lax. Turning it on refuses a great deal
+of honest traffic, and an operator has to want that.
+
+When it is on, the witness refuses to certify a contribution unless the **last
+inference call the contribution declares** carries a NEAR AI receipt that
+verifies against that call's own raw request and response bodies, as they sit
+in the session the witness was handed. The witness — not the contributor —
+decides which exchange that is: it takes the last `HttpExchange` event in the
+trace's own order.
+
+### What the requirement establishes
+
+Exactly this: at witness time, an attested NEAR AI enclave had produced that
+response for that request, and both bodies were inside the session that was
+certified.
+
+It does **not** establish that the session made the call — a contributor
+holding a receipt and its bodies can paste them into a trace they wrote. It
+says nothing about any other turn, tool result or file edit. And it says
+nothing about the conversation history: the reason one body pair is worth
+having is that a chat-completions request body repeats the whole conversation
+prefix, but a session that compacted or truncated its context sends a summary
+instead, and the witness cannot tell which it got.
+
+Render the count `n_of_m` — one verified receipt over a trace declaring three
+calls is `1_of_3`. Never "attested", never "genuine".
+
+### Verification happens once and cannot be repeated
+
+The receipt binds the raw bodies; the witness publishes a redacted artifact.
+Redaction destroys the attested bytes, so **nothing downstream can re-check
+the receipt**. The witness is the only party that ever holds both, which is
+why it is the only party that can verify at all. Do not build a surface that
+implies a server or a consumer re-verified anything.
+
+Note also what the certificate does **not** carry: there is no
+attested-inference field on it. A certificate proves the requirement held only
+in the sense that a requiring witness issues none when it does not — and the
+measurement pins the image, not the environment, so two witnesses at the same
+measurement can differ on this policy. Closing that needs a v2 certificate
+profile with its own signing domain (see `redaction_witness/certificate.rs`,
+"Why there are no inference fields"), which is a separate change across three
+independent implementations of the wire format.
+
+### What it refuses, and why each refusal is honest
+
+Every refusal below is a 403 with a label, and a refused submission carries no
+certificate at all.
+
+| Label | Meaning |
+| --- | --- |
+| `witness_inference_attestation_missing` | required, and no receipt was offered |
+| `witness_inference_attestation_unavailable` | offered on `POST /v1/witness`'s **text** shape, which carries no event order and so cannot say which call was last |
+| `witness_inference_call_absent` | the contribution declares no inference call at all |
+| `witness_inference_body_not_in_session` | the last call carries no bodies — in practice, the contribution withheld tool payloads |
+| `witness_inference_receipt_unverified` | the receipt did not verify against those bytes |
+| `witness_inference_receipt_model_unbound` | the two-part receipt form, which binds no model |
+| `witness_inference_model_inadmissible` | the bound model is not in `TRACE_COMMONS_WITNESS_ADMISSIBLE_INFERENCE_MODELS` |
+| `witness_inference_body_unreadable` | the request body is not JSON naming a `model` |
+| `witness_inference_body_too_large` | a body exceeds `TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES` |
+
+`witness_inference_receipt_unverified` is the one to read carefully. SHA-256
+answers one bit, so a capture that pretty-printed a body, reordered its keys or
+re-serialised it from a parsed form produces **exactly** the same failure as a
+receipt lifted from somewhere else. The witness cannot tell them apart and does
+not pretend to. On an honest deployment, suspect the capture first.
+
+### Who this excludes, before you turn it on
+
+- **Every trace from a provider that is not NEAR AI.** Claude Code, Codex,
+  Gemini and Cline sessions have no receipt to offer.
+- **Every trace that withheld tool payloads.** The bodies live in an
+  `HttpExchange` event's `structured_payload["request"]["body"]` and `content`,
+  and both are written only under `include_tool_payloads`. That flag has
+  historically been off everywhere.
+- **Every trace on the text shape of `POST /v1/witness`**, including the smoke
+  tests in this document. The requirement is enforceable only on the structured
+  `raw_contribution` shape.
+- **Everything, on today's binary.** `trace-commons-witness` never calls
+  `with_contribution_redactor`, so the structured route is unavailable and
+  answers `witness_contribution_path_unavailable`. Turning the requirement on
+  against this binary therefore refuses every submission by one label or the
+  other. Wiring the structured seam into the binary is a prerequisite, and it
+  is not part of this change.
+
+That is a large exclusion. It is the product decision the flag exists to make
+explicit.
+
 ## First boot
 
 Expect exactly two things in the log, and nothing else about any request:
