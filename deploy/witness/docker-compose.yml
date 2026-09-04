@@ -55,15 +55,43 @@ services:
       # `deterministic-only` or `full-pipeline`, and the binary refuses to start
       # if it is neither -- there is no default in either direction.
       #
-      # This reference deployment ships `deterministic-only` because
-      # `full-pipeline` needs a prose-PII classifier, and neither way of
-      # supplying one is free: a sibling container inside this CVM adds a
-      # multi-gigabyte model and runs it on CVM vCPUs, and an external endpoint
-      # sends partially-redacted text out of the enclave. See the README's
-      # "Choosing a redaction mode" -- the choice has a consequence for what a
-      # certificate is worth, and it is not a default anyone should inherit
-      # without reading it.
-      TRACE_COMMONS_WITNESS_REDACTION: "deterministic-only"
+      # This deployment runs `full-pipeline`: the deterministic pass, then the
+      # prose-PII classifier over its output, which is the same two stages in
+      # the same order that ingest applies. A `deterministic-only` certificate
+      # carries the deterministic policy alias, and the server's policy
+      # allowlist is what keeps such a certificate from admitting a trace no
+      # classifier ever read -- so the mode here decides whether these
+      # certificates can lift the PII backstop hold at all.
+      TRACE_COMMONS_WITNESS_REDACTION: "full-pipeline"
+
+      # The classifier, resolved at startup: a witness told to run
+      # `full-pipeline` with no usable backend does not bind, and a backend
+      # that fails mid-request refuses rather than degrading to the
+      # deterministic result.
+      #
+      # THIS IS A TRUST-BOUNDARY DECISION, taken deliberately. `near-ai` is an
+      # endpoint OUTSIDE this enclave, so partially-redacted text leaves the
+      # CVM. The deterministic pass has already run, so credentials and local
+      # paths are masked in what goes out -- that ordering is why it is this
+      # way round -- but prose PII is still present in it. Choosing this backend
+      # places the classifier's operator inside the trust boundary of every
+      # transcript this witness sees. The alternative, a sibling classifier
+      # container inside the CVM, leaks nothing and costs a multi-gigabyte
+      # model on CVM vCPUs at roughly 58 characters per second.
+      TRACE_PRIVACY_FILTER_BACKEND: "near-ai"
+
+      # Pinned rather than left to the binary's defaults. Both are MEASURED
+      # here, so a contributor who has verified the measurement knows which
+      # endpoint and which model this enclave sends prose to, without
+      # disassembling the image to read a compiled-in default.
+      TRACE_NEAR_AI_PRIVACY_BASE_URL: "https://cloud-api.near.ai/v1"
+      TRACE_NEAR_AI_PRIVACY_MODEL: "openai/privacy-filter"
+
+      # Injected encrypted at deploy time and declared in app-compose.json's
+      # `allowed_envs`. The NAME is measured; the VALUE is not, and must never
+      # be written into this file -- app-compose.json embeds this compose
+      # verbatim and is uploaded to the deployer.
+      TRACE_NEAR_AI_PRIVACY_API_KEY: ${TRACE_NEAR_AI_PRIVACY_API_KEY:?set at deploy time}
 
       # 64 MiB. The redacted-envelope cap is 16 MiB and the measured
       # raw-to-envelope ratio on this pilot is about 3.4:1.
