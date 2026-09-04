@@ -40,6 +40,8 @@ pub mod project_key;
 pub mod queue;
 pub mod settings;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_paths;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
