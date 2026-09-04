@@ -624,15 +624,15 @@ sh install.sh</code></pre>
     </section>
 
     <section class="section-band">
-      <p class="eyebrow">New in 0.6.0</p>
-      <h1>You can say what went wrong.</h1>
-      <p class="lede">0.5.0 let you mark a session worked, partly worked, or failed. Now, when you say it did not go well, you can add a short note explaining what happened. Nothing else in a trace can carry that: the transcript records what the agent did, not what you expected instead.</p>
+      <p class="eyebrow">New in 0.8.0</p>
+      <h1>You can see what was left in.</h1>
+      <p class="lede">The scrubbing panel has always told you what it removed. Now it also tells you, separately, when something it recognised as a secret is still there in what would be sent &mdash; and it stops counting that among the things it took out. A value left in was being reported as taken out, on the screen where you decide whether to send.</p>
     </section>
 
     <section class="about-grid">
-      <div class="panel"><h2>Stored as you wrote it</h2><p class="lede">Everywhere else, file paths and email addresses in your session are replaced with placeholders before upload. Your note is not: replacing the details would remove the explanation. Treat it as writing about your own work, and leave out anything you would not want in the corpus.</p></div>
-      <div class="panel"><h2>Still optional, still yours</h2><p class="lede">The note only appears when you say a session went badly, and skipping it changes nothing. If it looks like it contains an API key or a token, the upload is refused and you are asked to remove it rather than having it quietly masked.</p></div>
-      <div class="panel"><h2>Paths are never shown</h2><p class="lede">Projects are identified by opaque IDs and daemon-supplied labels, so a project path is never rendered anywhere in the app.</p></div>
+      <div class="panel"><h2>Private, or direct</h2><p class="lede">A Tools section lists each of your tools as Private, Sends direct, Not known, or Not used, read from a record kept on your own machine. It is off until you turn it on. It says where a request goes first, not what happens to it afterwards, and where it does not know it says Not known.</p></div>
+      <div class="panel"><h2>Places, not secrets</h2><p class="lede">When something is still present, the count is of the places it was found, not of values &mdash; one place can hold several. You can also search the session as it was first recorded, not just the scrubbed copy, to check a value is really gone; if that check cannot run, you are told so rather than shown an all-clear.</p></div>
+      <div class="panel"><h2>Shown, not stored</h2><p class="lede">The queue groups sessions by their project folder and shows it the way your disk spells it, so you can tell projects apart. The identity used to store and group them stays an opaque ID, and the folder is never logged, never put in a notification, and never written to your history.</p></div>
       <div class="panel"><h2>The tray cannot send</h2><p class="lede">Waiting and armed projects, weekly totals, and quick access to Review, pause, Settings, and Quit. Tray rows are read-only and cannot approve or submit a trace.</p></div>
     </section>
 
