@@ -97,7 +97,8 @@ pub fn line(occurrences: &BTreeMap<String, u32>, distinct: &BTreeMap<String, u32
         .join(" \u{00b7} ")
 }
 
-/// How many secrets were found and left in what would be sent.
+/// How many places a secret was found and left in what would be sent.
+/// Sites, not secrets: one site can hold more than one value.
 pub fn survivor_total(counts: &BTreeMap<String, u32>) -> u32 {
     counts
         .iter()
