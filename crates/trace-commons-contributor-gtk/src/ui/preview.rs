@@ -87,6 +87,12 @@ struct Sheet {
     recent_row: gtk::Box,
 
     whats_in_it: gtk::Box,
+    /// The removed-summary panel, above the transcript on the same tab.
+    ///
+    /// Rebuilt from the pinned preview on every `fill`, like `whats_in_it`
+    /// and `permissions`: it describes one session and must never survive
+    /// the sheet advancing to the next one.
+    removed_summary: gtk::Box,
     /// The transcript tab's body, chunked and evicting. See
     /// `crate::transcript_paging` for why it is not one text view.
     transcript: Rc<TranscriptPane>,
@@ -329,6 +335,13 @@ impl Sheet {
         body_head.append(&copy_all);
         let body_panel = style::card(gtk::Orientation::Vertical, 0);
         body_panel.append(&transcript.scroller);
+        // Above the marks rather than below them: it is the at-a-glance
+        // half, and a person who reads only the top of this tab should
+        // still have been told what left.
+        let removed_summary = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::S)
+            .build();
         let body_page = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(space::M)
@@ -338,6 +351,7 @@ impl Sheet {
             .margin_end(space::L)
             .build();
         body_page.append(&body_head);
+        body_page.append(&removed_summary);
         body_page.append(&body_panel);
         stack.add_titled(&body_page, Some(TRANSCRIPT_TAB), copy::TAB_WOULD_BE_SENT);
 
@@ -613,6 +627,7 @@ impl Sheet {
             search_summary,
             recent_row,
             whats_in_it,
+            removed_summary,
             transcript: Rc::clone(&transcript),
             copy_all: copy_all.clone(),
             permissions,
@@ -802,6 +817,54 @@ impl Sheet {
         self.contribute.set_sensitive(self.pinned.get());
     }
 
+    /// The removed-summary panel: one row per redaction family, and -- only
+    /// when there is one -- what scrubbing found and left in.
+    ///
+    /// The caveat sits under both. A panel that enumerates categories makes
+    /// the app look more thorough than it is, which is exactly when that
+    /// sentence earns its place.
+    fn fill_removed_summary(&self, summary: &PreviewSummary) {
+        while let Some(child) = self.removed_summary.first_child() {
+            self.removed_summary.remove(&child);
+        }
+        let (removed, still_present) =
+            crate::redaction_summary::rows(&summary.redactions, &summary.redactions_distinct);
+
+        let panel = style::card(gtk::Orientation::Vertical, space::S);
+        panel.append(&style::section(copy::REDACTION_PANEL_REMOVED));
+        if removed.is_empty() {
+            let none = gtk::Label::builder()
+                .label(copy::NOTHING_MATCHED)
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            none.add_css_class("tc-meta");
+            panel.append(&none);
+        }
+        for row in &removed {
+            panel.append(&summary_row(row, Tone::Neutral));
+        }
+
+        if !still_present.is_empty() {
+            panel.append(&style::section(copy::REDACTION_PANEL_STILL_PRESENT));
+            for row in &still_present {
+                panel.append(&summary_row(row, Tone::Attention));
+            }
+        }
+
+        let caveat = gtk::Label::builder()
+            .label(copy::residual_risk_line(
+                crate::redaction_labels::removed_total(&summary.redactions),
+            ))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        caveat.add_css_class("tc-caveat");
+        panel.append(&caveat);
+
+        self.removed_summary.append(&panel);
+    }
+
     fn fill(self: &Rc<Self>, summary: &PreviewSummary, body: Option<String>) {
         self.set_manifest(Some(summary));
         // Approving is only allowed against a real, pinned preview. An
@@ -832,6 +895,8 @@ impl Sheet {
                 self.transcript.show_sentence(copy::BODY_NOT_AVAILABLE_HERE);
             }
         }
+
+        self.fill_removed_summary(summary);
 
         // "What's in it", from what the contract actually reports. Files
         // touched, tools invoked and the model are not on this response --
@@ -991,14 +1056,31 @@ impl Sheet {
         }
 
         let hits = search_hits(body, needle);
-        // "0 matches" is the answer a contributor under an NDA came here
-        // for, so it is the one that gets the good-standing tone. A hit is
-        // not a failure -- it is something to weigh -- so it gets gold, not
-        // coral. Both carry a glyph and words as well as a colour.
+        // What the redacted body says, on its own, before the daemon answers
+        // about the original. It is replaced in place by
+        // `apply_original_count` when that answer lands, and it is what
+        // stands if the answer never does.
+        //
+        // Which is why the zero-hit case is drawn NEUTRAL rather than clear.
+        // Zero matches in the redacted body cannot tell "never here" from
+        // "removed", and it certainly cannot tell either from "the daemon
+        // has not answered yet" -- and this module's own doc says the one
+        // direction it must not fail in is reporting "not in this session"
+        // about a value that is in it. Printing the good-standing tick here
+        // did exactly that, synchronously, before anything was checked.
+        // `apply_original_count` is the only thing allowed to print a
+        // verdict.
+        self.request_original_count(needle, hits.len() as u32);
+        // A hit is not a failure -- it is something to weigh -- so it gets
+        // gold, not coral. Every state carries a glyph and words as well as
+        // a colour.
         if hits.is_empty() {
-            self.set_summary_tone(Tone::Clear);
-            self.search_summary
-                .set_text(&format!("{}  0 matches", Tone::Clear.glyph()));
+            self.set_summary_tone(Tone::Neutral);
+            self.search_summary.set_text(&format!(
+                "{}  {}",
+                Tone::Neutral.glyph(),
+                copy::SEARCH_CHECKING_ORIGINAL
+            ));
             // A clean answer is still worth one caution, and the caution is
             // the gold one: a literal search finds the spelling it was
             // given and no other. Glyph, words and colour, so it survives
@@ -1050,6 +1132,65 @@ impl Sheet {
             more.add_css_class("tc-meta");
             self.search_results.append(&more);
         }
+    }
+
+    /// Ask the daemon how many times this needle was in the PRE-redaction
+    /// session, and say which of the four cases this is once it answers.
+    ///
+    /// Asynchronous, because the daemon reads the raw session file to
+    /// answer. Until it does, the summary says what the redacted body says
+    /// on its own -- an honest partial answer rather than a blank.
+    ///
+    /// The reply is dropped unless the sheet is still showing the SAME ENTRY
+    /// and the search box still holds the needle it was asked about. Typing
+    /// produces one call per keystroke and the replies can land out of
+    /// order, and a stale count printed against a newer question would be a
+    /// wrong answer on the screen whose whole job is to be right about this.
+    ///
+    /// The entry half is not redundant with the needle half. `fill` re-runs
+    /// the search when the sheet advances to the next session, so advancing
+    /// with the box unchanged asks the same needle of a different entry --
+    /// and needle-only matching would let entry A's count paint over entry
+    /// B's, which is the case a contributor stepping through a queue hits
+    /// every time.
+    fn request_original_count(self: &Rc<Self>, needle: &str, remaining: u32) {
+        let Some(entry) = self.current() else {
+            return;
+        };
+        let entry_id = entry.entry_id.clone();
+        let sheet = Rc::clone(self);
+        let asked = needle.to_string();
+        let asked_of = entry_id.clone();
+        self.app
+            .search_original(&entry_id, &asked.clone(), move |_, original| {
+                let still_here = sheet
+                    .current()
+                    .is_some_and(|entry| entry.entry_id == asked_of);
+                if !still_here || sheet.search_entry.text().trim() != asked {
+                    return;
+                }
+                sheet.apply_original_count(remaining, original);
+            });
+    }
+
+    /// Replace the summary with the sentence that tells "never here" apart
+    /// from "removed". See `crate::original_search`.
+    fn apply_original_count(&self, remaining: u32, original: Option<u32>) {
+        let outcome = crate::original_search::classify(remaining, original);
+        // Three tones, not two. An `Unknown` used to draw in the clear tone,
+        // putting the good-standing tick beside the sentence that says the
+        // check did not run. See `original_search::Emphasis`.
+        let tone = match crate::original_search::emphasis(&outcome) {
+            crate::original_search::Emphasis::Attention => Tone::Attention,
+            crate::original_search::Emphasis::Clear => Tone::Clear,
+            crate::original_search::Emphasis::Unchecked => Tone::Neutral,
+        };
+        self.set_summary_tone(tone);
+        let glyph = tone.glyph();
+        self.search_summary.set_text(&format!(
+            "{glyph}  {}",
+            crate::original_search::sentence(&outcome)
+        ));
     }
 
     fn remember_search(self: &Rc<Self>, needle: &str) {
@@ -1560,6 +1701,58 @@ impl TranscriptPane {
     }
 }
 
+/// One row of the removed-summary panel: what kind of thing, how much of it,
+/// what that kind IS, and which sub-labels it folded in.
+///
+/// Never a matched value. The row names a KIND -- the value is gone by
+/// construction, and a sub-label is a schema-shaped identifier the redactor
+/// minted, not contributor text.
+fn summary_row(row: &crate::redaction_summary::Row, tone: Tone) -> gtk::Box {
+    let container = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    if tone == Tone::Attention {
+        head.append(&style::tag(tone.glyph(), tone));
+    }
+    let name = gtk::Label::builder()
+        .label(&row.display)
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    name.add_css_class("tc-card-title");
+    head.append(&name);
+    let counts = gtk::Label::new(Some(&copy::redaction_row_counts(
+        row.occurrences,
+        row.distinct,
+    )));
+    counts.add_css_class("tc-meta");
+    counts.set_valign(gtk::Align::Center);
+    head.append(&counts);
+    container.append(&head);
+
+    let description = gtk::Label::builder()
+        .label(row.description)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    description.add_css_class("tc-meta");
+    container.append(&description);
+
+    if !row.detail.is_empty() {
+        let detail = gtk::Label::builder()
+            .label(row.detail.join(", "))
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        detail.add_css_class("tc-meta");
+        detail.add_css_class("tc-tertiary");
+        container.append(&detail);
+    }
+
+    container
+}
+
 /// One chunk, laid out: a text view over that chunk's bytes with its
 /// redaction markers chipped.
 ///
@@ -1589,7 +1782,83 @@ fn chunk_view(text: &str) -> gtk::TextView {
     let buffer = view.buffer();
     buffer.set_text(text);
     highlight_redactions(&buffer, text);
+    label_placeholders(&view, text);
     view
+}
+
+/// Name each redaction mark, on hover.
+///
+/// `highlight_redactions` makes a mark legible; this says WHAT was taken out
+/// there, which is the half a `GtkTextTag` cannot carry. Both walk the same
+/// spans -- `transcript_paging::marker_spans`, which the chunker also uses
+/// -- so there is no second marker pass, and no set of marks one of them
+/// knows about and the other does not.
+///
+/// Three forms, three amounts of information, and none of them padded out
+/// with a guess: a numbered placeholder names its category and, on a repeat
+/// of the same ordinal, says it is the same original value; a labelled
+/// `[REDACTED:...]` names its category only; a bare `[REDACTED]` says just
+/// that something was removed. See `crate::placeholders`.
+///
+/// The ranges are converted to CHARACTER offsets here, because that is the
+/// unit a `GtkTextIter` counts in while the spans are bytes. Done once per
+/// chunk rather than per motion event, which would re-walk the chunk on
+/// every pixel of a hover.
+fn label_placeholders(view: &gtk::TextView, text: &str) {
+    let mut marks: Vec<(i32, i32, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+    let mut byte = 0usize;
+    let mut chars = 0i32;
+    for found in crate::placeholders::scan(text) {
+        chars += text[byte..found.start].chars().count() as i32;
+        let width = text[found.start..found.end].chars().count() as i32;
+        let name = match (&found.label, found.ordinal) {
+            (Some(label), Some(ordinal)) => {
+                let kind = crate::placeholders::display(label);
+                // Only a numbered placeholder supports this claim: the
+                // redactor mints one token per DISTINCT value and reuses it
+                // wherever that value recurs.
+                if seen.insert((label.clone(), ordinal)) {
+                    copy::redaction_mark_tooltip(&kind)
+                } else {
+                    copy::redaction_mark_repeat(&kind)
+                }
+            }
+            (Some(label), None) => {
+                copy::redaction_mark_tooltip(&crate::placeholders::display(label))
+            }
+            (None, _) => copy::REDACTION_MARK_UNNAMED.to_string(),
+        };
+        marks.push((chars, chars + width, name));
+        chars += width;
+        byte = found.end;
+    }
+    if marks.is_empty() {
+        return;
+    }
+    view.set_has_tooltip(true);
+    view.connect_query_tooltip(move |view, x, y, keyboard, tooltip| {
+        // A keyboard tooltip has no pointer position to resolve, and this
+        // mark is a property of a place rather than of the widget.
+        if keyboard {
+            return false;
+        }
+        let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
+        let Some(iter) = view.iter_at_location(bx, by) else {
+            return false;
+        };
+        let offset = iter.offset();
+        match marks
+            .iter()
+            .find(|(start, end, _)| offset >= *start && offset < *end)
+        {
+            Some((_, _, name)) => {
+                tooltip.set_text(Some(name));
+                true
+            }
+            None => false,
+        }
+    });
 }
 
 /// A readable window around a search hit, and where inside it the hit is.

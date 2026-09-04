@@ -364,51 +364,65 @@ pub fn render(app: &Rc<App>) {
     let entries = app.entries.borrow();
     let pending: Vec<&QueueEntry> = entries.iter().filter(|e| e.state == "pending").collect();
 
-    app.set_queue_count(pending.len());
+    // The two facts the count cannot carry, both read off the previews the
+    // cards already hold: a session scrubbing matched NOTHING in, and one
+    // that was trimmed to fit the raw byte budget. An entry with no preview
+    // yet counts as neither -- it is not yet known to be either.
+    let previews = app.previews.borrow();
+    let nothing_matched = pending
+        .iter()
+        .filter(|e| {
+            previews
+                .get(&e.entry_id)
+                .is_some_and(|p| crate::redaction_labels::removed_total(&p.redactions) == 0)
+        })
+        .count();
+    drop(previews);
+    let trimmed = pending.iter().filter(|e| e.subagents_dropped > 0).count();
+    app.set_queue_count(
+        pending.len(),
+        crate::shield::state(pending.len(), nothing_matched, trimmed),
+    );
     view.empty.set_visible(pending.is_empty());
     view.scroller.set_visible(!pending.is_empty());
     view.heading.set_text(&copy::waiting_heading(pending.len()));
 
-    // Grouped by project, in the order each project's first entry appears,
-    // so a project's header always sits above its own cards. Each entry
-    // keeps the index it had in the flat `pending` list -- `Look inside`
-    // opens the preview sheet by that index, and the sheet re-derives its
-    // own copy of `pending` with the identical filter, so the position this
-    // loop hands to `row` must stay the one that list agrees on, whatever
-    // order the cards are drawn in.
-    let mut groups: Vec<(&str, &str, Vec<(usize, &QueueEntry)>)> = Vec::new();
-    for (index, entry) in pending.iter().enumerate() {
-        match groups.iter_mut().find(|(id, _, _)| *id == entry.project_id) {
-            Some((_, _, members)) => members.push((index, entry)),
-            None => groups.push((
-                &entry.project_id,
-                &entry.project_label,
-                vec![(index, entry)],
-            )),
-        }
-    }
+    // Grouped by project, in the order each project's first entry appears.
+    // Each entry keeps the index it had in the flat `pending` list --
+    // `Look inside` opens the preview sheet by that index, and the sheet
+    // re-derives its own copy of `pending` with the identical filter, so the
+    // position handed to `row` must stay the one that list agrees on,
+    // whatever order the cards are drawn in. `queue_folders::group` is what
+    // guarantees that, and `members_keep_their_flat_pending_index` is what
+    // guards it.
+    let folders = crate::queue_folders::group(&pending);
+    // Resolved on every render rather than mutated on every queue change: a
+    // folder can be pulled out from under the person standing in it by an
+    // approval or by a background upload finishing, and the only thing that
+    // has to be true is that what is drawn matches what exists now.
+    let here = crate::queue_folders::resolve(&app.queue_location.borrow(), &folders);
+    *app.queue_location.borrow_mut() = here.clone();
 
-    for (project_id, project_label, members) in &groups {
-        // `Submit all` only earns its place when it says something a row's
-        // own `Submit` does not -- see `project_header` -- but the header
-        // itself, and its `Ignore project`, are drawn at every group size:
-        // ignoring a project with one waiting session is exactly as
-        // meaningful as ignoring one with ten.
-        view.list.append(&project_header(
-            app,
-            project_id,
-            project_label,
-            members.len(),
-        ));
-        for (index, entry) in members {
-            let widget = row(app, entry, *index);
-            // Kept so a scroll settle can ask each widget its own bounds
-            // against the scroller -- see
-            // `App::schedule_visible_preview_update`.
-            app.card_widgets
-                .borrow_mut()
-                .insert(entry.entry_id.clone(), widget.clone());
-            view.list.append(&widget);
+    match &here {
+        crate::queue_folders::Location::Root => {
+            for folder in &folders {
+                view.list.append(&folder_row(app, folder));
+            }
+        }
+        crate::queue_folders::Location::Project(id) => {
+            if let Some(folder) = folders.iter().find(|f| &f.project_id == id) {
+                view.list.append(&folder_heading(app, folder));
+                for (index, entry) in &folder.members {
+                    let widget = row(app, entry, *index);
+                    // Kept so a scroll settle can ask each widget its own
+                    // bounds against the scroller -- see
+                    // `App::schedule_visible_preview_update`.
+                    app.card_widgets
+                        .borrow_mut()
+                        .insert(entry.entry_id.clone(), widget.clone());
+                    view.list.append(&widget);
+                }
+            }
         }
     }
 
@@ -686,13 +700,31 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     // Who, what ran it, and when -- on one line, with the time hung on the
     // right where a column of them can be read down.
     let head = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    head.set_valign(gtk::Align::Start);
+    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
     let title = gtk::Label::builder()
         .label(&entry.project_label)
         .xalign(0.0)
         .wrap(true)
         .build();
     title.add_css_class("tc-card-title");
-    head.append(&title);
+    naming.append(&title);
+    // Where the session actually ran, when that is not the project root.
+    // The daemon sends null rather than repeating `project_path`, so this
+    // line is drawn only when it says something the folder did not.
+    if let Some(session_path) = entry.session_path.as_deref() {
+        let ran_in = gtk::Label::builder()
+            .label(session_path)
+            .xalign(0.0)
+            // Ellipsized at the START: the tail is the subdirectory that
+            // distinguishes this session, and the head is the part it shares
+            // with the folder it is already sitting in.
+            .ellipsize(gtk::pango::EllipsizeMode::Start)
+            .build();
+        ran_in.add_css_class("tc-meta");
+        naming.append(&ran_in);
+    }
+    head.append(&naming);
     let agent = gtk::Label::new(Some(entry.agent_label()));
     agent.add_css_class("tc-meta");
     agent.set_hexpand(true);
@@ -721,6 +753,23 @@ fn row(app: &Rc<App>, entry: &QueueEntry, index: usize) -> gtk::Widget {
     card.append(&summary);
 
     card.append(&manifest_block(app, entry, index, state));
+
+    // A second route to `Look inside`, never a replacement for it. The
+    // button keeps its emphasis -- one-click submit added AVAILABILITY, and
+    // primary styling is a RECOMMENDATION. What this adds is that the
+    // obvious gesture on a card does the obvious thing.
+    let click = gtk::GestureClick::new();
+    let app_for_click = Rc::clone(app);
+    click.connect_released(move |gesture, n_press, _, _| {
+        if n_press != 1 {
+            return;
+        }
+        // Claimed so the gesture does not also reach the card's own
+        // buttons' parents.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        super::preview::open(&app_for_click, index);
+    });
+    card.add_controller(click);
 
     card.upcast()
 }
@@ -784,7 +833,25 @@ fn manifest_block(
         (CardPreview::Ready(_), Some(0)) => {
             let chip = style::tag(copy::NOTHING_MATCHED, Tone::Attention);
             chip.set_valign(gtk::Align::Start);
-            pairs.append(&chip);
+            // The chip is the one thing on the card that names a doubt, and
+            // it used to be the one thing that could not be acted on. It now
+            // opens the sheet on the search tab, which is where the doubt is
+            // answerable: type the string you are worried about and be told
+            // whether it is in there.
+            let button = gtk::Button::builder().child(&chip).build();
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Start);
+            button.set_tooltip_text(Some(copy::NOTHING_MATCHED_TOOLTIP));
+            let app_for_chip = Rc::clone(app);
+            button.connect_clicked(move |_| {
+                super::preview::open_with_search(
+                    &app_for_chip,
+                    index,
+                    None,
+                    Some("search".to_string()),
+                );
+            });
+            pairs.append(&button);
         }
         (CardPreview::Ready(p), _) => pairs.append(&style::manifest_field(
             copy::REMOVED_BY_PATTERN,
@@ -929,35 +996,127 @@ fn manifest_block(
     block
 }
 
-/// A project's header. `Submit all` is built only when there is more than
-/// one session waiting -- one waiting session from a project is already
-/// covered by that row's own `Submit`, so the button would say nothing new
-/// -- but `Ignore project` is built regardless of `waiting`: ignoring a
-/// project with one card pending is exactly as meaningful as ignoring one
-/// with ten. `Submit all` calls `approve` with `project_id` rather than
-/// enumerating this project's entry ids itself: the daemon is what decides
-/// which entries that selects, exactly once, and this shell does not keep
-/// its own copy of that rule. `Ignore project` calls `set_project_mode` the
-/// same way -- see `set_mode` in `ui/settings.rs`.
-fn project_header(
-    app: &Rc<App>,
-    project_id: &str,
-    project_label: &str,
-    waiting: usize,
-) -> gtk::Widget {
+/// The head of a folder's sessions: the way back, and which folder this is.
+///
+/// The back control is a flat button rather than a header-bar arrow because
+/// this drill-in lives inside one page of the view stack -- the window's
+/// header bar belongs to the switcher, and putting a second navigation
+/// affordance up there would make "back" ambiguous.
+fn folder_heading(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widget {
     let bar = style::card(gtk::Orientation::Horizontal, space::M);
     bar.set_valign(gtk::Align::Center);
 
+    let back = gtk::Button::with_label(copy::ALL_FOLDERS);
+    back.add_css_class("flat");
+    let app_for_back = Rc::clone(app);
+    back.connect_clicked(move |_| {
+        *app_for_back.queue_location.borrow_mut() = crate::queue_folders::Location::Root;
+        render(&app_for_back);
+    });
+    bar.append(&back);
+
+    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    naming.set_hexpand(true);
     let heading = gtk::Label::builder()
-        .label(copy::project_group_heading(project_label, waiting))
+        .label(&folder.project_label)
         .xalign(0.0)
-        .hexpand(true)
         .wrap(true)
         .build();
     heading.add_css_class("tc-card-title");
-    bar.append(&heading);
+    naming.append(&heading);
+    if !folder.project_path.is_empty() {
+        let path = gtk::Label::builder()
+            .label(&folder.project_path)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Start)
+            .build();
+        path.add_css_class("tc-meta");
+        naming.append(&path);
+    }
+    bar.append(&naming);
 
-    if waiting > 1 {
+    bar.upcast()
+}
+
+/// One folder in the queue's top level: a project, its folder, what is
+/// waiting in it, and the two things that can be done to the whole project
+/// without opening it.
+///
+/// The label is the row's largest text with the path beneath it, because the
+/// question a contributor is answering at this level is "which repository is
+/// this", and a basename cannot answer it when two checkouts share one.
+///
+/// The row itself is a button into the folder. `Submit all` calls `approve`
+/// with `project_id` rather than enumerating this project's entry ids
+/// itself: the daemon is what decides which entries that selects, exactly
+/// once, and this shell does not keep its own copy of that rule.
+/// `Ignore project` calls `set_project_mode` the same way -- see `set_mode`
+/// in `ui/settings.rs`.
+fn folder_row(app: &Rc<App>, folder: &crate::queue_folders::Folder) -> gtk::Widget {
+    let project_id = folder.project_id.as_str();
+    let project_label = folder.project_label.as_str();
+    let waiting = folder.members.len();
+
+    let bar = style::card(gtk::Orientation::Horizontal, space::M);
+    bar.set_valign(gtk::Align::Center);
+
+    // What names the folder, and what says how much is in it. Both live
+    // inside the button that opens it; the project-wide actions sit outside,
+    // as siblings, so no button is ever nested in another.
+    let opener = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
+    opener.set_hexpand(true);
+
+    // The label over the path, as one column, so the name is what is read
+    // first and the path is what disambiguates it.
+    let naming = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
+    naming.set_hexpand(true);
+    let heading = gtk::Label::builder()
+        .label(project_label)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    heading.add_css_class("tc-card-title");
+    naming.append(&heading);
+    if !folder.project_path.is_empty() {
+        let path = gtk::Label::builder()
+            .label(&folder.project_path)
+            .xalign(0.0)
+            // Ellipsized at the START: the tail of a path is what tells two
+            // checkouts apart, and the head is the part every row shares.
+            .ellipsize(gtk::pango::EllipsizeMode::Start)
+            .build();
+        path.add_css_class("tc-meta");
+        naming.append(&path);
+    }
+    opener.append(&naming);
+
+    let summary = gtk::Label::new(Some(&copy::folder_summary(waiting, folder.bytes)));
+    summary.add_css_class("tc-meta");
+    summary.set_valign(gtk::Align::Center);
+    opener.append(&summary);
+
+    // Opening the folder. A flat button around the naming column rather than
+    // a gesture on the whole row: `Submit all`, `Submit all as...` and
+    // `Ignore project` all sit in this same row, and a row-wide gesture
+    // would have to compete with them for the click.
+    let open = gtk::Button::builder().child(&opener).build();
+    open.add_css_class("flat");
+    open.set_hexpand(true);
+    let app_for_open = Rc::clone(app);
+    let id_for_open = project_id.to_string();
+    open.connect_clicked(move |_| {
+        *app_for_open.queue_location.borrow_mut() =
+            crate::queue_folders::Location::Project(id_for_open.clone());
+        render(&app_for_open);
+    });
+    bar.append(&open);
+
+    {
+        // Shown at every count, including one. The old rule hid it at one
+        // because the row's own `Submit` was on the same screen and did the
+        // same thing. Under drill-in that row is a level down, so hiding this
+        // would mean opening a folder to do the thing the folder is offering.
+        // The rule expired with the layout it was written for.
         let submit_all = gtk::Button::with_label(copy::SUBMIT_ALL);
         submit_all.add_css_class("suggested-action");
         submit_all.add_css_class("tc-primary");
@@ -1171,18 +1330,15 @@ fn submit_and_toast(
     });
 }
 
-/// The "Removed by pattern" figure: the receipt's own categories, in the
-/// receipt's own order, separated as the design writes them.
+/// The "Removed by pattern" figure.
 ///
-/// Built from `PreviewSummary::scrubbed_line` rather than from the raw map
-/// so the queue and the preview sheet cannot disagree about how a category
-/// is worded, pluralised, or ranked.
+/// One call into [`crate::redaction_labels::line`], which is where the rules
+/// live and where they are tested. It used to reformat
+/// `PreviewSummary::scrubbed_line` by stripping a prefix and swapping
+/// separators, which left no room for the distinct counts and did
+/// string-surgery on a sentence assembled somewhere else.
 fn removed_by_pattern(preview: &PreviewSummary) -> String {
-    preview
-        .scrubbed_line()
-        .strip_prefix("scrubbed: ")
-        .unwrap_or("nothing")
-        .replace(", ", " \u{00b7} ")
+    crate::redaction_labels::line(&preview.redactions, &preview.redactions_distinct)
 }
 
 /// The manifest strip as the preview sheet draws it: four fields rather than
@@ -1200,7 +1356,11 @@ pub fn manifest_for(preview: Option<&PreviewSummary>) -> gtk::Box {
             ("Personal info", "-".into(), Tone::Neutral),
         ]);
     };
-    let total: u32 = p.redactions.values().sum();
+    // Removals only: `redactions` also carries `residual_secret_at:*`, which
+    // counts a secret that was found and LEFT IN, and a strip headed
+    // "Removed by pattern" must not tip out of its attention tone because a
+    // survivor made the figure non-zero.
+    let total = crate::redaction_labels::removed_total(&p.redactions);
     style::manifest(&[
         ("Turns", format!("{}", p.event_count), Tone::Neutral),
         (
