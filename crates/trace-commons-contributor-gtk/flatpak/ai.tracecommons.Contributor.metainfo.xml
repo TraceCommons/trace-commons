@@ -62,6 +62,16 @@
   </provides>
 
   <releases>
+    <release version="0.8.0" date="2026-09-04">
+      <description>
+        <p>A new Tools section can read a record kept on this machine of where each of your tools sends its requests first, and says so one tool at a time: Private, Sends direct, Not known, or Not used. It is off until you turn it on, and changes apply straight away. On a machine already keeping such a record the port is found for you rather than asked for. It says where a request goes first and nothing about what happens to it afterwards, and where it does not know it says so rather than guessing.</p>
+        <p>The queue is now organised by the folder each session was worked in, rather than one long list. Open a folder to see its sessions. The folder is shown the way your disk spells it, so a project called IronWire is no longer flattened to ironwire.</p>
+        <p>The scrubbing panel now tells you two things where it used to tell you one. It has always said what was removed. It now says separately when something it recognised as a secret is still present in what would be sent, and it no longer counts such a value among the ones it took out. That was the wrong way round, on the one screen where you decide whether to send.</p>
+        <p>Where something is still present, the sentence says how many places it was found in, not how many secrets there are: one place can hold more than one value. Read it as at least this many.</p>
+        <p>You can also search the session as it was originally recorded, not only the scrubbed copy, to check whether a value you are worried about is really gone. If that check cannot run, the app says so rather than showing a clear result it did not verify.</p>
+        <p>A project set to contribute automatically now waits a day after you last work on a session before sending it. Arming no longer means the next thing you type leaves immediately.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-08-26">
       <description>
         <p>When you mark a session as failed or partly successful, you can now add a short written note saying what went wrong. Writing one is optional and skipping it changes nothing. Nothing else in a trace can carry that: the transcript records what the agent did, not what you expected it to do instead.</p>
