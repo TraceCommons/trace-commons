@@ -239,6 +239,21 @@ public static class WitnessTools
     }
 
     /// <summary>
+    /// The pinned measurements, as the editor's text: one entry per line, in
+    /// stored order, verbatim.
+    /// </summary>
+    /// <remarks>
+    /// The read half of <see cref="SerializeMeasurements"/>, and the two round
+    /// trip. NOTHING IS REFORMATTED HERE. The entries arrive as they are
+    /// stored -- including one this build cannot parse, which is returned so a
+    /// contributor can see the typo rather than having it deleted the next
+    /// time they save -- and a shell that re-emitted a pin from a parsed form
+    /// could rewrite one nobody touched.
+    /// </remarks>
+    public static string JoinMeasurements(string[]? entries) =>
+        entries is null ? string.Empty : string.Join('\n', entries);
+
+    /// <summary>
     /// The typed measurements, as the JSON array
     /// <c>tc_witness_configure</c> takes.
     /// </summary>

@@ -308,6 +308,78 @@ public sealed class WitnessSurfaceTests
     }
 
     /// <summary>
+    /// The pinned measurements read back verbatim, and round trip.
+    /// </summary>
+    /// <remarks>
+    /// The array the status payload carries is exactly what
+    /// <c>tc_witness_configure</c> takes, so the editor is pre-filled from it
+    /// and hands it straight back. NOTHING MAY BE REFORMATTED IN BETWEEN: a
+    /// shell that re-emits a pin from a parsed form can re-emit it wrongly,
+    /// and would rewrite a pin nobody touched.
+    /// </remarks>
+    [Fact]
+    public void ThePinnedMeasurementsRoundTripUntouched()
+    {
+        string[] stored =
+        {
+            "mrtd=abab,mrconfigid=cdcd",
+            "mrtd=efef",
+            // A stored entry this build cannot parse comes back as it is
+            // stored, so a contributor can see the typo. It must survive the
+            // round trip too, or saving would delete their work.
+            "mrtd=NOTHEX,,mrconfigid",
+        };
+
+        string text = WitnessTools.JoinMeasurements(stored);
+        Assert.Equal(
+            "[\"mrtd=abab,mrconfigid=cdcd\",\"mrtd=efef\",\"mrtd=NOTHEX,,mrconfigid\"]",
+            WitnessTools.SerializeMeasurements(text));
+
+        // And through the editor's own text, which is what the box holds.
+        Assert.Equal(stored, text.Split('\n'));
+
+        // No entries is an empty box, not a box with a blank line in it.
+        Assert.Equal(string.Empty, WitnessTools.JoinMeasurements(Array.Empty<string>()));
+        Assert.Equal(string.Empty, WitnessTools.JoinMeasurements(null));
+    }
+
+    /// <summary>
+    /// The count's sentence crosses the ABI, and is absent where there is no
+    /// witness to count for.
+    /// </summary>
+    /// <remarks>
+    /// Rendered or not rendered -- never replaced with a bare numeral, which
+    /// is a shell inventing wording by omission, and never with a placeholder.
+    /// </remarks>
+    [Fact]
+    public void TheCountsSentenceIsCarriedAndTheEntriesMatchIt()
+    {
+        WitnessStatus? status = WitnessTools.ParseStatus(
+            "{\"state\":\"pinned\",\"state_code\":1,\"refusal\":null,"
+            + "\"url\":\"https://witness.example\",\"signing_address\":\"0xabc\","
+            + "\"pinned_measurement_count\":2,"
+            + "\"pinned_measurement_line\":\"2 measurements are pinned.\","
+            + "\"pinned_measurements\":[\"mrtd=aa\",\"mrtd=bb\"]}");
+
+        Assert.NotNull(status);
+        Assert.Equal("2 measurements are pinned.", status!.PinnedMeasurementLine);
+        Assert.Equal(new[] { "mrtd=aa", "mrtd=bb" }, status.PinnedMeasurements);
+
+        // The count and the list are one fact. A payload where they disagree
+        // is not one this build produces, and the assertion is here so a
+        // shell never renders a sentence about a number it did not read.
+        Assert.Equal(status.PinnedMeasurementCount, status.PinnedMeasurements.Length);
+
+        // A payload from the build before these keys existed still parses,
+        // and answers no sentence and no entries rather than a placeholder.
+        WitnessStatus? older = WitnessTools.ParseStatus(
+            "{\"state\":\"absent\",\"state_code\":0,\"pinned_measurement_count\":0}");
+        Assert.NotNull(older);
+        Assert.Null(older!.PinnedMeasurementLine);
+        Assert.Empty(older.PinnedMeasurements);
+    }
+
+    /// <summary>
     /// This shell authors no wording on the witness surface.
     ///
     /// Read from the implementation's own source for the reason
@@ -374,6 +446,11 @@ public sealed class WitnessSurfaceTests
             "Settings.WitnessStateIsAttention",
             "Settings.WitnessStateIsRefused",
             "Settings.WitnessLastResultIsRefused",
+            // The count's sentence, on its own visibility. Shown when the ABI
+            // had one and not otherwise -- never a placeholder, and never a
+            // bare numeral this shell composed.
+            "Settings.WitnessMeasurementLine",
+            "Settings.HasWitnessMeasurementLine",
         })
         {
             Assert.Contains(bind, xaml, StringComparison.Ordinal);
@@ -411,6 +488,17 @@ public sealed class WitnessSurfaceTests
         // witness reading is ever taken from the routing table.
         Assert.DoesNotContain("RoutingSurface.StateTone(WitnessTone", uncommented, StringComparison.Ordinal);
         Assert.DoesNotContain("RoutingTone _witness", uncommented, StringComparison.Ordinal);
+
+        // The measurements box is pre-filled from the read-back, through the
+        // helper that touches nothing. A box built any other way is a box that
+        // can rewrite a pin nobody edited -- and one left empty makes an
+        // untouched configuration indistinguishable from a cleared one, so
+        // changing only the URL would refuse.
+        Assert.Contains(
+            "WitnessTools.JoinMeasurements(status.PinnedMeasurements)",
+            uncommented,
+            StringComparison.Ordinal);
+        Assert.Contains("status?.PinnedMeasurementLine", uncommented, StringComparison.Ordinal);
     }
 
     /// <summary>

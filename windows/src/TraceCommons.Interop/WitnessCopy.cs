@@ -1,3 +1,4 @@
+using System;
 using System.Text.Json.Serialization;
 
 namespace TraceCommons.Interop;
@@ -120,8 +121,41 @@ public sealed record WitnessStatus
     /// <summary>The witness signing address, verbatim, under the same rule as <see cref="Url"/>.</summary>
     [JsonPropertyName("signing_address")] public string? SigningAddress { get; init; }
 
-    /// <summary>How many measurement sets are pinned.</summary>
+    /// <summary>
+    /// How many measurement sets are pinned. Always
+    /// <see cref="PinnedMeasurements"/>'s length; the two can never disagree.
+    /// </summary>
     [JsonPropertyName("pinned_measurement_count")] public int PinnedMeasurementCount { get; init; }
+
+    /// <summary>
+    /// The sentence for that count, or null where there is no witness to
+    /// count for.
+    /// </summary>
+    /// <remarks>
+    /// Null on absent, not-enrolled and unreadable. A shell must render this
+    /// or nothing: a bare numeral on a privacy surface is a shell inventing
+    /// wording by omission, and a count of the pins on a witness that does not
+    /// exist is not a shorter sentence but a wrong one.
+    /// </remarks>
+    [JsonPropertyName("pinned_measurement_line")] public string? PinnedMeasurementLine { get; init; }
+
+    /// <summary>
+    /// The pinned measurement sets themselves, VERBATIM, in stored order.
+    /// </summary>
+    /// <remarks>
+    /// Exactly what <c>tc_witness_configure</c> takes: pre-fill the editor
+    /// from it and hand it straight back. NOT REFORMATTED ON THE WAY THROUGH
+    /// -- a shell that re-emits a pin from a parsed form is a shell that can
+    /// re-emit it wrongly, and it would rewrite a pin nobody touched.
+    ///
+    /// A stored entry this build cannot parse comes back as it is stored
+    /// rather than omitted, so a contributor can see the typo instead of
+    /// having their work deleted the next time they save. The read is
+    /// permissive; handing that same entry back to configure is still
+    /// refused.
+    /// </remarks>
+    [JsonPropertyName("pinned_measurements")] public string[] PinnedMeasurements { get; init; } =
+        Array.Empty<string>();
 }
 
 /// <summary>
