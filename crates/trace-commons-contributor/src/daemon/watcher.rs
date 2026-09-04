@@ -278,13 +278,11 @@ impl PassContext {
             .map(|c| c.consent_scopes.clone())
             .unwrap_or_default();
         let approval_inputs = cfg.as_ref().map(|c| {
-            let near_ai = shared
-                .settings
-                .lock()
-                .expect("settings lock")
-                .near_ai
-                .clone();
-            crate::daemon::preview::input_fingerprint(c, near_ai.as_ref())
+            let (near_ai, attested_bodies) = {
+                let s = shared.settings.lock().expect("settings lock");
+                (s.near_ai.clone(), s.ironwire_attested_bodies)
+            };
+            crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
         });
         Self {
             now,

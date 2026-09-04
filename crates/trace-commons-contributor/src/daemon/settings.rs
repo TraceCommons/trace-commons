@@ -150,6 +150,32 @@ pub struct DaemonSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ironwire: Option<IronWireDeclaration>,
 
+    /// Whether the final inference call's verbatim request and response
+    /// bodies are carried to a witness.
+    ///
+    /// **A second answer, never a consequence of the field above.** The
+    /// declaration says "read this proxy's ledger": numbers about calls --
+    /// how many, how much they cost, which backend served them. This says
+    /// "and send that call's content", which is the contributor's own
+    /// prompt, in the clear, to a remote process. A contributor who wanted
+    /// cost attribution has not thereby agreed to publish a prompt, so
+    /// declaring the proxy must never switch this on and this is a separate
+    /// key on the wire. The directory is *derived* from the declaration --
+    /// see [`attested_bodies_dir_for`] -- because two configured paths that
+    /// have to agree is a bug waiting to happen; the switch is what stays
+    /// separate.
+    ///
+    /// `#[serde(default)]` so a settings file written before this field
+    /// existed loads with it off. An upgrade must not start sending prompt
+    /// bodies on its own.
+    ///
+    /// Off is fully inert: nothing is read, nothing is carried, and a
+    /// contributor with no witness configured is unaffected either way --
+    /// the bodies only ever reach a witness (`witness::transport`), never a
+    /// queued or submitted envelope.
+    #[serde(default)]
+    pub ironwire_attested_bodies: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -245,6 +271,12 @@ pub enum IronWireDeclaration {
 /// The file the proxy writes its control-API token to, inside whichever
 /// directory [`ironwire_token_path`] resolves.
 pub const IRONWIRE_TOKEN_FILE: &str = "control.token";
+
+/// The subdirectory of the proxy's home holding the verbatim bodies it
+/// captured, one pair per exchange as `<body_ref>.req` / `<body_ref>.res`.
+///
+/// IronWire's own name for it, and the only place this crate spells it.
+pub const IRONWIRE_BODIES_SUBDIR: &str = "bodies";
 
 impl IronWireDeclaration {
     /// The port to read, or `None` when the proxy is off.
@@ -433,6 +465,47 @@ pub fn ironwire_ledger_for(
     ))
 }
 
+/// Where the proxy's verbatim body store is, for a deployment that carries
+/// attested bodies -- and `None` for every deployment that does not.
+///
+/// Two independent conditions, both required, and the separation between
+/// them is the point:
+///
+/// 1. `enabled` -- the contributor's answer to "carry the call's content",
+///    which is [`DaemonSettings::ironwire_attested_bodies`] and nothing
+///    else. A routing declaration alone never satisfies it.
+/// 2. a declared, watched proxy -- because the bodies are located through
+///    the ledger rows joined to a session, so a body store with no ledger
+///    names nothing.
+///
+/// The path is **derived**, not configured. It resolves through
+/// [`ironwire_token_path`] and takes the home that produced the token, so
+/// the store this reads and the token the ledger reads always come from the
+/// same proxy. A second configured path would be a second thing to keep in
+/// agreement, and the failure of that agreement is silent: a body store
+/// belonging to some other proxy would be read as this one's.
+///
+/// Fail-closed everywhere. No declaration, a declaration of `Off`, a switch
+/// left off, or nothing at all resolving -- every one of them is `None`, no
+/// error and nothing carried, which is exactly the state a machine with no
+/// proxy is in. A directory that does not exist or cannot be read is not
+/// checked here either: `routing::attested` refuses on the read, by name,
+/// and refusing there keeps every "could not carry" answer in one place.
+#[must_use]
+pub fn attested_bodies_dir_for(
+    declaration: Option<&IronWireDeclaration>,
+    enabled: bool,
+) -> Option<PathBuf> {
+    if !enabled {
+        return None;
+    }
+    let declaration = declaration?;
+    // `Off` answers `None` here, which is the refusal.
+    declaration.port()?;
+    let token = ironwire_token_path(declaration.token_dir())?;
+    Some(token.parent()?.join(IRONWIRE_BODIES_SUBDIR))
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -466,6 +539,7 @@ impl Default for DaemonSettings {
             gemini_source: None,
             cline_source: None,
             ironwire: None,
+            ironwire_attested_bodies: false,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -753,6 +827,16 @@ pub fn apply_settings_object(
             // conventional fallback location.
             "ironwire" => {
                 settings.ironwire = parse_ironwire_declaration(value)?;
+            }
+            // A SECOND question, deliberately not folded into the key
+            // above. Declaring the proxy is consent to read metadata about
+            // calls; this is consent to send one call's content to a
+            // witness. A shell that sets `ironwire` and not this one gets
+            // routing telemetry and no bodies, which is the answer most
+            // contributors mean.
+            "ironwire_attested_bodies" => {
+                settings.ironwire_attested_bodies =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -1074,6 +1158,67 @@ mod tests {
             ironwire_ledger_for(Some(&declaration)).is_none(),
             "a declared directory with no token yields no reader, and never \
              falls back to the environment"
+        );
+    }
+
+    // --- the attested-bodies switch ------------------------------------
+
+    /// The separation, stated as a test: declaring the proxy for routing
+    /// telemetry carries no bodies. Cost attribution is not consent to send
+    /// a prompt, so the switch is a second, independent answer and the
+    /// declaration alone never implies it.
+    #[test]
+    fn a_declared_proxy_alone_carries_no_attested_bodies() {
+        let home = token_dir_holding("token");
+        let declaration = watch(Some(home.path()));
+        assert!(
+            attested_bodies_dir_for(Some(&declaration), false).is_none(),
+            "a routing declaration must never switch on body capture"
+        );
+    }
+
+    /// And where the directory comes from: the SAME home the token resolved
+    /// in, never a second configured path that could disagree with it.
+    #[test]
+    fn the_bodies_directory_is_derived_from_the_declared_proxy_home() {
+        let home = token_dir_holding("token");
+        let declaration = watch(Some(home.path()));
+        assert_eq!(
+            attested_bodies_dir_for(Some(&declaration), true),
+            Some(home.path().join(IRONWIRE_BODIES_SUBDIR)),
+            "the body store sits beside the control token, in the one home \
+             the contributor named"
+        );
+    }
+
+    /// Fail-closed on every absent or refused declaration, switch or no
+    /// switch.
+    #[test]
+    fn no_declaration_carries_no_attested_bodies() {
+        let environment = token_dir_holding("token-from-environment");
+        let _at = IronWireAt::home(environment.path());
+        assert!(
+            attested_bodies_dir_for(None, true).is_none(),
+            "an undeclared proxy is not read, and its bodies least of all"
+        );
+        assert!(
+            attested_bodies_dir_for(Some(&IronWireDeclaration::Off), true).is_none(),
+            "a proxy the contributor declared off carries nothing"
+        );
+    }
+
+    /// A settings file written before the switch existed loads with it off.
+    /// An upgrade must never start sending prompt bodies on its own.
+    #[test]
+    fn a_settings_file_written_before_the_switch_existed_loads_with_it_off() {
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("ironwire_attested_bodies");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(
+            !settings.ironwire_attested_bodies,
+            "an absent switch is off, never on"
         );
     }
 

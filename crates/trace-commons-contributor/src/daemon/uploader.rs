@@ -398,8 +398,11 @@ impl Uploader<'_, '_> {
         // the terms were never recorded (an entry from before this field
         // existed, or an approval taken with no readable config), which is
         // "unknown, so re-ask": fail-closed.
-        let inputs_now =
-            super::preview::input_fingerprint(self.ctx.effective_cfg(), self.ctx.near_ai());
+        let inputs_now = super::preview::input_fingerprint(
+            self.ctx.effective_cfg(),
+            self.ctx.near_ai(),
+            self.settings.ironwire_attested_bodies,
+        );
         if entry.approved_inputs.as_deref() != Some(inputs_now.as_str()) {
             return Ok(UploadDecision::ApprovalStale {
                 reason_label: super::preview::REASON_INPUTS_CHANGED.to_string(),
@@ -790,7 +793,7 @@ mod tests {
         /// ordinary case where nothing moved between approval and upload.
         fn entry_for(&self, hash: &str, cfg: &crate::config::ContributorConfig) -> QueueEntry {
             QueueEntry {
-                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None)),
+                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None, false)),
                 ..self.entry(hash)
             }
         }

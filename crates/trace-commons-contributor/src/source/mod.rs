@@ -555,6 +555,9 @@ impl std::fmt::Debug for SourceRoots {
             .field("declared", &self.declared)
             .field("trajectory", &self.trajectory)
             .field("routing", &self.routing.is_some())
+            // Presence, never the path: this is a local filesystem location
+            // and `Debug` output is a place log lines come from.
+            .field("attested_bodies", &self.attested_bodies_dir.is_some())
             .finish()
     }
 }

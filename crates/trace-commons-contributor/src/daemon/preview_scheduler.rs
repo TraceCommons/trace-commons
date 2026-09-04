@@ -624,9 +624,9 @@ impl PreviewJobRunner for DaemonPreviewRunner {
             // Nothing here pins: an approval that finds no pin builds and
             // pins one synchronously (`handle_approve`), so a contributor
             // still cannot send bytes they were never shown.
-            let near_ai = {
+            let (near_ai, attested_bodies) = {
                 let s = shared.settings.lock().expect("settings lock");
-                s.near_ai.clone()
+                (s.near_ai.clone(), s.ironwire_attested_bodies)
             };
             let source_roots = shared.source_roots_with_routing();
             let sources = crate::source::all_sources(&source_roots);
@@ -636,8 +636,14 @@ impl PreviewJobRunner for DaemonPreviewRunner {
                     label: "session-file-vanished",
                 };
             };
-            match super::preview::build_preview_card(cfg.as_ref(), near_ai, source, &session_ref)
-                .await
+            match super::preview::build_preview_card(
+                cfg.as_ref(),
+                near_ai,
+                attested_bodies,
+                source,
+                &session_ref,
+            )
+            .await
             {
                 Ok(summary) => {
                     PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(&summary)))
