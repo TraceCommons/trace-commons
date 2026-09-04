@@ -1,5 +1,8 @@
 using System;
 using System.Linq;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -97,7 +100,30 @@ public class RoutingCopyTests
             .Where(p => p.PropertyType == typeof(string))
             .ToList();
 
-        Assert.Equal(27, strings.Count);
+        // What "every" means comes from the payload the Rust exported, not
+        // from a number kept here. A literal count was edited by every copy
+        // addition, caught nothing the loop below does not, and did not catch
+        // the drift actually worth catching -- a field the Rust exports and
+        // this shell dropped, which sails past a count as long as somebody
+        // remembers to decrement it.
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_routing_copy());
+        Assert.False(string.IsNullOrWhiteSpace(json));
+        using JsonDocument payload = JsonDocument.Parse(json!);
+        string[] exported = payload.RootElement
+            .EnumerateObject()
+            .Select(field => field.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        string[] declared = strings
+            .Select(p => p.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name ?? p.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        // Non-vacuous: the surface has words, and this shell reads every one
+        // the Rust sends and invents none of its own.
+        Assert.NotEmpty(exported);
+        Assert.Equal(exported, declared);
+
         foreach (var property in strings)
         {
             string? value = (string?)property.GetValue(copy);
