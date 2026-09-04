@@ -126,6 +126,33 @@ public sealed partial class SettingsView : UserControl
         await Settings.LookAgainAsync();
     }
 
+    /// <summary>
+    /// Points this device at the witness in the three fields above.
+    /// </summary>
+    /// <remarks>
+    /// The state is re-read from the ABI afterwards whether or not the write
+    /// landed, so this card never shows a configuration that was asked for
+    /// rather than one that is in force.
+    /// </remarks>
+    private async void OnWitnessConfigure(object sender, RoutedEventArgs e)
+    {
+        await Settings.ConfigureWitnessAsync();
+    }
+
+    /// <summary>
+    /// Stops using a witness, returning this device to local redaction.
+    /// </summary>
+    /// <remarks>
+    /// Not an off switch, and the sentence beside the button says so: the
+    /// redaction still happens, here, and what changes is that later sessions
+    /// carry this app's own judgement of what was left rather than a signed
+    /// record of it.
+    /// </remarks>
+    private async void OnWitnessClear(object sender, RoutedEventArgs e)
+    {
+        await Settings.ClearWitnessAsync();
+    }
+
     private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
         if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))
