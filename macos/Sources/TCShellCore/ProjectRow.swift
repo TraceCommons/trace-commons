@@ -47,6 +47,12 @@ public enum ProjectMode: String, Decodable, Equatable, Sendable {
 public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     public let projectId: String
     public let projectLabel: String
+    /// The project's folder, `~`-abbreviated, for display only.
+    ///
+    /// Empty against a daemon predating the field, and for the unresolved
+    /// bucket, which is not a directory. A row with no path shows its label
+    /// alone.
+    public let projectPath: String
     public let mode: ProjectMode
     /// Nil for a project the daemon has seen but the contributor has not yet
     /// decided anything about.
@@ -62,6 +68,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     public init(
         projectId: String,
         projectLabel: String,
+        projectPath: String = "",
         mode: ProjectMode,
         addedAt: Date? = nil,
         configured: Bool = false,
@@ -69,6 +76,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
+        self.projectPath = projectPath
         self.mode = mode
         self.addedAt = addedAt
         self.configured = configured
@@ -78,6 +86,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     public enum CodingKeys: String, CodingKey {
         case projectId = "project_id"
         case projectLabel = "project_label"
+        case projectPath = "project_path"
         case mode
         case addedAt = "added_at"
         case configured
@@ -88,6 +97,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         projectId = try c.decode(String.self, forKey: .projectId)
         projectLabel = try c.decode(String.self, forKey: .projectLabel)
+        projectPath = try c.decodeIfPresent(String.self, forKey: .projectPath) ?? ""
         mode = try c.decode(ProjectMode.self, forKey: .mode)
         addedAt = try c.decodeIfPresent(Date.self, forKey: .addedAt)
         // Older daemons predate the flag. Absent means "not configured",

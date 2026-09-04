@@ -14,6 +14,7 @@ final class QuarantineExplanationTests: XCTestCase {
         HistoryRecord(
             submissionID: UUID().uuidString,
             submittedAt: Date(timeIntervalSince1970: 0),
+            projectID: "proj_demo",
             projectLabel: "demo",
             source: "claude-code",
             status: "quarantined",
