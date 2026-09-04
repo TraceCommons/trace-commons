@@ -55,6 +55,20 @@ RUN cargo build --locked --release --bin trace-commons-witness \
 
 FROM ${RUNTIME_IMAGE}
 
+# Names the repository this image was built from, in the image itself.
+#
+# Not decoration. GHCR links a package to a repository through this label and
+# nothing else, and an unlinked package cannot inherit that repository's
+# visibility -- so the first push of this image landed PRIVATE even though the
+# repository is public and the organisation is set to inherit access. A CVM
+# pulling it anonymously then gets 403, which surfaces as an opaque deploy
+# failure rather than a permissions error.
+#
+# It also puts provenance where an auditor can read it. This image is not
+# reproducibly buildable, so a measurement pins an artifact rather than a
+# source tree; the least the artifact can do is say where it came from.
+LABEL org.opencontainers.image.source="https://github.com/TraceCommons/trace-commons"
+
 # ca-certificates is needed only by the `full-pipeline` redaction mode when its
 # classifier backend is reached over TLS. `deterministic-only` makes no network
 # call at all. libssl3 is the runtime half of the build dependency above.
