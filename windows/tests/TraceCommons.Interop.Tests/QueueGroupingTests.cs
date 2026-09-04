@@ -13,13 +13,16 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public sealed class QueueGroupingTests
 {
-    private static QueueEntry Entry(string entryId, string? projectId, string? projectLabel) =>
-        new()
-        {
-            EntryId = entryId,
-            ProjectId = projectId,
-            ProjectLabel = projectLabel,
-        };
+    // Lifted into QueueEntries so QueueNavigationTests buckets entries built
+    // exactly the same way, rather than with a second fixture that could
+    // drift from this one.
+    private static QueueEntry Entry(
+        string entryId,
+        string? projectId,
+        string? projectLabel,
+        long bytes = 0,
+        string path = "") =>
+        QueueEntries.Entry(entryId, projectId, projectLabel, bytes, path);
 
     /// <summary>
     /// The bucketing key is project_id, never project_label. Two entries
@@ -88,13 +91,16 @@ public sealed class QueueGroupingTests
     }
 
     /// <summary>
-    /// "Submit all" is offered only on a group with more than one entry,
-    /// matching the macOS shell's rule: a single-entry group's own row
-    /// already has a Submit button that does exactly what the group action
-    /// would.
+    /// Shown at every count, including one.
+    ///
+    /// The old rule hid it at one because the row's own Submit was on the
+    /// same screen and did the same thing. Under the folder-first layout that
+    /// row is a level down, so hiding this would mean opening a folder to do
+    /// the thing the folder is offering. The rule expired with the layout it
+    /// was written for.
     /// </summary>
     [Fact]
-    public void SubmitAllAppearsOnlyOnMultiEntryGroups()
+    public void ASingleEntryGroupStillOffersSubmitAll()
     {
         var entries = new List<QueueEntry>
         {
@@ -108,8 +114,53 @@ public sealed class QueueGroupingTests
         ProjectQueueGroup solo = Assert.Single(groups, g => g.ProjectId == "proj_solo");
         ProjectQueueGroup pair = Assert.Single(groups, g => g.ProjectId == "proj_pair");
 
-        Assert.False(solo.ShowSubmitAll);
+        Assert.True(solo.ShowSubmitAll);
         Assert.True(pair.ShowSubmitAll);
+    }
+
+    /// <summary>
+    /// The folder row's byte total: sessions on disk, summed, never a
+    /// would-send figure.
+    /// </summary>
+    [Fact]
+    public void AGroupSumsItsMembersBytes()
+    {
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(new[]
+        {
+            Entry("e1", "proj_a", "api", bytes: 30),
+            Entry("e2", "proj_a", "api", bytes: 12),
+        });
+
+        Assert.Equal(42, groups[0].SizeBytes);
+    }
+
+    /// <summary>
+    /// Every entry sharing an id shares a project key, so the first member's
+    /// path is the group's path -- there is no disagreement to reconcile.
+    /// </summary>
+    [Fact]
+    public void AGroupTakesThePathOfItsFirstMember()
+    {
+        IReadOnlyList<ProjectQueueGroup> groups = QueueGrouping.ByProject(new[]
+        {
+            Entry("e1", "proj_a", "api", path: "~/work/api"),
+            Entry("e2", "proj_a", "api", path: "~/work/api"),
+        });
+
+        Assert.Equal("~/work/api", groups[0].ProjectPath);
+    }
+
+    /// <summary>
+    /// A daemon predating the field sends no path, and the row renders its
+    /// label alone rather than inventing one.
+    /// </summary>
+    [Fact]
+    public void AGroupFromAnOlderDaemonHasNoPath()
+    {
+        IReadOnlyList<ProjectQueueGroup> groups =
+            QueueGrouping.ByProject(new[] { Entry("e1", "proj_a", "api") });
+
+        Assert.Equal("", groups[0].ProjectPath);
     }
 
     /// <summary>

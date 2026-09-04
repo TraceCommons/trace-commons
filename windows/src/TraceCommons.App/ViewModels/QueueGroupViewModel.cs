@@ -6,7 +6,7 @@ using TraceCommons.Interop;
 namespace TraceCommons.App.ViewModels;
 
 /// <summary>
-/// One project's header in the grouped queue, and the rows under it.
+/// One project's folder row in the queue, and the sessions inside it.
 ///
 /// A read-only projection of <see cref="ProjectQueueGroup"/> plus the rows
 /// that belong to it -- the same relationship <see cref="QueueEntryViewModel"/>
@@ -36,17 +36,43 @@ public sealed class QueueGroupViewModel
 
     public string ProjectLabel => _group.ProjectLabel;
 
-    /// <summary>The header's row count text, e.g. "3 sessions".</summary>
+    /// <summary>
+    /// The project's folder, <c>~</c>-abbreviated, beneath the label.
+    /// </summary>
+    /// <remarks>
+    /// The reason the folder-first layout is worth building. A disambiguated
+    /// label keeps two projects DISTINCT (<c>api</c> and <c>api (3f9c)</c>)
+    /// but can never make them IDENTIFIABLE, and a contributor deciding what
+    /// to upload from which repository needs the second. Display only: never
+    /// logged, notified, or persisted -- see
+    /// <see cref="ProjectQueueGroup.ProjectPath"/>.
+    /// </remarks>
+    public string ProjectPath => _group.ProjectPath;
+
+    /// <summary>
+    /// Whether there is a path to draw. False against a daemon predating the
+    /// field, where the row renders its label alone rather than a blank line.
+    /// </summary>
+    public bool HasProjectPath => _group.ProjectPath.Length > 0;
+
+    /// <summary>
+    /// The folder's total session bytes on disk. Never a would-send figure --
+    /// see <see cref="ProjectQueueGroup.SizeBytes"/>.
+    /// </summary>
+    public string SizeText => QueueEntryViewModel.FormatBytes(_group.SizeBytes);
+
+    /// <summary>The folder row's count text, e.g. "3 sessions".</summary>
     public string CountText => _group.Count == 1
         ? "1 session"
         : string.Format(CultureInfo.CurrentCulture, "{0} sessions", _group.Count);
 
     /// <summary>
-    /// Whether the header offers "Submit all". False for a single-entry
-    /// group: its one row's own Submit button already does what the group
-    /// action would, so a second control offering the identical decision
-    /// would be noise rather than a second choice. Decided entirely by
-    /// <see cref="ProjectQueueGroup.ShowSubmitAll"/>.
+    /// Whether the folder row offers "Submit all". True at every count,
+    /// including one: the row that used to make it redundant is now a level
+    /// down, so hiding it would mean opening a folder to do the thing the
+    /// folder is offering. Decided entirely by
+    /// <see cref="ProjectQueueGroup.ShowSubmitAll"/>, which records the
+    /// history.
     /// </summary>
     public bool ShowSubmitAll => _group.ShowSubmitAll;
 
@@ -75,11 +101,9 @@ public sealed class QueueGroupViewModel
     public string VerdictFailedLabel => VerdictCopy.Failed;
 
     /// <summary>
-    /// Whether the header offers "Ignore project". Always true, unlike
-    /// <see cref="ShowSubmitAll"/>: a single-entry group's one row already
-    /// has its own way to send that one session, but declining the whole
-    /// project is not something any row-level control does, so the header
-    /// action belongs at every group size.
+    /// Whether the folder row offers "Ignore project". Always true: declining
+    /// a whole project is not something any row-level control does, so the
+    /// folder action belongs at every group size.
     /// </summary>
     public bool ShowIgnoreProject => true;
 
@@ -100,6 +124,6 @@ public sealed class QueueGroupViewModel
     /// </summary>
     public int PendingCount => _group.Count;
 
-    /// <summary>The rows in this project, in queue order.</summary>
+    /// <summary>The sessions in this project, in queue order.</summary>
     public ObservableCollection<QueueEntryViewModel> Entries { get; }
 }

@@ -275,6 +275,13 @@ public sealed class TranscriptPagingTests
         AssertMarkerSurvivesEveryOffset("[REDACTED:aws_secret_key]");
     }
 
+    /// <summary>The same for the bare <c>[REDACTED]</c> secrets token.</summary>
+    [Fact]
+    public void BareRedactedMarkerStraddlingABoundaryIsNotSplit()
+    {
+        AssertMarkerSurvivesEveryOffset("[REDACTED]");
+    }
+
     private static void AssertMarkerSurvivesEveryOffset(string marker)
     {
         int target = TranscriptPaging.TargetChunkBytes;

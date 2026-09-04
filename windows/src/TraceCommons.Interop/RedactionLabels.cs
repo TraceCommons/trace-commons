@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace TraceCommons.Interop;
@@ -68,6 +69,99 @@ public static class RedactionLabels
     /// <summary>Total occurrences removed. Never includes survivors.</summary>
     public static int RemovedTotal(IReadOnlyDictionary<string, int> counts)
         => counts.Where(pair => IsRemoval(pair.Key)).Sum(pair => pair.Value);
+
+    /// <summary>
+    /// What a session with no removals reads as, on the card and in the
+    /// preview header.
+    /// </summary>
+    /// <remarks>
+    /// Never "0". A session where no pattern fired is the one worth slowing
+    /// down on, and a zero reads as a reassurance.
+    /// </remarks>
+    public const string NothingMatched = "nothing matched";
+
+    /// <summary>
+    /// Total occurrences removed. An alias for <see cref="RemovedTotal"/>,
+    /// named for the figure a caller is asking for rather than for the
+    /// filtering it has to do to get it.
+    /// </summary>
+    public static int Total(IReadOnlyDictionary<string, int> occurrences)
+        => RemovedTotal(occurrences);
+
+    /// <summary>
+    /// The card's "removed by pattern" line: <c>185 local path (12 distinct)
+    /// · 3 email</c>, or <see cref="NothingMatched"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two numbers, because the map carries two different facts about one
+    /// category. The redactor mints one placeholder per distinct value and
+    /// reuses it, so one path referenced two hundred times is two hundred
+    /// occurrences and one value. The occurrence count says how much of the
+    /// transcript the pipeline touched; the distinct count says how many
+    /// separate things left, which is the number a person estimating risk is
+    /// actually after.
+    /// </para>
+    /// <para>
+    /// The distinct figure is omitted whenever it equals or exceeds the
+    /// occurrence count. Equal says the same thing twice ("3 secret
+    /// (3 distinct)"), and greater is impossible from a correct daemon, where
+    /// saying nothing is better than printing a figure that cannot be true.
+    /// </para>
+    /// <para>
+    /// Biggest count first, ties broken on the label, so the order is stable
+    /// between redraws rather than following whatever order a map iterated
+    /// in. Survivors are excluded here as everywhere else: this renders under
+    /// a heading that says "removed".
+    /// </para>
+    /// </remarks>
+    public static string Line(
+        IReadOnlyDictionary<string, int> occurrences,
+        IReadOnlyDictionary<string, int> distinct)
+    {
+        IReadOnlyList<string> categories = Categories(occurrences, distinct);
+        return categories.Count == 0 ? NothingMatched : string.Join("  ·  ", categories);
+    }
+
+    /// <summary>
+    /// The per-category phrases <see cref="Line"/> is built from, in its
+    /// order, for a caller that joins them differently.
+    /// </summary>
+    /// <remarks>
+    /// Shared rather than restated so the receipt under a card and the
+    /// figure in the preview header cannot come to disagree about what a
+    /// category is called or which of them are shown.
+    /// </remarks>
+    public static IReadOnlyList<string> Categories(
+        IReadOnlyDictionary<string, int> occurrences,
+        IReadOnlyDictionary<string, int> distinct)
+    {
+        ArgumentNullException.ThrowIfNull(occurrences);
+        ArgumentNullException.ThrowIfNull(distinct);
+
+        return occurrences
+            .Where(pair => IsRemoval(pair.Key))
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => Phrase(pair.Key, pair.Value, distinct))
+            .ToList();
+    }
+
+    private static string Phrase(
+        string label,
+        int occurrences,
+        IReadOnlyDictionary<string, int> distinct)
+    {
+        string name = label.Replace('_', ' ');
+        return distinct.TryGetValue(label, out int values) && values > 0 && values < occurrences
+            ? string.Format(
+                CultureInfo.CurrentCulture,
+                "{0} {1} ({2} distinct)",
+                occurrences,
+                name,
+                values)
+            : string.Format(CultureInfo.CurrentCulture, "{0} {1}", occurrences, name);
+    }
 
     /// <summary>How many places a secret was found and left in what would be
     /// sent. Sites, not secrets: one site can hold more than one value.</summary>

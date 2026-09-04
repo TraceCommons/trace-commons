@@ -140,6 +140,47 @@
                                 <TextBlock Text="Waiting"
                                            Style="{StaticResource TcNavLabelTextStyle}"
                                            VerticalAlignment="Center" />
+
+                                <!--
+                                    The shield, in three states, and the count
+                                    BESIDE it rather than replaced by it. The
+                                    ask was to swap the count for an icon; at
+                                    149 waiting sessions the count is the
+                                    signal a contributor is actually reading,
+                                    and an icon meaning "some" is a downgrade
+                                    exactly at the scale that produced the
+                                    feedback. The shield adds the state the
+                                    count could never carry: something waiting
+                                    matched nothing, or was trimmed to fit.
+
+                                    Three elements each bound to the condition
+                                    under which it belongs on screen, rather
+                                    than one with a converted foreground, which
+                                    is how every other either/or on this window
+                                    is drawn. QueueShield.For decides which,
+                                    in TraceCommons.Interop, where it is
+                                    tested.
+                                -->
+                                <FontIcon Glyph="&#xE72E;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsClear, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                          VerticalAlignment="Center" />
+                                <FontIcon Glyph="&#xE72E;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsWaiting, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcGreenTextBrush}"
+                                          VerticalAlignment="Center" />
+                                <FontIcon Glyph="&#xE7BA;"
+                                          FontSize="12"
+                                          Visibility="{x:Bind ViewModel.ShieldIsAttention, Mode=OneWay}"
+                                          Foreground="{ThemeResource TcGoldTextBrush}"
+                                          VerticalAlignment="Center" />
+
+                                <TextBlock Text="{x:Bind ViewModel.QueueCountText, Mode=OneWay}"
+                                           Visibility="{x:Bind ViewModel.HasQueueCount, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoBadgeTextStyle}"
+                                           VerticalAlignment="Center" />
                             </StackPanel>
 
                             <!-- The selection bar: 3px, inset 8px top and bottom. -->
@@ -596,45 +637,35 @@
 
 
                 <!--
-                    The queue, grouped by project. The grouping RULE, which
-                    entries share a group, group order, whether a group's
-                    "Submit all" appears, is QueueGrouping.ByProject's, in
-                    TraceCommons.Interop, and is covered by
-                    QueueGroupingTests there; this outer ListView (one item
-                    per project) and the inner ItemsRepeater (one item per
-                    session within it) only render what that already
-                    decided. Both levels virtualize now: the outer ListView
-                    always did, and the inner level was an ItemsControl
-                    until this fix, which realizes every child regardless of
-                    visibility. A contributor with a large project (one real
-                    user reached 500 queued sessions) would otherwise pay
-                    for every card in it up front.
+                    The queue, folders first.
 
-                    The preview scheduler's visibility signal reads the
-                    INNER ItemsRepeater, not this outer ListView's own
-                    realization. Before this fix, "which project containers
-                    are realized here" was a fair stand in for "which
-                    sessions are on screen", because every row under a
-                    realized project was already in the visual tree
-                    regardless of scroll position. That stopped being true
-                    the moment the inner list started virtualizing on its
-                    own: a project with hundreds of sessions now realizes
-                    only the handful actually windowed into view, so
-                    treating "every entry under a realized project" as
-                    visible would report most of a large project as on
-                    screen, making preview_visible's build order priority
-                    close to meaningless for exactly the case this whole
-                    effort exists to fix. See OnSessionElementPrepared and
-                    OnSessionElementClearing on each ItemsRepeater below, and
-                    RecomputeVisiblePreviews in MainWindow.xaml.cs, which
-                    read ItemsRepeater's own ElementPrepared and
-                    ElementClearing events (the per row realization signal
-                    the WinUI docs give ItemsRepeater for exactly this
-                    purpose), instead of this ListView's own
-                    ContainerContentChanging.
+                    Two levels, and the grouping RULE for both (which entries
+                    share a folder, folder order, whether "Submit all" appears)
+                    is QueueGrouping.ByProject's, in TraceCommons.Interop,
+                    covered by QueueGroupingTests there. WHICH level is on
+                    screen is QueueNavigation.Resolve's, in the same assembly
+                    and covered by QueueNavigationTests. Neither decision is
+                    made in this markup; it only renders them.
+
+                    Why folders at all: at 149 waiting sessions the queue stops
+                    being a list and becomes a haystack, and a flat list of
+                    cards is the wrong shape for it. The folder name is the
+                    row's largest text here, where it used to be the SMALLEST
+                    text on its line beside an accented "Submit all". The line
+                    read as a button with a caption, and it should read as a
+                    place with actions.
+
+                    The preview scheduler's visibility signal reads the session
+                    ItemsRepeater in the detail pane below, through its own
+                    ElementPrepared and ElementClearing. See
+                    OnSessionElementPrepared and RecomputeVisiblePreviews in
+                    MainWindow.xaml.cs: those are ItemsRepeater's own per-row
+                    realization signals, which is the only thing that reports
+                    what is genuinely windowed into view.
                 -->
                 <ListView x:Name="QueueListView"
                           Grid.Row="2"
+                          Visibility="{x:Bind ViewModel.IsAtQueueRoot, Mode=OneWay}"
                           ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
                           ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
                           SelectionMode="None"
@@ -642,136 +673,173 @@
                           ScrollViewer.HorizontalScrollMode="Disabled">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="vm:QueueGroupViewModel">
-                            <StackPanel Spacing="12">
-                                <!--
-                                    The group header: project label, entry
-                                    count, and, only for a project with more
-                                    than one entry, see
-                                    QueueGroupViewModel.ShowSubmitAll, the
-                                    "Submit all" action. A single-entry group
-                                    offers no second way to do what its one
-                                    row's own Submit already does. "Ignore
-                                    project", see QueueGroupViewModel.
-                                    ShowIgnoreProject, renders at every group
-                                    size: no row-level control declines the
-                                    whole project the way this one does.
+                            <!--
+                                One folder. The row itself is a Button with its
+                                chrome removed rather than a Border with a
+                                tapped handler, the same choice the navigation
+                                rail makes and for the same reason: a Button
+                                carries keyboard focus, the invoke pattern and a
+                                narrator announcement for free.
 
-                                    Ignore sits to the RIGHT of "Submit all",
-                                    matching macOS and GTK. The dialog on it
-                                    is justified by the neighbour: two
-                                    adjacent controls acting on one set of
-                                    traces in opposite directions, and which
-                                    side each is on is part of that muscle
-                                    memory, so it is not a per-shell choice.
+                                The three actions sit UNDER the name and path
+                                rather than beside them, so the row reads as a
+                                place first. "Ignore project" stays to the RIGHT
+                                of "Submit all", matching macOS and GTK. Which
+                                side each is on is muscle memory for two
+                                adjacent controls acting on one set of traces in
+                                opposite directions, so it is not a per-shell
+                                choice.
 
-                                    Both labels and the tooltip are bound, not
-                                    typed here: they live in ProjectIgnoreCopy,
-                                    which is where three shells are kept from
-                                    drifting.
-                                -->
-                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                                    <StackPanel Grid.Column="0"
-                                                Orientation="Horizontal"
-                                                Spacing="8">
-                                        <TextBlock Text="{x:Bind ProjectLabel}"
-                                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   VerticalAlignment="Center" />
-                                        <TextBlock Text="{x:Bind CountText}"
+                                Every label and tooltip is bound, not typed
+                                here: they live in ProjectIgnoreCopy and
+                                VerdictCopy, which is where three shells are
+                                kept from drifting.
+                            -->
+                            <StackPanel Spacing="10" Margin="0,0,0,18">
+                                <Button HorizontalAlignment="Stretch"
+                                        HorizontalContentAlignment="Stretch"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        Padding="0"
+                                        Tag="{x:Bind}"
+                                        Click="OnOpenFolder">
+                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto"
+                                          ColumnSpacing="12">
+                                        <StackPanel Grid.Column="0" Spacing="2">
+                                            <TextBlock Text="{x:Bind ProjectLabel}"
+                                                       Style="{StaticResource TcTitleCardTextStyle}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <!-- The path is the reason this
+                                                 layout exists: a disambiguated
+                                                 label keeps two projects
+                                                 distinct and can never make
+                                                 them identifiable. Absent
+                                                 against a daemon that does not
+                                                 send one, rather than a blank
+                                                 line. -->
+                                            <TextBlock Text="{x:Bind ProjectPath}"
+                                                       Visibility="{x:Bind HasProjectPath}"
+                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{x:Bind CountText}"
                                                    Style="{StaticResource TcCaptionTextStyle}"
                                                    Foreground="{ThemeResource TcInkSecondaryBrush}"
                                                    VerticalAlignment="Center" />
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="1"
-                                                Orientation="Horizontal"
-                                                Spacing="8">
-                                        <Button Style="{StaticResource TcPrimaryButtonStyle}"
-                                                Content="{x:Bind SubmitAllText}"
-                                                Visibility="{x:Bind ShowSubmitAll}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
-                                                Click="OnSubmitAll" />
-                                        <!--
-                                            The opt-in path for answering the
-                                            verdict question once for the
-                                            whole group. "Submit all" above is
-                                            untouched and still sends no
-                                            outcome: this is a separate
-                                            control BESIDE it, never a
-                                            confirmation step in front of it,
-                                            so the common one-click path does
-                                            not get slower for a question
-                                            nobody has to answer. Secondary
-                                            styling, for the same reason
-                                            Ignore is: only one control here
-                                            reads as the primary send.
-                                        -->
-                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                Content="{x:Bind SubmitAllAsText}"
-                                                Visibility="{x:Bind ShowSubmitAll}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
-                                            <Button.Flyout>
-                                                <MenuFlyout>
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllWorked" />
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllPartly" />
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllFailed" />
-                                                </MenuFlyout>
-                                            </Button.Flyout>
-                                        </Button>
-                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                Content="{x:Bind IgnoreProjectText}"
-                                                Visibility="{x:Bind ShowIgnoreProject}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
-                                                Click="OnIgnoreProject" />
-                                    </StackPanel>
-                                </Grid>
+                                        <TextBlock Grid.Column="2"
+                                                   Text="{x:Bind SizeText}"
+                                                   Style="{StaticResource TcMonoFigureTextStyle}"
+                                                   VerticalAlignment="Center" />
+                                        <FontIcon Grid.Column="3"
+                                                  Glyph="&#xE76C;"
+                                                  FontSize="12"
+                                                  Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                  VerticalAlignment="Center" />
+                                    </Grid>
+                                </Button>
 
-                                <!--
-                                    The rows. ItemsRepeater, not ItemsControl:
-                                    a project can hold hundreds of sessions,
-                                    and ItemsControl realizes every child the
-                                    moment its project scrolls into view, so
-                                    a large project paid for cards nobody was
-                                    looking at yet. ItemsRepeater virtualizes
-                                    instead, recycling containers as rows
-                                    scroll past. It carries no selection, no
-                                    ItemContainerStyle, and no built-in item
-                                    chrome of its own, only whatever the
-                                    DataTemplate below draws; the StackLayout
-                                    spacing is left at 0 because the 14px gap
-                                    between cards is still the Border's own
-                                    bottom margin below, unchanged from the
-                                    flat-queue layout this replaced.
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                            Content="{x:Bind SubmitAllText}"
+                                            Visibility="{x:Bind ShowSubmitAll}"
+                                            Tag="{x:Bind}"
+                                            ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
+                                            Click="OnSubmitAll" />
+                                    <!--
+                                        The opt-in path for answering the
+                                        verdict question once for the whole
+                                        folder. "Submit all" beside it is
+                                        untouched and still sends no outcome:
+                                        this is a separate control, never a
+                                        confirmation step in front of it, so the
+                                        common one-click path does not get
+                                        slower for a question nobody has to
+                                        answer.
+                                    -->
+                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind SubmitAllAsText}"
+                                            Visibility="{x:Bind ShowSubmitAll}"
+                                            Tag="{x:Bind}"
+                                            ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
+                                        <Button.Flyout>
+                                            <MenuFlyout>
+                                                <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
+                                                                Tag="{x:Bind}"
+                                                                Click="OnSubmitAllWorked" />
+                                                <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
+                                                                Tag="{x:Bind}"
+                                                                Click="OnSubmitAllPartly" />
+                                                <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
+                                                                Tag="{x:Bind}"
+                                                                Click="OnSubmitAllFailed" />
+                                            </MenuFlyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind IgnoreProjectText}"
+                                            Visibility="{x:Bind ShowIgnoreProject}"
+                                            Tag="{x:Bind}"
+                                            ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
+                                            Click="OnIgnoreProject" />
+                                </StackPanel>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
 
-                                    Every decision each row's own buttons
-                                    make is exactly as it was when the outer
-                                    list was flat: each button's Tag carries
-                                    the row's own view model rather than
-                                    relying on the inherited DataContext, see
-                                    the comment on that StackPanel below.
-                                    Recycled containers make that more
-                                    important, not less, because a container
-                                    that used to belong to one row can be
-                                    handed a different row's data on reuse,
-                                    and the DataContext of a container in
-                                    flight during that swap is not something
-                                    a click handler should ever trust.
-                                -->
-                                <ItemsRepeater ItemsSource="{x:Bind Entries}"
-                                               ElementPrepared="OnSessionElementPrepared"
-                                               ElementClearing="OnSessionElementClearing">
-                                    <ItemsRepeater.Layout>
-                                        <StackLayout Orientation="Vertical" Spacing="0" />
-                                    </ItemsRepeater.Layout>
-                                    <ItemsRepeater.ItemTemplate>
+                <!--
+                    One folder's sessions.
+
+                    The cards are exactly what the flat queue drew, scoped to
+                    the open folder, with a back control and the folder's own
+                    name and path as the heading. The ItemsRepeater virtualizes:
+                    a folder can hold hundreds of sessions (one real user
+                    reached 500), and an ItemsControl would realize every card
+                    the moment the folder opened.
+                -->
+                <Grid Grid.Row="2"
+                      Visibility="{x:Bind ViewModel.IsInQueueFolder, Mode=OneWay}"
+                      RowDefinitions="Auto,*">
+                    <Grid Grid.Row="0"
+                          ColumnDefinitions="Auto,*"
+                          ColumnSpacing="12"
+                          Padding="22,14,22,10">
+                        <Button Grid.Column="0"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                VerticalAlignment="Center"
+                                Click="OnCloseFolder"
+                                AutomationProperties.Name="Back to the folder list">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE72B;" FontSize="12" />
+                                <TextBlock Text="All folders" />
+                            </StackPanel>
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind ViewModel.OpenFolderLabel, Mode=OneWay}"
+                                       Style="{StaticResource TcTitleCardTextStyle}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind ViewModel.OpenFolderPath, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.HasOpenFolderPath, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </Grid>
+
+                    <ScrollViewer x:Name="QueueDetailScroller"
+                                  Grid.Row="1"
+                                  Padding="22,0,22,22"
+                                  HorizontalScrollMode="Disabled"
+                                  ViewChanged="OnQueueDetailScrolled">
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.OpenFolderEntries, Mode=OneWay}"
+                                       ElementPrepared="OnSessionElementPrepared"
+                                       ElementClearing="OnSessionElementClearing">
+                            <ItemsRepeater.Layout>
+                                <StackLayout Orientation="Vertical" Spacing="0" />
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
                         <DataTemplate x:DataType="vm:QueueEntryViewModel">
                             <!--
                                 The manifest strip bleeds to the card's inside
@@ -780,16 +848,33 @@
                                 the card is a 1px border, so the inside edge
                                 is one pixel tighter than the outside.
                             -->
+                            <!--
+                                The whole card is a second route to "Look
+                                inside". The button below keeps its accent: one
+                                click submit added AVAILABILITY, and accent
+                                styling is a RECOMMENDATION. What this adds is
+                                that the obvious gesture on a card does the
+                                obvious thing.
+
+                                A WinUI Button handles its own pointer press,
+                                so a footer button does not raise Tapped on this
+                                Border. OnCardTapped checks anyway, because
+                                being wrong about that would silently turn
+                                "Not this one" into "Look inside".
+                            -->
                             <Border Background="{ThemeResource TcSurfaceCardBrush}"
                                     BorderBrush="{ThemeResource TcHairlineBrush}"
                                     BorderThickness="1"
                                     CornerRadius="{StaticResource TcCardCornerRadius}"
-                                    Margin="0,0,0,14">
+                                    Margin="0,0,0,14"
+                                    Tag="{x:Bind}"
+                                    Tapped="OnCardTapped">
                                 <StackPanel>
                                     <!-- Header row: name, agent, then the time
                                          pushed to the far edge. -->
                                     <Grid Padding="16,12"
                                           ColumnDefinitions="*,Auto"
+                                          RowDefinitions="Auto,Auto"
                                           ColumnSpacing="12">
                                         <!-- A horizontal StackPanel would measure
                                              both of these against infinite
@@ -815,6 +900,31 @@
                                                        MaxWidth="160"
                                                        VerticalAlignment="Center" />
                                         </Grid>
+
+                                        <!--
+                                            Where this session actually ran,
+                                            when that is not the folder it is
+                                            filed under. Normalization walks up
+                                            to the enclosing repository, so two
+                                            sibling subdirectories become one
+                                            folder; this is what pays for that
+                                            merge, and it is absent entirely
+                                            when there is nothing to say.
+
+                                            Trimmed at the HEAD, so the tail of
+                                            the path survives: the last two
+                                            components are what distinguish two
+                                            sessions in one repo, and the first
+                                            two are the same for both.
+                                        -->
+                                        <TextBlock Grid.Row="1"
+                                                   Grid.ColumnSpan="2"
+                                                   Text="{x:Bind SessionPath}"
+                                                   Visibility="{x:Bind HasSessionPath}"
+                                                   Style="{StaticResource TcCaptionSmallTextStyle}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                   TextTrimming="WordEllipsis"
+                                                   Margin="0,2,0,0" />
 
                                         <TextBlock Grid.Column="1"
                                                    Text="{x:Bind DiscoveredText}"
@@ -1054,12 +1164,10 @@
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
-                                    </ItemsRepeater.ItemTemplate>
-                                </ItemsRepeater>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </ScrollViewer>
+                </Grid>
 
                 <!-- Empty state, layered over the same row as the list so the
                      two cannot both take space.

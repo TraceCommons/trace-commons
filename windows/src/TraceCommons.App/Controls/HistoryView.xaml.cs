@@ -76,6 +76,27 @@ public sealed partial class HistoryView : UserControl
     }
 
     /// <summary>
+    /// A folder row: shows that project's contributions.
+    /// </summary>
+    /// <remarks>
+    /// Opened by the folder's KEY, not its label: two projects can share a
+    /// label, and a record written before ids reached history is keyed on its
+    /// label under a prefix that a real id cannot collide with. Same Tag-first
+    /// pattern as every other click on this screen.
+    /// </remarks>
+    private void OnOpenHistoryFolder(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: HistoryFolderViewModel folder })
+        {
+            ViewModel.OpenFolder(folder.Key);
+        }
+    }
+
+    /// <summary>Back to the folder list.</summary>
+    private void OnCloseHistoryFolder(object sender, RoutedEventArgs e) =>
+        ViewModel.CloseFolder();
+
+    /// <summary>
     /// Which record a click came from.
     /// </summary>
     /// <remarks>

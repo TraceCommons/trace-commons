@@ -247,6 +247,38 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// Counts a needle in an entry's PRE-redaction session text, or null when
+    /// the count could not be made.
+    /// </summary>
+    /// <remarks>
+    /// Off the UI thread for the same reason
+    /// <see cref="OpenPreviewAsync"/> is: the daemon re-reads the session file
+    /// to answer, and the search tab must not freeze on a large one.
+    ///
+    /// Null when the daemon is not running, which reaches the sheet as "could
+    /// not check" rather than as "not there" -- see
+    /// <see cref="OriginalSearchOutcome.Classify"/>. A search that cannot be
+    /// made must never render as a clean result, and that includes this
+    /// branch.
+    /// </remarks>
+    public async Task<int?> SearchOriginalAsync(
+        string entryId,
+        string needle,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(needle);
+
+        if (_daemon is not TcDaemon daemon)
+        {
+            return null;
+        }
+
+        return await Task.Run(() => daemon.SearchOriginal(entryId, needle), cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// The subscription callback. Runs on a RUST BACKGROUND THREAD, so it does
     /// the minimum possible work and hops to the UI thread for everything
     /// else. Nothing here may touch observable state directly.

@@ -33,6 +33,27 @@ public sealed class HistoryRecord
     [JsonPropertyName("project_label")]
     public string ProjectLabel { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The opaque project identifier, for grouping history by folder.
+    /// </summary>
+    /// <remarks>
+    /// Admissible in this sink by construction rather than by policy:
+    /// <c>project_id_for</c> is a one-way SHA-256 prefix that leaks no path
+    /// component, which is the property it was built for. A path is not
+    /// admissible here and is deliberately absent -- see the type's own
+    /// remarks.
+    ///
+    /// Grouping on <see cref="ProjectLabel"/> is not an option: a label is a
+    /// display name, is not unique across two projects, and grouping on it
+    /// would merge them.
+    ///
+    /// Empty for a record written before the field existed. Those records
+    /// cannot be backfilled -- nothing retained the key they were minted
+    /// from -- so they group by label instead. See <see cref="HistoryFolders"/>.
+    /// </remarks>
+    [JsonPropertyName("project_id")]
+    public string ProjectId { get; set; } = string.Empty;
+
     [JsonPropertyName("source")]
     public string? Source { get; set; }
 

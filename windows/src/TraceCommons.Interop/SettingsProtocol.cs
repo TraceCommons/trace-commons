@@ -131,7 +131,11 @@ public static class BehaviorSettingsRequest
     }
 }
 
-/// <summary><c>list_projects</c>, containing no local path.</summary>
+/// <summary>
+/// <c>list_projects</c>. Carries a display path and nothing else path-shaped:
+/// see <see cref="ProjectSetting.ProjectPath"/> for the one relaxation and
+/// the rule it is bounded by.
+/// </summary>
 public sealed class ProjectSettingsPayload
 {
     [JsonPropertyName("projects")]
@@ -145,6 +149,21 @@ public sealed class ProjectSetting
 
     [JsonPropertyName("project_label")]
     public string ProjectLabel { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The project's folder, <c>~</c>-abbreviated, for display only.
+    /// </summary>
+    /// <remarks>
+    /// Same field, same rule, same reasoning as
+    /// <see cref="QueueEntry.ProjectPath"/>: it may be rendered, and it may
+    /// not be logged, audited, notified, or persisted to history. This is
+    /// where history's folder paths are resolved from, by matching a
+    /// record's <see cref="HistoryRecord.ProjectId"/> against these rows.
+    ///
+    /// Empty against a daemon predating the field.
+    /// </remarks>
+    [JsonPropertyName("project_path")]
+    public string ProjectPath { get; set; } = string.Empty;
 
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "ask";

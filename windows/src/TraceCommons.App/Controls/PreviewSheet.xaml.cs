@@ -4,11 +4,13 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Windows.System;
 
 namespace TraceCommons.App.Controls;
 
@@ -438,11 +440,51 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         if (sender is TextBox box)
         {
             ViewModel.Needle = box.Text;
-            ViewModel.RunSearch();
+            ViewModel.RunSearch(remember: false);
         }
     }
 
-    private void OnSearchClick(object sender, RoutedEventArgs e) => ViewModel.RunSearch();
+    /// <summary>
+    /// Enter in the search box: the same commit the button is.
+    /// </summary>
+    /// <remarks>
+    /// Bound because otherwise the button would be the only way to record a
+    /// term, and pressing Enter is how most people ask a search box a
+    /// question. Not marked handled: the box's own Enter behaviour is not
+    /// this sheet's to take away.
+    /// </remarks>
+    private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter)
+        {
+            ViewModel.RunSearch(remember: true);
+        }
+    }
+
+    /// <summary>
+    /// The Search button: a committed question, so the term is recorded.
+    /// </summary>
+    /// <remarks>
+    /// Live search on every keystroke already ran this without recording. The
+    /// difference is the whole fix: typing "xyz" used to record "x", "xy" and
+    /// "xyz", filling a six-slot strip with the prefixes of one word.
+    /// </remarks>
+    private void OnSearchClick(object sender, RoutedEventArgs e) =>
+        ViewModel.RunSearch(remember: true);
+
+    /// <summary>
+    /// The nothing-matched chip: opens the search tab.
+    /// </summary>
+    /// <remarks>
+    /// The chip stays gold. The complaint it answers is that it said nothing
+    /// to DO about a session where no pattern fired, and searching it for the
+    /// things you would not want to send is the thing to do.
+    /// </remarks>
+    private void OnNothingMatchedChip(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectTab(PreviewTab.Search);
+        SearchBox.Focus(FocusState.Programmatic);
+    }
 
     private void OnRecentSearchClick(object sender, RoutedEventArgs e)
     {

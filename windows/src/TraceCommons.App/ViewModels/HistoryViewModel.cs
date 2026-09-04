@@ -45,6 +45,21 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
         new(StringComparer.Ordinal);
 
     private HistoryRollup _rollup = new();
+
+    /// <summary>
+    /// Project id to display path, from the live <c>list_projects</c> rows.
+    /// </summary>
+    /// <remarks>
+    /// History carries no path of its own -- it is one of the three sinks a
+    /// path must never reach -- so a folder's path is resolved client-side, by
+    /// matching the record's opaque project id against what the daemon
+    /// currently knows. A project it no longer knows renders with its label
+    /// alone.
+    /// </remarks>
+    private Dictionary<string, string> _projectPaths = new(StringComparer.Ordinal);
+
+    private QueueLocation _location = QueueLocation.Root;
+    private HistoryFolderViewModel? _openFolder;
     private bool _isBusy;
     private bool _loaded;
     private string _notice = string.Empty;
@@ -58,6 +73,83 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
 
     /// <summary>The page of records, newest first, as the daemon orders them.</summary>
     public ObservableCollection<HistoryRecordViewModel> Records { get; } = new();
+
+    /// <summary>
+    /// The same records grouped into folders, for the root of this screen.
+    /// </summary>
+    /// <remarks>
+    /// The same two-level shape as the queue, over the same
+    /// <see cref="QueueNavigation.Resolve"/>, so the two screens navigate
+    /// identically. The grouping rule is <see cref="HistoryFolders.Group"/>'s.
+    /// </remarks>
+    public ObservableCollection<HistoryFolderViewModel> Folders { get; } = new();
+
+    /// <summary>The records inside the open folder, or empty at the root.</summary>
+    public ObservableCollection<HistoryRecordViewModel> OpenFolderRecords { get; } = new();
+
+    /// <summary>Whether the folder list is showing rather than one folder.</summary>
+    public bool IsAtHistoryRoot => _location is not QueueLocation.Project;
+
+    /// <summary>The inverse, for the detail pane.</summary>
+    public bool IsInHistoryFolder => !IsAtHistoryRoot;
+
+    /// <summary>The open folder's label, or empty at the root.</summary>
+    public string OpenFolderLabel => _openFolder?.ProjectLabel ?? string.Empty;
+
+    /// <summary>The open folder's resolved path, or empty when it has none.</summary>
+    public string OpenFolderPath => _openFolder?.ProjectPath ?? string.Empty;
+
+    /// <summary>Whether the detail heading has a path to draw.</summary>
+    public bool HasOpenFolderPath => OpenFolderPath.Length > 0;
+
+    /// <summary>Opens one folder's contributions.</summary>
+    public void OpenFolder(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        SetLocation(new QueueLocation.Project(key));
+    }
+
+    /// <summary>Returns to the folder list.</summary>
+    public void CloseFolder() => SetLocation(QueueLocation.Root);
+
+    /// <summary>
+    /// Moves this screen to <paramref name="location"/>, after checking it is
+    /// somewhere that still exists.
+    /// </summary>
+    /// <remarks>
+    /// Re-run on every rebuild, not only when the contributor navigates: a
+    /// withdrawal or a refresh can take the last record out of a folder, and
+    /// standing in one that has gone shows an empty pane with a back button
+    /// and no explanation.
+    /// </remarks>
+    private void SetLocation(QueueLocation location)
+    {
+        _location = QueueNavigation.Resolve(
+            location,
+            Folders.Select(folder => folder.Key).ToList());
+        _openFolder = _location is QueueLocation.Project project
+            ? Folders.FirstOrDefault(folder =>
+                string.Equals(folder.Key, project.ProjectId, StringComparison.Ordinal))
+            : null;
+
+        OpenFolderRecords.Clear();
+        if (_openFolder is not null)
+        {
+            foreach (HistoryRecordViewModel row in Records)
+            {
+                if (string.Equals(row.FolderKey, _openFolder.Key, StringComparison.Ordinal))
+                {
+                    OpenFolderRecords.Add(row);
+                }
+            }
+        }
+
+        Raise(nameof(IsAtHistoryRoot));
+        Raise(nameof(IsInHistoryFolder));
+        Raise(nameof(OpenFolderLabel));
+        Raise(nameof(OpenFolderPath));
+        Raise(nameof(HasOpenFolderPath));
+    }
 
     /// <summary>
     /// Entries that reached the queue and did not go out, by the daemon's own
@@ -284,6 +376,24 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
             DaemonResponse outcomes = await _host
                 .CallAsync(DaemonProtocol.Methods.QueueOutcomeCounts)
                 .ConfigureAwait(true);
+            DaemonResponse projects = await _host
+                .CallAsync(DaemonProtocol.Methods.ListProjects)
+                .ConfigureAwait(true);
+
+            // A failed read leaves the previous map rather than emptying it:
+            // losing every folder path because one call failed would be a
+            // visible regression for no gain, and a stale path is still the
+            // path that project had.
+            if (projects.ResultAs<ProjectSettingsPayload>() is { } rows)
+            {
+                _projectPaths = rows.Projects
+                    .Where(row => row.ProjectId.Length > 0 && row.ProjectPath.Length > 0)
+                    .GroupBy(row => row.ProjectId, StringComparer.Ordinal)
+                    .ToDictionary(
+                        group => group.Key,
+                        group => group.First().ProjectPath,
+                        StringComparer.Ordinal);
+            }
 
             // A rollup that cannot be read leaves the previous figures rather
             // than zeroing them: zeros drawn from a failed read are the same
@@ -425,6 +535,17 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
             Records.Add(new HistoryRecordViewModel(record, attempt));
         }
 
+        Folders.Clear();
+        foreach (HistoryFolder folder in HistoryFolders.Group(_lastPage))
+        {
+            // A folder whose project the daemon no longer knows, and every
+            // folder keyed on a label because its records predate the id,
+            // resolve to no path and render their label alone.
+            _projectPaths.TryGetValue(folder.ProjectId, out string? path);
+            Folders.Add(new HistoryFolderViewModel(folder, path ?? string.Empty));
+        }
+
+        SetLocation(_location);
         Raise(nameof(IsEmpty));
     }
 

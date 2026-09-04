@@ -1,7 +1,4 @@
-using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -40,6 +37,23 @@ public sealed class PreviewSummary
     /// <summary>Category label to count. Never the matched text.</summary>
     [JsonPropertyName("redactions")]
     public Dictionary<string, int> Redactions { get; set; } = new();
+
+    /// <summary>
+    /// The same category labels, counting DISTINCT VALUES rather than
+    /// occurrences.
+    /// </summary>
+    /// <remarks>
+    /// The redactor mints one placeholder per distinct value and reuses it,
+    /// so one path referenced two hundred times is two hundred occurrences
+    /// and one value. <c>185 local path</c> is the first number;
+    /// <c>185 local path (12 distinct)</c> is the one a person is actually
+    /// trying to estimate risk from.
+    ///
+    /// Empty against a daemon predating the field, which reads as "no
+    /// distinct figure to show" and never as zero distinct values.
+    /// </remarks>
+    [JsonPropertyName("redactions_distinct")]
+    public Dictionary<string, int> RedactionsDistinct { get; set; } = new();
 
     [JsonPropertyName("pii_labels_present")]
     public List<string> PiiLabelsPresent { get; set; } = new();
@@ -95,7 +109,12 @@ public sealed class PreviewSummary
         }
     }
 
-    public int TotalRedactions => Redactions.Values.Sum();
+    /// <summary>
+    /// Occurrences removed. Never the whole map: see
+    /// <see cref="RedactionLabels"/>, which is why this goes through
+    /// <see cref="RedactionLabels.Total"/> rather than summing the values.
+    /// </summary>
+    public int TotalRedactions => RedactionLabels.Total(Redactions);
 
     /// <summary>
     /// "scrubbed: 12 secrets, 4 tokens, 31 paths" -- the shared spec's
@@ -103,18 +122,15 @@ public sealed class PreviewSummary
     /// so the same summary always renders the same line.
     /// </summary>
     public string RedactionReceipt =>
-        RedactionLabels.RemovedTotal(Redactions) == 0
-            ? "scrubbed: nothing matched"
-            : "scrubbed: " + string.Join(", ", SortedCategories());
+        "scrubbed: " + (TotalRedactions == 0
+            ? RedactionLabels.NothingMatched
+            : string.Join(", ", Categories));
 
     /// <summary>
     /// The same figures under the header's "Scrubbing found" label, which is
     /// the number a contributor reads the transcript against.
     /// </summary>
-    public string ScrubbingFound =>
-        RedactionLabels.RemovedTotal(Redactions) == 0
-            ? "nothing matched"
-            : string.Join(" · ", SortedCategories());
+    public string ScrubbingFound => RedactionLabels.Line(Redactions, RedactionsDistinct);
 
     /// <summary>
     /// Secrets the scan FOUND and did not remove, or an empty string when
@@ -132,18 +148,10 @@ public sealed class PreviewSummary
     public bool HasSurvivingSecrets => RedactionLabels.SurvivorTotal(Redactions) > 0;
 
     /// <summary>
-    /// Removals only. <see cref="Redactions"/> also carries
-    /// <c>residual_secret_at:*</c>, which counts a secret that was DETECTED
-    /// AND LEFT IN, and these figures render under headings that say the
-    /// opposite. See <see cref="RedactionLabels"/>.
+    /// Removals only, one phrase per category, largest first. Survivors are
+    /// excluded because these render under headings that say "removed" --
+    /// see <see cref="RedactionLabels"/>.
     /// </summary>
-    private IEnumerable<string> SortedCategories() =>
-        RedactionLabels.Removals(Redactions)
-            .OrderByDescending(pair => pair.Value)
-            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
-            .Select(pair => string.Format(
-                CultureInfo.CurrentCulture,
-                "{0} {1}",
-                pair.Value,
-                pair.Key.Replace('_', ' ')));
+    private IReadOnlyList<string> Categories =>
+        RedactionLabels.Categories(Redactions, RedactionsDistinct);
 }

@@ -77,10 +77,19 @@ public sealed class SettingsProtocolTests
         Assert.Equal("client-api", project.ProjectLabel);
         Assert.Equal("ignore", project.Mode);
 
+        // The key is the identity, and it is the full local path folded for
+        // case. It must never cross this socket, and neither must any other
+        // path -- except the one the folder-first queue exists to show.
+        // `ProjectPath` is that one: a `~`-abbreviated folder for display,
+        // sanctioned by `ProjectEntry::display_path` on the daemon side and
+        // bound there to "rendered, never logged, audited, notified, or
+        // persisted to history". Naming it explicitly keeps this guard able
+        // to fail on a SECOND path field, which is what it is really for.
         Assert.DoesNotContain(
             typeof(ProjectSetting).GetProperties(),
-            property => property.Name.Contains("Path", StringComparison.Ordinal)
-                        || property.Name.Contains("Key", StringComparison.Ordinal));
+            property => property.Name.Contains("Key", StringComparison.Ordinal)
+                        || (property.Name.Contains("Path", StringComparison.Ordinal)
+                            && property.Name != nameof(ProjectSetting.ProjectPath)));
     }
 
     [Fact]

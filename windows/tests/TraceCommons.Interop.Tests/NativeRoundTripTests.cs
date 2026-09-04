@@ -587,6 +587,68 @@ public sealed class NativeRoundTripTests : IDisposable
         return Assert.IsType<DaemonStatus>(status);
     }
 
+    /// <summary>
+    /// The count-only oracle over PRE-redaction bytes, against the real
+    /// cdylib.
+    /// </summary>
+    /// <remarks>
+    /// The planted secret is gone from the preview body, which
+    /// EnrolledPreviewCanBeApprovedAndUndoneThroughTheNativeBinding already
+    /// asserts. Searching the redacted body for it therefore returns zero, and
+    /// zero is indistinguishable from "never there" -- which is exactly the
+    /// pair of answers this call exists to separate. Only a real daemon
+    /// re-reading a real session file can show that it does.
+    /// </remarks>
+    [Fact]
+    public void SearchingTheOriginalFindsAValueRedactionRemoved()
+    {
+        string entryId = SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        using (TcPreview preview = daemon.OpenPreview(entryId))
+        {
+            Assert.DoesNotContain(PlantedSecret, preview.Body, StringComparison.Ordinal);
+            Assert.Empty(preview.Search(PlantedSecret));
+        }
+
+        int? original = daemon.SearchOriginal(entryId, PlantedSecret);
+
+        Assert.NotNull(original);
+        Assert.True(
+            original > 0,
+            "the secret is in the seeded session file, so the pre-redaction count is not zero");
+    }
+
+    /// <summary>
+    /// Absent is 0, never the error sentinel. A needle nowhere in the session
+    /// has to come back as a count, because -1 would render as "could not
+    /// check" and lose the one honest reassurance this tab can give.
+    /// </summary>
+    [Fact]
+    public void ANeedleNowhereInTheSessionCountsZeroRatherThanFailing()
+    {
+        string entryId = SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        int? count = daemon.SearchOriginal(entryId, "nowhere-in-this-session-at-all");
+
+        Assert.NotNull(count);
+        Assert.Equal(0, count!.Value);
+    }
+
+    /// <summary>
+    /// An unknown entry is an error, and an error is null rather than zero:
+    /// the wrapper must not turn a failed check into a clean result.
+    /// </summary>
+    [Fact]
+    public void AnUnknownEntryReportsThatTheCheckCouldNotBeMade()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        Assert.Null(daemon.SearchOriginal(Guid.NewGuid().ToString(), PlantedSecret));
+    }
+
     [Fact]
     public void EnrolledPreviewCanBeApprovedAndUndoneThroughTheNativeBinding()
     {
