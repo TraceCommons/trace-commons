@@ -50,10 +50,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use super::eligibility::{Eligibility, Observation, evaluate};
+use super::eligibility::{Eligibility, Observation, armed_settle_elapsed, evaluate};
 use super::health;
 use super::ipc::{DaemonShared, EVENT_QUEUE_CHANGED};
-use super::policy::{ProjectMode, disambiguated_label, known_keys, project_key_for};
+use super::policy::{ProjectMode, disambiguated_label, known_keys, project_for};
 use super::queue::{QueueEntry, QueueState, entry_id_for};
 use super::state::CwdCacheEntry;
 use crate::source::{SessionRef, TraceSource, all_sources};
@@ -65,6 +65,11 @@ pub struct TickReport {
     /// Entries handed straight to the uploader because their project is
     /// opted in.
     pub auto_ready: usize,
+    /// Entries whose project is opted in but whose session has not been
+    /// quiet for `ARMED_SETTLE_SECS` yet, so they stay `Pending` for now.
+    /// Counted apart from `auto_ready` because it is a wait, not a refusal:
+    /// the same entry becomes `auto_ready` on a later poll.
+    pub armed_not_settled: usize,
     pub ignored: usize,
     /// Sessions skipped because the contributor dismissed them. Distinct
     /// from `ignored`, which is a standing decision about a whole project.
@@ -424,6 +429,18 @@ fn visit_session(
             out.report.ignored += 1;
             return;
         }
+        // Armed, but not yet settled: leave it `Pending` and look again next
+        // poll. The entry stays in the queue meanwhile, so a contributor who
+        // opens the app can still approve it by hand -- arming is a standing
+        // yes to sending finished work unattended, not a refusal to let them
+        // act sooner. See `eligibility::ARMED_SETTLE_SECS`.
+        if mode == ProjectMode::AutoUpload
+            && state == QueueState::Pending
+            && !armed_settle_elapsed(obs.modified_at, ctx.now)
+        {
+            out.report.armed_not_settled += 1;
+            return;
+        }
         // The one thing the discarded dedup path did do: re-apply a
         // project's standing opt-in to an entry that has since been
         // put back to `Pending` (by a supersede, or by the
@@ -462,7 +479,7 @@ fn visit_session(
     }
 
     let cwd = resolve_cwd(shared, source, session_ref, &obs);
-    let project_key = project_key_for(cwd.as_deref());
+    let (project_key, project_path) = project_for(cwd.as_deref());
     let mode = {
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
@@ -544,6 +561,12 @@ fn visit_session(
         known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()))
     };
 
+    // Two independent restrictions on arming, and a fresh entry has to clear
+    // both. They arrived from different directions -- the settle window from
+    // #515, the staging exclusion from the trajectory-import work -- and each
+    // one dropped is a session sent unattended that should not have been, so
+    // they are ANDed rather than either replacing the other.
+
     // A staged trajectory is never armed, whatever the project mode says.
     //
     // The daemon's only trajectory scope is the staging directory (see
@@ -558,7 +581,15 @@ fn visit_session(
     // contributor dropped in by hand, not only for the ones that name
     // themselves.
     let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
-    let armed = mode == ProjectMode::AutoUpload && !from_staging;
+
+    // A fresh entry from an armed project is queued `Pending` until it has
+    // settled, not `Approved` on sight. The next poll promotes it once the
+    // window has elapsed (site above), and a session that grows in the
+    // meantime supersedes this entry -- free, where the same growth after an
+    // upload would cost one of three re-uploads and a duplicate penalty.
+    let armed = mode == ProjectMode::AutoUpload
+        && !from_staging
+        && armed_settle_elapsed(obs.modified_at, ctx.now);
 
     let entry = QueueEntry {
         entry_id: entry_id_for(&transcript.session_hash),
@@ -566,9 +597,11 @@ fn visit_session(
         source: session_ref.source.to_string(),
         declared_source: session_ref.declared_source.clone(),
         project_key: project_key.clone(),
+        // The unfolded spelling of the same directory, for rendering only.
+        project_path: project_path.clone(),
         // The raw recorded cwd, which `project_key_for` normalized away.
         session_cwd: cwd.clone(),
-        project_label: disambiguated_label(&project_key, &known),
+        project_label: disambiguated_label(&project_key, project_path.as_deref(), &known),
         path: obs.path.clone(),
         size_bytes: obs.size_bytes,
         discovered_at: ctx.now,
@@ -811,9 +844,11 @@ fn resolve_cwd(
 
 #[cfg(test)]
 mod tests {
+    use super::super::policy::project_key_for;
     use super::*;
     use crate::config::ConfigStore;
     use crate::daemon::policy::ProjectMode;
+    use crate::daemon::test_paths::{abs, abs_json, json_escaped};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -893,16 +928,17 @@ mod tests {
                 .join(format!("-Users-testuser-code-{project}"));
             std::fs::create_dir_all(&project_dir).unwrap();
             let path = project_dir.join(format!("{name}.jsonl"));
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             let mut body = format!(
                 "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
-                 \"cwd\":\"/Users/testuser/code/{project}\",\
+                 \"cwd\":\"{cwd}\",\
                  \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                  \"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
             );
             for i in 0..extra_events {
                 body.push_str(&format!(
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"more {i}\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{name}\",\"uuid\":\"b{i}\"}}\n"
                 ));
@@ -917,6 +953,9 @@ mod tests {
         /// checkouts both named `api`), which `write_session` alone cannot
         /// produce since it always uses the same parent directory.
         fn write_session_with_cwd(&self, dir_name: &str, cwd: &str, name: &str) -> PathBuf {
+            // Escaped here rather than at each call site, so callers pass a
+            // real path and not a JSON fragment.
+            let cwd = json_escaped(cwd);
             let project_dir = self.claude_root.join(dir_name);
             std::fs::create_dir_all(&project_dir).unwrap();
             let path = project_dir.join(format!("{name}.jsonl"));
@@ -940,11 +979,12 @@ mod tests {
                 .join("subagents");
             std::fs::create_dir_all(&subagents).unwrap();
             let path = subagents.join(format!("{agent}.jsonl"));
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             std::fs::write(
                 &path,
                 format!(
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"delegated\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{session}\",\"uuid\":\"s1\"}}\n"
                 ),
@@ -967,7 +1007,7 @@ mod tests {
         /// raw spelling would be setting it for a project nothing ever
         /// resolves to.
         fn set_mode(&self, project: &str, mode: ProjectMode) {
-            self.set_mode_for_key(&format!("/Users/testuser/code/{project}"), mode);
+            self.set_mode_for_key(&abs(&format!("Users/testuser/code/{project}")), mode);
         }
 
         /// Like `set_mode`, but for an explicit recorded cwd rather than
@@ -996,7 +1036,7 @@ mod tests {
                 id: 1,
                 method: "set_project_mode".to_string(),
                 params: serde_json::json!({
-                    "project_key": project_key_for(Some(&format!("/Users/testuser/code/{project}"))),
+                    "project_key": project_key_for(Some(&abs(&format!("Users/testuser/code/{project}")))),
                     "mode": mode,
                 }),
             };
@@ -1140,11 +1180,12 @@ mod tests {
         fn append_to_session(&self, path: &std::path::Path, project: &str, name: &str) {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
             for i in 0..40 {
                 writeln!(
                     f,
                     "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"later {i}\"}},\
-                     \"cwd\":\"/Users/testuser/code/{project}\",\
+                     \"cwd\":\"{cwd}\",\
                      \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
                      \"sessionId\":\"{name}\",\"uuid\":\"c{i}\"}}"
                 )
@@ -1212,6 +1253,58 @@ mod tests {
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.queued, 0);
         assert_eq!(f.states(), vec![QueueState::Approved]);
+    }
+
+    /// Arming is a standing yes to sending *finished* work unattended, not
+    /// to sending whatever has been quiet for half an hour. The fixture's
+    /// mtime is genuinely now, so an hour later is past quiescence and well
+    /// inside the settle window -- exactly a session paused over lunch.
+    #[tokio::test]
+    async fn an_opted_in_session_is_not_approved_before_it_settles() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        assert_eq!(report.auto_ready, 0, "{report:?}");
+        assert_eq!(
+            f.states(),
+            vec![QueueState::Pending],
+            "an unsettled armed session waits in the queue rather than being sent"
+        );
+    }
+
+    /// ...and it is a wait, not a refusal: the same entry is promoted once
+    /// the window elapses, with no new discovery and no second decision.
+    #[tokio::test]
+    async fn an_opted_in_session_is_approved_once_it_settles() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+
+        let report = tick(&f.shared, Utc::now() + chrono::Duration::hours(25))
+            .await
+            .unwrap();
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(f.states(), vec![QueueState::Approved]);
+        assert_eq!(f.queue_len(), 1, "promotion must not mint a second entry");
+    }
+
+    /// The wait is counted, and counted apart from `auto_ready`, so an
+    /// operator reading a tick report can tell "holding" from "nothing
+    /// armed here".
+    #[tokio::test]
+    async fn an_unsettled_armed_session_is_reported_as_waiting() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(1)).await;
+        let report = tick(&f.shared, Utc::now() + chrono::Duration::hours(2))
+            .await
+            .unwrap();
+        assert_eq!(report.armed_not_settled, 1, "{report:?}");
+        assert_eq!(report.auto_ready, 0, "{report:?}");
     }
 
     #[tokio::test]
@@ -1305,12 +1398,12 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1349,7 +1442,7 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1362,7 +1455,7 @@ mod tests {
         // A second, colliding project shows up in a later tick.
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:10:00Z")).await;
@@ -1372,12 +1465,16 @@ mod tests {
         let first = queue
             .all()
             .iter()
-            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/work/api")))
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/work/api").as_str()))
+            })
             .unwrap();
         let second = queue
             .all()
             .iter()
-            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/client/api")))
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/client/api").as_str()))
+            })
             .unwrap();
         assert!(
             first.project_label.starts_with("api ("),
@@ -1404,12 +1501,12 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session_with_cwd(
             "-Users-testuser-work-api",
-            "/Users/testuser/work/api",
+            abs("Users/testuser/work/api").as_str(),
             "11111111-1111-1111-1111-111111111111",
         );
         f.write_session_with_cwd(
             "-Users-testuser-client-api",
-            "/Users/testuser/client/api",
+            abs("Users/testuser/client/api").as_str(),
             "22222222-2222-2222-2222-222222222222",
         );
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -1417,8 +1514,14 @@ mod tests {
         // Configure both projects in policy too (with distinct modes so the
         // `list_projects` rows can be told apart, since that surface
         // deliberately never echoes the project key).
-        f.set_mode_for_key("/Users/testuser/work/api", ProjectMode::NotifyOnly);
-        f.set_mode_for_key("/Users/testuser/client/api", ProjectMode::Ignore);
+        f.set_mode_for_key(
+            abs("Users/testuser/work/api").as_str(),
+            ProjectMode::NotifyOnly,
+        );
+        f.set_mode_for_key(
+            abs("Users/testuser/client/api").as_str(),
+            ProjectMode::Ignore,
+        );
 
         let resp = crate::daemon::ipc::handle_request(
             &f.shared,
@@ -1441,7 +1544,9 @@ mod tests {
         let queue_entry = queue
             .all()
             .iter()
-            .find(|e| e.project_key == project_key_for(Some("/Users/testuser/work/api")))
+            .find(|e| {
+                e.project_key == project_key_for(Some(abs("Users/testuser/work/api").as_str()))
+            })
             .unwrap();
         assert_eq!(
             list_label, queue_entry.project_label,
@@ -1886,7 +1991,7 @@ mod tests {
         let event = serde_json::json!({
             "type": "user",
             "message": {"role": "user", "content": content},
-            "cwd": format!("/Users/testuser/code/{project}"),
+            "cwd": abs(&format!("Users/testuser/code/{project}")),
             "timestamp": "2026-08-08T10:00:00Z",
             "version": "2.0.1",
             "sessionId": name,

@@ -29,6 +29,10 @@ public enum RedactionLabels {
     /// The label family marking a secret that was found and left in place.
     public static let residualPrefix = "residual_secret_at"
 
+    /// What the card shows when nothing fired. `ScrubbingCaveat` supplies
+    /// the sentence that says what that does and does not prove.
+    public static let nothingMatched = "nothing matched"
+
     /// The part of a label before its first `:`.
     ///
     /// The count vocabulary is namespaced and OPEN -- `secret:{pattern_name}`,
@@ -55,6 +59,42 @@ public enum RedactionLabels {
         removals(counts).values.reduce(0, +)
     }
 
+    /// "185 local path (12 distinct)  ·  3 secret"
+    ///
+    /// The daemon reports two maps. `redaction_counts` counts OCCURRENCES --
+    /// how many times a pattern fired. `redactions_distinct` counts VALUES --
+    /// how many different strings those firings covered, because the redactor
+    /// mints one placeholder per distinct value and reuses it. One path
+    /// referenced two hundred times is two hundred occurrences and one value,
+    /// and a card that reports only the first overstates how much of the
+    /// session was touched.
+    ///
+    /// Lives here rather than on the view because it is the only part of that
+    /// card with a right and a wrong answer, and `swift test` cannot reach a
+    /// SwiftUI body.
+    ///
+    /// Ordered by count so the biggest number is first, which is what a
+    /// person scanning a column of cards is looking for; ties break on the
+    /// label so the order is stable between two redraws.
+    public static func line(occurrences: [String: Int], distinct: [String: Int]) -> String {
+        let removed = removals(occurrences)
+        if removed.isEmpty { return nothingMatched }
+        return removed
+            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .map { label, count in
+                let words = label.replacingOccurrences(of: "_", with: " ")
+                // Only when it says something the occurrence count did not:
+                // equal counts are the same fact twice, and a distinct count
+                // above its occurrence count is impossible from a correct
+                // daemon and not worth rendering from an incorrect one.
+                guard let values = distinct[label], values > 0, values < count else {
+                    return "\(count) \(words)"
+                }
+                return "\(count) \(words) (\(values) distinct)"
+            }
+            .joined(separator: "  ·  ")
+    }
+
     /// Where secrets were found and left in the payload, with how many at
     /// each site, ordered for a stable rendering.
     ///
@@ -73,7 +113,8 @@ public enum RedactionLabels {
             .sorted { $0.site < $1.site }
     }
 
-    /// How many secrets were found and left in what would be sent.
+    /// How many places a secret was found and left in what would be sent.
+    /// Sites, not secrets: one site can hold more than one value.
     public static func survivorTotal(_ counts: [String: Int]) -> Int {
         counts.filter { !isRemoval($0.key) }.values.reduce(0, +)
     }
@@ -81,15 +122,15 @@ public enum RedactionLabels {
     /// The line shown when a session carries survivors, in the attention
     /// tone. Nil when there are none.
     ///
-    /// Deliberately says "still in what would be sent" rather than naming a
-    /// number of secrets: the count is of detection SITES, and one site can
-    /// hold more than one value. Overstating precision here would be its own
-    /// small lie.
+    /// Never names a number of secrets. The count is of detection SITES, and
+    /// one site can hold more than one value, so "2 secrets" would understate
+    /// what survived. The plural says "found in N places" instead, which is
+    /// what the number actually counts; the singular drops it entirely.
     public static func survivorLine(_ counts: [String: Int]) -> String? {
         let total = survivorTotal(counts)
         guard total > 0 else { return nil }
         return total == 1
-            ? "1 secret found here is still in what would be sent"
-            : "\(total) secrets found here are still in what would be sent"
+            ? "A secret found here is still in what would be sent"
+            : "Secrets found in \(total) places are still in what would be sent"
     }
 }

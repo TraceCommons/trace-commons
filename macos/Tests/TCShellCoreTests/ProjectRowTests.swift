@@ -160,4 +160,23 @@ final class ProjectRowTests: XCTestCase {
         """#)
         XCTAssertFalse(decoded[0].isUnresolvedBucket)
     }
+
+    /// The folder path is display-only, and Settings shows it so that
+    /// `~/work/api` and `~/client/api` stop reading as `api` and `api`.
+    func testAProjectCarriesItsDisplayPath() throws {
+        let decoded = try rows(#"""
+        {"projects":[{"project_id":"p_a","project_label":"api","project_path":"~/work/api","mode":"notify_only","added_at":null,"configured":false}]}
+        """#)
+        XCTAssertEqual(decoded[0].projectPath, "~/work/api")
+    }
+
+    /// A daemon predating the field sends no path, and the row must still
+    /// decode: the app ships separately from the daemon, so a required key
+    /// here would empty the projects list rather than drop one line.
+    func testAProjectFromAnOlderDaemonHasNoPath() throws {
+        let decoded = try rows(#"""
+        {"projects":[{"project_id":"p_a","project_label":"api","mode":"notify_only","added_at":null,"configured":false}]}
+        """#)
+        XCTAssertEqual(decoded[0].projectPath, "")
+    }
 }

@@ -250,6 +250,25 @@ final class DaemonClient {
         try setSettings(RoutingSurface.settingsParams(form))
     }
 
+    /// Asks what a running IronWire published about itself.
+    ///
+    /// Reads one file the daemon can see and this app cannot rely on
+    /// finding: a GUI never inherits a login shell, so `$IRONWIRE_HOME`
+    /// never reaches it -- and the pointer is written under the real home
+    /// directory regardless of that variable, which is exactly why it is
+    /// findable from here.
+    ///
+    /// **Opens no connection and returns no token.** The result carries a
+    /// port and, when IronWire said so, the path it wrote its credential
+    /// to. Nothing here declares anything or starts anything reading.
+    ///
+    /// Never throws for a machine without IronWire: that is a well-formed
+    /// answer -- the ordinary one -- and not a failed call. What throws is
+    /// the call not running at all, which reads the same way.
+    func discoverRouting() throws -> RoutingDiscovery {
+        RoutingDiscovery.parse(try resultObject("discover_routing", params: [:]))
+    }
+
     /// Asks whether the declared proxy answers on that port with that
     /// credential. Answers in the three-outcome vocabulary
     /// `RoutingProbeOutcome` reads.
@@ -564,6 +583,17 @@ final class DaemonClient {
     // MARK: - Preview body (in-process only)
 
     /// Opens the redacted body for `entryID`. Blocks for the redaction pass.
+    /// How many times `needle` appears in the entry's PRE-redaction session
+    /// text, or nil if that could not be checked.
+    ///
+    /// The one call in this client that reads unredacted bytes, and it is
+    /// allowed to because it returns a number and nothing else. It is what
+    /// tells "the scrubber took it out" apart from "it was never here",
+    /// which the redacted-body search cannot.
+    func searchOriginal(entryID: String, needle: String) -> Int? {
+        daemon.searchOriginal(entryID: entryID, needle: needle)
+    }
+
     func openPreview(entryID: String) throws -> TCPreview {
         try daemon.openPreview(entryID: entryID)
     }

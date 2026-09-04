@@ -265,6 +265,45 @@ pub fn envelope_has_residual_secret(
     Ok(report.blocked_secret_detected)
 }
 
+/// The site reported when the residual scan could not run at all.
+///
+/// Deliberately inside the `residual_secret_at:` family rather than a family
+/// of its own. Every shell splits the count map exactly one way -- this
+/// family is a survivor, everything else is a removal -- so a new family
+/// would be silently summed into "removed by pattern", which is the
+/// reassuring answer for the one case where nothing was verified. The braces
+/// mark it as a placeholder rather than a path, matching how the scan itself
+/// collapses a non-schema-shaped object key to `{}`.
+pub const RESIDUAL_SCAN_UNAVAILABLE_SITE: &str = "{scan_unavailable}";
+
+/// Residual-secret labels for a finished envelope, fail-closed.
+///
+/// On a scan the redactor could not complete (serialization failure, or an
+/// envelope past the scan's node/depth budget) this reports a survivor at
+/// [`RESIDUAL_SCAN_UNAVAILABLE_SITE`] rather than an empty map. That is the
+/// point: an unscanned envelope must not render as a scanned-clean one on
+/// the screen where somebody is deciding whether to send it.
+///
+/// Refusing the preview outright was the other candidate and is worse here:
+/// it would deny a contributor any view of a large session, and a preview is
+/// a disclosure surface, not a gate -- the submit path keeps its own
+/// refusal in `envelope_has_residual_secret`.
+pub fn residual_secret_labels_fail_closed(
+    redactor: &DeterministicTraceRedactor,
+    envelope: &TraceContributionEnvelope,
+) -> BTreeMap<String, u32> {
+    match trace_commons_protocol::trace_contribution::residual_secret_labels(redactor, envelope) {
+        Ok(labels) => labels,
+        Err(_) => BTreeMap::from([(
+            format!(
+                "{}{RESIDUAL_SCAN_UNAVAILABLE_SITE}",
+                trace_commons_protocol::trace_contribution::RESIDUAL_SECRET_AT_PREFIX
+            ),
+            1,
+        )]),
+    }
+}
+
 /// Serialize `raw` and refuse (label-only) if the pre-redaction payload
 /// already exceeds `MAX_ENVELOPE_BYTES`. The finished envelope carries the
 /// same event content plus additional metadata (trace card, consent, etc.),
@@ -1064,6 +1103,50 @@ mod tests {
     /// backing map cannot be observed in a digest. Under a `BTreeMap` the
     /// assertion is true for free; under `preserve_order` it is real work, and
     /// it is the version that runs in this crate's graph.
+    /// A residual scan that cannot cover the envelope must report an
+    /// explicit unchecked survivor, never an empty map.
+    ///
+    /// An empty map is indistinguishable from "scanned, nothing survived",
+    /// and it would render on the consent surface as the reassuring answer
+    /// for the one case where nothing was actually verified. The label goes
+    /// into the `residual_secret_at:` family on purpose: every shell splits
+    /// the count map on exactly that prefix, so a family of its own would be
+    /// summed into "removed by pattern".
+    #[tokio::test]
+    async fn a_residual_scan_that_cannot_run_reports_unchecked_not_clean() {
+        let transcript = fixture_transcript();
+        let cfg = test_config();
+        let raw = build_raw_contribution(&transcript, &cfg, chrono::Utc::now());
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
+
+        // Baseline: this envelope scans clean, so the assertion below cannot
+        // pass merely because the fixture carries a real survivor.
+        assert!(residual_secret_labels_fail_closed(&redactor, &envelope).is_empty());
+
+        // Nest past the scan's depth budget. Mutating after redaction is the
+        // point: this models an envelope the scan cannot traverse, not one
+        // the redactor mishandled.
+        let mut deep = Value::Null;
+        for _ in 0..256 {
+            deep = Value::Array(vec![deep]);
+        }
+        envelope.replay.expected_assertions.push(deep);
+
+        let labels = residual_secret_labels_fail_closed(&redactor, &envelope);
+        let expected = format!(
+            "{}{RESIDUAL_SCAN_UNAVAILABLE_SITE}",
+            trace_commons_protocol::trace_contribution::RESIDUAL_SECRET_AT_PREFIX
+        );
+        assert_eq!(
+            labels.get(expected.as_str()),
+            Some(&1),
+            "an unscannable envelope must report an unchecked survivor; got {labels:?}"
+        );
+    }
+
     #[tokio::test]
     async fn an_envelope_serialises_key_sorted_whatever_map_backs_this_build() {
         use trace_commons_protocol::trace_contribution::{

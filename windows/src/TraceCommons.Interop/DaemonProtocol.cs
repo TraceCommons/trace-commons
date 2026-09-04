@@ -94,6 +94,22 @@ public static class DaemonProtocol
         /// </summary>
         public const string ProbeRoutedTools = "probe_routed_tools";
 
+        /// <summary>
+        /// What a running IronWire published about itself: the port its
+        /// control API bound to, and where it wrote its credential.
+        /// </summary>
+        /// <remarks>
+        /// Reads one file and opens no connection, and NEVER returns a token
+        /// -- the path is for display; the daemon opens it itself, at call
+        /// time. Nothing here declares anything: it is what lets the
+        /// declaring flow pre-fill instead of asking, which removes the
+        /// question without removing the consent.
+        ///
+        /// A machine without IronWire answers <c>found: false</c>. That is
+        /// not an error and must not be rendered as one.
+        /// </remarks>
+        public const string DiscoverRouting = "discover_routing";
+
         // History and withdrawal. Like the onboarding block above, every one
         // of these was already in the daemon's pinned METHODS array before
         // this app could call any of them -- the gap on Windows was never

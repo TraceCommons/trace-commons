@@ -53,6 +53,11 @@ struct QueueContent: View {
     /// `AppModel`'s, behind `setPreviewVisible` -- this is not published and
     /// nothing reads it directly.
     @State private var visibleRowIDs: Set<String> = []
+    /// Which level of the queue is showing. Resolved against the live
+    /// groups on every redraw (`QueueNavigation.resolve`), so a folder that
+    /// empties while it is open returns to the list rather than rendering
+    /// an empty detail view.
+    @State private var location: QueueLocation = .root
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.md) {
@@ -114,55 +119,17 @@ struct QueueContent: View {
         .tcScreen()
     }
 
+    /// The queue's two levels, resolved against what the queue currently
+    /// holds rather than against what it held when the folder was opened.
     private var waiting: some View {
-        VStack(alignment: .leading, spacing: TC.Space.md) {
-            // Left as a sentence, not compressed into a label-and-count
-            // header. It is the one line on this screen written in the
-            // product's voice and it says what the screen is FOR.
-            Text("^[\(model.decisionsOwed) session](inflect: true) waiting for your decision")
-                .font(TC.Font_.sectionTitle)
-                .foregroundStyle(TC.inkPrimary)
-
-            // Grouped by project so `Submit all` has something honest to
-            // point at -- a group is exactly what `submitProject` acts on,
-            // never a slice the UI made up. `waitingByProject`'s order is
-            // first-seen, which is also `awaitingDecision`'s order, so this
-            // reshuffles nothing a contributor has already scanned.
-            //
-            // The group carries its own entries. It used to carry only
-            // totals, and this loop filtered the whole waiting list once
-            // per group to find the rows -- entries times projects on every
-            // redraw, at a 500-entry cap. `QueueGrouping` does it in one
-            // pass, off the model, only when the queue moves. See #388.
-            VStack(spacing: TC.Space.lg) {
-                ForEach(model.waitingByProject) { group in
-                    ProjectQueueGroup(
-                        group: group,
-                        summaries: model.summaries,
-                        summaryErrors: model.summaryErrors,
-                        tooLarge: model.tooLarge,
-                        onLookInside: { previewing = $0 },
-                        onSubmit: { model.approve($0) },
-                        onDismiss: { model.dismiss($0) },
-                        onSubmitAll: { model.submitProject(id: group.id) },
-                        onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },
-                        onIgnoreProject: {
-                            model.ignoreProject(
-                                id: group.id,
-                                label: group.label,
-                                promised: group.count
-                            )
-                        },
-                        onAppear: { entry in
-                            model.requestPreview(for: entry)
-                            visibleRowIDs.insert(entry.entryID)
-                            model.setPreviewVisible(visibleRowIDs)
-                        },
-                        onDisappear: { entry in
-                            visibleRowIDs.remove(entry.entryID)
-                            model.setPreviewVisible(visibleRowIDs)
-                        }
-                    )
+        let here = QueueNavigation.resolve(location, in: model.waitingByProject)
+        return VStack(alignment: .leading, spacing: TC.Space.md) {
+            switch here {
+            case .root:
+                folderList
+            case .project(let id):
+                if let group = model.waitingByProject.first(where: { $0.id == id }) {
+                    folderDetail(group)
                 }
             }
 
@@ -173,29 +140,118 @@ struct QueueContent: View {
             ScrubbingCaveatNote()
                 .padding(.top, TC.Space.xxs)
         }
+        // Writing the resolved location back is what makes a vanished
+        // folder's back button unnecessary rather than broken.
+        .onChange(of: model.waitingByProject.map(\.id)) { _, _ in
+            location = QueueNavigation.resolve(location, in: model.waitingByProject)
+        }
+    }
+
+    /// The root level: one row per folder, folder name first.
+    ///
+    /// Grouped by project so `Submit all` has something honest to point at
+    /// -- a group is exactly what `submitProject` acts on, never a slice the
+    /// UI made up. `waitingByProject`'s order is first-seen, which is also
+    /// `awaitingDecision`'s order, so this reshuffles nothing a contributor
+    /// has already scanned.
+    private var folderList: some View {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
+            // Left as a sentence, not compressed into a label-and-count
+            // header. It is the one line on this screen written in the
+            // product's voice and it says what the screen is FOR.
+            Text("^[\(model.decisionsOwed) session](inflect: true) waiting for your decision")
+                .font(TC.Font_.sectionTitle)
+                .foregroundStyle(TC.inkPrimary)
+
+            LazyVStack(spacing: TC.Space.md) {
+                ForEach(model.waitingByProject) { group in
+                    QueueFolderRow(
+                        group: group,
+                        onOpen: { location = .project(group.id) },
+                        onSubmitAll: { model.submitProject(id: group.id) },
+                        onSubmitAllAs: { model.submitProject(id: group.id, verdict: $0) },
+                        onIgnoreProject: {
+                            model.ignoreProject(
+                                id: group.id,
+                                label: group.label,
+                                promised: group.count
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    /// One folder's sessions, a level in from the list.
+    ///
+    /// The folder's own actions stay on the row one level up rather than
+    /// being repeated here: two copies would be two things to keep in step.
+    private func folderDetail(_ group: QueueGroup<QueueEntry>) -> some View {
+        VStack(alignment: .leading, spacing: TC.Space.md) {
+            Button {
+                location = .root
+            } label: {
+                HStack(spacing: TC.Space.xs) {
+                    QueueGlyph(glyph: .chevronLeft, size: 11, color: TC.inkSecondary)
+                    Text("All folders")
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(group.label)
+                    .font(TC.Font_.sectionTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                if let path = group.entries.first?.projectPath, !path.isEmpty {
+                    Text(path)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkSecondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            ProjectQueueGroup(
+                group: group,
+                summaries: model.summaries,
+                summaryErrors: model.summaryErrors,
+                tooLarge: model.tooLarge,
+                onLookInside: { previewing = $0 },
+                onSearch: { previewing = $0 },
+                onSubmit: { model.approve($0) },
+                onDismiss: { model.dismiss($0) },
+                onAppear: { entry in
+                    model.requestPreview(for: entry)
+                    visibleRowIDs.insert(entry.entryID)
+                    model.setPreviewVisible(visibleRowIDs)
+                },
+                onDisappear: { entry in
+                    visibleRowIDs.remove(entry.entryID)
+                    model.setPreviewVisible(visibleRowIDs)
+                }
+            )
+        }
     }
 }
 
-/// One project's slice of the queue: its rows, and -- only when there is
-/// more than one of them -- the `Submit all` action that approves the whole
-/// group in the same gesture the design spec calls "the same gesture at the
-/// project level". A single-entry group offers no second way to do what its
-/// one row's own `Submit` already does.
+/// One folder's rows, at the queue's second level.
+///
+/// It used to carry the group header too -- the label, `Submit all`,
+/// `Submit all as` and `Ignore`. Those moved up to `QueueFolderRow` when the
+/// queue became folder-first: a folder's actions belong beside the folder,
+/// and stating them in both places would be two things to keep in step.
 private struct ProjectQueueGroup: View {
     let group: QueueGroup<QueueEntry>
     let summaries: [String: PreviewSummary]
     let summaryErrors: [String: String]
     let tooLarge: [String: PreviewTooLarge]
     let onLookInside: (QueueEntry) -> Void
+    let onSearch: (QueueEntry) -> Void
     let onSubmit: (QueueEntry) -> Void
     let onDismiss: (QueueEntry) -> Void
-    let onSubmitAll: () -> Void
-    /// The opt-in bulk path: the same approval, carrying one verdict for
-    /// every entry it covers. Separate from `onSubmitAll` so the plain
-    /// one-click submit stays exactly one click and keeps sending no
-    /// `outcome` at all.
-    let onSubmitAllAs: (ContributorVerdict) -> Void
-    let onIgnoreProject: () -> Void
     /// Called when a row actually appears on screen -- `AppModel.requestPreview(for:)`,
     /// which is where the daemon-side scheduler dedupe lives. See `rowList`
     /// for why this is what drives loading at all now.
@@ -206,64 +262,8 @@ private struct ProjectQueueGroup: View {
     /// leaves the pending list for good (`AppModel.applyPendingUpdate`).
     let onDisappear: (QueueEntry) -> Void
 
-    @State private var confirmingIgnore = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.md) {
-            HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-                Text(group.label)
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(TC.inkSecondary)
-                Spacer(minLength: TC.Space.m)
-                if group.count > 1 {
-                    Button("Submit all (\(group.count))", action: onSubmitAll)
-                        .tcPrimaryAction()
-                        .help("""
-                        Submits every session waiting in \(group.label). Each is scrubbed \
-                        the same way a single Submit would be, and flagged sessions are \
-                        included, not held back.
-                        """)
-                    // Beside `Submit all`, never in front of it: answering
-                    // the outcome question for a whole group is a choice a
-                    // contributor opts into, and the common path must not
-                    // grow a step because this exists. Never
-                    // `.tcPrimaryAction()` -- one primary action per group,
-                    // and it is the plain button.
-                    Menu(VerdictCopy.submitAllAs) {
-                        ForEach(ContributorVerdict.allCases, id: \.rawValue) { option in
-                            Button(option.label) { onSubmitAllAs(option) }
-                        }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help(VerdictCopy.submitAllAsTooltip)
-                }
-                // Shown at every count, unlike `Submit all`, which hides at
-                // one because the row's own Submit already does the same
-                // thing. This has no row-level equivalent: it is a statement
-                // about the project, not about a trace.
-                //
-                // Never `.tcPrimaryAction()`. It sits beside a control that
-                // uploads the very traces this removes, and two adjacent
-                // actions that do opposite things must not look alike.
-                Button(ProjectIgnoreCopy.buttonLabel) { confirmingIgnore = true }
-                    .help(ProjectIgnoreCopy.tooltip)
-            }
-            .confirmationDialog(
-                ProjectIgnoreCopy.confirmationTitle(project: group.label),
-                isPresented: $confirmingIgnore,
-                titleVisibility: .visible
-            ) {
-                Button(ProjectIgnoreCopy.buttonLabel, role: .destructive, action: onIgnoreProject)
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text(ProjectIgnoreCopy.confirmationBody(
-                    project: group.label,
-                    pendingCount: group.count
-                ))
-            }
-            rowList
-        }
+        rowList
     }
 
     /// The rows themselves, split from `body` so a real queue -- a
@@ -308,6 +308,7 @@ private struct ProjectQueueGroup: View {
                 summaryError: summaryErrors[entry.entryID],
                 tooLarge: tooLarge[entry.entryID],
                 onLookInside: { onLookInside(entry) },
+                onSearch: { onSearch(entry) },
                 onSubmit: { onSubmit(entry) },
                 onDismiss: { onDismiss(entry) }
             )
@@ -334,6 +335,13 @@ struct QueueRow: View {
     /// the raw stat -- never a would-send estimate; see `PreviewTooLarge`.
     let tooLarge: PreviewTooLarge?
     let onLookInside: () -> Void
+    /// Opens this session's search. Distinct from `onLookInside` as an
+    /// intent even though the two currently coincide: the sheet opens on its
+    /// Search tab already (`PreviewSheet.tab` starts at `.search`), so there
+    /// is nothing to select and no `initialTab` to add. If the sheet ever
+    /// opens somewhere else, this is the seam that keeps the chip pointing
+    /// at the thing to do about it.
+    let onSearch: () -> Void
     let onSubmit: () -> Void
     let onDismiss: () -> Void
 
@@ -362,17 +370,48 @@ struct QueueRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .tcCard(emphasised: summary != nil && redactionCount == 0)
+        // A second route to `Look inside`, never a replacement for it. The
+        // button keeps its emphasis: one-click submit added AVAILABILITY,
+        // and primary styling is a RECOMMENDATION -- see `actions`. What
+        // this adds is that the obvious gesture on a card does the obvious
+        // thing.
+        //
+        // The three footer buttons are `Button`s inside the card and consume
+        // their own taps, so `Not this one`, `Submit` and `Look inside` keep
+        // doing their own jobs.
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onLookInside)
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: - Identity
 
-    /// project_label, never a path. The contract keeps paths off the wire
-    /// and this view has nothing else to render.
+    /// The project label, the agent, and -- when the session did not run at
+    /// the project root -- the subdirectory it did run in.
+    ///
+    /// `sessionPath` is the contract's one display-path relaxation
+    /// (`ipc::display_path`), for the screen only. Nothing here is logged or
+    /// notified.
     private var identity: some View {
         HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Text(entry.projectLabel)
-                .font(TC.Font_.cardTitle)
-                .foregroundStyle(TC.inkPrimary)
+            VStack(alignment: .leading, spacing: TC.Space.micro) {
+                Text(entry.projectLabel)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                // Where this session actually ran, when that is not the
+                // project root. A folder of sessions from one repository
+                // otherwise says nothing about which of them came from
+                // where. Absent when the daemon predates the field and when
+                // the session ran at the root, which is the same rendering
+                // either way: a line only when it says something.
+                if let sessionPath = entry.sessionPath, !sessionPath.isEmpty {
+                    Text(sessionPath)
+                        .font(TC.Font_.meta)
+                        .foregroundStyle(TC.inkTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
             Text(entry.agentName)
                 .font(TC.Font_.meta)
                 .foregroundStyle(TC.inkSecondary)
@@ -449,7 +488,10 @@ struct QueueRow: View {
                             if redactionCount == 0 {
                                 nothingMatchedChip
                             } else {
-                                Text(Self.removedSummary(summary.redactions))
+                                Text(RedactionLabels.line(
+                                    occurrences: summary.redactions,
+                                    distinct: summary.redactionsDistinct
+                                ))
                                     .font(TC.Font_.ledger)
                                     .foregroundStyle(TC.inkPrimary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -539,22 +581,30 @@ struct QueueRow: View {
     /// glyph the health banner uses, quieter, because this is a thing to weigh
     /// rather than a thing to fix.
     private var nothingMatchedChip: some View {
-        HStack(spacing: TC.Space.xxs) {
-            QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
-            Text("nothing matched")
-                .font(TC.Font_.monoChip)
-                .foregroundStyle(TC.goldText)
+        // A control, not a label. The gold is right and stays gold -- a
+        // session where no pattern fired is the one worth slowing down on --
+        // but a judgement with nothing to do about it is where a contributor
+        // stops. Searching is the thing to do about it.
+        Button(action: onSearch) {
+            HStack(spacing: TC.Space.xxs) {
+                QueueGlyph(glyph: .triangle, size: 11, stroke: 1.6, color: TC.gold)
+                Text(RedactionLabels.nothingMatched)
+                    .font(TC.Font_.monoChip)
+                    .foregroundStyle(TC.goldText)
+            }
+            .padding(.horizontal, TC.Space.s)
+            .padding(.vertical, 3)
+            .overlay {
+                Capsule().strokeBorder(
+                    TC.gold.opacity(TC.Border.chipAlpha),
+                    lineWidth: TC.Border.hairline
+                )
+            }
+            .contentShape(Capsule())
         }
-        .padding(.horizontal, TC.Space.s)
-        .padding(.vertical, 3)
-        .overlay {
-            Capsule().strokeBorder(
-                TC.gold.opacity(TC.Border.chipAlpha),
-                lineWidth: TC.Border.hairline
-            )
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Nothing matched a pattern.")
+        .buttonStyle(.plain)
+        .help("Opens this session's search, which is the thing to do about it.")
+        .accessibilityLabel("Nothing matched a pattern. Search this session.")
     }
 
     private func cell<Value: View>(
@@ -566,16 +616,6 @@ struct QueueRow: View {
             value()
         }
         .accessibilityElement(children: .combine)
-    }
-
-    /// Category labels and counts only; the contract guarantees the map
-    /// never carries matched text. Ordered by count so the biggest number is
-    /// first, which is what a person is scanning for.
-    static func removedSummary(_ redactions: [String: Int]) -> String {
-        RedactionLabels.removals(redactions)
-            .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .map { "\($0.value) \($0.key.replacingOccurrences(of: "_", with: " "))" }
-            .joined(separator: "  ·  ")
     }
 
     // MARK: - Actions
@@ -839,7 +879,11 @@ struct NotOfferedDisclosure: View {
 /// One of the design's glyphs, stated on its own 16-unit grid and stroked at
 /// whatever size the call site asks for. See the note beside the same type in
 /// `MainWindowView`; a later pass folds the two together.
-private struct QueueGlyph: View {
+///
+/// Internal rather than file-private because `QueueFolderRow` -- the queue's
+/// root list, in its own file -- draws the same disclosure chevron. Two
+/// copies of one path is how two rows in one list start disagreeing.
+struct QueueGlyph: View {
     let glyph: QueueGlyphs
     var size: CGFloat = 12
     /// Stroke width in grid units, converted against `size`.
@@ -861,7 +905,7 @@ private struct QueueGlyph: View {
     }
 }
 
-private struct QueueGlyphShape: Shape {
+struct QueueGlyphShape: Shape {
     let glyph: QueueGlyphs
 
     func path(in rect: CGRect) -> Path {
@@ -874,10 +918,11 @@ private struct QueueGlyphShape: Shape {
     }
 }
 
-private enum QueueGlyphs {
+enum QueueGlyphs {
     case clock
     case triangle
     case chevronRight
+    case chevronLeft
     case checkCircle
     case columns
 
@@ -886,6 +931,7 @@ private enum QueueGlyphs {
         case .clock: Self.clock(&path)
         case .triangle: Self.triangle(&path)
         case .chevronRight: Self.chevronRight(&path)
+        case .chevronLeft: Self.chevronLeft(&path)
         case .checkCircle: Self.checkCircle(&path)
         case .columns: Self.columns(&path)
         }
@@ -912,6 +958,13 @@ private enum QueueGlyphs {
         path.move(to: CGPoint(x: 6, y: 4))
         path.addLine(to: CGPoint(x: 10, y: 8))
         path.addLine(to: CGPoint(x: 6, y: 12))
+    }
+
+    /// `m10 4-4 4 4 4` -- `chevronRight` mirrored, for the back control.
+    static func chevronLeft(_ path: inout Path) {
+        path.move(to: CGPoint(x: 10, y: 4))
+        path.addLine(to: CGPoint(x: 6, y: 8))
+        path.addLine(to: CGPoint(x: 10, y: 12))
     }
 
     /// A tick in a circle, using the design's tick path `m5.2 8.3 1.9 1.9 3.6-4.3`.

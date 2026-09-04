@@ -81,7 +81,7 @@ final class RoutingCopyExportTests: XCTestCase {
             XCTAssertFalse(text.isEmpty, "\(child.label ?? "?") arrived empty")
             checked += 1
         }
-        XCTAssertEqual(checked, 22, "the payload's field count changed")
+        XCTAssertEqual(checked, 26, "the payload's field count changed")
     }
 
     /// The sentences arrive finished. This shell never fills in a hole, so
@@ -95,6 +95,16 @@ final class RoutingCopyExportTests: XCTestCase {
         XCTAssertNotNil(unnamed)
         XCTAssertEqual(unnamed?.contains("/Users/x"), false)
         XCTAssertNotEqual(named, unnamed)
+
+        let discovered = TCRoutingCopy.discoveryLine(port: 9143)
+        XCTAssertEqual(discovered?.contains("9143"), true)
+        // Nothing discovered is a real sentence, not an error and not a
+        // port zero: it is the ordinary machine, and the screen has to say
+        // what to do on it.
+        let nothing = TCRoutingCopy.discoveryLine(port: nil)
+        XCTAssertNotNil(nothing)
+        XCTAssertEqual(nothing?.contains("0"), false)
+        XCTAssertNotEqual(discovered, nothing)
 
         let withPort = TCRoutingCopy.unreachableLine(port: 8463)
         XCTAssertEqual(withPort?.contains("8463"), true)

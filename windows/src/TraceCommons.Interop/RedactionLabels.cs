@@ -163,7 +163,8 @@ public static class RedactionLabels
             : string.Format(CultureInfo.CurrentCulture, "{0} {1}", occurrences, name);
     }
 
-    /// <summary>How many secrets were found and left in what would be sent.</summary>
+    /// <summary>How many places a secret was found and left in what would be
+    /// sent. Sites, not secrets: one site can hold more than one value.</summary>
     public static int SurvivorTotal(IReadOnlyDictionary<string, int> counts)
         => counts.Where(pair => !IsRemoval(pair.Key)).Sum(pair => pair.Value);
 
@@ -192,9 +193,10 @@ public static class RedactionLabels
     /// Empty when there are none.
     /// </summary>
     /// <remarks>
-    /// Says "found here" rather than naming a number of secrets: the count is
-    /// of detection SITES, and one site can hold more than one value.
-    /// Overstating the precision would be its own small lie.
+    /// Never names a number of secrets. The count is of detection SITES, and
+    /// one site can hold more than one value, so "2 secrets" would understate
+    /// what survived. The plural says "found in N places" instead, which is
+    /// what the number actually counts; the singular drops it entirely.
     /// </remarks>
     public static string SurvivorLine(IReadOnlyDictionary<string, int> counts)
     {
@@ -204,8 +206,8 @@ public static class RedactionLabels
             return string.Empty;
         }
         string head = total == 1
-            ? "1 secret found here is still in what would be sent"
-            : $"{total} secrets found here are still in what would be sent";
+            ? "A secret found here is still in what would be sent"
+            : $"Secrets found in {total} places are still in what would be sent";
         IReadOnlyList<string> sites = SurvivorSites(counts);
         return sites.Count == 0 ? head : $"{head} ({string.Join(", ", sites)})";
     }

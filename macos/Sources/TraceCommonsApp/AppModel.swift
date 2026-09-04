@@ -114,6 +114,16 @@ final class AppModel: ObservableObject {
     /// shared word like every other on this card.
     @Published private(set) var routingChecking = false
 
+    /// What a running IronWire published about itself, as far as this app
+    /// has asked.
+    ///
+    /// Starts as nothing found rather than as nil, because that is the
+    /// state of a machine nobody has asked about yet AND the state of a
+    /// machine without IronWire, and the card says the same thing about
+    /// both: here are the fields, say which port. It becomes a found port
+    /// only when `discover_routing` says so.
+    @Published private(set) var routingDiscovery = RoutingDiscovery.none
+
     /// Everything on this surface that is decided in the Rust: the sentences
     /// that interpolate, and the two branch tables that pick a word and a
     /// state line. This shell fills in no holes and owns no `switch`; see
@@ -121,6 +131,7 @@ final class AppModel: ObservableObject {
     let routingCalls = RoutingCalls(
         tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
         unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+        discoveryLine: { TCRoutingCopy.discoveryLine(port: $0) },
         toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
         toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
         stateLine: { TCRoutingCopy.stateLine(state: $0) },
@@ -185,6 +196,18 @@ final class AppModel: ObservableObject {
     /// this reshuffles nothing a contributor has already scanned.
     @Published private(set) var waitingByProject: [QueueGroup<QueueEntry>] = []
 
+    /// Sessions waiting whose preview reported that no pattern fired.
+    /// Drives `QueueShieldState` only, and never the badge: the count is
+    /// what a contributor with 149 sessions is reading, and this is a state
+    /// the count cannot carry.
+    ///
+    /// Stored rather than computed for the reason `awaitingDecision` is:
+    /// a SwiftUI body would otherwise walk the whole waiting list on every
+    /// redraw. It depends on `summaries`, which arrive asynchronously long
+    /// after the queue settles, so it is recomputed from both sides --
+    /// `recomputeWaiting` and `applyPreviewOutcome`.
+    @Published private(set) var nothingMatchedCount: Int = 0
+
     /// The badge counts DECISIONS OWED -- entries actually waiting for a yes
     /// or no -- not sessions found and not queue total.
     var decisionsOwed: Int {
@@ -206,6 +229,20 @@ final class AppModel: ObservableObject {
                 sizeBytes: \.sizeBytes
             )
         )
+        recomputeNothingMatched()
+    }
+
+    /// How many waiting sessions have a preview that removed nothing.
+    ///
+    /// A session with no preview yet is NOT counted: nothing is known about
+    /// it, and "nothing matched" is a report, not a default. It starts
+    /// counting the moment its preview lands.
+    private func recomputeNothingMatched() {
+        let count = awaitingDecision.reduce(into: 0) { total, entry in
+            guard let summary = summaries[entry.entryID] else { return }
+            if RedactionLabels.removedTotal(summary.redactions) == 0 { total += 1 }
+        }
+        publishIfChanged(\.nothingMatchedCount, count)
     }
 
     var armedProjects: [ProjectRow] {
@@ -565,12 +602,38 @@ final class AppModel: ObservableObject {
     /// That is display only: `RoutingSurface.settingsParams` writes nothing
     /// while the switch is off, so a default nobody chose never becomes an
     /// announcement that a local service is in use.
+    ///
+    /// A discovered port fills the field only where nothing is declared.
+    /// The contributor's own port always wins -- see
+    /// `RoutingForm.fromDeclaration`.
     var routingForm: RoutingForm {
         RoutingForm.fromDeclaration(
             mode: daemonSettings?.ironwire?.mode,
             port: daemonSettings?.ironwire?.port,
-            tokenDir: daemonSettings?.ironwire?.tokenDir
+            tokenDir: daemonSettings?.ironwire?.tokenDir,
+            discoveredPort: routingDiscovery.port
         )
+    }
+
+    /// Ask what the machine already knows, and show it.
+    ///
+    /// **This writes nothing and reads nothing of the contributor's.** It
+    /// reads one file IronWire left, learns a port from it, and puts that
+    /// port in a field. Declaring is still the switch and the button; a
+    /// discovery that declared on its own would be this window announcing a
+    /// local service nobody mentioned, which is the whole thing the
+    /// declaration exists to stop.
+    ///
+    /// A machine without IronWire is not a failure and produces no error
+    /// state: the answer is `found: false`, and a call that did not run at
+    /// all degrades to the same thing, because both mean there is nothing
+    /// to offer.
+    func discoverRouting() {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let discovery = (try? client.discoverRouting()) ?? .none
+            await MainActor.run { self.routingDiscovery = discovery }
+        }
     }
 
     /// Write the declaration, then -- when it is on -- ask what was found.
@@ -866,6 +929,7 @@ final class AppModel: ObservableObject {
         case .ready:
             if let summary = result.summary, summaries[result.entryID] != summary {
                 summaries[result.entryID] = summary
+                recomputeNothingMatched()
             }
         case .tooLarge:
             let refusal = PreviewTooLarge(
@@ -1251,6 +1315,15 @@ final class AppModel: ObservableObject {
 
     // MARK: - Preview body
 
+    /// How many times `needle` appears in an entry's pre-redaction session,
+    /// or nil when that could not be checked.
+    ///
+    /// Synchronous: the ABI call scans an already-parsed session and returns
+    /// a count, with no redaction pass to block on.
+    func searchOriginal(entryID: String, needle: String) -> Int? {
+        client?.searchOriginal(entryID: entryID, needle: needle)
+    }
+
     /// Opens the in-process preview off the main actor -- the redaction pass
     /// blocks -- and hands the open handle back on the main actor.
     func openPreview(entryID: String) async -> PreviewOutcome {
@@ -1295,6 +1368,7 @@ final class AppModel: ObservableObject {
             eventCount: 3,
             openingPrompt: "Add a retry to the Northwind billing sync",
             redactions: ["aws_secret_key": 1, "local_path": 3],
+            redactionsDistinct: ["aws_secret_key": 1, "local_path": 2],
             piiLabelsPresent: ["email"],
             consentScopes: ["debugging_evaluation"],
             residualRisk: "pattern-based"
@@ -1306,6 +1380,8 @@ final class AppModel: ObservableObject {
             declaredSource: nil,
             projectID: "project_screenshot_fixture",
             projectLabel: "northwind-billing",
+            projectPath: "~/code/northwind-billing",
+            sessionPath: nil,
             sizeBytes: 1615,
             discoveredAt: Date(timeIntervalSince1970: 1_770_000_000),
             state: .pending,

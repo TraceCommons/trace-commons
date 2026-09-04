@@ -22,6 +22,10 @@ private final class RecordingDaemon: DaemonCalling {
         return responses[method] ?? #"{"id":1,"result":{}}"#
     }
 
+    /// Never called by these tests. Nil is the honest answer for a
+    /// double with no session behind it: not a count of zero.
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+
     func openPreview(entryID: String) throws -> TCPreview {
         throw TCDaemon.TCError.daemonGone
     }
@@ -41,6 +45,7 @@ private final class RecordingDaemon: DaemonCalling {
 private let routingCalls = RoutingCalls(
     tokenLine: { TCRoutingCopy.tokenLine(path: $0) },
     unreachableLine: { TCRoutingCopy.unreachableLine(port: $0) },
+    discoveryLine: { TCRoutingCopy.discoveryLine(port: $0) },
     toolWord: { TCRoutingCopy.toolWord(sourceMode: $0, wiring: $1) },
     toolTone: { TCRoutingCopy.toolTone(sourceMode: $0, wiring: $1) },
     stateLine: { TCRoutingCopy.stateLine(state: $0) },

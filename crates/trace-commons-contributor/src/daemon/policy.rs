@@ -78,6 +78,23 @@ pub struct ProjectEntry {
     /// Display name for consumers. Shells render this; they never render the
     /// key, which is a full local path.
     pub label: String,
+    /// The same directory as the map key, spelled the way the filesystem
+    /// spells it.
+    ///
+    /// The key is case-folded on macOS and Windows so one project cannot
+    /// mint two keys (see `project_key::NormalizedProject`). That fold is
+    /// right for a lookup and wrong for a person: it renders `~/Code/Api`
+    /// as `~/code/api`, a path that appears nowhere on their machine. This
+    /// is the unfolded half, carried so rendering never has to guess.
+    ///
+    /// No new class of secret: this map is already keyed by the full local
+    /// path, so the file this serializes into holds the same directory
+    /// either way. `None` on a policy file written before the field
+    /// existed, and on a key that no longer resolves -- both fall back to
+    /// the folded key, which is honest about the directory even when it is
+    /// not spelled the way the disk spells it.
+    #[serde(default)]
+    pub display_path: Option<String>,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -218,7 +235,11 @@ impl ProjectPolicy {
         let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
         for (key, entry) in std::mem::take(&mut self.projects) {
             let Some(fresh) = renamed(&key) else { continue };
-            let label = project_label_for(&fresh);
+            // Re-derived rather than carried across from `entry`: a v2 file
+            // has no display path at all, and one written on another host
+            // may name a directory this one spells differently.
+            let shown = display_path_for_key(&fresh);
+            let label = project_label_for(shown.as_deref().unwrap_or(&fresh));
             projects
                 .entry(fresh)
                 .and_modify(|existing| {
@@ -227,11 +248,13 @@ impl ProjectPolicy {
                     // about this project is as old as its oldest half.
                     existing.added_at = existing.added_at.min(entry.added_at);
                     existing.label = label.clone();
+                    existing.display_path = shown.clone();
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
                     added_at: entry.added_at,
                     label,
+                    display_path: shown,
                 });
         }
         self.projects = projects;
@@ -328,12 +351,14 @@ impl ProjectPolicy {
                  per-project opt-in can apply to them"
             );
         }
+        let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
             ProjectEntry {
                 mode,
                 added_at: now,
-                label: project_label_for(project_key),
+                label: project_label_for(shown.as_deref().unwrap_or(project_key)),
+                display_path: shown,
             },
         );
         Ok(())
@@ -491,8 +516,34 @@ fn has_usable_basename(cwd: &str) -> bool {
 /// direct violation of the invariant `audit`'s own
 /// `an_audit_entry_never_carries_a_path` test asserts.
 pub fn project_key_for(cwd: Option<&str>) -> String {
-    cwd.and_then(crate::daemon::project_key::normalize_project_key)
-        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string())
+    project_for(cwd).0
+}
+
+/// [`project_key_for`] and, beside it, the unfolded path a person is shown.
+///
+/// Both from one normalization, because they are two spellings of one
+/// directory and re-deriving the second would let them drift. `None` for
+/// the unknown bucket, which is not a directory and has nothing to show.
+pub fn project_for(cwd: Option<&str>) -> (String, Option<String>) {
+    match cwd.and_then(crate::daemon::project_key::normalize_project) {
+        Some(p) => (p.key, Some(p.display_path)),
+        None => (UNKNOWN_PROJECT_KEY.to_string(), None),
+    }
+}
+
+/// Recover the unfolded spelling of a directory from its folded key.
+///
+/// The key is itself a real path, so re-normalizing it recovers the case
+/// the filesystem holds -- `std::fs::canonicalize` reports the on-disk
+/// spelling on both macOS and Windows. `None` for the unknown bucket and
+/// for a key that no longer resolves to anything; callers fall back to the
+/// folded key, which names the right directory in the wrong case rather
+/// than naming nothing.
+pub fn display_path_for_key(project_key: &str) -> Option<String> {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return None;
+    }
+    crate::daemon::project_key::normalize_project(project_key).map(|p| p.display_path)
 }
 
 /// A display label for a project key: the final path segment, or the bucket
@@ -565,15 +616,26 @@ pub fn known_keys(
 /// The suffix is derived from `sha256(project_key)`, never from any path
 /// segment: labels cross the IPC socket and must never leak which directory
 /// a colliding project lives in.
-pub fn disambiguated_label(project_key: &str, known_keys: &[String]) -> String {
-    let label = project_label_for(project_key);
+pub fn disambiguated_label(
+    project_key: &str,
+    project_path: Option<&str>,
+    known_keys: &[String],
+) -> String {
+    // Two labels, deliberately. The rendered one comes from the unfolded
+    // path so `IronWire` stays `IronWire`; the collision test runs on the
+    // folded key, so two projects whose basenames differ only in case are
+    // still treated as colliding and still both get a suffix. Testing on
+    // the rendered label instead would let `Api` and `api` sit side by side
+    // looking like two spellings of one project.
+    let label = project_label_for(project_path.unwrap_or(project_key));
     if project_key == UNKNOWN_PROJECT_KEY {
         return label;
     }
 
+    let folded = project_label_for(project_key);
     let collides = known_keys
         .iter()
-        .any(|other| other != project_key && project_label_for(other) == label);
+        .any(|other| other != project_key && project_label_for(other) == folded);
     if !collides {
         return label;
     }
@@ -596,6 +658,7 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+    use crate::daemon::test_paths::{abs, abs_key};
 
     fn now() -> DateTime<Utc> {
         "2026-08-08T12:00:00Z".parse().unwrap()
@@ -605,7 +668,7 @@ mod tests {
     fn an_unknown_project_defaults_to_notify_only() {
         let p = ProjectPolicy::new();
         assert_eq!(
-            p.resolve("/Users/z/code/never-seen"),
+            p.resolve(&abs("Users/z/code/never-seen")),
             ProjectMode::NotifyOnly
         );
     }
@@ -614,17 +677,14 @@ mod tests {
     fn sessions_without_a_cwd_land_in_the_unknown_bucket() {
         assert_eq!(project_key_for(None), UNKNOWN_PROJECT_KEY);
         assert_eq!(project_key_for(Some("   ")), UNKNOWN_PROJECT_KEY);
-        // Lowercase on the case-folding platforms, which is what
-        // `project_key::normalize_project_key` produces there.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        // Spelled for the host platform: `/Users/z/code/proj` has a root
+        // but no prefix on Windows, so it is not absolute there and would
+        // fall into the unknown bucket for a reason that has nothing to do
+        // with what this test is about. `abs_key` applies the case-folding
+        // rule directly rather than by calling normalization again.
         assert_eq!(
-            project_key_for(Some("/Users/z/code/proj")),
-            "/users/z/code/proj"
-        );
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_eq!(
-            project_key_for(Some("/Users/z/code/proj")),
-            "/Users/z/code/proj"
+            project_key_for(Some(&abs("Users/z/code/proj"))),
+            abs_key("Users/z/code/proj")
         );
     }
 
@@ -648,6 +708,7 @@ mod tests {
                 mode: ProjectMode::AutoUpload,
                 added_at: now(),
                 label: "unknown".into(),
+                display_path: None,
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -737,7 +798,7 @@ mod tests {
         // `project_label_for`, so a leak there would leak through here too.
         let keys = vec!["/".to_string(), "/Users/z/client/..".to_string()];
         for key in &keys {
-            let label = disambiguated_label(key, &keys);
+            let label = disambiguated_label(key, None, &keys);
             assert!(!label.contains('/'), "{key} leaked as {label}");
         }
     }
@@ -779,7 +840,10 @@ mod tests {
             "/Users/z/code/alpha".to_string(),
             "/Users/z/code/beta".to_string(),
         ];
-        assert_eq!(disambiguated_label("/Users/z/code/alpha", &keys), "alpha");
+        assert_eq!(
+            disambiguated_label("/Users/z/code/alpha", None, &keys),
+            "alpha"
+        );
     }
 
     #[test]
@@ -789,13 +853,13 @@ mod tests {
             "/Users/z/work/api".to_string(),
             "/Users/z/client/api".to_string(),
         ];
-        let a = disambiguated_label("/Users/z/work/api", &keys);
-        let b = disambiguated_label("/Users/z/client/api", &keys);
+        let a = disambiguated_label("/Users/z/work/api", None, &keys);
+        let b = disambiguated_label("/Users/z/client/api", None, &keys);
         assert_ne!(a, b, "colliding projects must be distinguishable");
         assert!(a.starts_with("api ("), "got {a}");
         assert_eq!(
             a,
-            disambiguated_label("/Users/z/work/api", &keys),
+            disambiguated_label("/Users/z/work/api", None, &keys),
             "must be stable"
         );
     }
@@ -807,7 +871,7 @@ mod tests {
             "/Users/z/work/api".to_string(),
             "/Users/z/client/api".to_string(),
         ];
-        let a = disambiguated_label("/Users/z/work/api", &keys);
+        let a = disambiguated_label("/Users/z/work/api", None, &keys);
         assert!(!a.contains("work") && !a.contains('/'), "got {a}");
     }
 
@@ -895,7 +959,7 @@ mod tests {
     fn the_unknown_bucket_is_never_suffixed() {
         let keys = vec![UNKNOWN_PROJECT_KEY.to_string()];
         assert_eq!(
-            disambiguated_label(UNKNOWN_PROJECT_KEY, &keys),
+            disambiguated_label(UNKNOWN_PROJECT_KEY, None, &keys),
             UNKNOWN_PROJECT_KEY
         );
     }
@@ -1063,6 +1127,7 @@ mod tests {
                 mode: ProjectMode::Ignore,
                 added_at: now(),
                 label: "repo".to_string(),
+                display_path: None,
             },
         );
         p.projects.insert(
@@ -1071,6 +1136,7 @@ mod tests {
                 mode: ProjectMode::AutoUpload,
                 added_at: now(),
                 label: "inner".to_string(),
+                display_path: None,
             },
         );
 
@@ -1141,6 +1207,7 @@ mod tests {
                 mode: ProjectMode::Ignore,
                 added_at: now(),
                 label: "sub".to_string(),
+                display_path: None,
             },
         );
         p.save(&store).unwrap();
@@ -1160,6 +1227,7 @@ mod tests {
                 mode: ProjectMode::Ignore,
                 added_at: now(),
                 label: UNKNOWN_PROJECT_KEY.to_string(),
+                display_path: None,
             },
         );
         p.rekey();

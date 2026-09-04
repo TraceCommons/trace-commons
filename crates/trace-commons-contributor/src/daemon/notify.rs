@@ -196,6 +196,7 @@ mod tests {
             source: "claude-code".into(),
             declared_source: None,
             project_key: format!("/Users/z/code/{label}"),
+            project_path: None,
             session_cwd: None,
             project_label: label.into(),
             path: PathBuf::from("/Users/z/.claude/projects/x/s.jsonl"),

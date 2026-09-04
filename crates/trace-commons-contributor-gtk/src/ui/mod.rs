@@ -443,7 +443,7 @@ impl App {
             let dialog = if app.worker.hosts_the_loop() {
                 let d = adw::MessageDialog::new(
                     Some(window),
-                    Some("Quit Trace Commons?"),
+                    Some(concat!("Quit ", copy::app_name!(), "?")),
                     Some(copy::QUIT_HOSTING_BODY),
                 );
                 d.add_responses(&[
@@ -454,7 +454,7 @@ impl App {
             } else {
                 let d = adw::MessageDialog::new(
                     Some(window),
-                    Some("Quit Trace Commons?"),
+                    Some(concat!("Quit ", copy::app_name!(), "?")),
                     Some(copy::QUIT_ATTACHED_BODY),
                 );
                 d.add_responses(&[

@@ -103,6 +103,29 @@ public sealed partial class SettingsView : UserControl
         await Settings.ApplyRoutingAsync();
     }
 
+    /// <summary>
+    /// The one press the discovered case costs: turn it on and check.
+    /// </summary>
+    /// <remarks>
+    /// It declares the port that is on screen -- which discovery filled in,
+    /// or whatever was typed over it -- rather than one rebuilt from the
+    /// pointer, so a press cannot declare a number different from the one
+    /// displayed.
+    /// </remarks>
+    private async void OnRoutingConnect(object sender, RoutedEventArgs e)
+    {
+        await Settings.ConnectRoutingAsync();
+    }
+
+    /// <summary>
+    /// Asks what the machine knows again, for somebody who started IronWire
+    /// after opening this window. It reads a file and declares nothing.
+    /// </summary>
+    private async void OnRoutingLookAgain(object sender, RoutedEventArgs e)
+    {
+        await Settings.LookAgainAsync();
+    }
+
     private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
         if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))

@@ -244,6 +244,25 @@ public final class TCDaemon {
         return TCPreview(pointer: p)
     }
 
+    /// How many times `needle` appears in an entry's PRE-redaction session
+    /// text. `nil` on error, and `nil` when the handle is gone.
+    ///
+    /// A COUNT, never content -- that is the whole bound of the ABI call
+    /// behind this, and the reason it is allowed to read unredacted bytes at
+    /// all. Takes an entry id rather than an open preview because a preview
+    /// lives as long as its sheet, and an unredacted transcript must not.
+    public func searchOriginal(entryID: String, needle: String) -> Int? {
+        let count: Int32? = withHandle { h in
+            entryID.withCString { cEntry in
+                needle.withCString { cNeedle in
+                    tc_search_original(h, cEntry, cNeedle)
+                }
+            }
+        }
+        guard let count, count >= 0 else { return nil }
+        return Int(count)
+    }
+
     // MARK: - Subscription
 
     /// Registers `handler`, invoked with each JSON event frame the daemon

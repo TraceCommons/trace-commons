@@ -74,9 +74,18 @@ project groups. This is the function that collapses them.
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `pub fn normalize_project_key(cwd: &str) -> Option<String>` --
-  `None` when the input is not usable as a key (empty, relative, or no
-  usable basename), otherwise the normalized absolute path as a `String`.
+- Produces: `pub struct NormalizedProject { pub key: String, pub
+  display_path: String }` and `pub fn normalize_project(cwd: &str) ->
+  Option<NormalizedProject>` -- one normalization returning two spellings of
+  the same directory: `key` is `fold_case(display_path)` and is what
+  everything decides on; `display_path` is the canonicalized path with the
+  case the filesystem holds and is what a person is shown. `None` when the
+  input is not usable as a key (empty, relative, or no usable basename).
+- Produces: `pub fn normalize_project_key(cwd: &str) -> Option<String>`,
+  kept as a `.map(|p| p.key)` wrapper. Most callers -- `project_key_for`,
+  `ProjectPolicy::rekey`'s counter and cooldown maps -- want the key and
+  nothing else, and handing them a struct whose other half must not be
+  logged is how that half ends up somewhere it should not be.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -214,19 +223,54 @@ const VCS_MARKERS: [&str; 3] = [".git", ".hg", ".jj"];
 /// a session is not a project boundary anyone intended.
 const MAX_WALK_DEPTH: usize = 24;
 
+/// A recorded working directory resolved into the two forms the daemon
+/// needs, which are deliberately not the same string.
+///
+/// `key` is case-folded on macOS and Windows ([`fold_case`]) because those
+/// filesystems are case-insensitive: without folding, one project mints two
+/// keys depending on how the agent spelled the cwd, and a project set to
+/// `Ignore` under one spelling lapses under the other. Everything that
+/// decides something -- policy lookup, grouping, `project_id_for` -- keys
+/// on this.
+///
+/// `display_path` is the same directory with the case the filesystem
+/// actually holds. Nothing decides on it. It exists because a contributor
+/// reading `~/code/ironwire` is being shown a directory that is not spelled
+/// that way anywhere on their machine.
+///
+/// No `Debug`, no `Serialize`, and no `Clone` of convenience:
+/// `display_path` is a local filesystem path, admissible only on the
+/// rendering paths that already carry one, and a derived `Debug` is how
+/// such a string reaches a log line by accident.
+pub struct NormalizedProject {
+    pub key: String,
+    pub display_path: String,
+}
+
 /// Normalize a recorded working directory into a project key.
 ///
 /// `None` when the input cannot be a key at all: empty, blank, relative, or
 /// with no usable final path segment. Those go to the unknown bucket, which
 /// is `policy::project_key_for`'s job, not this one's.
 pub fn normalize_project_key(cwd: &str) -> Option<String> {
-    normalize_project_key_within(cwd, home_dir().as_deref())
+    normalize_project(cwd).map(|p| p.key)
 }
 
-/// The body of [`normalize_project_key`], with the home directory injected
+/// [`normalize_project_key`] with the home directory injected, for tests.
+pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<String> {
+    normalize_project_within(cwd, home).map(|p| p.key)
+}
+
+/// Normalize a recorded working directory into both the folded key and the
+/// unfolded path a person should be shown.
+pub fn normalize_project(cwd: &str) -> Option<NormalizedProject> {
+    normalize_project_within(cwd, home_dir().as_deref())
+}
+
+/// The body of [`normalize_project`], with the home directory injected
 /// so the "a marker in $HOME is not a project root" rule is testable
 /// without touching the real environment.
-pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<String> {
+pub fn normalize_project_within(cwd: &str, home: Option<&Path>) -> Option<NormalizedProject> {
     let trimmed = cwd.trim();
     if trimmed.is_empty() {
         return None;
@@ -249,7 +293,17 @@ pub fn normalize_project_key_within(cwd: &str, home: Option<&Path>) -> Option<St
     }
 
     let rooted = repo_root_of(&resolved, home).unwrap_or(resolved);
-    Some(fold_case(&path_to_key(&rooted)))
+    // One string, two spellings. `std::fs::canonicalize` returns the case
+    // the filesystem holds on both macOS and Windows, so the display half
+    // is the true spelling of the directory rather than whatever the agent
+    // happened to record; a directory that has since been deleted took the
+    // `lexically_clean` fallback above and keeps the recorded spelling,
+    // which is the most honest thing left to say about it.
+    let display_path = path_to_key(&rooted);
+    Some(NormalizedProject {
+        key: fold_case(&display_path),
+        display_path,
+    })
 }
 
 /// The nearest enclosing repository root, if one sits within
@@ -301,7 +355,7 @@ fn path_to_key(path: &Path) -> String {
 /// directories. The folded string is still a usable path on macOS and
 /// Windows, which is what keeps `project_key_is_admissible` working against
 /// it.
-fn fold_case(key: &str) -> String {
+pub(crate) fn fold_case(key: &str) -> String {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         key.to_lowercase()
@@ -344,11 +398,48 @@ assertion to be fold-aware:
     }
 ```
 
+Then add the test that pins both halves at once. Asserted as a pair on
+purpose: a future change that satisfies either one by breaking the other
+fails here. Note that it builds its inputs by creating a real mixed-case
+directory and normalizing a SUBDIRECTORY of it, so both expected strings
+come out of the real walk rather than being spelled by the test.
+
+```rust
+    #[test]
+    fn a_normalized_project_folds_only_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("IronWire");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("Crates").join("Inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let p = normalize_project(sub.to_str().unwrap()).unwrap();
+        assert!(
+            p.display_path.ends_with("IronWire"),
+            "the display half lost the capitals the disk holds: {}",
+            p.display_path
+        );
+        assert_eq!(
+            p.key,
+            fold_case(&p.display_path),
+            "the key must be the folded spelling of the same directory"
+        );
+        // Where folding is a no-op the two are equal by construction, so
+        // the inequality is asserted only where it is a real claim.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(
+            p.key, p.display_path,
+            "on a case-insensitive filesystem the key must still be folded"
+        );
+    }
+```
+
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor --lib daemon::project_key`
 
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -373,10 +464,18 @@ without rejecting the normalizer.
 - Test: same file, existing `#[cfg(test)] mod tests`
 
 **Interfaces:**
-- Consumes: `daemon::project_key::normalize_project_key(&str) -> Option<String>` (Task 1).
+- Consumes: `daemon::project_key::normalize_project(&str) -> Option<NormalizedProject>` (Task 1).
 - Produces: `project_key_for` unchanged in signature --
   `pub fn project_key_for(cwd: Option<&str>) -> String` -- but returning a
   normalized key.
+- Produces: `pub fn project_for(cwd: Option<&str>) -> (String, Option<String>)`
+  -- the key and, beside it, the unfolded path a person is shown, from one
+  normalization. `None` for the unknown bucket, which is not a directory and
+  has nothing to show. `project_key_for` becomes `project_for(cwd).0`.
+- Produces: `pub fn display_path_for_key(project_key: &str) -> Option<String>`
+  -- recovers the unfolded spelling from a folded key by re-normalizing it,
+  for the call sites that hold only a key. `None` for the unknown bucket and
+  for a key that no longer resolves.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -439,8 +538,34 @@ breaks that.
 /// direct violation of the invariant `audit`'s own
 /// `an_audit_entry_never_carries_a_path` test asserts.
 pub fn project_key_for(cwd: Option<&str>) -> String {
-    cwd.and_then(crate::daemon::project_key::normalize_project_key)
-        .unwrap_or_else(|| UNKNOWN_PROJECT_KEY.to_string())
+    project_for(cwd).0
+}
+
+/// [`project_key_for`] and, beside it, the unfolded path a person is shown.
+///
+/// Both from one normalization, because they are two spellings of one
+/// directory and re-deriving the second would let them drift. `None` for
+/// the unknown bucket, which is not a directory and has nothing to show.
+pub fn project_for(cwd: Option<&str>) -> (String, Option<String>) {
+    match cwd.and_then(crate::daemon::project_key::normalize_project) {
+        Some(p) => (p.key, Some(p.display_path)),
+        None => (UNKNOWN_PROJECT_KEY.to_string(), None),
+    }
+}
+
+/// Recover the unfolded spelling of a directory from its folded key.
+///
+/// The key is itself a real path, so re-normalizing it recovers the case
+/// the filesystem holds -- `std::fs::canonicalize` reports the on-disk
+/// spelling on both macOS and Windows. `None` for the unknown bucket and
+/// for a key that no longer resolves to anything; callers fall back to the
+/// folded key, which names the right directory in the wrong case rather
+/// than naming nothing.
+pub fn display_path_for_key(project_key: &str) -> Option<String> {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return None;
+    }
+    crate::daemon::project_key::normalize_project(project_key).map(|p| p.display_path)
 }
 ```
 
@@ -654,6 +779,32 @@ pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v2";
 pub const DAEMON_PROJECTS_SCHEMA_V1: &str = "trace_commons.daemon_projects.v1";
 ```
 
+Add the display half to `ProjectEntry`, immediately after `pub label: String,`:
+
+```rust
+    /// The same directory as the map key, spelled the way the filesystem
+    /// spells it.
+    ///
+    /// The key is case-folded on macOS and Windows so one project cannot
+    /// mint two keys (see `project_key::NormalizedProject`). That fold is
+    /// right for a lookup and wrong for a person: it renders `~/Code/Api`
+    /// as `~/code/api`, a path that appears nowhere on their machine. This
+    /// is the unfolded half, carried so rendering never has to guess.
+    ///
+    /// No new class of secret: this map is already keyed by the full local
+    /// path, so the file this serializes into holds the same directory
+    /// either way. `None` on a policy file written before the field
+    /// existed, and on a key that no longer resolves -- both fall back to
+    /// the folded key, which is honest about the directory even when it is
+    /// not spelled the way the disk spells it.
+    #[serde(default)]
+    pub display_path: Option<String>,
+```
+
+Every `ProjectEntry` literal in the crate -- including `set_mode`'s, which
+sets it from `display_path_for_key(project_key)` and derives its label from
+the same value -- gains the field; the compiler points at all of them.
+
 Add the mode comparison, beside the `ProjectMode` enum:
 
 ```rust
@@ -702,7 +853,11 @@ Add `rekey` inside `impl ProjectPolicy`:
         let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
         for (key, entry) in std::mem::take(&mut self.projects) {
             let Some(fresh) = renamed(&key) else { continue };
-            let label = project_label_for(&fresh);
+            // Re-derived rather than carried across from `entry`: a v2 file
+            // has no display path at all, and one written on another host
+            // may name a directory this one spells differently.
+            let shown = display_path_for_key(&fresh);
+            let label = project_label_for(shown.as_deref().unwrap_or(&fresh));
             projects
                 .entry(fresh)
                 .and_modify(|existing| {
@@ -711,11 +866,13 @@ Add `rekey` inside `impl ProjectPolicy`:
                     // about this project is as old as its oldest half.
                     existing.added_at = existing.added_at.min(entry.added_at);
                     existing.label = label.clone();
+                    existing.display_path = shown.clone();
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
                     added_at: entry.added_at,
                     label,
+                    display_path: shown,
                 });
         }
         self.projects = projects;
@@ -801,8 +958,10 @@ raw recorded cwd has to survive.
 - Test: `crates/trace-commons-contributor/src/daemon/queue.rs`, inline test module
 
 **Interfaces:**
-- Consumes: nothing new.
+- Consumes: `policy::project_for` (Task 2).
 - Produces: `QueueEntry.session_cwd: Option<String>`, `#[serde(default)]`.
+- Produces: `QueueEntry.project_path: Option<String>`, `#[serde(default)]` --
+  the unfolded spelling of `project_key`, for rendering only.
 
 - [ ] **Step 1: Find the construction site**
 
@@ -853,6 +1012,23 @@ Expected: compile error, `no field session_cwd on type QueueEntry`.
 In `queue.rs`, immediately after `pub project_key: String,`:
 
 ```rust
+    /// The same directory as `project_key`, spelled the way the filesystem
+    /// spells it.
+    ///
+    /// `project_key` is case-folded on macOS and Windows so one project
+    /// cannot mint two keys (see `project_key::NormalizedProject`), and
+    /// that fold is what a contributor sees when a folder row renders the
+    /// key: `~/Code/IronWire` comes back as `~/code/ironwire`. This is the
+    /// unfolded half. Nothing decides on it -- policy lookup, grouping and
+    /// `project_id_for` all key on `project_key` -- and like `project_key`
+    /// and `session_cwd` it is local-only: rendered over the socket, never
+    /// logged, audited, notified, or written to a history record.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; such an entry renders from the folded
+    /// key, which names the right directory in the wrong case.
+    #[serde(default)]
+    pub project_path: Option<String>,
     /// The working directory the session actually recorded, when it differs
     /// from `project_key`.
     ///
@@ -875,8 +1051,11 @@ In `queue.rs`, immediately after `pub project_key: String,`:
 
 At each line found in Step 1, set `session_cwd` to the raw recorded cwd --
 the same `Option<&str>` that was passed to `project_key_for` -- as
-`cwd.map(|c| c.to_string())`. Where a construction site is in a test and has
-no meaningful cwd, use `session_cwd: None`.
+`cwd.map(|c| c.to_string())`, and set `project_path` to the second half of
+`policy::project_for(cwd.as_deref())`, whose first half is already the key
+that site assigns. Where a construction site is in a test and has no
+meaningful cwd, use `session_cwd: None` and `project_path: None`; the `None`
+fallback is exactly the older-file case, so those tests exercise it.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -906,11 +1085,18 @@ the test proving it was relaxed nowhere else.
 - Test: `crates/trace-commons-contributor/src/daemon/ipc.rs`, inline test module
 
 **Interfaces:**
-- Consumes: `QueueEntry.session_cwd` (Task 4).
+- Consumes: `QueueEntry.session_cwd` and `QueueEntry.project_path` (Task 4),
+  `ProjectEntry.display_path` and `policy::display_path_for_key` (Tasks 2, 3).
 - Produces: two new keys on the queue-entry wire shape, `project_path:
   String` and `session_path: String | null`; one new key on each
   `list_projects` row, `project_path: String`. All `~`-abbreviated.
-- Produces: `pub fn display_path(key: &str) -> String` in `ipc.rs`.
+- Produces: `pub fn display_path(project_key: &str) -> String` in `ipc.rs`.
+  Despite the parameter name it takes a PATH, not necessarily a key: callers
+  pass the unfolded half where they have one and the folded key only as a
+  fallback.
+- Changes: `policy::disambiguated_label` gains a middle parameter,
+  `pub fn disambiguated_label(project_key: &str, project_path: Option<&str>,
+  known_keys: &[String]) -> String`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -930,9 +1116,88 @@ Add to `ipc.rs`'s test module:
 
     #[test]
     fn a_home_relative_project_path_is_abbreviated() {
-        let home = std::env::var("HOME").expect("HOME is set in the test environment");
-        assert_eq!(display_path(&format!("{home}/code/api")), "~/code/api");
-        assert_eq!(display_path("/opt/elsewhere"), "/opt/elsewhere");
+        // `home_dir` rather than `$HOME`: Windows sets `%USERPROFILE%` and
+        // no `HOME`, which is exactly the fallback `display_path` itself
+        // uses. Reading only `HOME` here makes this test unrunnable there.
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            display_path(&format!("{}{sep}code{sep}api", home.display())),
+            format!("~{sep}code{sep}api")
+        );
+        let elsewhere = crate::daemon::test_paths::abs("opt/elsewhere");
+        assert_eq!(display_path(&elsewhere), elsewhere);
+    }
+
+    /// What the contributor reads keeps its capitals; what the daemon
+    /// decides on does not.
+    ///
+    /// Both halves in one test deliberately. Unfolding the key to fix the
+    /// display would let one project mint two keys and an `Ignore` lapse
+    /// under the other spelling; re-folding the display to keep the key
+    /// tidy puts `~/code/ironwire` back in front of someone whose disk has
+    /// no such directory. Only doing both is passing.
+    ///
+    /// Every expected string is derived by running the real
+    /// `policy::project_for` over a real on-disk directory, from a
+    /// SUBDIRECTORY of it, rather than assembled here -- a test that
+    /// concatenates `$HOME` itself is how the broken `~` abbreviation went
+    /// unnoticed on this branch once already.
+    #[test]
+    fn a_mixed_case_project_keeps_its_capitals_while_its_key_stays_folded() {
+        let home = crate::daemon::project_key::home_dir()
+            .expect("a home directory must be discoverable in the test environment");
+        // Inside the real home, because the `~` abbreviation is half of
+        // what is being asserted and `display_path` reads the environment.
+        let dir = tempfile::Builder::new()
+            .prefix("tc-case-")
+            .tempdir_in(&home)
+            .expect("a temporary directory under home");
+        let root = dir.path().join("IronWire");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("Crates").join("Inner");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let (key, shown) = crate::daemon::policy::project_for(Some(&sub.to_string_lossy()));
+        let shown = shown.expect("a directory that resolves has a display path");
+
+        let mut e = sample_entry();
+        e.project_key = key.clone();
+        e.project_path = Some(shown.clone());
+        e.project_label = crate::daemon::policy::disambiguated_label(
+            &key,
+            Some(&shown),
+            std::slice::from_ref(&key),
+        );
+
+        let v = entry_value(&e);
+        let rendered = v["project_path"].as_str().expect("a rendered path");
+        assert!(
+            rendered.ends_with("IronWire"),
+            "the displayed path was lowercased: {rendered}"
+        );
+        assert!(
+            rendered.starts_with('~'),
+            "a project under home must still abbreviate: {rendered}"
+        );
+        assert_eq!(
+            v["project_label"], "IronWire",
+            "the label was lowercased: {v}"
+        );
+        assert_eq!(
+            key,
+            crate::daemon::project_key::fold_case(&shown),
+            "the key must remain the folded spelling of the same directory"
+        );
+        // Where folding is a no-op the two are equal by construction, so
+        // the inequality is asserted only where it is a real claim.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(
+            key, shown,
+            "on a case-insensitive filesystem the key must still be folded"
+        );
     }
 
     #[test]
@@ -960,8 +1225,14 @@ Expected: compile error, `cannot find function display_path`.
 Add to `ipc.rs`, above `entry_value`:
 
 ```rust
-/// A project key rendered for display: `~`-abbreviated, never modified
+/// A local path rendered for display: `~`-abbreviated, never modified
 /// otherwise.
+///
+/// Takes a PATH, not a key. Callers pass `QueueEntry::project_path` (or
+/// `ProjectEntry::display_path`) where they have one and the folded key
+/// only as a fallback, because the key is lowercased on macOS and Windows
+/// and a contributor should not be shown a spelling of their own directory
+/// that exists nowhere on their disk.
 ///
 /// This is the ONE place in this crate that deliberately puts a local
 /// filesystem path on the socket, and the bound is stated where the
@@ -988,19 +1259,58 @@ pub fn display_path(project_key: &str) -> String {
     else {
         return project_key.to_string();
     };
-    match project_key.strip_prefix(&home) {
-        Some(rest) if rest.is_empty() => "~".to_string(),
-        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!("~{rest}"),
+    // The COMPARISON is case-insensitive on macOS and Windows, and stays
+    // that way now that the input is unfolded. It is not a workaround for
+    // the key's folding -- it is the filesystem's own rule. `$HOME` and
+    // `%USERPROFILE%` are whatever the environment was handed; a shell
+    // exporting `HOME=/Users/Zaki` against a disk that spells it
+    // `/Users/zaki` names one directory, and on a case-insensitive volume
+    // the two are the same prefix. Comparing raw there meant the prefix
+    // never matched and every path rendered absolute.
+    //
+    // Only the comparison folds. The rendered string is cut from the
+    // ORIGINAL below, so the tail keeps its case.
+    match crate::daemon::project_key::fold_case(project_key)
+        .strip_prefix(&crate::daemon::project_key::fold_case(&home))
+    {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => {
+            // Rendered from the ORIGINAL tail so the path keeps the case
+            // the filesystem holds. Folding can in principle change a
+            // string's length, in which case the boundary is not a
+            // character boundary and the folded tail is used instead.
+            let tail = project_key
+                .get(project_key.len().saturating_sub(rest.len())..)
+                .unwrap_or(rest);
+            format!("~{tail}")
+        }
         _ => project_key.to_string(),
     }
 }
 ```
 
+**What this function renders, and from what.** It renders whatever string
+it is handed, tail cut from the original, so the case it shows is the case
+of its input. That is why every caller hands it the unfolded half where one
+exists -- `QueueEntry::project_path`, `ProjectEntry::display_path`, or
+`policy::display_path_for_key` at a site that holds only a key -- and falls
+back to the folded key only when there is none. `session_path` is handed
+`QueueEntry.session_cwd`, which was never folded, and keeps the case the
+agent recorded. Folding both sides of the `$HOME` comparison is the
+filesystem's rule on a case-insensitive volume, not a workaround for the
+key; see the spec's 1.2.
+
+`fold_case` must be `pub(crate)` for this call site, not private to
+`project_key.rs`.
+
 In `entry_value`, immediately after the `"project_label"` line:
 
 ```rust
-        // Rendered, never logged -- see `display_path`.
-        "project_path": display_path(&e.project_key),
+        // Rendered, never logged -- see `display_path`. The unfolded half
+        // when the entry has one, and the folded key when it does not: an
+        // entry written before `project_path` existed still names the right
+        // directory, just in the case the key was folded to.
+        "project_path": display_path(e.project_path.as_deref().unwrap_or(&e.project_key)),
         // Only when the session ran somewhere other than the project root,
         // which is the fact normalization discards and the folder detail
         // view puts back. Null rather than a repeat of `project_path`, so a
@@ -1009,16 +1319,33 @@ In `entry_value`, immediately after the `"project_label"` line:
             .session_cwd
             .as_deref()
             .map(display_path)
-            .filter(|p| p != &display_path(&e.project_key))
+            .filter(|p| p != &display_path(e.project_path.as_deref().unwrap_or(&e.project_key)))
             .map(serde_json::Value::from)
             .unwrap_or(serde_json::Value::Null),
 ```
 
-In both `list_projects` `json!` arms, after the `"project_label"` line:
+In both `list_projects` `json!` arms, after the `"project_label"` line. The
+configured arm has a `ProjectEntry` and reads `entry.display_path`; the
+discovered arm is built from the queue, so collect it as a
+`BTreeMap<String, Option<String>>` of key to `QueueEntry::project_path`
+rather than a `BTreeSet<String>` of keys, and read the value. Each falls
+back to the key:
 
 ```rust
-                        "project_path": display_path(key),
+                        let shown = entry.display_path.as_deref().unwrap_or(key);
+                        "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
+                        "project_path": display_path(shown),
 ```
+
+Every other `disambiguated_label` call site gains the same middle argument:
+the watcher passes the `project_path` it just normalized, and the sites in
+`handle_request` and `handle_approve` that hold only a key pass
+`policy::display_path_for_key(&key).as_deref()`. Inside
+`disambiguated_label`, the rendered label comes from the unfolded path while
+the collision test runs on the folded key -- testing on the rendered label
+instead would let `Api` and `api` in two different repos sit side by side
+looking like two spellings of one project instead of both taking a hash
+suffix.
 
 Then update the module doc at `ipc.rs:44-50`, which currently states the old
 absolute rule. Replace the sentence "Queue entries carry `project_label`,
@@ -1198,6 +1525,14 @@ In `history.rs`, immediately before `pub project_label: String,`:
     #[serde(default)]
     pub project_id: String,
 ```
+
+**`HistoryRecord` gets no path field, deliberately.** It derives `Debug`
+and `Serialize` and it is persisted, which is precisely the combination the
+display path is kept away from; `a_history_record_carries_the_opaque_project_id_and_no_path`
+stands as the assertion. It does not need one either: its `project_label`
+is copied from `QueueEntry::project_label`, which is already rendered from
+the unfolded path, so a history row inherits the corrected capitalization
+without carrying a path to get it.
 
 - [ ] **Step 5: Fill it at the construction site**
 
@@ -1793,7 +2128,7 @@ signature.
 
 ```bash
 git push -u origin shell-ux-feedback
-gh pr create --repo zmanian/trace-commons-server \
+gh pr create --repo TraceCommons/trace-commons \
   --title "Daemon and FFI foundation for the folder-first contributor queue" \
   --body "Implements docs/superpowers/plans/2026-09-03-contributor-shell-ux-foundation.md.
 
@@ -1832,7 +2167,10 @@ Spec: docs/superpowers/specs/2026-09-03-contributor-shell-queue-ux-design.md"
 case-insensitive volumes; Task 1 implements it platform-gated
 (macOS/Windows) rather than by probing the volume, and says why in the
 code comment. Probing would be more precise and is not worth a filesystem
-round-trip per session.
+round-trip per session. The fold itself is not a gap: the key stays folded
+because a project set to `Ignore` under one spelling must not lapse under
+another on a case-insensitive filesystem, and the unfolded spelling is
+carried beside it for everything a person reads.
 
 **Two places the implementer will have to look rather than copy.** Task 4
 Step 5, Task 6 Step 5, and Task 8 Step 1's fixture all say "find the call
@@ -1840,13 +2178,19 @@ site" or "reuse the neighbouring helper" rather than quoting code. That is
 because the construction sites are in files this plan does not otherwise
 touch and quoting them would go stale; each step gives the exact grep.
 
-**Type consistency check.** `normalize_project_key` /
-`normalize_project_key_within` (Task 1) are consumed by `project_key_for`
-(Task 2) and `rekey` (Task 3) with matching signatures.
+**Type consistency check.** `normalize_project` /
+`normalize_project_within` (Task 1) return `NormalizedProject` and are
+consumed by `project_for` and `display_path_for_key` (Task 2); the
+`normalize_project_key` / `normalize_project_key_within` wrappers over them
+are consumed by `project_key_for` (Task 2) and `rekey` (Task 3) with
+matching signatures. `QueueEntry.project_path` (Task 4) and
+`ProjectEntry.display_path` (Task 3) are read by `entry_value` and
+`list_projects` (Task 5), each falling back to the folded key when `None`.
 `ProjectMode::more_restrictive` is defined in Task 3 Step 3 and used in Task
 3 Step 3 only. `QueueEntry.session_cwd` (Task 4) is read by `entry_value`
 (Task 5). `HistoryRecord.project_id` (Task 6) is written by Task 5's test
-and by Task 6 Step 5. `display_path` (Task 5) is used in Task 5 only.
+and by Task 6 Step 5. `display_path` (Task 5) is used in Task 5 only, and
+takes a path rather than a key.
 `search_original` (Task 8 Step 3) is called by `tc_search_original` (Task 8
 Step 7) with `(&Shared, Uuid, &str) -> Result<u32, &'static str>` in both.
 

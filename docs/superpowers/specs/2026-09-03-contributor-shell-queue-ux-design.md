@@ -44,9 +44,11 @@ for one of them and do not:
 ### 1.1 A project's path, on the socket only
 
 Queue entries and `list_projects` rows gain `project_path: String`,
-`~`-abbreviated for display. `project_label` is unchanged: still the bare
-basename from `project_label_for`, still the only project string that
-crosses into any audit, notification, or history sink.
+`~`-abbreviated for display. Both it and `project_label` are rendered from
+the *unfolded* spelling of the project directory, which 1.2 carries beside
+the case-folded key -- not from the key itself. `project_label` is otherwise
+unchanged: still the bare basename from `project_label_for`, still the only
+project string that crosses into any audit, notification, or history sink.
 
 This is a deliberate widening of the rule stated in `policy.rs`'s
 `project_id_for` doc comment -- "the privacy rule is that a project key, a
@@ -103,6 +105,48 @@ repo and still say individually where they ran.
 Steps 1-3 are unconditional. Step 4 is worth stating as reversible: it is a
 single function, and if the merge turns out to be wrong for real users it
 comes out without touching anything else.
+
+**The key is folded; what a person reads is not.** One normalization
+returns both spellings. `normalize_project_within` yields a
+`NormalizedProject` whose `key` is `fold_case(display_path)` and whose
+`display_path` is the canonicalized directory with the case the filesystem
+holds. Everything that *decides* something keys on the folded half -- policy
+lookup, grouping, `project_id_for`, and `disambiguated_label`'s collision
+test. Everything a person *reads* is rendered from the unfolded half.
+
+Both halves are load-bearing and neither may be dropped. Dropping the fold
+would be a fail-open: on a case-insensitive volume `~/Code/Api` and
+`~/code/api` are one directory, so one project would mint two keys, and a
+project the contributor set to `Ignore` under one spelling would silently
+lapse under the other. Dropping the unfolded half puts `~/code/ironwire` and
+`ironwire` in front of a contributor whose disk holds `~/Code/IronWire` -- a
+spelling of their own directory that exists nowhere on their machine, which
+weakens exactly the "identifiable" 1.1 exists to provide.
+
+The unfolded half is carried rather than re-derived at each render:
+`QueueEntry::project_path: Option<String>` beside `project_key`, and
+`ProjectEntry::display_path: Option<String>` beside the map key, both
+`#[serde(default)]` so a queue or policy file written before the fields
+existed still loads. `None` -- an older file, or a key that no longer
+resolves -- falls back to the folded key, which names the right directory in
+the wrong case rather than naming nothing, so a row is never empty and
+never a panic. `project_id_for` still takes the folded key, so a change of
+case cannot move a project's id. `NormalizedProject` derives nothing --
+no `Debug`, no `Serialize` -- because a derived `Debug` is how a local path
+reaches a log line by accident; the display half is local-only exactly as
+`project_key` and `session_cwd` are, rendered over the socket and never
+logged, audited, notified, or written to a history record.
+
+`session_path` is unaffected. It renders `QueueEntry.session_cwd`, which is
+the raw cwd the watcher recorded and is never folded. `display_path` still
+folds both sides only to *compare* against `$HOME`, and renders the tail
+from the string it was handed. That comparison is not a workaround for the
+key's folding: `$HOME` is whatever the environment supplied, and a shell
+exporting `HOME=/Users/Zaki` against a disk that spells it `/Users/zaki`
+names one directory on a case-insensitive volume, so folding the comparison
+is the filesystem's own rule. What had been wrong was that the *input* was
+folded too, leaving no case for the "cut the tail from the original" branch
+to preserve.
 
 Normalization changes `project_id_for`'s input, and ids are derived rather
 than stored, so **every existing project id changes on upgrade.** What that
@@ -175,59 +219,83 @@ with its current emphasis, for the reasons in "What is not changing".
 
 ## 3. The scrubber says what it removed (items 3, 5, 7)
 
-### 3.1 Redactions are already visible, and the app is hiding them
+### 3.1 Redactions are already marked, and this section used to say otherwise
 
-`DeterministicTraceRedactor` does not delete a matched value. It substitutes
-a typed placeholder from `PlaceholderMap::placeholder_for`:
-
-```
-<PRIVATE_LOCAL_PATH_1>   <PRIVATE_SECRET_3>   <PRIVATE_CONTEXTUAL_ENTROPY_2>
-```
-
-Those tokens are **already in the bytes `tc_preview_body` returns.** The
+**Correcting an error that survived this spec, four plans, and a review
+pass.** An earlier draft of this section claimed the redactor's placeholder
+tokens were "already in the bytes `tc_preview_body` returns" while "the
 shells render them as ordinary transcript text and the contributor scrolls
-past them.
+past them," and asked each shell to build a scan that marked them.
 
-So the whole of item 3's first half needs no protocol change, no FFI change,
-and no new data crossing any boundary. The shells scan the body and style
-each hit as a labelled chip in the transcript.
+The second half was never true. All three shells already mark them, and have
+for some time:
 
-**Two token shapes, not one, and the difference matters.** Only
-`apply_placeholder_regex` mints the numbered `<PRIVATE_([A-Z0-9_]+)_(\d+)>`
-form, and it is called for exactly two labels: `local_path` and
-`private_email`. Everything else is replaced with one of three FIXED
-tokens, none of them numbered:
+| Shell | Where |
+|---|---|
+| macOS | `TCShellCore.TranscriptMarkerScan` (`TranscriptPaging.swift`), drawn as chips by `TranscriptMarkers.chipped` |
+| GTK | `transcript_paging.rs`, around the `MARKER` pattern |
+| Windows | `TraceCommons.Interop.TranscriptMarkers` |
+
+All three carry the identical pattern
+`<PRIVATE_[A-Za-z0-9_]+>|\[REDACTED[^\]\n]*\]`, which covers the numbered
+`<PRIVATE_LABEL_N>` form and the square-bracketed `[REDACTED]` /
+`[REDACTED:label]` forms.
+
+**It does not cover `<REDACTED_PRIVATE_KEY>`, and that is a live defect.**
+That token is angle-bracketed like the first family but begins `<REDACTED_`,
+so it matches neither alternative -- not the `<PRIVATE_` arm, and not the
+`\[REDACTED` arm, which requires a square bracket. A PEM private key is
+therefore removed from the payload and its removal is **invisible in the
+transcript** in all three shells: the highest-stakes redaction there is, and
+the one a contributor cannot see happened.
+
+There is a second consequence. The pattern is shared with the chunker
+precisely so a marker is never cut in half; a token the pattern does not
+match is not protected, so `<REDACTED_PRIVATE_KEY>` can also be split across
+a chunk boundary and render as two fragments.
+
+Fixing it means widening one alternation in three separately-maintained
+copies of the constant, each with chunk-boundary tests behind it. That is
+its own change, not a rider on this one. The scan
+is deliberately shared with the chunker so a marker is never cut in half,
+and the chip styling is a considered choice recorded in its own doc comment:
+markers read as objects placed in the text, not as damage done to it.
+
+So item 3's "show me where" is **already shipped**, and a shell must not
+add a second marker pass, restyle the existing chips, or bypass the
+chunk-boundary contract.
+
+**What is actually missing is the naming.** Today every marker draws as the
+same anonymous chip. The tokens carry more than that: the numbered form
+carries a label and an ordinal, and `[REDACTED:label]` carries a category.
+A chip that says "local path removed", and that can tell a reader two chips
+stand for the same original value, is new information and restyles nothing.
+That -- plus the summary panel in §3.1b and the search in §3.2 -- is the
+whole of the scrubber work.
+
+Where a marker carries no ordinal, none is invented; where it carries no
+label, the chip says only that something was removed.
+
+**Which kinds carry what**, since the naming depends on it. Only
+`apply_placeholder_regex` mints the numbered form, for exactly two labels:
+`local_path` and `private_email`. Everything else is a fixed token:
 
 | Token | Covers |
 |---|---|
 | `[REDACTED]` | `secret`, `secret:{pattern}`, `secret:contextual_entropy`, `secret:split_literal`, `sensitive_field` |
-| `<REDACTED_PRIVATE_KEY>` | `secret:pem_private_key` -- angle-bracketed but carrying no index, so it does NOT match the numbered pattern |
+| `<REDACTED_PRIVATE_KEY>` | `secret:pem_private_key` -- angle-bracketed but carrying no index |
 | `[REDACTED:{label}]` | `tool_sensitive_field{:action}`, and every `privacy_filter:{label}` |
 
-Only the third carries a label, so only the third can name its own category
-in a mark. The first two can say that something left and not what.
-
-That includes secrets, which is the category a contributor most wants to
-see. A shell scanning only for the numbered form would mark every path and
-no secret, while the summary panel beside it reports those secrets as
-removed. The scan must recognise both shapes, and the ordinal must be
-optional in the type rather than faked with a zero. The reporter's "show list of things that got removed" is
-answered by the transcript itself, in place, which is better than a list
-because it also answers *where*.
-
-The token numbering is per distinct value -- the same path twice gets the
-same token -- which the summary line should also use. `185 local path` is an
-occurrence count; `185 local path (12 distinct)` is the number a person is
-actually trying to estimate risk from, and it comes free from the highest
-index per label.
+Only the third names its own category. The first two can say that something
+left and not what, which is exactly the limit on how well a chip can be
+labelled.
 
 Distinct counts come from the placeholder map, so they exist for exactly the
 two labels that mint placeholders. `3 secret` will never carry a distinct
 suffix. That is correct rather than a gap -- there is no second number to
-report -- but it means no test may assert a distinct count for a secret
-fixture, and the rendering must omit the suffix rather than print
-`(0 distinct)` -- which, beside a non-zero occurrence count, reads as
-"nothing was removed".
+report -- but no test may assert a distinct count for a secret fixture, and
+the rendering must omit the suffix rather than print `(0 distinct)`, which
+beside a non-zero occurrence count reads as "nothing was removed".
 
 The two layers differ on the wire and a shell must not confuse them.
 `PrivacyMetadata::redaction_distinct_counts` is
@@ -237,14 +305,13 @@ attribute, so a shell reading a preview always sees the key, as `{}`. Either
 way the renderer's rule is the same: no entry means no distinct count is
 available for that label, not that the count is zero.
 
-**A caveat the UI must carry, not bury.** Placeholders appear where
-redaction *rewrote* a typed field. The detector scans every leaf; the
-rewriter does not reach all of them. So a body with no placeholder in a
-region is not a body with nothing sensitive in that region, and the existing
-`ScrubbingCaveat` sentence is what says so. Highlighting makes the app look
-more thorough than it is, and that is precisely the moment the caveat earns
-its place -- it stays, next to the highlights, not at the bottom of the
-screen.
+**The caveat this section must keep.** Markers appear where redaction
+*rewrote* a typed field. The detector scans every leaf; the rewriter does
+not reach all of them. A region with no marker is not a region with nothing
+sensitive in it, and `ScrubbingCaveat`'s sentence is what says so. Naming
+the chips makes the app look more thorough, which is precisely when that
+sentence earns its place.
+
 
 ### 3.1b The removed-summary panel
 
@@ -371,9 +438,19 @@ is why the count is safe where a context snippet would not be.
 slots -- fills with prefixes of one word.
 
 Live search stays; it is the good part. `remember` moves out of `run()` and
-onto the explicit commit paths only (`onSubmit`, the `Search` button). Same
-defect and same fix in the GTK and Windows shells, whose recents lists are
-the same in-memory design for the same documented reason.
+onto the explicit commit paths only (`onSubmit`, the `Search` button).
+
+**Windows has the same defect and takes the same fix.**
+`PreviewSheetViewModel.RunSearch` calls `Remember(Needle)` on any non-empty
+result, and `PreviewSheet.xaml.cs` calls `RunSearch` from the search box's
+text-changed handler as well as from the button. `Remember` moves onto the
+button and the recents strip only.
+
+**GTK already does this and needs no work.** `connect_search_changed` calls
+`run_search(.., false)`; `remember_search` is called only from
+`connect_activate` and the search button's click, beside the same
+`run_search(.., true)`. The separation is deliberate and carries a comment
+inside `run_search` saying so. Do not "fix" it.
 
 ### 3.4 "nothing matched" gets something to do (item 7)
 
