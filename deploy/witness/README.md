@@ -635,6 +635,182 @@ Changing the mode changes the measurement. See "The configuration is measured".
 
 ---
 
+## Requiring attested inference
+
+`TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE` is **off by default**, and
+the default is deliberate rather than lax. Turning it on refuses a great deal
+of honest traffic, and an operator has to want that.
+
+When it is on, the witness refuses to certify a contribution unless the **last
+inference call the contribution declares** carries a NEAR AI receipt that
+verifies against that call's own raw request and response bodies, as they sit
+in the session the witness was handed. The witness — not the contributor —
+decides which exchange that is: it takes the last `HttpExchange` event in the
+trace's own order.
+
+### What the requirement establishes — and read this before writing any surface
+
+At witness time, an attested NEAR AI enclave had produced that response for
+that request, and both bodies were inside the session that was certified.
+
+**The attested bytes are not the bytes the agent sent.** The receipt binds what
+the *upstream provider* received and returned. On an IronWire route the request
+is rewritten before forwarding — a policy model swap re-serialises it, the
+privacy filter re-serialises it wholesale, and a cross-family route synthesises
+a different document entirely, so the attested request on a NEAR AI route may
+be a Chat Completions document built from an Anthropic one, carrying substituted
+models and privacy-filter placeholders where the original held real values. The
+attested response is the provider's own raw event stream, not the frames the
+client saw.
+
+So the claim is *these are the bytes the provider hashed*. It is never "this is
+the request the agent made", and no wording may let a reader assume it is.
+
+One consequence runs in our favour: capture sits downstream of the privacy
+filter, so the attested bytes are already filtered.
+
+It also does **not** establish that the session made the call — a contributor
+holding a receipt and its bodies can paste them into a trace they wrote. It says
+nothing about any other turn, tool result or file edit. And it says nothing
+about the conversation history: the reason one body pair is worth having is that
+a chat-completions request body repeats the whole conversation prefix, but a
+session that compacted or truncated its context sends a summary instead, and the
+witness cannot tell which it got.
+
+Render the count `n_of_m` — one verified receipt over a trace declaring three
+calls is `1_of_3`. Never "attested", never "genuine".
+
+### The model is not bound, and we cannot make it so
+
+`verify_receipt` supports a three-part receipt whose leading part is the model,
+and an earlier draft of this control refused anything else. That was wrong about
+the provider: NEAR AI signs the **two-part** form — `<requestHash>:<responseHash>`,
+no model prefix — and supplies the model as a query parameter on retrieval
+(`GET /v1/signature/{chat_id}?model=...`). A query parameter is not signed and is
+chosen by whoever fetches the receipt, so it establishes nothing. Refusing the
+two-part form would refuse every real receipt, and a model allowlist checked
+against it would be a control that cannot fail.
+
+There is therefore no model policy and no allowlist variable. That is a
+**limitation of the provider's current API**, not a decision this deployment
+made. Note what it costs: a policy model swap substitutes the model that served,
+and a bound model is exactly what would have caught it.
+
+### The bodies do not leave the enclave
+
+The witness **removes** the inference request and response bodies — and the
+header maps beside them — from the artifact it returns. The certificate is over
+the stripped bytes: the order is redact, strip, hash, sign, so the digest names
+the artifact the contributor actually holds.
+
+They are removed rather than kept because by that point they are worthless. The
+witness redacts the session it is given, bodies included, so what survives the
+pass no longer hashes to what the receipt binds — a downstream party trying to
+re-verify gets a request-hash mismatch it cannot distinguish from tampering.
+The only way to keep them verifiable would be to exempt them from redaction,
+which means shipping raw prompts and completions to ingest and storage. That is
+strictly worse than useless bodies. The bodies were only ever input to a check
+that happens once, inside the enclave, over bytes only the enclave holds.
+
+Two consequences:
+
+- **The 16 MB envelope cap is not at risk.** The bodies never reach ingest or
+  storage, so the payload that would have pushed an attested trace past the cap
+  does not exist downstream. That was a real blocker and it is gone.
+- **Method, URL and status survive.** Those are ordinary trace content and a
+  consumer may want them. Headers do not survive: an inference request carries
+  its credential in `Authorization`, and this repository has measured that
+  opaque bearer tokens are not reliably redacted.
+
+Note that the deterministic pass already dropped bodies and headers for events
+whose *tool name* contains `http`, `browser` or `web`. The strip is what makes
+that hold for an exchange captured under any other name — the guarantee is now
+the witness's, not a classifier profile's keyed on a string the capture chose.
+
+### Verification happens once and cannot be repeated
+
+The receipt binds the raw bodies; the witness publishes a redacted artifact.
+Redaction destroys the attested bytes, so **nothing downstream can re-check the
+receipt**. The witness is the only party that ever holds both, which is why it
+is the only party that can verify at all. Do not build a surface that implies a
+server or a consumer re-verified anything.
+
+Note also what the certificate does **not** carry: there is no
+attested-inference field on it. Adding one needs a v2 profile with its own
+signing domain (see `redaction_witness/certificate.rs`, "Why there are no
+inference fields") and a flag day across three independent implementations of
+the wire format.
+
+With the bodies stripped, that limitation no longer touches the artifact: a
+certificate exists **if and only if** attestation passed, because a requiring
+witness issues none otherwise, and the artifact carries nothing a reader could
+mistake for re-verifiable evidence.
+
+**The open item, unchanged and not fixed by stripping:** a server still cannot
+distinguish a requiring witness from a permissive one at the same measurement.
+The measurement pins the image, not the environment. So the measurement plus
+this deployment's configuration is the entire basis of the claim, and an
+operator who cannot vouch for the configuration cannot vouch for the claim.
+
+### What it refuses, and why each refusal is honest
+
+Every refusal below is a 403 with a label, and a refused submission carries no
+certificate at all.
+
+| Label | Meaning |
+| --- | --- |
+| `witness_inference_attestation_missing` | required, and no receipt was offered |
+| `witness_inference_attestation_unavailable` | offered on `POST /v1/witness`'s **text** shape, which carries no event order and so cannot say which call was last |
+| `witness_inference_call_absent` | the contribution declares no inference call at all |
+| `witness_inference_call_unattestable` | the final call declares a restarted stream, for which no receipt exists or ever will |
+| `witness_inference_body_not_in_session` | the last call carries no bodies — in practice, the contribution withheld tool payloads |
+| `witness_inference_receipt_unverified` | the receipt did not verify against those bytes |
+| `witness_inference_body_too_large` | a body exceeds `TRACE_COMMONS_WITNESS_MAX_INFERENCE_BODY_BYTES` |
+
+`witness_inference_receipt_unverified` is the one to read carefully. SHA-256
+answers one bit, so a capture that pretty-printed a body, reordered its keys or
+re-serialised it from a parsed form produces **exactly** the same failure as a
+receipt lifted from somewhere else. The witness cannot tell them apart and does
+not pretend to. On an honest deployment, suspect the capture first.
+
+### The restarted-stream hole
+
+IronWire's resilience guard restarts a stalled stream, and a restarted stream
+records no digest — so no receipt exists for it. Because the requirement attests
+the **final** call, a trace whose last call was restarted mid-stream can never
+satisfy it. That is a coverage hole, not a rare edge.
+
+It has its own label so an operator is not sent looking for a client bug, but
+the witness can only use that label when the capture side *declares* the
+restart, at `structured_payload["response"]["stream_restarted"]`. **Nothing
+writes that field today**; it is a contract IronWire must honour. Until it does,
+a restarted final call surfaces as `witness_inference_attestation_missing` —
+fail-closed, but less informative.
+
+### Who this excludes, before you turn it on
+
+- **Every trace from a provider that is not NEAR AI.** Claude Code, Codex,
+  Gemini and Cline sessions have no receipt to offer.
+- **Every trace that withheld tool payloads.** The bodies live in an
+  `HttpExchange` event's `structured_payload["request"]["body"]` and `content`,
+  and both are written only under `include_tool_payloads`. That flag has
+  historically been off everywhere.
+- **Every trace whose final call was a restarted stream**, per above.
+- **Every trace on the text shape of `POST /v1/witness`**, including the smoke
+  tests in this document. The requirement is enforceable only on the structured
+  `raw_contribution` shape.
+- **Everything, on today's binary.** `trace-commons-witness` never calls
+  `with_contribution_redactor`, so the structured route is unavailable and
+  answers `witness_contribution_path_unavailable`. Turning the requirement on
+  against this binary therefore refuses every submission by one label or the
+  other. Wiring the structured seam into the binary is a prerequisite, and it is
+  not part of this change.
+
+Nothing fetches a receipt today, either: `upstream_id` in IronWire's ledger *is*
+the receipt `chat_id`, and the ledger already persists it with both digests and
+the served model, but no code anywhere calls `GET /v1/signature/{chat_id}`. That
+call belongs downstream of the ledger and does not exist yet.
+
 ## First boot
 
 Expect exactly two things in the log, and nothing else about any request:

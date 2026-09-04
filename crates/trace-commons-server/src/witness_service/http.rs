@@ -66,6 +66,7 @@ use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
 };
 
+use crate::near_attestation::receipt::ReceiptPayload;
 use crate::redaction_witness::certificate::WitnessCertificate;
 
 use super::surface::{
@@ -230,6 +231,47 @@ struct WitnessRequestBody {
     granted_scopes: Option<Vec<ConsentScope>>,
     #[serde(default)]
     granted_uses: Option<Vec<TraceAllowedUse>>,
+    /// The receipt offered for this session's last inference call.
+    ///
+    /// Optional on the wire and absent by default, because a witness with no
+    /// requirement is the deployed configuration today. Absent is not a
+    /// downgrade: a witness that requires attestation refuses an absent
+    /// receipt by name.
+    ///
+    /// There are no body fields beside it, and no field naming which exchange
+    /// it attests. The bodies are already in the session, and the witness --
+    /// not the caller -- decides which exchange was last. A second copy of the
+    /// bodies sent alongside would be a copy that has to be joined back to the
+    /// first, which is exactly the problem this shape does not have.
+    #[serde(default)]
+    inference_receipt: Option<InferenceReceiptBody>,
+}
+
+/// The offered receipt, on the wire.
+///
+/// `deny_unknown_fields` for the reason the outer body has it: a field this
+/// witness does not understand may be one a contributor believed was being
+/// checked -- a `request_body` or a `produced_event_id` sent here is refused
+/// rather than ignored, because a caller who sent one believed it mattered.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InferenceReceiptBody {
+    /// The receipt's signed text: two or three `:`-separated parts.
+    text: String,
+    /// The 65-byte secp256k1 signature, hex.
+    signature: String,
+    /// The address the provider claims signed it.
+    signing_address: String,
+}
+
+impl From<InferenceReceiptBody> for ReceiptPayload {
+    fn from(body: InferenceReceiptBody) -> Self {
+        ReceiptPayload {
+            text: body.text,
+            signature: body.signature,
+            signing_address: body.signing_address,
+        }
+    }
 }
 
 /// Which of the two request shapes a body carries, once disambiguated.
@@ -268,9 +310,16 @@ fn shape_of(body: WitnessRequestBody) -> Result<RequestShape, Refusal> {
                 return Err(malformed());
             }
             let consent = body.consent.ok_or_else(malformed)?;
+            // Carried rather than refused here even though the text route
+            // cannot attest anything. The refusal belongs to the service,
+            // where it has a name -- `InferenceAttestationUnavailable` --
+            // rather than being folded into "malformed", which would tell a
+            // contributor their request was wrong when what is wrong is the
+            // route they used.
             Ok(RequestShape::Transcript(super::WitnessRequest {
                 raw_transcript,
                 consent,
+                offered_receipt: body.inference_receipt.map(Into::into),
             }))
         }
         (None, Some(raw_contribution)) => {
@@ -292,6 +341,7 @@ fn shape_of(body: WitnessRequestBody) -> Result<RequestShape, Refusal> {
                 WitnessContributionRequest {
                     raw_contribution: *raw_contribution,
                     granted: GrantedConsent { scopes, uses },
+                    offered_receipt: body.inference_receipt.map(Into::into),
                 },
             )))
         }
@@ -385,6 +435,37 @@ fn refusal_for(error: WitnessError) -> Refusal {
             StatusCode::SERVICE_UNAVAILABLE,
             "witness_signing_unavailable",
         ),
+        // The attested-inference refusals are 403, not 503. Every one of them
+        // is this deployment declining this submission under a policy the
+        // operator set, which is a permanent answer for this input: a 503
+        // would tell a contributor to retry something that will be refused
+        // identically forever, and a 400 would tell them their request was
+        // malformed when it was well-formed and unattested.
+        WitnessError::InferenceAttestationMissing => Refusal::new(
+            StatusCode::FORBIDDEN,
+            "witness_inference_attestation_missing",
+        ),
+        WitnessError::InferenceAttestationUnavailable => Refusal::new(
+            StatusCode::FORBIDDEN,
+            "witness_inference_attestation_unavailable",
+        ),
+        WitnessError::InferenceCallAbsent => {
+            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_absent")
+        }
+        WitnessError::InferenceCallUnattestable => {
+            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_call_unattestable")
+        }
+        WitnessError::InferenceBodyNotInSession => Refusal::new(
+            StatusCode::FORBIDDEN,
+            "witness_inference_body_not_in_session",
+        ),
+        WitnessError::InferenceReceiptUnverified => Refusal::new(
+            StatusCode::FORBIDDEN,
+            "witness_inference_receipt_unverified",
+        ),
+        WitnessError::InferenceReceiptTooLarge => {
+            Refusal::new(StatusCode::FORBIDDEN, "witness_inference_body_too_large")
+        }
     }
 }
 
@@ -1590,5 +1671,77 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
         }
+    }
+
+    // ---------------------------------------------------------------
+    // The attested-inference requirement, over the real router.
+    // ---------------------------------------------------------------
+
+    /// The same structured service, refusing anything whose last declared
+    /// inference call does not carry a verified receipt.
+    fn requiring_service() -> Arc<WitnessService> {
+        Arc::new(
+            WitnessService::new(
+                Arc::new(DeterministicRedaction::new(Vec::new())),
+                Arc::new(TestSigner::new("http-surface")),
+                Arc::new(RecordingEnclave::default()),
+                TEST_LIMIT,
+            )
+            .with_contribution_redactor(Arc::new(
+                super::super::PipelineContributionRedaction::deterministic_only(Vec::new()),
+            ))
+            .requiring_attested_inference(
+                super::super::inference::InferenceAttestationPolicy::required(
+                    super::super::inference::DEFAULT_MAX_BODY_BYTES,
+                )
+                .expect("a well formed policy"),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_requiring_witness_refuses_an_unattested_contribution_and_certifies_nothing() {
+        let body = contribution_body("ran the build");
+
+        // The control first: the identical body is certified by a witness
+        // that requires nothing, so what follows is the policy and not the
+        // fixture.
+        let (status, headers, _) =
+            send_full(structured_service(), post_witness(body.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.contains_key(WITNESS_CERTIFICATE_HEADER));
+
+        let (status, headers, response) = send_full(requiring_service(), post_witness(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a policy refusal is permanent for this input, not a 503 to retry"
+        );
+        assert_eq!(
+            error_code(&String::from_utf8_lossy(&response)),
+            "witness_inference_attestation_missing"
+        );
+        // The whole point of a fail-closed requirement: nothing was signed.
+        assert!(
+            !headers.contains_key(WITNESS_CERTIFICATE_HEADER)
+                && !headers.contains_key(WITNESS_SIGNATURE_HEADER),
+            "a refused submission must carry no certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_text_route_cannot_satisfy_the_requirement_and_says_which_control_is_missing() {
+        let (status, body) = send(
+            requiring_service(),
+            post_witness(witness_body("ran the build")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error_code(&body),
+            "witness_inference_attestation_unavailable",
+            "the text route carries no event order, so it can attest nothing; \
+             the label must name that rather than reading as a bad request"
+        );
     }
 }
