@@ -7,10 +7,12 @@ Branch: `native-onboarding-admission`
 Worktree: `.worktrees/native-onboarding-admission`, based on `dd26e016`.
 The original checkout remains on `witness-production-config`.
 
-Progress: slice 1 implemented and reviewed. The first implementation wave
-was dispatched from `bf946228` into the isolated worktrees below. Slices 2-5
-are not yet integrated; public admission and inference funding are not enabled
-by this branch.
+Progress: slice 1 and the first implementation wave are integrated. Explicit
+witness review now reaches daemon IPC, immutable preview reopening, approval,
+and byte-preserving retry. The second wave is implementing durable account
+signup, account-bound admission, and all three native shells. Public admission
+and inference funding remain disabled pending configured limits and provider
+funding terms.
 
 Design: [Native inference onboarding](../specs/2026-09-04-native-inference-onboarding-design.md).
 Admission: [Invite or attested inference](../specs/2026-09-04-admission-invite-or-attestation-design.md).
@@ -93,6 +95,32 @@ Initial coordinator decisions:
 Each worker returns its own commit and test results. This record establishes
 dispatch, not completion; accepted changes and validation are recorded when
 the coordinator integrates them.
+
+### Second implementation wave (in progress)
+
+The user authorized the complete integration on September 4. Accepted first-wave
+commits are `8032ad0e` (witness artifact), `30070acf` (NEAR verification), and
+`86913c3f` (provider balance decoder). Shared native words are `1228887b`;
+daemon witness IPC is `0c08956c`; distinct admission protocol is `991631d8`;
+client admission header transport is `ac665da3`.
+
+| Worker | Worktree | Current scope |
+|---|---|---|
+| Account | `.worktrees/onboarding-identity-integration` | V58 durable PKCE ceremony, network/account/device mapping, browser wallet handoff, scoped claims, PostgreSQL tests |
+| Evidence/ledger | `.worktrees/onboarding-evidence-admission` | V59 challenge/replay/attempt/cost ledger, provider-pinned receipt evidence, witness route, ingest gates, PostgreSQL races |
+| Native | `.worktrees/onboarding-native-flow` | Explicit witness review and immutable controls across macOS/Windows/GTK, paged GTK preview, first-contribution guidance |
+| Coordinator | `.worktrees/native-onboarding-admission` | IPC/FFI integration, exact artifact validation and retry headers, native account glue, integration checks |
+
+A separate IronWire worktree, `/tmp/ironwire-onboarding-admission`, preserves
+its main checkout while adding the explicit final-request metadata binding.
+No running proxy configuration, capture setting, provider credential or public
+service is changed by these implementation worktrees.
+
+Current evidence: contributor suite 1,275 passed and one ignored; one additional
+home-directory fixture requires a sandbox-exempt rerun. Admission transport has
+two passing tests for signed artifact binding and exact-header preservation
+across compatible retries. Native/platform and PostgreSQL results are recorded
+only after their worker returns and integration checks finish.
 
 ### Coordinator ownership and integration rules
 

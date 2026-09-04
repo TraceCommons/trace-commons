@@ -2344,6 +2344,22 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
 /// entry.
 /// One explicit, user-confirmed remote review. Ordinary preview paths never call it.
 async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) -> Response {
+    handle_witness_preview_request_inner(
+        shared,
+        req,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn handle_witness_preview_request_inner(
+    shared: &DaemonShared,
+    req: &Request,
+    // Recorded signed responses exercise persistence/approval without pretending
+    // that local fixtures are Intel-signed quotes. Absent from production builds.
+    #[cfg(test)] recorded: Option<super::preview::WitnessPreview>,
+) -> Response {
     if req
         .params
         .get("raw_session_confirmed")
@@ -2419,7 +2435,7 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "session-file-vanished");
     };
-    let review = match super::preview::build_witnessed_preview(
+    let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
         near_ai,
@@ -2432,9 +2448,15 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
             verdict,
             correction,
         },
-    )
-    .await
-    {
+    );
+    #[cfg(test)]
+    let built = match recorded {
+        Some(review) => Ok(review),
+        None => build.await,
+    };
+    #[cfg(not(test))]
+    let built = build.await;
+    let review = match built {
         Ok(review) => review,
         Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-failed"),
     };
@@ -4004,6 +4026,169 @@ mod tests {
             .upsert(entry, 500)
             .unwrap();
         (s, entry_id, dir)
+    }
+
+    async fn recorded_witness_review() -> (
+        DaemonShared,
+        Uuid,
+        tempfile::TempDir,
+        super::super::preview::WitnessPreview,
+    ) {
+        let body = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"synthetic onboarding task\"},\"cwd\":\"/synthetic/project\",\"timestamp\":\"2026-08-08T10:00:00Z\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n";
+        let (s, id, dir) = shared_with_session(body);
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let path = project.join("sess-1.jsonl");
+        std::fs::write(&path, body).unwrap();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            let mut entry = queue.get(id).unwrap().clone();
+            entry.path = path;
+            entry.session_hash = crate::source::session_hash(body.as_bytes());
+            *queue = super::super::queue::Queue::default();
+            queue.upsert(entry, 500).unwrap();
+        }
+        s.settings.lock().unwrap().claude_source =
+            Some(super::super::settings::SourceDeclaration::Watch {
+                path: dir.path().to_path_buf(),
+            });
+        let device = crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.device_key_id = device.device_key_id;
+        cfg.tenant_id = "synthetic-tenant".into();
+        cfg.user_subject = "synthetic-user".into();
+        cfg.consent_scopes = vec!["debugging_evaluation".into()];
+        let roots = s.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+        let (source, reference) = super::super::find_session(&sources, &entry).unwrap();
+        let (_, _, envelope) = super::super::preview::build_preview_with_correction(
+            &s.store,
+            Some(&cfg),
+            None,
+            source,
+            &reference,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let (response, address) = crate::witness::transport::signed_fixture(
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        );
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://synthetic-witness.invalid".into(),
+            signing_address: address,
+            expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+            admission_evidence: false,
+        });
+        s.store.save_config(&cfg).unwrap();
+        let artifact = super::super::approved_envelope::WitnessReviewArtifact::new(
+            response,
+            entry.session_hash,
+            super::super::preview::input_fingerprint(&cfg, None, false),
+            None,
+            None,
+        );
+        let transcript = source.load(&reference).unwrap();
+        let (summary, body, _) = super::super::preview::summarize_witnessed_preview(
+            &artifact,
+            &cfg,
+            None,
+            &transcript,
+            reference.size_bytes,
+            false,
+        )
+        .unwrap();
+        (
+            s,
+            id,
+            dir,
+            super::super::preview::WitnessPreview {
+                summary,
+                body,
+                artifact,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn recorded_witness_request_reopens_and_approves_the_same_persisted_artifact() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        let expected_digest = review.summary.envelope_digest.clone();
+        let expected_body = review.body.clone();
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(review),
+        )
+        .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Pending
+        );
+        let reloaded =
+            DaemonShared::load(ConfigStore::open(s.store.dir().to_path_buf()).unwrap()).unwrap();
+        // Source settings are persisted independently by the settings API.
+        *reloaded.settings.lock().unwrap() = s.settings.lock().unwrap().clone();
+        let (summary, body) = open_preview(&reloaded, id).await.unwrap();
+        assert_eq!(summary.envelope_digest, expected_digest);
+        assert_eq!(body, expected_body);
+        let refusal = handle_approve(
+            &reloaded,
+            &req(
+                "approve",
+                serde_json::json!({"entry_id":id,"outcome":"failed"}),
+            ),
+        )
+        .await;
+        assert_eq!(refusal.result.unwrap()["approved"], 0);
+        let approved = handle_approve(
+            &reloaded,
+            &req("approve", serde_json::json!({"entry_id":id})),
+        )
+        .await;
+        assert_eq!(approved.result.unwrap()["approved"], 1);
+        assert_eq!(
+            reloaded
+                .queue
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .previewed_envelope_digest
+                .as_deref(),
+            Some(expected_digest.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_witness_request_refuses_changed_consent_before_pinning() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        s.settings.lock().unwrap().ironwire_attested_bodies = true;
+        let response = handle_witness_preview_request_inner(
+            &s,
+            &req(
+                "witness_preview_request",
+                serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+            ),
+            Some(review),
+        )
+        .await;
+        assert_eq!(response.error.unwrap().message, "witness-review-stale");
+        assert!(
+            s.queue
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .previewed_envelope_digest
+                .is_none()
+        );
     }
 
     #[tokio::test]
