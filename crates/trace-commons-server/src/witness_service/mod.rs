@@ -86,6 +86,7 @@ use crate::redaction_witness::certificate::{CertificateDetails, WitnessCertifica
 use crate::redaction_witness::correspondence::check_correspondence;
 use crate::witness_service::inference::{
     InferenceAttestationPolicy, WitnessedSession, check_inference_attestation,
+    strip_inference_bodies,
 };
 
 /// What the contributor sends: the raw transcript and the consent flags that
@@ -882,6 +883,19 @@ pub async fn witness_contribution(
     );
 
     let residual_risk_verdict = envelope.privacy.residual_pii_risk;
+
+    // Redact, strip, hash, sign -- in that order, and the order is the whole
+    // of it. The digest below must cover the artifact the contributor
+    // receives, so the bodies have to be gone before `to_string` runs; a
+    // strip after serialisation would hand back a certificate naming bytes
+    // nobody holds. `strip_inference_bodies` says why they go rather than
+    // being kept for a downstream verifier.
+    //
+    // Unconditional, not gated on whether a receipt was offered or on whether
+    // this witness requires one. A refusal returns no artifact at all, and
+    // every path that does return one goes through here, so there is no way
+    // out of this function that carries a body.
+    strip_inference_bodies(&mut envelope);
 
     // The single serialisation on this path. `serde_json::to_string` rather
     // than `to_vec` so the same allocation can be handed to
@@ -1866,5 +1880,174 @@ mod tests {
 
         let request = raw_with_correction(REFUSED_MARKER);
         assert!(!format!("{request:?}").contains(REFUSED_MARKER));
+    }
+
+    /// The markers a stripping test needs: distinctive enough that finding one
+    /// in a response cannot be an accident, and not secret-shaped, so the
+    /// redaction pass has no reason to remove them. If the redactor removed
+    /// them, an absence assertion would pass against a witness that strips
+    /// nothing.
+    const REQUEST_BODY_MARKER: &str = "zzq-request-body-marker-zzq";
+    const RESPONSE_BODY_MARKER: &str = "zzq-response-body-marker-zzq";
+    const HEADER_MARKER: &str = "zzq-bearer-marker-zzq";
+    const URL_MARKER: &str = "zzq-url-marker-zzq";
+
+    /// A contribution whose final `HttpExchange` carries bodies, a header
+    /// bearing a credential, and a URL that must survive.
+    fn contribution_with_exchange() -> WitnessContributionRequest {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceContributionEvent, TraceContributionEventType,
+        };
+        let mut request = contribution_request("ran the build");
+        // Two fixture choices that are load-bearing, and both were found by
+        // watching this test fail rather than by reading.
+        //
+        // The tool name is `inference` rather than `http`. The deterministic
+        // pass keys its tool-payload profiles on the *name*, and a name
+        // containing http, browser or web already drops `body` and
+        // `headers` as `browser_content` and `browser_header`. So an exchange
+        // captured under one of those names never needed this strip -- and an
+        // exchange captured under any other name is a raw prompt and a live
+        // `Authorization` header on their way to storage. This strip is what
+        // makes the guarantee a property of the witness rather than of a
+        // classifier profile keyed on a string a capture chose.
+        //
+        // Payload consent is granted, which is the other configuration in which
+        // this strip does any work: without it the redaction pass already
+        // removes an `http_exchange`'s bodies and headers as
+        // `browser_content` and `browser_header`. The requirement needs the
+        // bodies present in the raw input, so it needs this flag -- and that
+        // is exactly the case where an unstripped artifact would carry them
+        // onward.
+        request.raw_contribution.consent.tool_payloads_included = true;
+        request
+            .raw_contribution
+            .events
+            .push(RawTraceContributionEvent {
+                event_id: uuid::Uuid::new_v4(),
+                parent_event_id: None,
+                event_type: TraceContributionEventType::HttpExchange,
+                timestamp: chrono::Utc::now(),
+                content: Some(format!(
+                    r#"{{"choices":[{{"message":{{"content":"{RESPONSE_BODY_MARKER}"}}}}]}}"#
+                )),
+                structured_payload: serde_json::json!({
+                    "request": {
+                        "method": "POST",
+                        "url": format!("https://example.invalid/{URL_MARKER}"),
+                        "headers": {"authorization": format!("Bearer {HEADER_MARKER}")},
+                        "body": format!(r#"{{"model":"m","prompt":"{REQUEST_BODY_MARKER}"}}"#),
+                    },
+                    "response": {"status": 200, "headers": {"x-request-id": HEADER_MARKER}},
+                }),
+                tool_name: Some("inference".to_string()),
+                tool_call_id: None,
+                latency_ms: None,
+                token_counts: None,
+                cost_usd: None,
+                success: Some(true),
+                failure_modes: Vec::new(),
+            });
+        request
+    }
+
+    /// The artifact a contributor receives carries no inference body and no
+    /// header, and still carries the exchange itself.
+    #[tokio::test]
+    async fn the_returned_artifact_carries_no_inference_bodies_or_headers() {
+        let response = witness_contribution(
+            contribution_with_exchange(),
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+        let artifact =
+            String::from_utf8(response.envelope_bytes.clone()).expect("the envelope is UTF-8");
+
+        // The positive control first. Without it, a witness that returned an
+        // empty document would pass every absence assertion below -- and so
+        // would one that deleted the whole event, which is not what this
+        // strips.
+        assert!(
+            artifact.contains(URL_MARKER),
+            "the exchange itself must survive: method, URL and status are \
+             ordinary trace content"
+        );
+
+        for (label, marker) in [
+            ("the request body", REQUEST_BODY_MARKER),
+            ("the response body", RESPONSE_BODY_MARKER),
+            ("a header", HEADER_MARKER),
+        ] {
+            assert!(
+                !artifact.contains(marker),
+                "{label} reached the artifact the contributor submits"
+            );
+        }
+    }
+
+    /// The ordering: redact, strip, hash, sign. A digest taken before the strip
+    /// names bytes nobody holds, and every verification downstream fails as an
+    /// artifact mismatch -- which looks exactly like tampering.
+    #[tokio::test]
+    async fn the_certificate_covers_the_stripped_bytes_and_not_the_unstripped_ones() {
+        let signer = TestSigner::new("witness");
+        let response = witness_contribution(
+            contribution_with_exchange(),
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+
+        verify_witness_certificate(
+            response.certificate.clone(),
+            &response.signature_hex,
+            Some(&pin(&signer)),
+            &response.envelope_bytes,
+        )
+        .expect(
+            "the certificate must cover the stripped artifact the contributor \
+             actually holds",
+        );
+
+        // And the digest is genuinely over these bytes rather than over
+        // something the witness asserted about them.
+        let mut tampered = response.envelope_bytes.clone();
+        tampered.push(b'\n');
+        assert!(matches!(
+            verify_witness_certificate(
+                response.certificate,
+                &response.signature_hex,
+                Some(&pin(&signer)),
+                &tampered,
+            )
+            .expect_err("an appended newline is a different artifact"),
+            WitnessVerificationError::ArtifactMismatch
+        ));
+    }
+
+    /// Stripping is not conditional on attestation. A witness that requires
+    /// nothing, handed a contribution nobody offered a receipt for, still
+    /// returns an artifact with no bodies in it.
+    #[tokio::test]
+    async fn bodies_are_stripped_even_where_no_receipt_was_offered() {
+        let mut request = contribution_with_exchange();
+        request.offered_receipt = None;
+        let response = witness_contribution(
+            request,
+            &contribution_redactor(),
+            &TestSigner::new("witness"),
+            &TestEnclave,
+        )
+        .await
+        .expect("the fixture redacts");
+        let artifact = String::from_utf8(response.envelope_bytes).expect("UTF-8");
+        assert!(artifact.contains(URL_MARKER), "positive control");
+        assert!(!artifact.contains(REQUEST_BODY_MARKER));
+        assert!(!artifact.contains(RESPONSE_BODY_MARKER));
     }
 }

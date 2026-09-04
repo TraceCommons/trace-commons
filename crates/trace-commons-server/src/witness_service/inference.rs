@@ -195,7 +195,8 @@
 
 use serde_json::Value;
 use trace_commons_protocol::trace_contribution::{
-    RawTraceContribution, RawTraceContributionEvent, TraceContributionEventType,
+    RawTraceContribution, RawTraceContributionEvent, TraceContributionEnvelope,
+    TraceContributionEventType,
 };
 
 use crate::near_attestation::receipt::{ReceiptPayload, verify_receipt};
@@ -412,6 +413,115 @@ pub fn check_inference_attestation(
         verified: 1,
         declared_calls,
     })
+}
+
+/// Remove the inference bodies from a redacted envelope, and every header map
+/// beside them.
+///
+/// Runs after the redaction pass and **before** the digest is taken. The
+/// certificate must cover the artifact the contributor actually receives, so
+/// the order is redact, strip, hash, sign; a digest taken before this ran
+/// would name bytes nobody holds and every downstream verification would fail
+/// as an artifact mismatch. There is a test for that ordering, because it is
+/// the kind of mistake that looks right.
+///
+/// # Why the bodies go, rather than being kept for a second verifier
+///
+/// They are already worthless by the time they are here. The witness redacts
+/// the session it is given, bodies included, so what survives the pass no
+/// longer hashes to what the receipt binds -- a downstream party trying to
+/// re-verify gets `RequestHashMismatch` and has no way to tell that from
+/// tampering. The only way to keep them verifiable would be to **exempt them
+/// from redaction**, which means shipping raw prompts and raw completions to
+/// ingest and to storage. That is strictly worse than useless bodies.
+///
+/// So the third option is the right one: the bodies were only ever input to a
+/// check that happens once, inside the enclave, over bytes only the enclave
+/// ever holds. Once that check has run they have no reader, and an artifact
+/// carrying them is carrying risk in exchange for nothing.
+///
+/// A consequence worth stating: the bodies never reach ingest or storage at
+/// all, so the payload that would have pushed an attested trace past the
+/// 16 MB envelope cap does not exist downstream.
+///
+/// # What is stripped, and what is not
+///
+/// The **body fields and the header maps**, not the event. Method, URL and
+/// status are ordinary trace content and a consumer may legitimately want
+/// them, so they stay.
+///
+/// Headers go with the bodies rather than staying with the method, and that is
+/// a deliberate departure from "strip only the bodies". An inference request
+/// carries its credential in `Authorization`, and this repository has already
+/// measured that opaque bearer tokens are **not** reliably redacted -- the
+/// deterministic detector does not match them. Keeping a header map here would
+/// mean shipping a live token downstream under a function whose whole purpose
+/// is to remove what should not travel.
+///
+/// # How much of this the redaction pass already did, measured
+///
+/// Some of it, conditionally, and the condition is a string a capture chose.
+/// `BROWSER_RULES` in `trace-commons-protocol` drops `body` and redacts
+/// `headers` for any event whose **tool name** contains `http`, `browser` or
+/// `web`. `from_recorded_trace` names its exchanges `http`, so on that path
+/// this function finds nothing to remove.
+///
+/// It is not therefore redundant, and the test fixture proves which case is
+/// which: an `HttpExchange` event named anything else -- `inference`, or
+/// whatever an IronWire capture picks -- keeps its request body and its
+/// `Authorization` header all the way through the pass, and this function is
+/// the only thing that removes them. Deleting it puts a raw prompt and a live
+/// token in the returned artifact, which is what
+/// `the_returned_artifact_carries_no_inference_bodies_or_headers` fails on.
+///
+/// So the guarantee moves from "a classifier profile matched the tool name" to
+/// "the witness removed them", which is where a guarantee should live.
+///
+/// # This is what makes refusal-only enforcement compose
+///
+/// The certificate carries no attested-inference field, because adding one
+/// needs a v2 profile with its own signing domain and a flag day across three
+/// implementations of the wire format. With the bodies stripped, that
+/// limitation no longer touches the artifact: a certificate exists **if and
+/// only if** attestation passed, since a requiring witness issues none
+/// otherwise, and the artifact carries nothing a downstream reader could
+/// mistake for re-verifiable evidence.
+///
+/// What it does **not** fix, and stripping does not make worse: a server still
+/// cannot distinguish a requiring witness from a permissive one at the same
+/// measurement. The measurement pins the image, not the environment, so the
+/// measurement plus the deployment's configuration is now the entire basis of
+/// the claim.
+pub fn strip_inference_bodies(envelope: &mut TraceContributionEnvelope) {
+    for event in &mut envelope.events {
+        if event.event_type != TraceContributionEventType::HttpExchange {
+            continue;
+        }
+        // The response body, as `from_recorded_trace` places it.
+        event.redacted_content = None;
+        for side in ["request", "response"] {
+            let Some(part) = event
+                .structured_payload
+                .get_mut(side)
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            // `remove`, not "set to null": a null `body` is still a body field
+            // a reader has to reason about, and the point is that there is
+            // nothing here to reason about.
+            part.remove("body");
+            part.remove("headers");
+        }
+        // A payload that put the bodies at the top level rather than under a
+        // side. Nothing in this tree writes that shape today; it is removed
+        // anyway, because the cost of being wrong about which shape a capture
+        // used is a raw prompt in storage.
+        if let Some(payload) = event.structured_payload.as_object_mut() {
+            payload.remove("body");
+            payload.remove("headers");
+        }
+    }
 }
 
 /// The flag a capture sets on an exchange whose stream was restarted.

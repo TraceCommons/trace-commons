@@ -607,6 +607,37 @@ There is therefore no model policy and no allowlist variable. That is a
 made. Note what it costs: a policy model swap substitutes the model that served,
 and a bound model is exactly what would have caught it.
 
+### The bodies do not leave the enclave
+
+The witness **removes** the inference request and response bodies — and the
+header maps beside them — from the artifact it returns. The certificate is over
+the stripped bytes: the order is redact, strip, hash, sign, so the digest names
+the artifact the contributor actually holds.
+
+They are removed rather than kept because by that point they are worthless. The
+witness redacts the session it is given, bodies included, so what survives the
+pass no longer hashes to what the receipt binds — a downstream party trying to
+re-verify gets a request-hash mismatch it cannot distinguish from tampering.
+The only way to keep them verifiable would be to exempt them from redaction,
+which means shipping raw prompts and completions to ingest and storage. That is
+strictly worse than useless bodies. The bodies were only ever input to a check
+that happens once, inside the enclave, over bytes only the enclave holds.
+
+Two consequences:
+
+- **The 16 MB envelope cap is not at risk.** The bodies never reach ingest or
+  storage, so the payload that would have pushed an attested trace past the cap
+  does not exist downstream. That was a real blocker and it is gone.
+- **Method, URL and status survive.** Those are ordinary trace content and a
+  consumer may want them. Headers do not survive: an inference request carries
+  its credential in `Authorization`, and this repository has measured that
+  opaque bearer tokens are not reliably redacted.
+
+Note that the deterministic pass already dropped bodies and headers for events
+whose *tool name* contains `http`, `browser` or `web`. The strip is what makes
+that hold for an exchange captured under any other name — the guarantee is now
+the witness's, not a classifier profile's keyed on a string the capture chose.
+
 ### Verification happens once and cannot be repeated
 
 The receipt binds the raw bodies; the witness publishes a redacted artifact.
@@ -616,13 +647,21 @@ is the only party that can verify at all. Do not build a surface that implies a
 server or a consumer re-verified anything.
 
 Note also what the certificate does **not** carry: there is no
-attested-inference field on it. A certificate proves the requirement held only
-in the sense that a requiring witness issues none when it does not — and the
-measurement pins the image, not the environment, so two witnesses at the same
-measurement can differ on this policy. Closing that needs a v2 certificate
-profile with its own signing domain (see `redaction_witness/certificate.rs`,
-"Why there are no inference fields"), which is a separate change across three
-independent implementations of the wire format.
+attested-inference field on it. Adding one needs a v2 profile with its own
+signing domain (see `redaction_witness/certificate.rs`, "Why there are no
+inference fields") and a flag day across three independent implementations of
+the wire format.
+
+With the bodies stripped, that limitation no longer touches the artifact: a
+certificate exists **if and only if** attestation passed, because a requiring
+witness issues none otherwise, and the artifact carries nothing a reader could
+mistake for re-verifiable evidence.
+
+**The open item, unchanged and not fixed by stripping:** a server still cannot
+distinguish a requiring witness from a permissive one at the same measurement.
+The measurement pins the image, not the environment. So the measurement plus
+this deployment's configuration is the entire basis of the claim, and an
+operator who cannot vouch for the configuration cannot vouch for the claim.
 
 ### What it refuses, and why each refusal is honest
 
