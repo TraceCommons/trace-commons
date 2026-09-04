@@ -949,7 +949,7 @@ mod tests {
         );
     }
 
-    use super::super::ironwire_pointer::test_support::IronWireHomeAt as IronWireHomeEnv;
+    use super::super::ironwire_pointer::test_support::IronWireAt;
 
     /// A directory holding a `control.token` with exactly this text.
     fn token_dir_holding(token: &str) -> tempfile::TempDir {
@@ -968,7 +968,7 @@ mod tests {
     fn a_declared_token_directory_wins_over_the_environment() {
         let declared = token_dir_holding("token-from-settings");
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
+        let _at = IronWireAt::home(environment.path());
 
         let declaration = IronWireDeclaration::Watch {
             port: 8463,
@@ -989,12 +989,12 @@ mod tests {
     #[test]
     fn the_environment_is_still_honoured_when_no_path_is_declared() {
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
-        // Pin "no pointer" for the length of the test. Without the guard a
-        // discovery test running on another thread could set the process
-        // override underneath this one, and it would resolve that pointer's
-        // token instead.
-        let _no_pointer = PointerAt::none();
+        // Pins both halves: `IRONWIRE_HOME` here, and "no pointer". A
+        // discovery test on another thread must not be able to set either
+        // underneath this one -- with the environment loose it would resolve
+        // against another test's directory, and with the override loose it
+        // would resolve that test's pointer's token instead.
+        let _at = IronWireAt::home(environment.path());
 
         let declaration = IronWireDeclaration::Watch {
             port: 8463,
@@ -1015,7 +1015,7 @@ mod tests {
     fn a_declared_directory_with_no_token_yields_no_reader() {
         let declared = tempfile::tempdir().expect("tempdir");
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
+        let _at = IronWireAt::home(environment.path());
 
         let declaration = IronWireDeclaration::Watch {
             port: 8463,
@@ -1031,7 +1031,7 @@ mod tests {
 
     // --- the discovery pointer -----------------------------------------
 
-    use super::super::ironwire_pointer::{IronWirePointer, test_support::PointerAt};
+    use super::super::ironwire_pointer::IronWirePointer;
 
     /// A pointer naming a `control.token` holding exactly this text.
     /// Returns the directory, which must outlive the assertions.
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn the_pointer_wins_over_the_environment() {
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
+        let _at = IronWireAt::home(environment.path());
         let (_d, pointer) = pointer_holding("token-from-pointer");
 
         let path =
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn a_stale_pointer_falls_through_and_is_no_worse_than_no_pointer() {
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
+        let _at = IronWireAt::home(environment.path());
 
         let gone = tempfile::tempdir().expect("tempdir");
         let missing = gone.path().join("control.token");
@@ -1140,7 +1140,7 @@ mod tests {
     #[test]
     fn a_pointer_with_no_token_path_still_falls_through() {
         let environment = token_dir_holding("token-from-environment");
-        let _env = IronWireHomeEnv::set(environment.path());
+        let _at = IronWireAt::home(environment.path());
         let pointer = IronWirePointer {
             port: 8463,
             token_path: None,
@@ -1157,9 +1157,6 @@ mod tests {
     #[test]
     fn a_discovered_token_builds_a_reader_for_a_declaration_that_named_no_directory() {
         let d = tempfile::tempdir().expect("tempdir");
-        // The pointer may only name a token inside the token directory, so
-        // the fixture has to say which directory that is.
-        let _env = IronWireHomeEnv::set(d.path());
         let token = d.path().join("control.token");
         std::fs::write(&token, "token-from-pointer\n").expect("write token");
         let endpoint = d.path().join("endpoint.json");
@@ -1172,7 +1169,7 @@ mod tests {
             .expect("pointer serialises"),
         )
         .expect("write pointer");
-        let _at = PointerAt::set(&endpoint);
+        let _at = IronWireAt::pointer(&endpoint);
 
         let ledger = ironwire_ledger_for(Some(&watch(None)))
             .expect("a discovered token must build a reader");
@@ -1199,7 +1196,7 @@ mod tests {
             .expect("pointer serialises"),
         )
         .expect("write pointer");
-        let _at = PointerAt::set(&endpoint);
+        let _at = IronWireAt::pointer(&endpoint);
 
         let declaration = IronWireDeclaration::Watch {
             port: 8463,
@@ -1233,7 +1230,7 @@ mod tests {
             .expect("pointer serialises"),
         )
         .expect("write pointer");
-        let _at = PointerAt::set(&endpoint);
+        let _at = IronWireAt::pointer(&endpoint);
 
         assert!(
             ironwire_ledger_for(None).is_none(),

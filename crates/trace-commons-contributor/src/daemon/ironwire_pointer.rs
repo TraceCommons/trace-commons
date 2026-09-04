@@ -328,76 +328,78 @@ pub(crate) mod test_support {
             .clone()
     }
 
-    /// Decide what [`super::read_pointer`] sees for the life of the guard.
+    /// What this process believes about IronWire, for the life of the guard.
     ///
-    /// Serialized on a mutex because the override is process-wide and the
-    /// harness runs tests on threads, and cleared on drop so a test that
-    /// panics does not leave the next one reading its tempdir.
-    pub(crate) struct PointerAt {
+    /// Pins **both** process-wide things the resolution path reads: the
+    /// pointer location [`super::read_pointer`] consults, and
+    /// `IRONWIRE_HOME`, which is what
+    /// [`crate::daemon::settings::ironwire_default_token_dir`] answers with
+    /// and therefore what [`super::confine_token_path`] compares against.
+    ///
+    /// One guard and one lock, deliberately. These were two guards with two
+    /// locks and a comment saying which to take first, and that cost a CI
+    /// failure: `a_pointer_port_never_overrides_a_declared_port` held the
+    /// pointer lock but not the environment one, so it read whatever
+    /// `IRONWIRE_HOME` a *concurrently running* test happened to have set.
+    /// It passed on every parallel run and failed under `--test-threads=1`
+    /// and on CI. A rule a test can silently not follow is not a rule, so
+    /// there is now no way to pin one without excluding the other.
+    ///
+    /// Cleared and restored on drop, so a test that panics does not leave
+    /// the next one reading its tempdir.
+    pub(crate) struct IronWireAt {
         _lock: MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
     }
 
-    impl PointerAt {
-        pub(crate) fn set(path: &Path) -> Self {
+    impl IronWireAt {
+        /// A machine with no pointer and no `IRONWIRE_HOME`: the ordinary
+        /// state of one without IronWire. A test asserting that state needs
+        /// the lock as much as one setting a path, or a concurrent guard
+        /// decides what it sees.
+        pub(crate) fn none() -> Self {
+            // A poisoned lock means some other test panicked while holding
+            // it; both the override and the environment were still restored
+            // by its guard's drop, so there is nothing here to refuse over.
+            let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+            let previous_home = std::env::var_os("IRONWIRE_HOME");
+            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            unsafe { std::env::remove_var("IRONWIRE_HOME") };
+            Self {
+                _lock: lock,
+                previous_home,
+            }
+        }
+
+        /// `IRONWIRE_HOME` at `home`, and no pointer.
+        pub(crate) fn home(home: &Path) -> Self {
             let guard = Self::none();
-            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            unsafe { std::env::set_var("IRONWIRE_HOME", home) };
             guard
         }
 
-        /// Hold the lock with no pointer in place: the state of a machine
-        /// without IronWire. A test asserting that state needs the lock as
-        /// much as one setting a path, or a concurrent `set` decides what
-        /// it sees.
-        pub(crate) fn none() -> Self {
-            let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
-            Self { _lock: lock }
+        /// A pointer at `path`, with the token directory set to the
+        /// directory holding it.
+        ///
+        /// That pairing is the real layout, not a convenience: IronWire
+        /// writes `~/.ironwire/endpoint.json` and, with no `IRONWIRE_HOME`
+        /// set, `~/.ironwire/control.token` beside it. Deriving the token
+        /// directory from the pointer's own path rather than asking each
+        /// test for it is what stops a fixture from forgetting to say.
+        pub(crate) fn pointer(path: &Path) -> Self {
+            let guard = match path.parent() {
+                Some(dir) => Self::home(dir),
+                None => Self::none(),
+            };
+            *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            guard
         }
     }
 
-    impl Drop for PointerAt {
+    impl Drop for IronWireAt {
         fn drop(&mut self) {
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        }
-    }
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    /// `IRONWIRE_HOME` for the life of the guard, restored on drop.
-    ///
-    /// Lives here rather than in `settings::tests` because three modules now
-    /// need it: the confinement in [`super::read_pointer`] compares against
-    /// this directory, so any test with a pointer naming a token has to say
-    /// where the token directory is. One guard so there is one lock on the
-    /// variable -- the process environment is shared by every test in this
-    /// binary and the harness runs them on threads, which is why `set_var`
-    /// is `unsafe` in edition 2024.
-    ///
-    /// A test needing both guards must take this one **first**: two locks,
-    /// and a consistent order is what keeps them from deadlocking.
-    pub(crate) struct IronWireHomeAt {
-        _lock: MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl IronWireHomeAt {
-        pub(crate) fn set(value: &Path) -> Self {
-            // A poisoned lock means some other test panicked while holding
-            // it; the environment was still restored by its guard's drop,
-            // so there is nothing here to refuse over.
-            let lock = HOME_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-            let previous = std::env::var_os("IRONWIRE_HOME");
-            unsafe { std::env::set_var("IRONWIRE_HOME", value) };
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for IronWireHomeAt {
-        fn drop(&mut self) {
-            match self.previous.take() {
+            match self.previous_home.take() {
                 Some(v) => unsafe { std::env::set_var("IRONWIRE_HOME", v) },
                 None => unsafe { std::env::remove_var("IRONWIRE_HOME") },
             }
@@ -572,7 +574,7 @@ mod tests {
     #[test]
     fn a_missing_pointer_file_is_not_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let _at = test_support::PointerAt::set(&dir.path().join("endpoint.json"));
+        let _at = test_support::IronWireAt::pointer(&dir.path().join("endpoint.json"));
         assert_eq!(read_pointer(), None);
     }
 
@@ -589,9 +591,8 @@ mod tests {
     #[test]
     fn a_token_path_inside_the_token_directory_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // The token has to be inside the token directory now, and has to
-        // exist: `confine_token_path` canonicalizes before comparing.
-        let _home = test_support::IronWireHomeAt::set(dir.path());
+        // The token has to be inside the token directory, and has to exist:
+        // `confine_token_path` canonicalizes before comparing.
         let token = dir.path().join("control.token");
         std::fs::write(&token, "tok\n").expect("write token");
         let path = dir.path().join("endpoint.json");
@@ -604,7 +605,7 @@ mod tests {
             .expect("fixture serialises"),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         assert_eq!(
             read_pointer(),
@@ -628,7 +629,6 @@ mod tests {
     fn a_token_path_outside_the_token_directory_is_refused() {
         let home = tempfile::tempdir().expect("tempdir");
         let elsewhere = tempfile::tempdir().expect("tempdir");
-        let _at_home = test_support::IronWireHomeAt::set(home.path());
 
         let secret = elsewhere.path().join("id_ed25519");
         std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
@@ -642,7 +642,7 @@ mod tests {
             .expect("fixture serialises"),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         let pointer = read_pointer().expect("the port is still usable");
         assert_eq!(pointer.port, 9111);
@@ -660,7 +660,6 @@ mod tests {
         let outer = tempfile::tempdir().expect("tempdir");
         let home = outer.path().join("home");
         std::fs::create_dir(&home).expect("mkdir");
-        let _at_home = test_support::IronWireHomeAt::set(&home);
 
         let secret = outer.path().join("secret");
         std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
@@ -674,7 +673,7 @@ mod tests {
             .expect("fixture serialises"),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         assert_eq!(read_pointer().expect("port survives").token_path, None);
     }
@@ -687,7 +686,6 @@ mod tests {
         let outer = tempfile::tempdir().expect("tempdir");
         let home = outer.path().join("home");
         std::fs::create_dir(&home).expect("mkdir");
-        let _at_home = test_support::IronWireHomeAt::set(&home);
 
         let secret = outer.path().join("secret");
         std::fs::write(&secret, "PRIVATE KEY").expect("write secret");
@@ -704,7 +702,7 @@ mod tests {
             .expect("fixture serialises"),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         assert_eq!(read_pointer().expect("port survives").token_path, None);
     }
@@ -720,7 +718,7 @@ mod tests {
         let path = dir.path().join("endpoint.json");
         std::fs::write(&path, r#"{"control_url":"http://127.0.0.1:9111"}"#).expect("write pointer");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
 
         assert_eq!(read_pointer(), None, "fail closed, not fall back");
     }
@@ -736,7 +734,7 @@ mod tests {
         std::fs::write(&real, r#"{"control_url":"http://127.0.0.1:9111"}"#).expect("write");
         let link = dir.path().join("endpoint.json");
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        let _at = test_support::PointerAt::set(&link);
+        let _at = test_support::IronWireAt::pointer(&link);
 
         assert_eq!(read_pointer(), None, "fail closed, not fall back");
     }
@@ -749,7 +747,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("endpoint.json");
         std::fs::create_dir(&path).expect("mkdir");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
         assert_eq!(read_pointer(), None);
     }
 
@@ -763,7 +761,7 @@ mod tests {
             format!(r#"{{"control_url":"http://127.0.0.1:8463","pad":"{padding}"}}"#),
         )
         .expect("write pointer");
-        let _at = test_support::PointerAt::set(&path);
+        let _at = test_support::IronWireAt::pointer(&path);
         assert_eq!(read_pointer(), None);
     }
 
@@ -773,7 +771,7 @@ mod tests {
     /// installed.
     #[test]
     fn tests_see_no_pointer_unless_they_ask_for_one() {
-        let _none = test_support::PointerAt::none();
+        let _none = test_support::IronWireAt::none();
         assert_eq!(pointer_path(), None);
         assert_eq!(read_pointer(), None);
     }

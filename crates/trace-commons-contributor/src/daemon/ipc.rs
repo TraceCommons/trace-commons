@@ -7186,11 +7186,11 @@ mod tests {
     #[test]
     fn discovery_reports_what_a_running_proxy_published() {
         let dir = pointer_dir(9143, "a-secret-token");
-        // The pointer's directory IS the token directory here: a `token_path`
-        // outside it is refused, so a test that did not say so would be
-        // asserting the refusal rather than the discovery.
-        let _home = super::super::ironwire_pointer::test_support::IronWireHomeAt::set(dir.path());
-        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+        // `IronWireAt::pointer` pins the token directory to the pointer's
+        // own directory, which is where this fixture's token is. A
+        // `token_path` outside it is refused, so a test that did not pin it
+        // would be asserting the refusal rather than the discovery.
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
             &dir.path().join("endpoint.json"),
         );
 
@@ -7218,7 +7218,7 @@ mod tests {
     /// fall back to asking.
     #[test]
     fn no_pointer_is_answered_as_not_found_rather_than_as_an_error() {
-        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+        let _none = super::super::ironwire_pointer::test_support::IronWireAt::none();
 
         let response = handle_discover_routing(&discover_request());
 
@@ -7240,7 +7240,7 @@ mod tests {
     #[test]
     fn discovery_never_carries_the_token() {
         let dir = pointer_dir(9143, "a-secret-token");
-        let _at = super::super::ironwire_pointer::test_support::PointerAt::set(
+        let _at = super::super::ironwire_pointer::test_support::IronWireAt::pointer(
             &dir.path().join("endpoint.json"),
         );
 
@@ -7257,7 +7257,7 @@ mod tests {
     /// request actually takes for a method that opens no connection.
     #[test]
     fn the_sync_dispatcher_answers_discovery_for_real() {
-        let _none = super::super::ironwire_pointer::test_support::PointerAt::none();
+        let _none = super::super::ironwire_pointer::test_support::IronWireAt::none();
 
         let response = handle_request(&shared(), &discover_request());
 
